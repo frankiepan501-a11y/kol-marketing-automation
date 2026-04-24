@@ -2,7 +2,7 @@
 部署在 Zeabur,由 n8n cron / webhook 触发
 """
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor
+from . import config, reply_monitor, dashboard, followup
 
 app = FastAPI(title="KOL Marketing Automation", version="0.1")
 
@@ -36,4 +36,28 @@ async def run_reply_monitor(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
-# TODO 下一步: /dashboard-refresh/run, /followup-generate/run, /enrich-kol-task, /enrich-editor-task, /send-approved/run
+@app.post("/dashboard/refresh")
+async def run_dashboard(authorization: str = Header(default="")):
+    """每日 9:00 刷新 KOL+编辑 营销数据看板"""
+    _check_auth(authorization)
+    try:
+        result = await dashboard.run()
+        return {"ok": True, **result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
+@app.post("/followup/generate")
+async def run_followup(authorization: str = Header(default="")):
+    """每日 10:00 扫无回复草稿 → 生成 D+7 第2封 / D+14 第3封"""
+    _check_auth(authorization)
+    try:
+        result = await followup.run()
+        return {"ok": True, **result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
+# TODO 下一步: /send-approved/run, /enrich-kol-task, /enrich-editor-task
