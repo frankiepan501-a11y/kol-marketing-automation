@@ -175,7 +175,7 @@ async def run():
 
         task_rid = xrid(first["fields"].get("关联任务"))
         fields = {
-            "草稿ID": f"{(task_rid or '')[:8]}-{ext(kol['fields'].get('账号名'))[:20]}-F{next_round}",
+            "邮件草稿ID": f"{(task_rid or '')[:8]}-{ext(kol['fields'].get('账号名'))[:20]}-F{next_round}",
             "关联任务": [task_rid] if task_rid else [],
             "关联KOL": [kid],
             "关联产品": [prod_rid],
@@ -184,8 +184,8 @@ async def run():
             "邮件主题": r.get("email_subject", ""),
             "邮件正文": r.get("email_body", ""),
             "邮件语言": lang,
-            "草稿状态": "待审",
-            "草稿来源": "followup",
+            "邮件草稿状态": "待审",
+            "邮件草稿来源": "followup",
             "对象类型": "KOL",
             "发送邮箱": sender_alias,
             "发送人署名": signature,

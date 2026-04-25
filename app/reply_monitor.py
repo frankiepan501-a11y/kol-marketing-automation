@@ -63,7 +63,7 @@ def html_to_text(s: str) -> str:
 
 
 async def classify_intent(from_addr: str, subject: str, body: str):
-    prompt = f"""你在审核一封 KOL/编辑 回复我们 cold outreach 邮件,判断其意图并给出建议。
+    prompt = f"""你在审核一封 KOL/媒体人 回复我们 cold outreach 邮件,判断其意图并给出建议。
 
 【回复】
 From: {from_addr}
@@ -110,9 +110,9 @@ async def find_contact(email: str):
 
 
 async def find_draft(contact_rid: str, contact_type: str):
-    link_field = "关联编辑" if contact_type == "editor" else "关联KOL"
+    link_field = "关联媒体人" if contact_type == "editor" else "关联KOL"
     items = await feishu.search_records(config.T_DRAFT, [
-        {"field_name": "草稿状态", "operator": "is", "value": ["已发送"]}
+        {"field_name": "邮件草稿状态", "operator": "is", "value": ["已发送"]}
     ])
     for rec in items:
         if xrid(rec["fields"].get(link_field)) == contact_rid:
@@ -129,7 +129,7 @@ def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, 
     return {
         "header": {
             "template": "green" if intent_type in ("感兴趣", "要报价") else "orange" if intent_type == "不明意图" else "red",
-            "title": {"tag": "plain_text", "content": f"{emoji} {'编辑' if contact_type=='editor' else 'KOL'} 回复 — {intent_type}"}
+            "title": {"tag": "plain_text", "content": f"{emoji} {'媒体人' if contact_type=='editor' else 'KOL'} 回复 — {intent_type}"}
         },
         "elements": [
             {"tag": "div", "fields": [
@@ -147,9 +147,9 @@ def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, 
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**原主题**: {subject}"}},
             {"tag": "action", "actions": [
-                {"tag": "button", "text": {"tag": "plain_text", "content": f"打开{'编辑' if contact_type=='editor' else 'KOL'}主表"},
+                {"tag": "button", "text": {"tag": "plain_text", "content": f"打开{'媒体人' if contact_type=='editor' else 'KOL'}主表"},
                  "url": f"{base_url}?table={target_table}", "type": "primary"},
-                {"tag": "button", "text": {"tag": "plain_text", "content": "打开外联草稿"},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "打开KOL·媒体人邮件草稿"},
                  "url": f"{base_url}?table={config.T_DRAFT}", "type": "default"},
             ]},
         ]
@@ -217,7 +217,7 @@ async def run():
                         "跟进日期": int(time.time() * 1000),
                         "跟进方式": "邮件",
                         "跟进内容": f"OOO 自动回复 (跳过自动回信, 等本人回来)\n命中: {ooo_frag}\n原文: {email_body[:400]}",
-                        "关联编辑": [contact["record_id"]],
+                        "关联媒体人": [contact["record_id"]],
                     })
                 else:
                     await feishu.create_record(config.T_KOL_FU, {
@@ -250,16 +250,16 @@ async def run():
                 if new_status:
                     await feishu.update_record(config.T_EDITOR, contact["record_id"], {"合作状态": new_status})
                 await feishu.create_record(config.T_EDITOR_FU, {
-                    "跟进摘要": f"[编辑回复] {intent_type}: {intent.get('summary','')[:80]}",
+                    "跟进摘要": f"[媒体人回复] {intent_type}: {intent.get('summary','')[:80]}",
                     "跟进日期": int(time.time() * 1000),
                     "跟进方式": "邮件",
                     "跟进内容": f"主题: {subject}\n\n意图: {intent_type} (置信度{intent.get('confidence',0):.2f})\n\n原文:\n{email_body[:600]}",
                     "客户反馈": intent.get("key_quote", "")[:200],
                     "下一步行动": intent.get("suggested_action", "")[:200],
-                    "关联编辑": [contact["record_id"]],
+                    "关联媒体人": [contact["record_id"]],
                 })
                 source = ext(cf.get("主要媒体")) or ext(cf.get("所属媒体"))
-                name = ext(cf.get("编辑姓名"))
+                name = ext(cf.get("媒体人姓名"))
             else:
                 new_status = INTENT_TO_STATUS_KOL.get(intent_type)
                 if new_status:

@@ -1,10 +1,10 @@
 """自动发送 (云端版, 替代 send_approved.py)
 
-n8n cron 每 10 分钟触发 → 扫「外联草稿」状态=自动通过 OR 通过 + 发送状态=未发
+n8n cron 每 10 分钟触发 → 扫「KOL·媒体人邮件草稿」状态=自动通过 OR 通过 + 发送状态=未发
 + 建议发送时间 ≤ now → Zoho 发送 + 限速 + 跨品牌交叉
 
 发完:
-- 草稿: 状态=已发送, 发送状态=已发, 发送时间, 草稿状态=已发送
+- 草稿: 状态=已发送, 发送状态=已发, 发送时间, 邮件草稿状态=已发送
 - KOL: 合作状态 未建联→待回复
 - 编辑: 合作状态 未建联→建联中
 - 跟进记录表: 新增一条
@@ -32,13 +32,13 @@ def _brand_from_alias(alias: str) -> str:
 async def scan_ready() -> tuple:
     """
     返回 (ready_list, scheduled_later_count, already_sent_count)
-    ready 条件: 草稿状态∈{自动通过, 通过} + 发送状态∈{None, 未发} + 建议发送时间 ≤ now
+    ready 条件: 邮件草稿状态∈{自动通过, 通过} + 发送状态∈{None, 未发} + 建议发送时间 ≤ now
     """
     items_auto = await feishu.search_records(config.T_DRAFT, [
-        {"field_name": "草稿状态", "operator": "is", "value": ["自动通过"]},
+        {"field_name": "邮件草稿状态", "operator": "is", "value": ["自动通过"]},
     ])
     items_pass = await feishu.search_records(config.T_DRAFT, [
-        {"field_name": "草稿状态", "operator": "is", "value": ["通过"]},
+        {"field_name": "邮件草稿状态", "operator": "is", "value": ["通过"]},
     ])
     seen = set()
     items = []
@@ -75,7 +75,7 @@ async def scan_ready() -> tuple:
             if kol_rid and any(d["fields"].get("是否回复") for d in all_drafts_by_kol.get(kol_rid, [])):
                 try:
                     await feishu.update_record(config.T_DRAFT, rec["record_id"], {
-                        "草稿状态": "已否决", "审批意见": "KOL 已回复, 跳过此 follow-up",
+                        "邮件草稿状态": "已否决", "审批意见": "KOL 已回复, 跳过此 follow-up",
                     })
                 except Exception as e:
                     print(f"[auto_send] mark 已否决 fail: {e}")
@@ -118,7 +118,7 @@ async def send_one(rec: dict) -> dict:
     except Exception as e:
         err = str(e)[:500]
         await feishu.update_record(config.T_DRAFT, rid, {
-            "发送状态": "失败", "发送错误": err, "草稿状态": "发送失败",
+            "发送状态": "失败", "发送错误": err, "邮件草稿状态": "发送失败",
         })
         return {"rid": rid, "ok": False, "error": err}
 
@@ -126,12 +126,12 @@ async def send_one(rec: dict) -> dict:
     await feishu.update_record(config.T_DRAFT, rid, {
         "发送状态": "已发",
         "发送时间": int(time.time() * 1000),
-        "草稿状态": "已发送",
+        "邮件草稿状态": "已发送",
     })
 
     # 按对象类型 + 跟进
     obj_type = ext(f.get("对象类型"))
-    source = ext(f.get("草稿来源"))    # cold / followup / reply
+    source = ext(f.get("邮件草稿来源"))    # cold / followup / reply
     body_text = re.sub(r'<[^>]+>', '', body_html or '').replace('&nbsp;', ' ').strip()[:500]
     signature = ext(f.get("发送人署名"))
     follow_content = f"发件: {sender_alias} ({signature})\n主题: {subject}\n\n{body_text}"
@@ -141,13 +141,13 @@ async def send_one(rec: dict) -> dict:
         prefix = "[回复发出]"
     elif source == "followup":
         prefix = f"[Follow-up {ext(f.get('Follow-up轮次')) or ''}]"
-    elif obj_type == "编辑":
+    elif obj_type == "媒体人":
         prefix = "[PR pitch]"
     else:
         prefix = "[冷开发信]"
 
-    if obj_type == "编辑":
-        editor_rid = xrid(f.get("关联编辑"))
+    if obj_type == "媒体人":
+        editor_rid = xrid(f.get("关联媒体人"))
         if editor_rid:
             # 状态变更只在 cold/followup 类型 (reply 已被 reply_monitor 改成洽谈中,不能覆盖)
             if source in ("", "cold", "followup", None):
@@ -161,7 +161,7 @@ async def send_one(rec: dict) -> dict:
                     "跟进日期": int(time.time() * 1000),
                     "跟进方式": "邮件",
                     "跟进内容": follow_content,
-                    "关联编辑": [editor_rid],
+                    "关联媒体人": [editor_rid],
                 })
             except Exception as e:
                 print(f"[auto_send] editor follow: {e}")

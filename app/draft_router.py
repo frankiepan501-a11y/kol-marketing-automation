@@ -1,13 +1,13 @@
 """草稿路由器 — 调用 reviewer + 决定下一步走向
 
-输入: 「外联草稿」record_id
-输出: 路由结果 (写回评分字段 + 改 草稿状态/审核路径 + 决定是否触发重生/通知)
+输入: 「KOL·媒体人邮件草稿」record_id
+输出: 路由结果 (写回评分字段 + 改 邮件草稿状态/审核路径 + 决定是否触发重生/通知)
 
 路由规则 (决策 B/C):
-  AI评分 ≥ 8 且 承诺命中=False → 草稿状态=自动通过 / 审核路径=自动通过
-  AI评分 5–7 或 承诺命中=True   → 草稿状态=待审 / 审核路径=待人审 + 飞书通知
-  AI评分 < 5 且 重生<2          → 草稿状态=退回重生 / 重生次数+1 + 触发对应 generator 重生
-  AI评分 < 5 且 重生≥2          → 草稿状态=待审 / 审核路径=需人改 + 飞书通知
+  AI评分 ≥ 8 且 承诺命中=False → 邮件草稿状态=自动通过 / 审核路径=自动通过
+  AI评分 5–7 或 承诺命中=True   → 邮件草稿状态=待审 / 审核路径=待人审 + 飞书通知
+  AI评分 < 5 且 重生<2          → 邮件草稿状态=退回重生 / 重生次数+1 + 触发对应 generator 重生
+  AI评分 < 5 且 重生≥2          → 邮件草稿状态=待审 / 审核路径=需人改 + 飞书通知
 """
 import time
 from . import config, feishu, reviewer
@@ -33,7 +33,7 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None) -> dict:
     subject = ext(f.get("邮件主题"))
     body = ext(f.get("邮件正文"))
     contact_type = ext(f.get("对象类型")) or "KOL"
-    source = ext(f.get("草稿来源")) or "cold"
+    source = ext(f.get("邮件草稿来源")) or "cold"
     sender_alias = ext(f.get("发送邮箱")) or ""
     # 从 alias 推断品牌
     if "powkong" in sender_alias.lower():
@@ -87,7 +87,7 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None) -> dict:
         "承诺命中": committed,
         "命中关键词": ", ".join(hits)[:200],
         "审核路径": path,
-        "草稿状态": new_status,
+        "邮件草稿状态": new_status,
     }
     if action == "retry":
         update_fields["重生次数"] = retries + 1
@@ -125,7 +125,7 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
     f = rec["fields"]
     subject = ext(f.get("邮件主题"))
     contact_type = ext(f.get("对象类型")) or "KOL"
-    source = ext(f.get("草稿来源")) or "cold"
+    source = ext(f.get("邮件草稿来源")) or "cold"
     base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_DRAFT}"
 
     if ship_confirm_meta:
@@ -151,7 +151,7 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
                 {"tag": "hr"},
                 {"tag": "div", "text": {"tag": "lark_md", "content": f"**审核理由 (5 项)**\n{reasons_text[:300]}"}},
                 {"tag": "action", "actions": [
-                    {"tag": "button", "text": {"tag": "plain_text", "content": "打开外联草稿"},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "打开KOL·媒体人邮件草稿"},
                      "url": base_url, "type": "primary"},
                 ]},
             ],
@@ -214,8 +214,8 @@ def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str
         "**🔄 完成动作**\n"
         "1. 库存确认 → 在领星 ERP 走寄样审批 → 拿到运单号\n"
         "2. 把草稿正文 \"will confirm tracking\" 改成 **真实运单号 + 物流商**\n"
-        "3. 把「草稿状态」改为 **通过** → 系统会自动发回信给对方\n"
-        "4. 同步更新 KOL/编辑 主表「合作状态」 → **已寄样**"
+        "3. 把「邮件草稿状态」改为 **通过** → 系统会自动发回信给对方\n"
+        "4. 同步更新 KOL/媒体人 主表「合作状态」 → **已寄样**"
     )
 
     return {
@@ -264,11 +264,11 @@ def _ship_confirm_targets() -> tuple:
 
 async def batch_review_pending() -> dict:
     """
-    扫所有 草稿状态=待审 + 没有 AI评分 的记录 → 跑 reviewer
+    扫所有 邮件草稿状态=待审 + 没有 AI评分 的记录 → 跑 reviewer
     用作兜底 cron, 防止生成器漏调 router
     """
     items = await feishu.search_records(config.T_DRAFT, [
-        {"field_name": "草稿状态", "operator": "is", "value": ["待审"]},
+        {"field_name": "邮件草稿状态", "operator": "is", "value": ["待审"]},
     ])
     processed = []
     for rec in items:

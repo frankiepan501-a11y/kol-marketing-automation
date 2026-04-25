@@ -38,8 +38,8 @@ async def run():
 
     drafts = await feishu.fetch_all_records(config.T_DRAFT)
     drafts = [d for d in drafts if ext(d["fields"].get("发送状态")) in ("已发", "已发送")]
-    kol_drafts = [d for d in drafts if ext(d["fields"].get("对象类型")) != "编辑"]
-    editor_drafts = [d for d in drafts if ext(d["fields"].get("对象类型")) == "编辑"]
+    kol_drafts = [d for d in drafts if ext(d["fields"].get("对象类型")) != "媒体人"]
+    editor_drafts = [d for d in drafts if ext(d["fields"].get("对象类型")) == "媒体人"]
 
     kol_recs = await feishu.fetch_all_records(config.T_KOL)
     kol_map = {r["record_id"]: r for r in kol_recs}
@@ -76,7 +76,7 @@ async def run():
 
     def enrich_editor(d):
         f = d["fields"]
-        eid = xrid(f.get("关联编辑"))
+        eid = xrid(f.get("关联媒体人"))
         pid = xrid(f.get("关联产品"))
         em = ed_map.get(eid, {}).get("fields", {}) if eid else {}
         sender = ext(f.get("发送邮箱"))
@@ -84,7 +84,7 @@ async def run():
         try: sc = float(f.get("匹配度总分") or 0)
         except (ValueError, TypeError): sc = 0
         return {
-            "obj": "编辑", "brand": brand,
+            "obj": "媒体人", "brand": brand,
             "country": ext(em.get("国家")) or "未知",
             "product": prod_map.get(pid, "(未知)") if pid else "(未知)",
             "signature": ext(f.get("发送人署名")),
@@ -145,28 +145,28 @@ async def run():
     for s, rs in sorted(by_sb.items()): add("KOL", "匹配度段", s, "全部", rs)
 
     # 编辑维度
-    add("编辑", "总览", "全部 编辑", "全部", enriched_ed)
+    add("媒体人", "总览", "全部 媒体人", "全部", enriched_ed)
     for b in ("FUNLAB", "POWKONG"):
-        add("编辑", "总览", f"品牌={b}", b, [r for r in enriched_ed if r["brand"]==b])
+        add("媒体人", "总览", f"品牌={b}", b, [r for r in enriched_ed if r["brand"]==b])
     by_media = defaultdict(list)
     for r in enriched_ed:
         if r["main_media"]: by_media[r["main_media"]].append(r)
-    for m, rs in by_media.items(): add("编辑", "主要媒体", m, "全部", rs)
+    for m, rs in by_media.items(): add("媒体人", "主要媒体", m, "全部", rs)
     by_group = defaultdict(list)
     for r in enriched_ed:
         if r["media_group"]: by_group[r["media_group"]].append(r)
-    for g, rs in by_group.items(): add("编辑", "媒体集团", g, "全部", rs)
+    for g, rs in by_group.items(): add("媒体人", "媒体集团", g, "全部", rs)
     by_type = defaultdict(list)
     for r in enriched_ed:
         if r["media_type"]: by_type[r["media_type"]].append(r)
-    for t, rs in by_type.items(): add("编辑", "媒体类型", t, "全部", rs)
+    for t, rs in by_type.items(): add("媒体人", "媒体类型", t, "全部", rs)
     by_cat = defaultdict(list)
     for r in enriched_ed:
         for c in r["categories"]: by_cat[c].append(r)
-    for c, rs in by_cat.items(): add("编辑", "报道品类", c, "全部", rs)
+    for c, rs in by_cat.items(): add("媒体人", "报道品类", c, "全部", rs)
     by_c = defaultdict(list)
     for r in enriched_ed: by_c[r["country"]].append(r)
-    for c, rs in by_c.items(): add("编辑", "国家", c, "全部", rs)
+    for c, rs in by_c.items(): add("媒体人", "国家", c, "全部", rs)
 
     # 全局对比
     add("全部", "总览", "全 KOL+编辑", "全部", enriched_kol + enriched_ed)

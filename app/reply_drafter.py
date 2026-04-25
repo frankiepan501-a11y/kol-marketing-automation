@@ -11,7 +11,7 @@
 - 要报价 → DeepSeek 生成 + 强制 committed=True (必走人审)
 - 不明意图 → DeepSeek 生成澄清问题草稿
 
-写入「外联草稿」表 (草稿来源=reply), 然后调 draft_router 走自审通道。
+写入「KOL·媒体人邮件草稿」表 (邮件草稿来源=reply), 然后调 draft_router 走自审通道。
 """
 import time
 import re
@@ -92,7 +92,7 @@ async def _classify_interest(original_body: str) -> dict:
              "extracted_address": "...",  # 仅 ship_confirm 命中时填
              "reason": "..."}
     """
-    prompt = f"""一位 KOL/编辑回复了我们的 cold email, 表达了感兴趣。
+    prompt = f"""一位 KOL/媒体人回复了我们的 cold email, 表达了感兴趣。
 请判断他的具体诉求属于以下哪一档:
 
 【4 个子类】
@@ -134,7 +134,7 @@ async def _gen_general_interest_draft(contact_name: str, original_subject: str,
                                        product_name: str, product_link: str) -> dict:
     """泛泛感兴趣 → AI 生成开放式问题草稿"""
     sig = _sender_signature(brand)
-    prompt = f"""一位 KOL/编辑回复了我们的 cold email, 说"感兴趣"但没明确诉求 (如 "Sounds cool!"/"Interested, tell me more")。
+    prompt = f"""一位 KOL/媒体人回复了我们的 cold email, 说"感兴趣"但没明确诉求 (如 "Sounds cool!"/"Interested, tell me more")。
 请生成一封简短回复, 礼貌追问对方实际想要什么 (产品介绍 / 寄样 / 视频会议 / 报价等), 让对方挑一项。
 
 【对方回信原文 (前 400 字)】
@@ -173,7 +173,7 @@ async def _gen_quote_draft(contact_name: str, original_subject: str,
                             product_name: str, product_link: str) -> dict:
     """要报价/谈条款类 → DeepSeek 生成回复 (会被 reviewer 标 committed=True 强制人审)"""
     sig = _sender_signature(brand)
-    prompt = f"""一位 KOL/编辑回复了我们的 cold email,他在询问商务条款 (报价/佣金/寄样数量等)。
+    prompt = f"""一位 KOL/媒体人回复了我们的 cold email,他在询问商务条款 (报价/佣金/寄样数量等)。
 你需要生成一封**专业、简洁、不做具体数字承诺**的回复草稿,等运营审核改细节后发送。
 
 【对方回信摘要】
@@ -215,7 +215,7 @@ async def _gen_clarify_draft(contact_name: str, original_subject: str,
                               original_body: str, intent_summary: str, brand: str) -> dict:
     """不明意图 → DeepSeek 生成澄清问题草稿"""
     sig = _sender_signature(brand)
-    prompt = f"""一位 KOL/编辑给我们 cold email 回复了一段话, 但意图模糊。
+    prompt = f"""一位 KOL/媒体人给我们 cold email 回复了一段话, 但意图模糊。
 请生成一封简短回复, 礼貌追问对方实际诉求, 让对方简短确认我们下一步该怎么做。
 
 【对方回信摘要】
@@ -261,15 +261,15 @@ async def draft_reply(
     related_draft_id: Optional[str] = None,
 ) -> Optional[str]:
     """
-    生成 reply 草稿 → 写入「外联草稿」 → 调 router 走自审
+    生成 reply 草稿 → 写入「KOL·媒体人邮件草稿」 → 调 router 走自审
 
     Returns:
         新建的草稿 record_id (如已生成); None 如果意图不需要回复
     """
     cf = contact_record["fields"]
     if contact_type == "editor":
-        contact_name = ext(cf.get("编辑姓名"))
-        link_field = "关联编辑"
+        contact_name = ext(cf.get("媒体人姓名"))
+        link_field = "关联媒体人"
     else:
         contact_name = ext(cf.get("账号名"))
         link_field = "关联KOL"
@@ -352,7 +352,7 @@ async def draft_reply(
     else:
         return None  # 不识别的意图,跳过
 
-    # 写入「外联草稿」
+    # 写入「KOL·媒体人邮件草稿」
     now_ms = int(time.time() * 1000)
     # ship_confirm 的元信息存到「匹配亮点」字段(临时复用,后续可加专用字段)
     extras = ""
@@ -360,14 +360,14 @@ async def draft_reply(
         extras = f"[ship_confirm] country={country_code} | address={extracted_address[:300]}"
 
     fields = {
-        "草稿ID": f"reply-{contact_record['record_id'][-8:]}-{int(time.time())}",
+        "邮件草稿ID": f"reply-{contact_record['record_id'][-8:]}-{int(time.time())}",
         link_field: [contact_record["record_id"]],
         "邮件主题": subj[:200],
         "邮件正文": body,
         "邮件语言": "en",
-        "草稿状态": "待审",
-        "草稿来源": "reply",
-        "对象类型": contact_type if contact_type == "KOL" else "编辑",
+        "邮件草稿状态": "待审",
+        "邮件草稿来源": "reply",
+        "对象类型": contact_type if contact_type == "KOL" else "媒体人",
         "发送邮箱": sender_alias,
         "发送人署名": sig_first,
         "生成时间": now_ms,

@@ -2,7 +2,7 @@
 
 n8n cron 每 5 分钟扫 T_TASK_KOL 任务状态=1-待触发 + 触发=true 的任务,
 对每个任务: 读关联产品 → 筛 KOL 候选 → 并发 DeepSeek 打分+生草稿 →
-写「外联草稿」 → 逐条调 draft_router 自审 → 更新任务状态。
+写「KOL·媒体人邮件草稿」 → 逐条调 draft_router 自审 → 更新任务状态。
 
 迁移自 scripts/send_loop/enrich_and_draft.py。
 """
@@ -252,7 +252,7 @@ async def write_drafts_and_route(task_rid: str, product_rid: str, brand: str,
         bk = s["breakdown"]
         send_ms, send_desc = _next_send_time(s.get("kol_country", "US") or "US")
         fields = {
-            "草稿ID": f"{task_rid[:8]}-{s['kol_name'][:20]}",
+            "邮件草稿ID": f"{task_rid[:8]}-{s['kol_name'][:20]}",
             "关联任务": [task_rid],
             "关联KOL": [s["kol_record_id"]],
             "关联产品": [product_rid],
@@ -270,8 +270,8 @@ async def write_drafts_and_route(task_rid: str, product_rid: str, brand: str,
             "邮件主题": s["subject"],
             "邮件正文": s["body"],
             "邮件语言": s["lang"],
-            "草稿状态": "待审",
-            "草稿来源": "cold",
+            "邮件草稿状态": "待审",
+            "邮件草稿来源": "cold",
             "对象类型": "KOL",
             "发送邮箱": sender_alias,
             "发送人署名": signature,

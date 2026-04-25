@@ -1,8 +1,8 @@
 """SLA 超时升级 — 扫 24h 未处理的寄样草稿,升级通知
 
 判定:
-- 草稿状态 = 待审
-- 草稿来源 = reply
+- 邮件草稿状态 = 待审
+- 邮件草稿来源 = reply
 - 命中关键词 含 "ship-sample" (reply_drafter 写入的 ship_confirm 标志)
 - 生成时间 < now - 24h
 
@@ -46,10 +46,10 @@ async def run() -> dict:
     """扫 SLA 超时草稿, 重发升级卡片"""
     cutoff_ms = int((time.time() - SLA_HOURS * 3600) * 1000)
 
-    # 拉所有 草稿状态=待审 + 草稿来源=reply 的草稿
+    # 拉所有 邮件草稿状态=待审 + 邮件草稿来源=reply 的草稿
     items = await feishu.search_records(config.T_DRAFT, [
-        {"field_name": "草稿状态", "operator": "is", "value": ["待审"]},
-        {"field_name": "草稿来源", "operator": "is", "value": ["reply"]},
+        {"field_name": "邮件草稿状态", "operator": "is", "value": ["待审"]},
+        {"field_name": "邮件草稿来源", "operator": "is", "value": ["reply"]},
     ])
 
     escalated = 0
