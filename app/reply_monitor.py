@@ -3,6 +3,36 @@ import re, time, html as html_mod
 from . import config, feishu, zoho, deepseek, reply_drafter
 from .feishu import ext, xrid
 
+
+# ===== OOO 自动回复检测 =====
+OOO_PATTERNS = [
+    r"\bout\s*[-_]?\s*of\s*[-_]?\s*office\b",
+    r"\bautomatic\s+reply\b",
+    r"\bauto[-_\s]?reply\b",
+    r"\bauto[-_\s]?response\b",
+    r"\bcurrently\s+(away|out)\b",
+    r"\bI('|')?ll\s+be\s+back\b",
+    r"\bI('|')?ll\s+get\s+back\s+to\s+you\s+on\b",
+    r"\bvacation\s+message\b",
+    r"\bleave\s+notice\b",
+    r"\bon\s+(annual\s+)?leave\b",
+    # 中文
+    r"自动回复",
+    r"暂时无法回复",
+    r"暂离办公室",
+    r"休假中",
+    r"休假回复",
+    r"度假中",
+]
+OOO_RE = re.compile("|".join(OOO_PATTERNS), re.IGNORECASE)
+
+
+def is_ooo(subject: str, body: str) -> tuple:
+    """检测是否为 OOO 自动回复 → (bool, 命中片段)"""
+    text = (subject or "") + "\n" + (body or "")
+    m = OOO_RE.search(text[:1500])
+    return (bool(m), m.group(0) if m else "")
+
 POSITIVE = {"感兴趣", "要报价"}
 INTENT_TO_STATUS_KOL = {
     "感兴趣": "洽谈中", "要报价": "洽谈中",
@@ -168,6 +198,38 @@ async def run():
                 try: body_html = await zoho.get_message_content(brand, msg_id, folder_id)
                 except Exception: pass
             email_body = html_to_text(body_html) or msg.get("summary", "") or subject
+
+            # === OOO 自动回复检测 (在 AI 分类前) ===
+            ooo_hit, ooo_frag = is_ooo(subject, email_body)
+            if ooo_hit:
+                # 标记草稿"是否回复=True" 但不分类、不通知、不生成回复草稿
+                await feishu.update_record(config.T_DRAFT, draft["record_id"], {
+                    "是否回复": True,
+                    "回复日期": int(time.time() * 1000),
+                    "回复意图": "不明意图",
+                    "回复原文": (f"[OOO 自动回复] {email_body[:400]}")[:500],
+                })
+                # 写跟进记录但只标记不动主表合作状态
+                cf = contact["fields"]
+                if ctype == "editor":
+                    await feishu.create_record(config.T_EDITOR_FU, {
+                        "跟进摘要": f"[OOO 自动回复] {ooo_frag[:30]}",
+                        "跟进日期": int(time.time() * 1000),
+                        "跟进方式": "邮件",
+                        "跟进内容": f"OOO 自动回复 (跳过自动回信, 等本人回来)\n命中: {ooo_frag}\n原文: {email_body[:400]}",
+                        "关联编辑": [contact["record_id"]],
+                    })
+                else:
+                    await feishu.create_record(config.T_KOL_FU, {
+                        "跟进摘要": f"[OOO 自动回复] {ooo_frag[:30]}",
+                        "跟进日期": int(time.time() * 1000),
+                        "跟进方式": "邮件",
+                        "跟进内容": f"OOO 自动回复 (跳过自动回信, 等本人回来)\n命中: {ooo_frag}\n原文: {email_body[:400]}",
+                        "关联KOL": [contact["record_id"]],
+                    })
+                processed += 1
+                results.append({"brand": brand, "from": from_addr, "skipped": "OOO", "ooo_match": ooo_frag})
+                continue  # 跳过分类/通知/生成草稿
 
             # 分类
             intent = await classify_intent(from_addr, subject, email_body)

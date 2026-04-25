@@ -109,3 +109,126 @@ async def run_reviewer_one(authorization: str = Header(default=""),
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-500:]}
+
+
+from fastapi import Body
+from . import reply_drafter, reply_monitor
+from .reply_drafter import _classify_interest, _gen_general_interest_draft, _gen_quote_draft, _gen_clarify_draft
+from .reply_drafter import (
+    TEMPLATE_UNSUBSCRIBE, TEMPLATE_DECLINE, TEMPLATE_SEND_ASSETS,
+    TEMPLATE_SHIP_CONFIRM, TEMPLATE_SCHEDULE_CALL, CALENDLY_DEFAULT,
+    _first_name, _sender_signature,
+)
+
+
+@app.post("/reply-drafter/dry-run")
+async def reply_drafter_dry_run(authorization: str = Header(default=""),
+                                  payload: dict = Body(default={})):
+    """Dry-run 测试 reply_drafter — 给输入回复, 返回生成的草稿 (不写飞书)
+    Payload:
+      {
+        "intent_type": "感兴趣|要报价|委婉拒绝|退订|不明意图",
+        "intent_summary": "...",
+        "original_subject": "...",
+        "original_body": "...",
+        "contact_name": "Scott Stein",
+        "brand": "POWKONG|FUNLAB",
+        "product_name": "Piranha Plant Switch 2 Dock",
+        "product_link": "https://...",
+        "is_editor": true|false
+      }
+    返回: {ok, ooo_check, sub_classify(if 感兴趣), subject, body, would_route}
+    """
+    _check_auth(authorization)
+    p = payload or {}
+    intent_type = p.get("intent_type", "感兴趣")
+    intent_summary = p.get("intent_summary", "")
+    original_subject = p.get("original_subject", "")
+    original_body = p.get("original_body", "")
+    contact_name = p.get("contact_name", "there")
+    brand = p.get("brand", "FUNLAB")
+    product_name = p.get("product_name", "our latest product")
+    product_link = p.get("product_link", "")
+
+    sig_full = _sender_signature(brand)
+    first = _first_name(contact_name)
+
+    # OOO 预检
+    ooo_hit, ooo_frag = reply_monitor.is_ooo(original_subject, original_body)
+    result = {"ooo_check": {"hit": ooo_hit, "match": ooo_frag}}
+    if ooo_hit:
+        result["action"] = "skip (OOO auto-reply, no draft generated)"
+        return {"ok": True, **result}
+
+    sub_info = None
+    subj = ""
+    body = ""
+    if intent_type == "退订":
+        subj = "Re: " + original_subject[:150]
+        body = TEMPLATE_UNSUBSCRIBE.format(first_name=first, signature=sig_full)
+    elif intent_type == "委婉拒绝":
+        subj = "Re: " + original_subject[:150]
+        body = TEMPLATE_DECLINE.format(first_name=first, signature=sig_full)
+    elif intent_type == "感兴趣":
+        sub_info = await _classify_interest(original_body)
+        subj = "Re: " + original_subject[:150]
+        if sub_info["sub"] == "ship_confirm":
+            body = TEMPLATE_SHIP_CONFIRM.format(first_name=first, signature=sig_full,
+                                                  product_name=product_name)
+        elif sub_info["sub"] == "schedule_call":
+            body = TEMPLATE_SCHEDULE_CALL.format(first_name=first, signature=sig_full,
+                                                   calendly_link=CALENDLY_DEFAULT)
+        elif sub_info["sub"] == "send_assets":
+            body = TEMPLATE_SEND_ASSETS.format(first_name=first, signature=sig_full,
+                                                 product_name=product_name,
+                                                 product_link=product_link or "(I'll send the deck shortly)")
+        else:  # general
+            d = await _gen_general_interest_draft(contact_name, original_subject, original_body,
+                                                    brand, product_name, product_link)
+            subj = d["subject"]; body = d["body"]
+    elif intent_type == "要报价":
+        d = await _gen_quote_draft(contact_name, original_subject, original_body,
+                                    intent_summary, brand, product_name, product_link)
+        subj = d["subject"]; body = d["body"]
+    elif intent_type == "不明意图":
+        d = await _gen_clarify_draft(contact_name, original_subject, original_body,
+                                      intent_summary, brand)
+        subj = d["subject"]; body = d["body"]
+
+    # 计算 would_route (走 reviewer 评分)
+    from . import reviewer
+    contact_type = "editor" if p.get("is_editor") else "KOL"
+    review_result = await reviewer.review_draft(subj, body, source="reply",
+                                                  contact_type=contact_type, brand=brand)
+    score = review_result["score"]
+    committed = review_result["committed"]
+
+    # ship_confirm 强制 committed=True
+    forced_commit = False
+    if sub_info and sub_info["sub"] == "ship_confirm":
+        committed = True
+        forced_commit = True
+
+    # 路由决策
+    if score >= 8 and not committed:
+        path = "自动通过 (会自动发)"
+    elif score < 5:
+        path = "退回重生"
+    else:
+        path = "待人审 (高优先级 + SLA 24h)" if forced_commit else "待人审"
+
+    result.update({
+        "intent_type": intent_type,
+        "sub_classify": sub_info,
+        "subject": subj,
+        "body": body,
+        "review": {
+            "score": score,
+            "committed": committed,
+            "forced_commit_by_ship": forced_commit,
+            "keywords_hit": review_result["keywords_hit"],
+            "summary": review_result["summary"],
+        },
+        "would_route": path,
+    })
+    return {"ok": True, **result}
