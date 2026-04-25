@@ -58,9 +58,17 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None) -> dict:
     reasons = result["reasons"]
     judge = result["ai_commitment_judge"]
 
+    # ship_confirm 强制 committed=True (寄样涉及实物成本+物流+地址核对, 必走人审)
+    if ship_confirm_meta:
+        committed = True
+        if "ship-sample" not in hits:
+            hits = list(hits) + ["ship-sample"]
+
     reasons_text = " | ".join(f"{k}:{v}" for k, v in reasons.items())[:500]
     if judge["reason"]:
         reasons_text += f" | 承诺判断:{judge['verdict']}-{judge['reason']}"
+    if ship_confirm_meta:
+        reasons_text = "[ship_confirm 强制人审] " + reasons_text
 
     # 3. 决定路由
     if score >= SCORE_AUTO_THRESHOLD and not committed:

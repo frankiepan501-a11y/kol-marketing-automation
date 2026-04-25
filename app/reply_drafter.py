@@ -286,7 +286,14 @@ async def draft_reply(
             if prod_rid:
                 prod = await feishu.get_record(config.T_PRODUCT, prod_rid)
                 pf = prod["fields"]
-                product_name = ext(pf.get("产品名")) or product_name
+                p_raw = ext(pf.get("产品名"))
+                # 剥离内部 SKU 前缀 (如 "YM24食人花-二代" → "食人花-二代", "FL-JC2-TMR-01-xxx" → "xxx")
+                p_clean = re.sub(r'^[A-Z]{1,4}\d{1,4}\s*[-_·]?\s*', '', p_raw).strip() or p_raw
+                m = re.match(r'^[A-Z]{2,5}[-_]?[A-Z0-9]{1,5}([-_][A-Z0-9]+)+\s*', p_clean)
+                if m:
+                    p_clean = p_clean[m.end():].strip() or p_raw
+                # 兜底: 如果剥后只剩中文/英文产品名,用它; 否则用原始
+                product_name = p_clean or product_name
                 product_link = ext(pf.get("官网链接")) or ""
         except Exception as e:
             print(f"[reply_drafter] fetch related product fail: {e}")
