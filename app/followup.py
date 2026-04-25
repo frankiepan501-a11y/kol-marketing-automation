@@ -185,14 +185,27 @@ async def run():
             "邮件正文": r.get("email_body", ""),
             "邮件语言": lang,
             "草稿状态": "待审",
+            "草稿来源": "followup",
+            "对象类型": "KOL",
             "发送邮箱": sender_alias,
             "发送人署名": signature,
             "生成时间": now_ms,
             "建议发送时间": int(send_dt.timestamp() * 1000),
             "Follow-up轮次": f"第{next_round}封",
+            "重生次数": 0,
         }
-        await feishu.create_record(config.T_DRAFT, fields)
+        new_rid = await feishu.create_record(config.T_DRAFT, fields)
         stats["generated"] += 1
-        stats["details"].append({"kol": ext(kol["fields"].get("账号名")), "round": next_round})
+        detail = {"kol": ext(kol["fields"].get("账号名")), "round": next_round, "rid": new_rid}
+
+        # === 调 router 自审 ===
+        try:
+            from . import draft_router
+            route = await draft_router.route_draft(new_rid)
+            detail["score"] = route["score"]
+            detail["path"] = route["path"]
+        except Exception as e:
+            detail["router_err"] = str(e)[:100]
+        stats["details"].append(detail)
 
     return stats

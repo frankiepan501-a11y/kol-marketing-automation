@@ -1,6 +1,6 @@
 """回复监听 - 迁移自本地 scripts/send_loop/reply_monitor.py"""
 import re, time, html as html_mod
-from . import config, feishu, zoho, deepseek
+from . import config, feishu, zoho, deepseek, reply_drafter
 from .feishu import ext, xrid
 
 POSITIVE = {"感兴趣", "要报价"}
@@ -222,6 +222,26 @@ async def run():
             }
             card = build_card(ctype, contact_info, brand, intent, subject)
             await notify_all(card)
+
+            # === 自动生成回复草稿 (走 reviewer 自审通道) ===
+            try:
+                alias_for_brand = config.BRAND_CONFIG[brand]["alias_from"]
+                reply_rid = await reply_drafter.draft_reply(
+                    contact_record=contact,
+                    contact_type=ctype,
+                    brand=brand,
+                    intent_type=intent_type,
+                    intent_summary=intent.get("summary", ""),
+                    original_subject=subject,
+                    original_body=email_body,
+                    sender_alias=alias_for_brand,
+                    related_draft_id=draft["record_id"],
+                )
+                if reply_rid:
+                    print(f"[reply_monitor] reply draft generated rid={reply_rid}")
+            except Exception as e:
+                print(f"[reply_monitor] draft_reply fail: {e}")
+
             processed += 1
 
     return {"processed": processed, "results": results}
