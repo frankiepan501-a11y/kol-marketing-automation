@@ -2,7 +2,7 @@
 部署在 Zeabur, 由 n8n cron / webhook 触发
 """
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor, dashboard, followup, enrich, auto_send, draft_router
+from . import config, reply_monitor, dashboard, followup, enrich, auto_send, draft_router, sla_check
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
 
@@ -90,6 +90,18 @@ async def run_reviewer_scan(authorization: str = Header(default="")):
     _check_auth(authorization)
     try:
         result = await draft_router.batch_review_pending()
+        return {"ok": True, **result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
+@app.post("/sla/check")
+async def run_sla_check(authorization: str = Header(default="")):
+    """每 6h 扫 ship_confirm 草稿超 24h 未处理 → 升级通知"""
+    _check_auth(authorization)
+    try:
+        result = await sla_check.run()
         return {"ok": True, **result}
     except Exception as e:
         import traceback

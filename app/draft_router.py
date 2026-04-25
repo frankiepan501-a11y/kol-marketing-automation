@@ -130,8 +130,9 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
 
     if ship_confirm_meta:
         card = _build_ship_confirm_card(record_id, rec, score, summary, ship_confirm_meta, base_url)
-        # 寄样高优先级 → 群 + 全员通知 (Frankie + 4 个运营)
-        targets = config.NOTIFY_USERS
+        # 寄样: 主审 (独立站运营专员) + CC (Frankie + 吴晓丹)
+        main_targets, cc_targets = _ship_confirm_targets()
+        targets = main_targets + cc_targets
     else:
         template_color = "orange" if path == "待人审" else "red"
         title_emoji = "📝" if path == "待人审" else "⚠️"
@@ -173,50 +174,13 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
             print(f"[draft_router] notify {name} fail: {e}")
 
 
-# ===== 仓库推荐 (V1: 静态映射, V2 接领星 API) =====
-# 国家 → 优先发货仓库类型 (按优先级)
-# 优先级: FBA 仓 > 海外仓 > 中国本地仓
-COUNTRY_TO_WAREHOUSE = {
-    # 北美
-    "US":  ["美国 FBA 仓", "美国海外仓 (Powkong/Funlab US)"],
-    "CA":  ["加拿大 FBA 仓", "美国 FBA 仓 (跨境快递)"],
-    "MX":  ["墨西哥 FBA 仓", "美国 FBA 仓 (DHL 跨境)"],
-    # 欧洲 (EFN 共享)
-    "UK":  ["英国 FBA 仓", "欧洲海外仓 (DE)"],
-    "DE":  ["德国 FBA 仓 (EFN)", "欧洲海外仓 (DE)"],
-    "FR":  ["法国 FBA 仓 (EFN)", "德国 FBA 仓 (EFN 共享)"],
-    "ES":  ["西班牙 FBA 仓 (EFN)", "德国 FBA 仓 (EFN 共享)"],
-    "IT":  ["意大利 FBA 仓 (EFN)", "德国 FBA 仓 (EFN 共享)"],
-    "NL":  ["荷兰 FBA 仓 (EFN)", "德国 FBA 仓 (EFN 共享)"],
-    "PT":  ["欧洲海外仓 (DE/ES)", "德国 FBA 仓 (EFN 共享)"],
-    "SE":  ["瑞典 FBA 仓", "德国 FBA 仓 (EFN 共享)"],
-    # 日澳
-    "JP":  ["日本 FBA 仓", "日本海外仓"],
-    "AU":  ["澳洲 FBA 仓", "中国本地仓直发 (DHL Express)"],
-    # 拉美
-    "BR":  ["巴西海外仓", "中国本地仓直发 (DHL Express)"],
-    # 亚太其他
-    "IN":  ["印度 FBA 仓", "中国本地仓直发"],
-    "TH":  ["中国本地仓直发", "新加坡海外仓 (中转)"],
-    "PH":  ["中国本地仓直发"],
-    "ID":  ["中国本地仓直发", "新加坡海外仓 (中转)"],
-    "AE":  ["阿联酋海外仓", "中国本地仓直发 (Aramex)"],
-}
-
-
-def _recommend_warehouses(country_code: str) -> list:
-    """根据国家给出仓库推荐顺序; 找不到返回兜底"""
-    if not country_code:
-        return ["⚠️ 未识别国家, 请运营手动从领星 ERP 确认仓库"]
-    return COUNTRY_TO_WAREHOUSE.get(country_code.upper()) or [
-        f"⚠️ {country_code} 暂无映射, 中国本地仓直发 (DHL Express)",
-        "请运营在领星 ERP 确认是否有当地海外仓",
-    ]
-
-
+# ===== ship_confirm 卡片 (V2: SOP 清单, 不查领星 API) =====
 def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str,
-                              meta: dict, base_url: str) -> dict:
-    """SHIP_CONFIRM 高优先级卡片"""
+                              meta: dict, base_url: str, escalation: bool = False) -> dict:
+    """SHIP_CONFIRM 高优先级卡片
+    Args:
+        escalation: True = 24h 超时升级版 (标题加 🚨, 颜色加深, 强调超时)
+    """
     f = rec["fields"]
     contact_type = ext(f.get("对象类型")) or "KOL"
     subject = ext(f.get("邮件主题"))
@@ -224,44 +188,78 @@ def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str
     country = (meta.get("country") or "").strip().upper()
     product_name = (meta.get("product_name") or "").strip()
 
-    warehouses = _recommend_warehouses(country)
-    wh_md = "\n".join(f"  {i+1}. {w}" for i, w in enumerate(warehouses))
-
     # SLA 24h
     import time as _t
-    sla_dt = _t.strftime("%Y-%m-%d %H:%M", _t.localtime(_t.time() + 24 * 3600))
+    gen_time = f.get("生成时间") or int(_t.time() * 1000)
+    sla_dt_ms = gen_time + 24 * 3600 * 1000
+    sla_str = _t.strftime("%Y-%m-%d %H:%M", _t.localtime(sla_dt_ms / 1000))
+
+    if escalation:
+        title = f"🚨 [SLA 超时] 寄样草稿 24h 未处理 — 立即跟进 ({contact_type})"
+        emoji_lead = "🚨🚨🚨"
+        color = "red"
+    else:
+        title = f"⚠️ 高优先级 — 寄样确认 ({contact_type}) | 24h SLA"
+        emoji_lead = "⚠️"
+        color = "red"
+
+    sop_md = (
+        "**📋 寄样操作 SOP** (24h 内完成)\n\n"
+        "**优先级 1**: 查该国 / 该区域 **FBA 仓** 是否有库存\n"
+        "  → 优先 **多渠道配送 (MCF)** 直接寄给收件人\n"
+        "  → 不紧急的可走 **移除订单 (Removal Order)** 退回再寄, 成本更低\n\n"
+        "**优先级 2**: 查该国 / 该区域 **海外仓** 是否有库存 → 走当地快递寄出\n\n"
+        "**兜底**: **中国本地仓直发** (DHL Express / 国际快递)\n\n"
+        "─────────\n\n"
+        "**🔄 完成动作**\n"
+        "1. 库存确认 → 在领星 ERP 走寄样审批 → 拿到运单号\n"
+        "2. 把草稿正文 \"will confirm tracking\" 改成 **真实运单号 + 物流商**\n"
+        "3. 把「草稿状态」改为 **通过** → 系统会自动发回信给对方\n"
+        "4. 同步更新 KOL/编辑 主表「合作状态」 → **已寄样**"
+    )
 
     return {
         "header": {
-            "template": "red",
-            "title": {"tag": "plain_text",
-                      "content": f"⚠️ 高优先级 — 寄样确认 ({contact_type}) | 24h SLA"},
+            "template": color,
+            "title": {"tag": "plain_text", "content": title},
         },
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md",
-                "content": f"**👤 对方主动给了寄送地址 + 想收 {product_name}**"}},
+                "content": f"**{emoji_lead} 对方主动给了寄送地址 + 想收 {product_name}**"}},
             {"tag": "hr"},
             {"tag": "div", "fields": [
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**国家**: {country or '?'}"}},
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**产品**: {product_name}"}},
-                {"is_short": False, "text": {"tag": "lark_md", "content": f"**📦 收件地址 (AI 提取)**\n```\n{address[:400]}\n```"}},
+                {"is_short": False, "text": {"tag": "lark_md",
+                    "content": f"**📦 收件地址 (AI 提取自对方邮件)**\n```\n{address[:400]}\n```"}},
             ]},
             {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md",
-                "content": f"**🚚 仓库发货建议** (优先级排序, 优先海外仓/FBA 减少时效)\n{wh_md}\n\n_请到领星 ERP 确认对应仓库的库存 + 仓库负责人, 走寄样审批流程_"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": sop_md}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md",
-                "content": f"**⏰ SLA**: 必须在 **{sla_dt}** 之前完成: 库存确认 → 物流 owner 指派 → 草稿审核通过 → 系统自动发回信"}},
+                "content": f"**⏰ SLA 截止**: {sla_str}" + (" ⚠️ **已超时!**" if escalation else "")}},
             {"tag": "div", "text": {"tag": "lark_md",
                 "content": f"**📝 AI 草稿评分**: {score}/10 — {summary}"}},
             {"tag": "action", "actions": [
                 {"tag": "button", "text": {"tag": "plain_text", "content": "打开此条草稿"},
                  "url": f"{base_url}", "type": "primary"},
-                {"tag": "button", "text": {"tag": "plain_text", "content": "领星 ERP 仓库管理"},
-                 "url": "https://erp.lingxing.com", "type": "default"},
             ]},
         ],
     }
+
+
+def _ship_confirm_targets() -> tuple:
+    """ship_confirm 通知目标分主审 + CC
+    Returns: (main_targets, cc_targets) 都是 [(name, open_id), ...]
+    """
+    main = []     # 主审: 独立站运营专员
+    cc = []       # CC: 潘志聪 + 吴晓丹
+    for name, oid in config.NOTIFY_USERS:
+        if "独立站" in name:
+            main.append((name, oid))
+        elif name.startswith("潘") or "晓丹" in name:
+            cc.append((name, oid))
+    return main, cc
 
 
 async def batch_review_pending() -> dict:
