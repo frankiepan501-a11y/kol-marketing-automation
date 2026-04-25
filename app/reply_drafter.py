@@ -48,9 +48,9 @@ TEMPLATE_SEND_ASSETS = (
 
 TEMPLATE_SHIP_CONFIRM = (
     "Hi {first_name},\n\n"
-    "Awesome — got the address! I'm coordinating with our team to send the "
-    "{product_name} your way. I'll confirm the shipping details and shoot you "
-    "a tracking number once it's on its way.\n\n"
+    "Awesome — got the address! Sending out the {product_name} via "
+    "[CARRIER 待填运营修改] — tracking number: **[TRACKING# 待填运营修改]**.\n"
+    "ETA: roughly [ETA 待填].\n\n"
     "If you have any specific angles or formats in mind for the content, "
     "feel free to share — happy to flex on what we send.\n\n"
     "Best,\n{signature}"

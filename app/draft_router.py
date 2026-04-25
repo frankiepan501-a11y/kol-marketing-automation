@@ -221,8 +221,13 @@ def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str
         "─────────\n\n"
         "**🔄 完成动作**\n"
         "1. 库存确认 → 在领星 ERP 走寄样审批 → 拿到运单号\n"
-        "2. 把草稿正文 \"will confirm tracking\" 改成 **真实运单号 + 物流商**\n"
+        "2. 在邮件正文用搜索框搜 **`待填`** (或 `[CARRIER`、`[TRACKING#`、`[ETA`),\n"
+        "   把以下 3 个占位符替换为真实信息:\n"
+        "   - `[CARRIER 待填运营修改]` → 物流商名 (如 USPS Ground / DHL Express / FedEx)\n"
+        "   - `[TRACKING# 待填运营修改]` → 实际运单号\n"
+        "   - `[ETA 待填]` → 预计到货时间 (如 3-5 business days)\n"
         "3. 把「邮件草稿状态」改为 **通过** → 系统会自动发回信给对方\n"
+        "   ⚠️ 系统已加占位符校验: 只要正文还含 `待填` 任何一个,**不会发送**, 状态会自动改回「待修改」\n"
         "4. 同步更新 KOL/媒体人 主表「合作状态」 → **已寄样**"
     )
 

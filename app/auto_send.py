@@ -28,6 +28,23 @@ def _brand_from_alias(alias: str) -> str:
     return "FUNLAB"
 
 
+# ===== 发送前占位符校验 =====
+# 任何模板里的"待填"占位符, 发送前必须删干净, 否则阻止发送
+PLACEHOLDER_KEYWORDS = [
+    "待填", "[TBD", "[CARRIER", "[TRACKING#", "[ETA",
+    "[ADDRESS", "[PRICE", "[QUANTITY", "[xxx", "[XXX",
+]
+
+
+def has_unfilled_placeholder(subject: str, body: str) -> tuple:
+    """检查 subject + body 是否还含未填写的占位符 → (bool, 命中的关键词)"""
+    text = (subject or "") + "\n" + (body or "")
+    for kw in PLACEHOLDER_KEYWORDS:
+        if kw in text:
+            return True, kw
+    return False, ""
+
+
 # ===== 1. 扫 ready 草稿 =====
 async def scan_ready() -> tuple:
     """
@@ -112,6 +129,16 @@ async def send_one(rec: dict) -> dict:
             "发送状态": "失败", "发送错误": f"邮箱格式错误: {to_email}",
         })
         return {"rid": rid, "ok": False, "error": f"bad email: {to_email}"}
+
+    # 发送前占位符校验: 防止"[运单号待填]"等没换就发出去
+    has_ph, ph_kw = has_unfilled_placeholder(subject, body_html)
+    if has_ph:
+        await feishu.update_record(config.T_DRAFT, rid, {
+            "邮件草稿状态": "待修改",
+            "审核路径": "需人改",
+            "审批意见": f"[占位符未替换] 命中 '{ph_kw}', 请运营把模板里的占位符全替换成真实信息",
+        })
+        return {"rid": rid, "ok": False, "error": f"unfilled placeholder: {ph_kw}"}
 
     try:
         msg_id = await zoho.send_email(brand, to_email, subject, body_html)
