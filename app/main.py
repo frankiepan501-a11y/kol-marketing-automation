@@ -133,6 +133,82 @@ from .reply_drafter import (
 )
 
 
+@app.post("/reply-drafter/backfill")
+async def backfill_reply_for_existing(
+    authorization: str = Header(default=""),
+    record_id: str = "",
+):
+    """对已有回复但未生成草稿的旧记录,补跑 reply_drafter pipeline.
+    用于在新 reply_drafter 上线前回过的邮件做 backfill.
+
+    流程: 读草稿 → 提取回复内容 → OOO 检测 → 调 reply_drafter.draft_reply()
+    """
+    _check_auth(authorization)
+    if not record_id:
+        return {"ok": False, "error": "missing record_id"}
+
+    from . import feishu, reply_monitor, reply_drafter
+    from .feishu import ext, xrid
+
+    try:
+        rec = await feishu.get_record(config.T_DRAFT, record_id)
+        f = rec["fields"]
+
+        if not f.get("是否回复"):
+            return {"ok": False, "error": "this draft has no reply yet (是否回复=False)"}
+
+        intent_type = ext(f.get("回复意图")) or "不明意图"
+        original_body = ext(f.get("回复原文")) or ""
+        original_subject = ext(f.get("邮件主题")) or ""
+        sender_alias = ext(f.get("发送邮箱")) or ""
+
+        # OOO 检测 (跟 reply_monitor 一致)
+        ooo_hit, ooo_match = reply_monitor.is_ooo(original_subject, original_body)
+        if ooo_hit:
+            return {"ok": True, "skipped": "OOO_AUTO_REPLY", "ooo_match": ooo_match,
+                    "msg": "OOO 自动回复 - 不生成草稿"}
+
+        # 推断品牌
+        if "powkong" in sender_alias.lower():
+            brand = "POWKONG"
+        else:
+            brand = "FUNLAB"
+
+        # 找联系人 (草稿关联 KOL 或 媒体人)
+        contact_record = None
+        contact_type = None
+        editor_rid = xrid(f.get("关联媒体人"))
+        if editor_rid:
+            contact_record = await feishu.get_record(config.T_EDITOR, editor_rid)
+            contact_type = "editor"
+        else:
+            kol_rid = xrid(f.get("关联KOL"))
+            if kol_rid:
+                contact_record = await feishu.get_record(config.T_KOL, kol_rid)
+                contact_type = "KOL"
+
+        if not contact_record:
+            return {"ok": False, "error": "no linked contact (no 关联媒体人 or 关联KOL)"}
+
+        # 调 reply_drafter
+        new_rid = await reply_drafter.draft_reply(
+            contact_record=contact_record,
+            contact_type=contact_type,
+            brand=brand,
+            intent_type=intent_type,
+            intent_summary=f"[Backfill] 历史已分类意图: {intent_type}",
+            original_subject=original_subject,
+            original_body=original_body,
+            sender_alias=sender_alias,
+            related_draft_id=record_id,
+        )
+        return {"ok": True, "new_draft_rid": new_rid, "intent_type": intent_type,
+                "contact_type": contact_type, "brand": brand}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-700:]}
+
+
 @app.post("/reply-drafter/dry-run")
 async def reply_drafter_dry_run(authorization: str = Header(default=""),
                                   payload: dict = Body(default={})):
