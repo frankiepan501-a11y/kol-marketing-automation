@@ -377,6 +377,15 @@ async def draft_reply(
     if sub == "ship_confirm" and extracted_address:
         extras = f"[ship_confirm] country={country_code} | address={extracted_address[:300]}"
 
+    # 拿 related_draft 的关联产品 record_id (用于关联到新 reply 草稿)
+    related_prod_rid = None
+    if related_draft_id:
+        try:
+            related_full = await feishu.get_record(config.T_DRAFT, related_draft_id)
+            related_prod_rid = xrid(related_full["fields"].get("关联产品"))
+        except Exception:
+            pass
+
     fields = {
         "邮件草稿ID": f"reply-{contact_record['record_id'][-8:]}-{int(time.time())}",
         link_field: [contact_record["record_id"]],
@@ -393,6 +402,8 @@ async def draft_reply(
         "重生次数": 0,
         "收件邮箱": ext(cf.get("邮箱")) or "",
     }
+    if related_prod_rid:
+        fields["关联产品"] = [related_prod_rid]
     if extras:
         fields["匹配亮点"] = extras[:500]   # 临时承载寄样元信息
 
