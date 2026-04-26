@@ -96,6 +96,20 @@ async def run_reviewer_scan(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
+@app.post("/zoho/test-send")
+async def zoho_test_send(authorization: str = Header(default=""),
+                          brand: str = "POWKONG", to: str = "frankiepan501@gmail.com"):
+    """发一封测试邮件验证 Zoho OAuth send_email 链路 (不依赖 folders scope)"""
+    _check_auth(authorization)
+    from . import zoho
+    try:
+        msg_id = await zoho.test_send(brand, to)
+        return {"ok": True, "msg_id": msg_id, "brand": brand, "to": to}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e)[:300], "trace": traceback.format_exc()[-500:]}
+
+
 @app.get("/zoho/sent-check")
 async def zoho_sent_check(authorization: str = Header(default=""),
                           brand: str = "POWKONG", to: str = ""):

@@ -68,6 +68,11 @@ async def search_inbox(brand: str, search_key: str, limit: int = 30):
         return r.json().get("data") or []
 
 
+async def test_send(brand: str, to_addr: str, subject: str = "[Test] Zoho OAuth check", body: str = "<p>Test email — please ignore.</p>"):
+    """测试发邮件 (验证 send_email API 是否能工作, 不依赖 folders scope)"""
+    return await send_email(brand, to_addr, subject, body)
+
+
 async def list_folders(brand: str):
     """列出账户所有 folder, 用于找 sent folder id"""
     cfg = config.BRAND_CONFIG[brand]
