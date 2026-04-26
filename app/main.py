@@ -2,7 +2,7 @@
 部署在 Zeabur, 由 n8n cron / webhook 触发
 """
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor, dashboard, followup, enrich, auto_send, draft_router, sla_check
+from . import config, reply_monitor, dashboard, followup, enrich, auto_send, draft_router, sla_check, dispatch
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
 
@@ -58,6 +58,18 @@ async def run_followup(authorization: str = Header(default="")):
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
+@app.post("/dispatch/run")
+async def run_dispatch(authorization: str = Header(default="")):
+    """每日 09:05 北京 派单调度: 读主推+派单就绪产品 → 按品牌分配额度 → 在 KOL 任务台建任务 → 触发 enrich-task"""
+    _check_auth(authorization)
+    try:
+        result = await dispatch.run()
+        return {"ok": True, **result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1500:]}
 
 
 @app.post("/enrich-task/run")
