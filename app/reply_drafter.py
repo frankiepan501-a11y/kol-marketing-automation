@@ -48,11 +48,22 @@ TEMPLATE_SEND_ASSETS = (
 
 TEMPLATE_SHIP_CONFIRM = (
     "Hi {first_name},\n\n"
-    "Awesome — got the address! Sending out the {product_name} via "
-    "[CARRIER 待填运营修改] — tracking number: **[TRACKING# 待填运营修改]**.\n"
-    "ETA: roughly [ETA 待填].\n\n"
+    "Awesome — got the address! Your {product_name} is on its way via "
+    "[CARRIER 待填运营修改] — ETA roughly [ETA 待填].\n\n"
+    "I'll send the tracking number in a quick follow-up once it's assigned "
+    "(typically within 24 hours of dispatch).\n\n"
     "If you have any specific angles or formats in mind for the content, "
     "feel free to share — happy to flex on what we send.\n\n"
+    "Best,\n{signature}"
+)
+
+# 第 2 封追加运单号 (auto_send 在第 1 封发出后自动建草稿, 待运营填运单号)
+TEMPLATE_TRACKING_FOLLOWUP = (
+    "Hi {first_name},\n\n"
+    "Quick update — here's the tracking number for your {product_name} sample:\n\n"
+    "**[TRACKING# 待填运营修改]** (via [CARRIER 待填运营修改])\n\n"
+    "Should arrive in the next [ETA 待填]. Excited to hear what you think — "
+    "feel free to drop a line if anything comes up after it lands.\n\n"
     "Best,\n{signature}"
 )
 

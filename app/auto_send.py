@@ -158,13 +158,15 @@ async def send_one(rec: dict) -> dict:
 
     # 按对象类型 + 跟进
     obj_type = ext(f.get("对象类型"))
-    source = ext(f.get("邮件草稿来源"))    # cold / followup / reply
+    source = ext(f.get("邮件草稿来源"))    # cold / followup / reply / tracking_followup
     body_text = re.sub(r'<[^>]+>', '', body_html or '').replace('&nbsp;', ' ').strip()[:500]
     signature = ext(f.get("发送人署名"))
     follow_content = f"发件: {sender_alias} ({signature})\n主题: {subject}\n\n{body_text}"
 
-    # 跟进摘要前缀 (区分 cold/followup/reply)
-    if source == "reply":
+    # 跟进摘要前缀 (区分 cold/followup/reply/tracking_followup)
+    if source == "tracking_followup":
+        prefix = "[运单号追加]"
+    elif source == "reply":
         prefix = "[回复发出]"
     elif source == "followup":
         prefix = f"[Follow-up {ext(f.get('Follow-up轮次')) or ''}]"
@@ -211,7 +213,97 @@ async def send_one(rec: dict) -> dict:
             except Exception as e:
                 print(f"[auto_send] kol follow: {e}")
 
+    # ship_confirm 第一封发出后, 自动建第 2 条 tracking_followup 草稿
+    # 判断: 草稿来源=reply + 命中关键词含 ship-sample (ship_confirm 标志)
+    kw_hit = ext(f.get("命中关键词")) or ""
+    if source == "reply" and "ship-sample" in kw_hit:
+        try:
+            await _create_tracking_followup_draft(rec, sender_alias, signature)
+        except Exception as e:
+            print(f"[auto_send] create tracking_followup fail: {e}")
+
     return {"rid": rid, "ok": True, "msg_id": msg_id, "to": to_email, "brand": brand}
+
+
+async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, signature: str):
+    """ship_confirm 第 1 封发出后,自动建第 2 条 tracking_followup 草稿
+    24h 后建议发送, 等运营从 Amazon 拿到运单号填占位符再点通过
+    """
+    from . import reply_drafter
+    pf = parent_rec["fields"]
+    obj_type = ext(pf.get("对象类型"))
+    parent_subject = ext(pf.get("邮件主题"))
+    to_email = ext(pf.get("收件邮箱"))
+    parent_rid = parent_rec["record_id"]
+
+    # 拿对方姓名 + 产品名
+    contact_name = "there"
+    product_name = "the sample"
+    if obj_type == "媒体人":
+        editor_rid = xrid(pf.get("关联媒体人"))
+        if editor_rid:
+            try:
+                ed = await feishu.get_record(config.T_EDITOR, editor_rid)
+                contact_name = ext(ed["fields"].get("媒体人姓名")) or contact_name
+            except Exception: pass
+        link_field = "关联媒体人"
+        link_rid = editor_rid
+    else:
+        kol_rid = xrid(pf.get("关联KOL"))
+        if kol_rid:
+            try:
+                k = await feishu.get_record(config.T_KOL, kol_rid)
+                contact_name = ext(k["fields"].get("账号名")) or contact_name
+            except Exception: pass
+        link_field = "关联KOL"
+        link_rid = kol_rid
+
+    prod_rid = xrid(pf.get("关联产品"))
+    if prod_rid:
+        try:
+            p = await feishu.get_record(config.T_PRODUCT, prod_rid)
+            p_raw = ext(p["fields"].get("产品名"))
+            p_clean = re.sub(r'^[A-Z]{1,4}\d{1,4}\s*[-_·]?\s*', '', p_raw).strip() or p_raw
+            product_name = p_clean
+        except Exception: pass
+
+    # 第 2 封模板
+    first = contact_name.strip().split()[0][:30] if contact_name else "there"
+    body = reply_drafter.TEMPLATE_TRACKING_FOLLOWUP.format(
+        first_name=first,
+        product_name=product_name,
+        signature=reply_drafter._sender_signature(
+            "POWKONG" if "powkong" in (sender_alias or "").lower() else "FUNLAB"
+        ),
+    )
+    subj = parent_subject if parent_subject.startswith("Re:") else f"Re: {parent_subject}"
+
+    now_ms = int(time.time() * 1000)
+    schedule_ms = now_ms + 24 * 3600 * 1000  # +24h
+
+    fields = {
+        "邮件草稿ID": f"track-{parent_rid[-8:]}-{int(time.time())}",
+        "邮件主题": subj[:200],
+        "邮件正文": body,
+        "邮件语言": "en",
+        "邮件草稿状态": "待修改",   # 待运营 24h 后填运单号
+        "邮件草稿来源": "tracking_followup",
+        "对象类型": obj_type or "KOL",
+        "发送邮箱": sender_alias,
+        "发送人署名": ext(pf.get("发送人署名")) or "Frankie",
+        "收件邮箱": to_email,
+        "生成时间": now_ms,
+        "建议发送时间": schedule_ms,
+        "重生次数": 0,
+        "审批意见": f"[等运单号 24h] 父草稿 rid={parent_rid}, 24h 后从 Amazon MCF 拿到运单号填进去再改'通过'",
+    }
+    if link_rid:
+        fields[link_field] = [link_rid]
+    if prod_rid:
+        fields["关联产品"] = [prod_rid]
+
+    new_rid = await feishu.create_record(config.T_DRAFT, fields)
+    print(f"[auto_send] created tracking_followup draft rid={new_rid} (schedule +24h)")
 
 
 # ===== 3. 主入口 =====
