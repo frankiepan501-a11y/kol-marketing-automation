@@ -32,9 +32,29 @@ async def access(brand: str):
     return await refresh_access(brand)
 
 
-async def send_email(brand: str, to_addr: str, subject: str, html_body: str):
+def _ensure_html(body: str) -> str:
+    """如果 body 是纯文本 (没有 <p>/<br>/<div> 等 HTML 标签), 自动转 HTML:
+    - **xxx** → <strong>xxx</strong> (markdown bold)
+    - 段落用 <p>...</p> 包裹
+    - 单换行 \\n → <br>
+    """
+    import re
+    if not body:
+        return ""
+    # 已经是 HTML 跳过
+    if re.search(r"<(p|div|br|h[1-6]|li|strong|em|a)[\s>/]", body, re.I):
+        return body
+    # markdown 加粗
+    s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", body)
+    # 按双换行切段, 段内单换行用 <br>
+    paragraphs = [p.strip() for p in s.split("\n\n") if p.strip()]
+    return "".join(f"<p>{p.replace(chr(10), '<br>')}</p>" for p in paragraphs)
+
+
+async def send_email(brand: str, to_addr: str, subject: str, body: str):
     cfg = config.BRAND_CONFIG[brand]
     tok = await access(brand)
+    html_body = _ensure_html(body)
     async with httpx.AsyncClient(timeout=45.0) as cli:
         r = await cli.post(
             f"https://mail.zoho.com/api/accounts/{cfg['account_id']}/messages",
