@@ -96,6 +96,33 @@ async def run_reviewer_scan(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
+@app.get("/zoho/sent-check")
+async def zoho_sent_check(authorization: str = Header(default=""),
+                          brand: str = "POWKONG", to: str = ""):
+    """查 Zoho sent folder, 可选过滤 to 邮箱 (调试用)"""
+    _check_auth(authorization)
+    from . import zoho
+    try:
+        result = await zoho.list_sent_messages(brand, limit=30)
+        if to and "messages" in result:
+            filtered = []
+            for m in result["messages"]:
+                if to.lower() in (m.get("toAddress") or "").lower():
+                    filtered.append({
+                        "subject": m.get("subject"),
+                        "to": m.get("toAddress"),
+                        "from": m.get("fromAddress"),
+                        "sentDateInGMT": m.get("sentDateInGMT"),
+                        "messageId": m.get("messageId"),
+                        "summary": (m.get("summary") or "")[:200],
+                    })
+            return {"ok": True, "matched": len(filtered), "results": filtered}
+        return {"ok": True, **result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-500:]}
+
+
 @app.post("/sla/check")
 async def run_sla_check(authorization: str = Header(default="")):
     """每 6h 扫 ship_confirm 草稿超 24h 未处理 → 升级通知"""

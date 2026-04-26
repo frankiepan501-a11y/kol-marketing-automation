@@ -68,6 +68,43 @@ async def search_inbox(brand: str, search_key: str, limit: int = 30):
         return r.json().get("data") or []
 
 
+async def list_folders(brand: str):
+    """列出账户所有 folder, 用于找 sent folder id"""
+    cfg = config.BRAND_CONFIG[brand]
+    tok = await access(brand)
+    async with httpx.AsyncClient(timeout=30.0) as cli:
+        r = await cli.get(
+            f"https://mail.zoho.com/api/accounts/{cfg['account_id']}/folders",
+            headers={"Authorization": f"Zoho-oauthtoken {tok}"},
+        )
+        r.raise_for_status()
+        return r.json().get("data") or []
+
+
+async def list_sent_messages(brand: str, limit: int = 30):
+    """列出 sent folder 最近发出的邮件"""
+    folders = await list_folders(brand)
+    sent_folder = None
+    for f in folders:
+        ftype = (f.get("folderType") or "").lower()
+        fname = (f.get("folderName") or "").lower()
+        if ftype == "sent" or fname in ("sent", "sent items", "已发送"):
+            sent_folder = f
+            break
+    if not sent_folder:
+        return {"error": "no sent folder", "folders": [f.get("folderName") for f in folders]}
+    cfg = config.BRAND_CONFIG[brand]
+    tok = await access(brand)
+    fid = sent_folder["folderId"]
+    async with httpx.AsyncClient(timeout=30.0) as cli:
+        r = await cli.get(
+            f"https://mail.zoho.com/api/accounts/{cfg['account_id']}/messages/view?folderId={fid}&limit={limit}&start=0",
+            headers={"Authorization": f"Zoho-oauthtoken {tok}"},
+        )
+        r.raise_for_status()
+        return {"sent_folder": sent_folder, "messages": r.json().get("data") or []}
+
+
 async def get_message_content(brand: str, msg_id: str, folder_id: str):
     cfg = config.BRAND_CONFIG[brand]
     tok = await access(brand)
