@@ -262,9 +262,16 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
     if prod_rid:
         try:
             p = await feishu.get_record(config.T_PRODUCT, prod_rid)
-            p_raw = ext(p["fields"].get("产品名"))
-            p_clean = re.sub(r'^[A-Z]{1,4}\d{1,4}\s*[-_·]?\s*', '', p_raw).strip() or p_raw
-            product_name = p_clean
+            ppf = p["fields"]
+            # 优先「产品英文名」, 缺则降级中文剥前缀
+            p_en = ext(ppf.get("产品英文名"))
+            if p_en:
+                product_name = p_en
+            else:
+                p_raw = ext(ppf.get("产品名"))
+                p_clean = re.sub(r'^[A-Z]{1,4}\d{1,4}\s*[-_·]?\s*', '', p_raw).strip() or p_raw
+                product_name = p_clean
+                print(f"[WARN] 产品 {prod_rid} 缺少「产品英文名」, 降级用 {product_name}")
         except Exception: pass
 
     # 第 2 封模板

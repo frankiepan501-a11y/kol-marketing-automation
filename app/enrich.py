@@ -169,8 +169,14 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
         return {"skip": "无邮箱"}
 
     pf = product["fields"]
-    p_name_raw = ext(pf.get("产品名"))
-    p_name = re.sub(r'^[A-Z]{1,4}\d{1,4}\s*[-_·]?\s*', '', p_name_raw).strip() or p_name_raw
+    # 海外营销邮件优先用「产品英文名」, 缺则降级中文剥前缀
+    p_en = ext(pf.get("产品英文名"))
+    if p_en:
+        p_name = p_en
+    else:
+        p_name_raw = ext(pf.get("产品名"))
+        p_name = re.sub(r'^[A-Z]{1,4}\d{1,4}\s*[-_·]?\s*', '', p_name_raw).strip() or p_name_raw
+        print(f"[WARN] 产品缺少「产品英文名」字段, 降级用中文剥前缀: {p_name}")
     p_brand = ext(pf.get("品牌"))
     p_cat = ext(pf.get("品类"))
     p_s1 = ext(pf.get("卖点1"))

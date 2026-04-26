@@ -52,9 +52,29 @@ def _ensure_html(body: str) -> str:
 
 
 async def send_email(brand: str, to_addr: str, subject: str, body: str):
+    """发送邮件 — 自动 plaintext→HTML + DRY-RUN 重定向支持
+
+    DRY-RUN: 如果 env `EMAIL_DRY_RUN_TO` 有值, 自动把 to 改成此邮箱,
+    主题前加 [DRY-RUN→{真实 to}], 防止改代码时误发到真客户。
+    """
+    import os
     cfg = config.BRAND_CONFIG[brand]
     tok = await access(brand)
     html_body = _ensure_html(body)
+
+    real_to = to_addr
+    dry_run_to = os.environ.get("EMAIL_DRY_RUN_TO", "").strip()
+    if dry_run_to:
+        to_addr = dry_run_to
+        subject = f"[DRY-RUN→{real_to}] {subject}"
+        html_body = (
+            f"<div style=\"background:#fff3cd;padding:8px;border:1px solid #ffc107;margin-bottom:12px\">"
+            f"<strong>⚠️ DRY-RUN MODE</strong> — 这封邮件本来要发给 <code>{real_to}</code>, "
+            f"但 EMAIL_DRY_RUN_TO env 已设置为 <code>{dry_run_to}</code>, 真客户不会收到。</div>"
+            + html_body
+        )
+        print(f"[zoho.send_email DRY-RUN] {real_to} → {to_addr}")
+
     async with httpx.AsyncClient(timeout=45.0) as cli:
         r = await cli.post(
             f"https://mail.zoho.com/api/accounts/{cfg['account_id']}/messages",

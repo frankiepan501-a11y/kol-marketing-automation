@@ -40,7 +40,12 @@ async def generate_followup(round_num: int, first_draft: dict, kol: dict, produc
                              brand: str, signature: str, lang: str):
     kf = kol["fields"]
     pf = product["fields"]
-    p_name = re.sub(r'^[A-Z]{1,4}\d{1,4}\s*[-_·]?\s*', '', ext(pf.get("产品名"))).strip() or ext(pf.get("产品名"))
+    # 海外营销邮件优先用「产品英文名」, 缺则降级中文剥前缀
+    p_en = ext(pf.get("产品英文名"))
+    if p_en:
+        p_name = p_en
+    else:
+        p_name = re.sub(r'^[A-Z]{1,4}\d{1,4}\s*[-_·]?\s*', '', ext(pf.get("产品名"))).strip() or ext(pf.get("产品名"))
     first_subject = ext(first_draft["fields"].get("邮件主题"))
     first_body = re.sub(r'<[^>]+>', ' ', ext(first_draft["fields"].get("邮件正文")))[:400]
 

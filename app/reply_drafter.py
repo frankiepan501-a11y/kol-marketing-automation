@@ -297,14 +297,17 @@ async def draft_reply(
             if prod_rid:
                 prod = await feishu.get_record(config.T_PRODUCT, prod_rid)
                 pf = prod["fields"]
-                p_raw = ext(pf.get("产品名"))
-                # 剥离内部 SKU 前缀 (如 "YM24食人花-二代" → "食人花-二代", "FL-JC2-TMR-01-xxx" → "xxx")
-                p_clean = re.sub(r'^[A-Z]{1,4}\d{1,4}\s*[-_·]?\s*', '', p_raw).strip() or p_raw
-                m = re.match(r'^[A-Z]{2,5}[-_]?[A-Z0-9]{1,5}([-_][A-Z0-9]+)+\s*', p_clean)
-                if m:
-                    p_clean = p_clean[m.end():].strip() or p_raw
-                # 兜底: 如果剥后只剩中文/英文产品名,用它; 否则用原始
-                product_name = p_clean or product_name
+                # 海外营销邮件: 优先用「产品英文名」, 没填则降级用「产品名」剥前缀 + 告警
+                p_en = ext(pf.get("产品英文名"))
+                if p_en:
+                    product_name = p_en
+                else:
+                    p_raw = ext(pf.get("产品名"))
+                    p_clean = re.sub(r'^[A-Z]{1,4}\d{1,4}\s*[-_·]?\s*', '', p_raw).strip() or p_raw
+                    m = re.match(r'^[A-Z]{2,5}[-_]?[A-Z0-9]{1,5}([-_][A-Z0-9]+)+\s*', p_clean)
+                    if m: p_clean = p_clean[m.end():].strip() or p_raw
+                    product_name = p_clean or product_name
+                    print(f"[WARN] 产品 {prod_rid} 缺少「产品英文名」字段, 降级用中文名: {product_name}")
                 product_link = ext(pf.get("官网链接")) or ""
         except Exception as e:
             print(f"[reply_drafter] fetch related product fail: {e}")
