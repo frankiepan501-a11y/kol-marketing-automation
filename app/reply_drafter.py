@@ -96,6 +96,54 @@ def _sender_signature(brand: str) -> str:
 
 
 # ===== 感兴趣子类 AI 判断 =====
+def _is_real_address(s: str) -> bool:
+    """正则验证 ship_confirm 提取的"地址"是否是真实邮寄地址(防 AI 把签名当地址).
+
+    bug 案例 (2026-04-28 1upBinge): AI 把 "Kyle J. Beauregard, Director of Programming,
+    www.wickedbinge.com" 当成地址提取出来, 触发 ship_confirm 模板"got the address!"。
+
+    真实邮寄地址必须含:
+    1. 街道门牌号 (开头 1-5 位数字 + 街道名) OR 邮编 (US 5 位 / UK 字母数字混合 / 加拿大 A1A 1A1 等)
+    2. 街道关键词 (Street/St/Ave/Boulevard/Road/Rd/Lane/Drive/Way/Court/Plaza/Suite/Apt 等)
+    3. 长度 >= 30 字符
+
+    签名特征 (排除):
+    - 含 URL (www./http/.com/.net/.io)
+    - 含 email (@gmail/@outlook/@yahoo/@xxx.com)
+    - 只有姓名+职位+网站 (Director|Manager|CEO|Founder|Editor|Producer|Programming + URL)
+    """
+    if not s or len(s) < 30:
+        return False
+    s_lower = s.lower()
+
+    # 排除签名特征
+    if any(x in s_lower for x in ["www.", "http://", "https://"]):
+        return False
+    # 排除职位 + 网站组合 (典型签名)
+    title_kws = ["director", "manager", "ceo", "founder", "editor", "producer",
+                 "programming", "marketing", "partnerships", "operations"]
+    if any(t in s_lower for t in title_kws) and any(x in s_lower for x in [".com", ".net", ".org", ".io", ".tv", ".gg"]):
+        return False
+
+    # 必须含街道关键词
+    street_kw_pattern = r"\b(street|st\.?|avenue|ave\.?|boulevard|blvd\.?|road|rd\.?|lane|ln\.?|drive|dr\.?|way|court|ct\.?|plaza|place|pl\.?|terrace|circle|cir\.?|parkway|pkwy|highway|hwy|suite|ste\.?|apt\.?|unit|floor|building|bldg)\b"
+    has_street_kw = bool(re.search(street_kw_pattern, s_lower))
+
+    # 邮编模式: US 5 digits / US 5+4 / UK / 加拿大 / 5位欧洲邮编
+    zip_patterns = [
+        r"\b\d{5}(-\d{4})?\b",                              # US ZIP
+        r"\b[A-Z]\d[A-Z]\s?\d[A-Z]\d\b",                    # 加拿大
+        r"\b[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}\b",           # UK
+        r"\b\d{4,5}\b",                                      # 通用 4-5 位邮编
+    ]
+    has_zip = any(bool(re.search(p, s)) for p in zip_patterns)
+
+    # 街道门牌号(开头数字 + 字母街道名)
+    has_street_num = bool(re.search(r"\b\d{1,5}\s+[A-Z][a-zA-Z]+", s))
+
+    return has_street_kw and (has_zip or has_street_num)
+
+
 async def _classify_interest(original_body: str) -> dict:
     """对方回复"感兴趣"时, 进一步细分子类.
     Returns {"sub": "ship_confirm|send_assets|schedule_call|general",
@@ -107,10 +155,19 @@ async def _classify_interest(original_body: str) -> dict:
 请判断他的具体诉求属于以下哪一档:
 
 【4 个子类】
-- ship_confirm: 想直接收到产品实物, 通常会含**邮寄地址** (姓名+街道+城市+国家/邮编), 或明确说"please send to..."/"my address is..."
+- ship_confirm: **必须满足两个条件**: ① 对方明确说想要实物 / "please send to..." / "my address is..." ② **回信原文里提供了具体邮寄地址 (含街道门牌号 + 城市 + 邮编)**。
+  - ✗ **签名 (姓名+职位+公司网站)** 不算地址,例: "Kyle J. Beauregard, Director of Programming, www.wickedbinge.com" 是签名,不是地址
+  - ✗ 仅说 "Would love to check it out" / "Looks awesome" 没给地址 → 走 general
+  - ✓ 例: "Send to: 123 Main St, Apt 4B, Brooklyn NY 11201, USA"
+  - ✓ 例: "My address is 5-10-1 Shibuya, Shibuya-ku, Tokyo 150-0002, Japan"
 - send_assets: 想要更多产品资料 / PDF / 详细介绍 / 高清图 / 产品对比, 还没准备好接收实物
 - schedule_call: 想要视频会议 / 电话沟通 / Zoom / Meet / Google call
-- general: 表达了感兴趣但没具体诉求 (如 "Sounds cool, tell me more!" / "Interesting!"), 需要追问
+- general: 表达了感兴趣但没具体诉求 (如 "Sounds cool, tell me more!" / "Interesting!" / "Looks awesome, would love to check it out"), 需要追问寄送地址
+
+【判断口诀】
+- 看到 "looks awesome" / "would love to" 等没明示地址 → general (不是 ship_confirm!)
+- 看到完整邮寄地址(街道+城市+邮编)→ ship_confirm
+- 看到只是签名 → 不算地址, 按其他线索判断子类
 
 【对方回信原文 (前 800 字)】
 {original_body[:800]}
@@ -119,8 +176,8 @@ async def _classify_interest(original_body: str) -> dict:
 {{
   "sub": "ship_confirm|send_assets|schedule_call|general",
   "confidence": 0.0-1.0,
-  "extracted_address": "如果是 ship_confirm, 把识别到的完整地址原文截出来 (姓名+街道+城市+州+邮编+国家); 否则留空",
-  "country_code": "如有地址, 推断出 ISO 国家代码 (US/UK/DE/JP/CA/AU/FR/ES/IT/NL/BR/MX 等); 否则留空",
+  "extracted_address": "**只有真实邮寄地址才填**(必须含街道门牌号+邮编),签名/职位/网站绝对不算; 否则留空",
+  "country_code": "如有真实地址, 推断出 ISO 国家代码 (US/UK/DE/JP/CA/AU/FR/ES/IT/NL/BR/MX 等); 否则留空",
   "reason": "20 字以内说明判断依据"
 }}"""
     try:
@@ -128,10 +185,18 @@ async def _classify_interest(original_body: str) -> dict:
         sub = r.get("sub", "general")
         if sub not in ("ship_confirm", "send_assets", "schedule_call", "general"):
             sub = "general"
+        extracted_address = (r.get("extracted_address") or "").strip()[:500]
+
+        # 后处理:即便 AI 判 ship_confirm,正则验证地址是否真实(防签名误识)
+        if sub == "ship_confirm" and not _is_real_address(extracted_address):
+            print(f"[reply_drafter] ship_confirm 降级 general: 地址正则校验失败 raw='{extracted_address[:120]}'")
+            sub = "general"
+            extracted_address = ""
+
         return {
             "sub": sub,
             "confidence": float(r.get("confidence", 0.5) or 0.5),
-            "extracted_address": (r.get("extracted_address") or "").strip()[:500],
+            "extracted_address": extracted_address,
             "country_code": (r.get("country_code") or "").strip().upper()[:5],
             "reason": (r.get("reason") or "")[:80],
         }
