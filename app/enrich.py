@@ -198,11 +198,17 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
 
 【2026 KOL 外联邮件黄金法则】(必须遵守)
 
-📌 主题行 (<40 字符 / <=7 词): 像朋友 DM, 不像营销文案; 引用 KOL 具体内容
+📌 主题行 (<40 字符 / <=7 词): 像朋友 DM, 不像营销文案
   ✗ 禁: "partnership"/"collaboration"/"opportunity"/"your thoughts"/"quick question"
-  ✓ 例: "Piranha Plant dock for your retro setup"
+  ✗ 禁: 通用模板主题(如 "Piranha Plant dock for your retro setup")— 任何不带KOL名字或KOL专属关键词的主题都属于"通用模板"
+  ✅ 必须包含 KOL 名字(从账号名 {kol_name} 抽取) OR KOL 频道/IP 喜好的专属关键词
+  ✓ 例:
+    - "{kol_name}, this fits your retro corner"
+    - "{kol_name}'s Switch 2 needs this dock"
+    - "For your GameCube nostalgia setup"  (有具体场景,非通用)
 
 📌 正文 (100-150 词):
+  ✅ 必须以 "Hey {{KOL名字}}," 开头(从账号名提取)— 不允许 "Hey," / "Hi there," / 任何匿名开头
   ✓ 第 1 句引用 KOL 具体内容 (视频/IP/风格), 禁 [xxx 占位符]
   ✓ 中段强调"为什么契合他"(参考下方匹配亮点)
   ✓ 1 行产品链接 (独立段落): <p>👉 <a href="{p_url}">{{See it in action →}}</a></p>
