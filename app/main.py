@@ -2,7 +2,7 @@
 部署在 Zeabur, 由 n8n cron / webhook 触发
 """
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor, dashboard, followup, enrich, auto_send, draft_router, sla_check, dispatch
+from . import config, reply_monitor, dashboard, followup, enrich, auto_send, draft_router, sla_check, dispatch, relabel
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
 
@@ -106,6 +106,18 @@ async def run_reviewer_scan(authorization: str = Header(default="")):
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
+@app.post("/relabel/kol-test")
+async def run_relabel_kol_test(authorization: str = Header(default=""), limit: int = 10):
+    """A 阶段验证: 重打前 N 个 KOL 标签 (基于近期视频标题). D3=c 云端反爬命中率测试."""
+    _check_auth(authorization)
+    try:
+        result = await relabel.run_kol_test(limit=limit)
+        return {"ok": True, **result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1500:]}
 
 
 @app.post("/zoho/test-send")
