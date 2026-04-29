@@ -209,7 +209,13 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
 
 📌 正文 (100-150 词):
   ✅ 必须以 "Hey {{KOL名字}}," 开头(从账号名提取)— 不允许 "Hey," / "Hi there," / 任何匿名开头
-  ✓ 第 1 句引用 KOL 具体内容 (视频/IP/风格), 禁 [xxx 占位符]
+  ✓ 第 1 句引用 KOL 内容方向(基于下方 IP喜好/风格 标签), 禁 [xxx 占位符]
+  🚨 严禁编造具体作品/视频/直播 — 我们没真看过 KOL 任何具体内容,只有抽象标签
+    ✗ 禁 "I saw your X video" / "I watched your latest stream" / "Your last episode about Y"
+    ✗ 禁 任何"我看了你 [具体作品]"句式 — 这是 LLM 幻觉, 客户一眼识破
+    ✓ 用 "Saw you're into {{IP喜好}} content" / "Your {{风格}} channel caught my eye"
+    ✓ 用 "Your retro-gaming corner has serious vibes" (基于风格标签的概括)
+    ✓ 模糊但真实 > 具体但编造 — 宁可泛泛而谈,也不要假装看过
   ✓ 中段强调"为什么契合他"(参考下方匹配亮点)
   ✓ 1 行产品链接 (独立段落): <p>👉 <a href="{p_url}">{{See it in action →}}</a></p>
      - en: "See it in action →"  / de: "Sieh es live →"  / fr: "À voir en action →"
