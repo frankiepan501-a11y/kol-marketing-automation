@@ -37,6 +37,14 @@ def _extract_channel_id(main_link: str) -> str:
     m = re.search(r"youtube\.com/@([\w.\-]+)", main_link)
     if m:
         return "@" + m.group(1)
+    # https://www.youtube.com/c/customname  → 以 /c/ 形式访问
+    m = re.search(r"youtube\.com/c/([\w.\-]+)", main_link)
+    if m:
+        return "@" + m.group(1)  # /c/X 通常等价 @X
+    # https://www.youtube.com/user/legacyname
+    m = re.search(r"youtube\.com/user/([\w.\-]+)", main_link)
+    if m:
+        return "@" + m.group(1)
     return ""
 
 
@@ -63,20 +71,43 @@ async def fetch_recent_video_titles(channel_id_or_handle: str, n: int = 10) -> l
     except Exception:
         return []
 
-    # YouTube 把 video grid 数据塞在 ytInitialData JSON 里, 提 "title":{"runs":[{"text":"..."}]}
-    # 视频标题模式: 用 regex 暴力提取.
+    # 抽真实视频标题 — 避开 YouTube UI 文案("快捷键""字幕"等)
+    # 策略 1 (主): videoRenderer 块的 title — 限定在 videoId 邻近 200 字内
+    # 策略 2 (兜底): aria-label="<title> by <channel> ... views ..."
     titles = []
     seen = set()
-    # 形如: "title":{"runs":[{"text":"Video Title Here"}]
-    for m in re.finditer(r'"title":\{"runs":\[\{"text":"((?:[^"\\]|\\.){5,200})"\}\]', html):
+
+    # 策略 1: videoId + title 同段(每个视频卡片 200-500 字内)
+    pat1 = re.compile(
+        r'"videoId":"[\w-]{11}"[^{}]{0,400}?"title":\{"runs":\[\{"text":"((?:[^"\\]|\\.){5,200})"\}',
+        re.DOTALL,
+    )
+    for m in pat1.finditer(html):
         t = m.group(1).encode("utf-8").decode("unicode_escape", errors="ignore")
-        # YouTube 同标题会出现多次(grid + 缓存), 去重
-        if t in seen:
+        if t in seen or len(t) < 5:
             continue
         seen.add(t)
-        # 排除频道名/UI 文案 (如果命中 5+ 词中文/英文,大概率是视频标题)
-        if len(t) < 5:
+        titles.append(t)
+        if len(titles) >= n:
+            return titles
+
+    # 策略 2: aria-label (richItem 渲染场景)
+    pat2 = re.compile(
+        r'"accessibilityData":\{"label":"((?:[^"\\]|\\.){10,250})"\}',
+    )
+    for m in pat2.finditer(html):
+        raw = m.group(1).encode("utf-8").decode("unicode_escape", errors="ignore")
+        # aria-label 形如 "Video Title by Channel 123 views 2 days ago 10 minutes"
+        # 用 ' by ' 切, 取前面部分; 找不到 by 就尝试 'views' 切
+        if " by " in raw:
+            t = raw.split(" by ")[0].strip()
+        elif " views" in raw:
+            t = re.sub(r"\s+\d[\d,.]*\s*views?.*$", "", raw).strip()
+        else:
             continue
+        if t in seen or len(t) < 5 or len(t) > 200:
+            continue
+        seen.add(t)
         titles.append(t)
         if len(titles) >= n:
             break
