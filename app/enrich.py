@@ -26,6 +26,29 @@ LANG_DISPLAY = {
     "pt": "Portuguese", "ja": "Japanese", "it": "Italian", "nl": "Dutch", "sv": "Swedish",
 }
 
+# ===== ban-phrase: 防 LLM 软幻觉(假装看过 KOL 具体作品) =====
+# 触发任一 → 重生 1 次, 仍命中 → 标记 _ban_phrase_failed 走人审通道
+BAN_PHRASE_PATTERNS = [
+    re.compile(r"\bI\s+(saw|watched|caught|loved|enjoyed)\s+(your|the)\b", re.I),
+    re.compile(r"\bjust\s+(saw|watched)\b", re.I),
+    re.compile(r"\b(been\s+)?following\s+your\s+(channel|content|stream)\b", re.I),
+    re.compile(r"\byour\s+(latest|recent|last|new)\s+(video|stream|episode|post|upload|clip)", re.I),
+    re.compile(r"\byour\s+(streams?|videos?|episodes?|uploads?|clips?)\b", re.I),
+    re.compile(r"\bloved\s+(how|the\s+way)\s+you\b", re.I),
+    re.compile(r"\bthat\s+(video|stream|episode|post)\s+you\b", re.I),
+]
+
+
+def _check_ban_phrases(body: str) -> list:
+    """返回命中的禁用句式列表(空 list = 干净)"""
+    hits = []
+    for p in BAN_PHRASE_PATTERNS:
+        m = p.search(body or "")
+        if m:
+            hits.append(m.group(0))
+    return hits
+
+
 SIGNATURE_POOL = {
     "FUNLAB": ["Tom from FUNLAB Team", "Mia @ FUNLAB Outreach", "Alex / FUNLAB Partnership"],
     "POWKONG": ["Lisa @ POWKONG Team", "Ryan from POWKONG", "Jamie / POWKONG Partnership"],
@@ -256,11 +279,38 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
     except Exception as e:
         return {"error": f"deepseek: {str(e)[:100]}"}
 
+    body = r.get("email_body", "")
+    ban_phrase_failed = False
+    hits = _check_ban_phrases(body)
+    if hits:
+        # 重生 1 次, 在原 prompt 后面追加 KOL_NAME + 上次命中片段警告
+        retry_prompt = (
+            prompt
+            + "\n\n"
+            + f"⚠️ 上次生成命中禁用句式: {hits[:3]} 严禁再用任何"
+            + "I saw/watched your X / your latest/recent/last video/stream / your streams/videos 等"
+            + "假装看过具体作品的句式。只能用基于 IP喜好/风格 的概括(如 'your retro-gaming corner' / "
+            + "'Saw you're into PC gaming content')。"
+        )
+        try:
+            r = await deepseek.chat_json(retry_prompt, max_tokens=1000, temperature=0.4)
+            body = r.get("email_body", "")
+            hits2 = _check_ban_phrases(body)
+            if hits2:
+                ban_phrase_failed = True
+                print(f"[ban-phrase] 重生后仍命中: {hits2[:3]} → 标记需人审")
+            else:
+                print(f"[ban-phrase] 首生命中 {hits[:3]}, 重生后干净")
+        except Exception as e:
+            ban_phrase_failed = True
+            print(f"[ban-phrase] 重生异常: {e}, 标记需人审")
+
     return {
         "subject": r.get("email_subject", ""),
-        "body": r.get("email_body", ""),
+        "body": body,
         "highlights": r.get("highlights", ""),
         "angle": r.get("angle", ""),
+        "ban_phrase_failed": ban_phrase_failed,
     }
 
 
@@ -303,6 +353,7 @@ async def score_and_draft_one(kol_record: dict, product: dict, brand: str,
         "body": draft["body"],
         "highlights": draft["highlights"],
         "angle": draft["angle"],
+        "ban_phrase_failed": draft.get("ban_phrase_failed", False),
     })
     return out
 
@@ -351,6 +402,17 @@ async def write_drafts_and_route(task_rid: str, product_rid: str, brand: str,
             rid = await feishu.create_record(config.T_DRAFT, fields)
         except Exception as e:
             results.append({"kol": s["kol_name"], "error": f"write_draft: {str(e)[:100]}"})
+            continue
+        # ban-phrase 失败 → 跳过 auto router, 强制走人审通道
+        if s.get("ban_phrase_failed"):
+            try:
+                await feishu.update_record(config.T_DRAFT, rid, {
+                    "审核路径": "需人改",
+                    "AI评分理由": "[ban-phrase] 软幻觉重生后仍命中, 人工修正后再发",
+                })
+            except Exception:
+                pass
+            results.append({"kol": s["kol_name"], "rid": rid, "path": "需人改", "reason": "ban_phrase_failed"})
             continue
         try:
             route = await draft_router.route_draft(rid)
