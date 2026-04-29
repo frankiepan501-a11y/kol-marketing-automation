@@ -71,46 +71,36 @@ async def fetch_recent_video_titles(channel_id_or_handle: str, n: int = 10) -> l
     except Exception:
         return []
 
-    # 抽真实视频标题 — 避开 YouTube UI 文案("快捷键""字幕"等)
-    # 策略 1 (主): videoRenderer 块的 title — 限定在 videoId 邻近 200 字内
-    # 策略 2 (兜底): aria-label="<title> by <channel> ... views ..."
+    # 2026 YouTube /videos 页结构: lockupMetadataViewModel.title.content
+    # 旧 videoRenderer 已废弃, gridVideoRenderer 也不再用
     titles = []
     seen = set()
-
-    # 策略 1: videoId + title 同段(每个视频卡片 200-500 字内)
-    pat1 = re.compile(
-        r'"videoId":"[\w-]{11}"[^{}]{0,400}?"title":\{"runs":\[\{"text":"((?:[^"\\]|\\.){5,200})"\}',
-        re.DOTALL,
+    pat = re.compile(
+        r'"lockupMetadataViewModel":\{"title":\{"content":"((?:[^"\\]|\\.){5,200})"\}',
     )
-    for m in pat1.finditer(html):
+    for m in pat.finditer(html):
         t = m.group(1).encode("utf-8").decode("unicode_escape", errors="ignore")
         if t in seen or len(t) < 5:
             continue
         seen.add(t)
         titles.append(t)
         if len(titles) >= n:
-            return titles
-
-    # 策略 2: aria-label (richItem 渲染场景)
-    pat2 = re.compile(
-        r'"accessibilityData":\{"label":"((?:[^"\\]|\\.){10,250})"\}',
-    )
-    for m in pat2.finditer(html):
-        raw = m.group(1).encode("utf-8").decode("unicode_escape", errors="ignore")
-        # aria-label 形如 "Video Title by Channel 123 views 2 days ago 10 minutes"
-        # 用 ' by ' 切, 取前面部分; 找不到 by 就尝试 'views' 切
-        if " by " in raw:
-            t = raw.split(" by ")[0].strip()
-        elif " views" in raw:
-            t = re.sub(r"\s+\d[\d,.]*\s*views?.*$", "", raw).strip()
-        else:
-            continue
-        if t in seen or len(t) < 5 or len(t) > 200:
-            continue
-        seen.add(t)
-        titles.append(t)
-        if len(titles) >= n:
             break
+
+    # 兜底: 旧版 videoRenderer (老页面/Shorts 频道偶尔仍用)
+    if len(titles) < 3:
+        pat_old = re.compile(
+            r'"videoRenderer":\{"videoId":"[\w-]{11}"[^{}]{0,800}?"title":\{"runs":\[\{"text":"((?:[^"\\]|\\.){5,200})"\}',
+            re.DOTALL,
+        )
+        for m in pat_old.finditer(html):
+            t = m.group(1).encode("utf-8").decode("unicode_escape", errors="ignore")
+            if t in seen or len(t) < 5:
+                continue
+            seen.add(t)
+            titles.append(t)
+            if len(titles) >= n:
+                break
     return titles
 
 
