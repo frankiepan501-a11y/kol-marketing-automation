@@ -190,7 +190,7 @@ async def run_reviewer_one(authorization: str = Header(default=""),
 
 from fastapi import Body
 from . import reply_drafter, reply_monitor
-from .reply_drafter import _classify_interest, _gen_general_interest_draft, _gen_quote_draft, _gen_clarify_draft
+from .reply_drafter import _classify_interest, _gen_general_interest_draft, _gen_quote_draft, _gen_clarify_draft, _gen_misspoke_apology_draft
 from .reply_drafter import (
     TEMPLATE_UNSUBSCRIBE, TEMPLATE_DECLINE, TEMPLATE_SEND_ASSETS,
     TEMPLATE_SHIP_CONFIRM, TEMPLATE_SCHEDULE_CALL, CALENDLY_DEFAULT,
@@ -280,7 +280,7 @@ async def reply_drafter_dry_run(authorization: str = Header(default=""),
     """Dry-run 测试 reply_drafter — 给输入回复, 返回生成的草稿 (不写飞书)
     Payload:
       {
-        "intent_type": "感兴趣|要报价|委婉拒绝|退订|不明意图",
+        "intent_type": "感兴趣|要报价|委婉拒绝|退订|质疑/澄清|不明意图",
         "intent_summary": "...",
         "original_subject": "...",
         "original_body": "...",
@@ -343,6 +343,10 @@ async def reply_drafter_dry_run(authorization: str = Header(default=""),
         d = await _gen_quote_draft(contact_name, original_subject, original_body,
                                     intent_summary, brand, product_name, product_link)
         subj = d["subject"]; body = d["body"]
+    elif intent_type == "质疑/澄清":
+        d = await _gen_misspoke_apology_draft(contact_name, original_subject, original_body,
+                                                intent_summary, brand, product_name, product_link)
+        subj = d["subject"]; body = d["body"]
     elif intent_type == "不明意图":
         d = await _gen_clarify_draft(contact_name, original_subject, original_body,
                                       intent_summary, brand)
@@ -359,6 +363,10 @@ async def reply_drafter_dry_run(authorization: str = Header(default=""),
     # ship_confirm 强制 committed=True
     forced_commit = False
     if sub_info and sub_info["sub"] == "ship_confirm":
+        committed = True
+        forced_commit = True
+    # 质疑/澄清 强制 committed=True (Ashtvn 反例 — KOL 在打脸我们)
+    if intent_type == "质疑/澄清":
         committed = True
         forced_commit = True
 

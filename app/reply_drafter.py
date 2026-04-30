@@ -9,6 +9,7 @@
     * schedule_call (想视频会议) → 模板带 calendly 链接, 自动发
     * general (泛泛感兴趣) → AI 生成开放式问题, 自动发
 - 要报价 → DeepSeek 生成 + 强制 committed=True (必走人审)
+- 质疑/澄清 → DeepSeek 生成"先承认错误再切入"草稿, **强制人审** (Ashtvn 反例)
 - 不明意图 → DeepSeek 生成澄清问题草稿
 
 写入「KOL·媒体人邮件草稿」表 (邮件草稿来源=reply), 然后调 draft_router 走自审通道。
@@ -287,6 +288,59 @@ async def _gen_quote_draft(contact_name: str, original_subject: str,
         }
 
 
+async def _gen_misspoke_apology_draft(contact_name: str, original_subject: str,
+                                        original_body: str, intent_summary: str, brand: str,
+                                        product_name: str, product_link: str) -> dict:
+    """质疑/澄清 → DeepSeek 生成"先承认错误再切入"草稿 (Ashtvn 反例)
+
+    KOL 在纠正我们 cold email 里的具体说法 (e.g. "I've never made a PC gaming setup video")。
+    禁止: 装没看见错误 / 直接问要不要寄样 / 双倍下注重申原描述。
+    必须: 简短承认错误 / 不重复错误细节 / 用通用语气重新介绍产品价值 / 不催地址。
+    """
+    sig = _sender_signature(brand)
+    prompt = f"""一位 KOL/媒体人回复了我们的 cold email,**纠正了我们对他的描述错误** (我们 cold email 里编造或写错了他的具体作品/视频/频道方向)。
+
+【对方回信摘要】
+意图: 质疑/澄清 - {intent_summary}
+原主题: {original_subject}
+原文 (前 500 字): {original_body[:500]}
+
+【我们要做什么】
+对方在用客气语气打脸我们。这是公关风险时刻。请生成一封**短、真诚、不卑不亢、不重复错误**的回复:
+1. 第一句简短承认 (e.g. "Apologies for the mix-up — that's on me.")
+2. 不要再次提原 cold email 里那个错误描述 (例: 如果对方说"I never made a PC gaming setup video",我们的回复**绝对不能再出现"PC gaming setup video"或类似措辞**)
+3. 用一句通用话术重新介绍产品价值 (产品名: {product_name}),不绑定具体内容方向
+4. **不要追问寄送地址、不要问 "would you like a sample?"** (让人审决定下一步)
+5. 留一个开放钩子让对方自己挑下一步 (e.g. "If it sounds like a fit for what you actually cover, happy to share more.")
+
+【约束】
+- 70-110 词
+- 主题: "Re: " + 原主题 (复用)
+- 称呼: Hi {_first_name(contact_name)},
+- 结尾签名: {sig}
+- 品牌 voice: {brand}
+
+【返回 JSON】
+{{"subject": "...", "body": "..."}}
+"""
+    try:
+        r = await deepseek.chat_json(prompt, max_tokens=500, temperature=0.2)
+        return {
+            "subject": r.get("subject", f"Re: {original_subject}")[:200],
+            "body": r.get("body", ""),
+        }
+    except Exception as e:
+        return {
+            "subject": f"Re: {original_subject}",
+            "body": (f"Hi {_first_name(contact_name)},\n\n"
+                     f"Apologies for the mix-up — that's on me. Let me reset: {product_name} "
+                     f"is something we built for the broader retro/Switch community, and I'd "
+                     f"love your honest take if it sounds like a fit for what you actually cover.\n\n"
+                     f"No pressure either way.\n\n"
+                     f"Best,\n{sig}\n\n[AI 错误: {str(e)[:50]}]"),
+        }
+
+
 async def _gen_clarify_draft(contact_name: str, original_subject: str,
                               original_body: str, intent_summary: str, brand: str) -> dict:
     """不明意图 → DeepSeek 生成澄清问题草稿"""
@@ -329,7 +383,7 @@ async def draft_reply(
     contact_record: dict,
     contact_type: str,             # KOL / editor
     brand: str,                    # POWKONG / FUNLAB
-    intent_type: str,              # 感兴趣/要报价/委婉拒绝/退订/不明意图
+    intent_type: str,              # 感兴趣/要报价/委婉拒绝/退订/质疑/澄清/不明意图
     intent_summary: str,
     original_subject: str,
     original_body: str,
@@ -430,6 +484,11 @@ async def draft_reply(
                                     intent_summary, brand, product_name, product_link)
         subj = d["subject"]
         body = d["body"]
+    elif intent_type == "质疑/澄清":
+        d = await _gen_misspoke_apology_draft(contact_name, original_subject, original_body,
+                                                intent_summary, brand, product_name, product_link)
+        subj = d["subject"]
+        body = d["body"]
     elif intent_type == "不明意图":
         d = await _gen_clarify_draft(contact_name, original_subject, original_body,
                                       intent_summary, brand)
@@ -488,6 +547,17 @@ async def draft_reply(
             })
         except Exception as e:
             print(f"[reply_drafter] mark ship_confirm committed fail: {e}")
+
+    # 质疑/澄清 强制 committed=True → 必走人审 (Ashtvn 反例)
+    # KOL 在纠错, 不能让 AI 自动发 (哪怕 score 高也不行)
+    if intent_type == "质疑/澄清":
+        try:
+            await feishu.update_record(config.T_DRAFT, rid, {
+                "承诺命中": True,
+                "命中关键词": "misspoke-correction (intent=质疑/澄清)",
+            })
+        except Exception as e:
+            print(f"[reply_drafter] mark 质疑/澄清 committed fail: {e}")
 
     # 调 router (惰性 import 防循环)
     try:

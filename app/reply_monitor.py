@@ -38,14 +38,17 @@ INTENT_TO_STATUS_KOL = {
     "感兴趣": "洽谈中", "要报价": "洽谈中",
     "委婉拒绝": "不合适", "退订": "黑名单",
     "不明意图": None,
+    "质疑/澄清": None,  # 让人审决定主表状态, 不自动推到洽谈中
 }
 INTENT_TO_STATUS_EDITOR = {
     "感兴趣": "洽谈中", "要报价": "洽谈中",
     "委婉拒绝": "不合适", "退订": "不合适",
     "不明意图": None,
+    "质疑/澄清": None,
 }
 INTENT_EMOJI = {
     "感兴趣": "✅", "要报价": "💰", "委婉拒绝": "⚠️", "退订": "🛑", "不明意图": "❓",
+    "质疑/澄清": "🔍",
 }
 
 
@@ -72,14 +75,20 @@ Body (前 800 字):
 {body[:800]}
 
 【意图类型】
-- 感兴趣: 想了解/收到产品/看样品/问细节
-- 要报价: 询问价格/佣金/合作条款
-- 委婉拒绝: "不适合""暂无档期""不感兴趣"
-- 退订: unsubscribe/please remove
+- 感兴趣: 主动表达兴趣或好评 ("Sounds cool!"/"Looks awesome"/"Would love to check it out"/"Tell me more"/给地址要寄样)
+- 要报价: 询问价格/佣金/合作条款 (commission/MOQ/rate card)
+- 委婉拒绝: "不适合"/"暂无档期"/"not a fit"/"thanks but no"
+- 退订: unsubscribe/please remove me/stop emailing
+- 质疑/澄清: 对方在**纠正/反驳**我们 cold email 里的某个具体说法 (典型: "I've never made X video"/"That's not my channel"/"You have me confused with someone else"/"I don't cover that category"/"Where did you see that?")。这种回复**不是表达兴趣**,是在打脸我们对他的描述错误,必须人审 + 道歉 + 重新切入,绝不能当作"感兴趣"自动发寄样确认。
 - 不明意图: out-of-office/自动回复/无法判断
 
+【判别要点】
+- 一封"我从没做过 X"/"那不是我"/"你搞错人了"类回复,即便语气客气,也是 质疑/澄清,不是 感兴趣。
+- 含有 "I've never"/"I don't"/"that's not"/"you have the wrong"/"actually, I"/"to clarify"/"correction"等纠错语气强信号。
+- "Tell me more" 不带纠错 = 感兴趣;"I don't make those, but tell me more about the product" = 质疑/澄清(因有纠错前置)。
+
 返回 JSON:
-{{"type":"感兴趣|要报价|委婉拒绝|退订|不明意图","confidence":0.0-1.0,"summary":"一句总结","key_quote":"原文 1 句","suggested_action":"下一步建议"}}"""
+{{"type":"感兴趣|要报价|委婉拒绝|退订|质疑/澄清|不明意图","confidence":0.0-1.0,"summary":"一句总结","key_quote":"原文 1 句","suggested_action":"下一步建议"}}"""
     try:
         return await deepseek.chat_json(prompt, max_tokens=400)
     except Exception as e:
@@ -128,7 +137,7 @@ def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, 
     target_table = config.T_EDITOR if contact_type == "editor" else config.T_KOL
     return {
         "header": {
-            "template": "green" if intent_type in ("感兴趣", "要报价") else "orange" if intent_type == "不明意图" else "red",
+            "template": "green" if intent_type in ("感兴趣", "要报价") else "orange" if intent_type in ("不明意图", "质疑/澄清") else "red",
             "title": {"tag": "plain_text", "content": f"{emoji} {'媒体人' if contact_type=='editor' else 'KOL'} 回复 — {intent_type}"}
         },
         "elements": [
