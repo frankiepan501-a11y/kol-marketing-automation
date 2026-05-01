@@ -205,10 +205,15 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
     p_s1 = ext(pf.get("卖点1"))
     p_s2 = ext(pf.get("卖点2"))
     p_s3 = ext(pf.get("卖点3"))
-    p_url = ext(pf.get("官网链接"))
+    p_url_raw = ext(pf.get("官网链接"))
     p_price = pf.get("报价(USD)", 0)
     p_audience = ext(pf.get("目标人群"))
     p_media = ext(pf.get("媒体报道"))
+
+    # UTM 注入 (Phase 1 ROI 闭环): 给产品链接加 utm_source/medium/campaign/content
+    from . import utm as _utm
+    p_url = _utm.make_utm_link(p_url_raw, brand, p_name, kol_name)
+    utm_id_value = _utm.kol_utm_id(kol_name)
 
     lang = COUNTRY_TO_LANG.get(kol_country, "en")
     lang_display = LANG_DISPLAY.get(lang, "English")
@@ -311,6 +316,8 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
         "highlights": r.get("highlights", ""),
         "angle": r.get("angle", ""),
         "ban_phrase_failed": ban_phrase_failed,
+        "utm_url": p_url,            # Phase 1: 实发产品链接 (含 UTM)
+        "utm_id": utm_id_value,      # Phase 1: KOL UTM ID (= utm_content)
     }
 
 
@@ -354,6 +361,8 @@ async def score_and_draft_one(kol_record: dict, product: dict, brand: str,
         "highlights": draft["highlights"],
         "angle": draft["angle"],
         "ban_phrase_failed": draft.get("ban_phrase_failed", False),
+        "utm_url": draft.get("utm_url", ""),
+        "utm_id": draft.get("utm_id", ""),
     })
     return out
 
@@ -397,12 +406,23 @@ async def write_drafts_and_route(task_rid: str, product_rid: str, brand: str,
             "建议发送时间": send_ms,
             "发送时区说明": send_desc,
             "重生次数": 0,
+            "UTM 链接": s.get("utm_url", ""),
         }
         try:
             rid = await feishu.create_record(config.T_DRAFT, fields)
         except Exception as e:
             results.append({"kol": s["kol_name"], "error": f"write_draft: {str(e)[:100]}"})
             continue
+        # Phase 1 ROI: 第一次给 KOL 派单时, 写 UTM ID 到 KOL 主表 (idempotent)
+        utm_id_val = s.get("utm_id", "")
+        if utm_id_val:
+            try:
+                kol_rec = await feishu.get_record(config.T_KOL, s["kol_record_id"])
+                cur_utm = ext(kol_rec["fields"].get("UTM ID"))
+                if not cur_utm:
+                    await feishu.update_record(config.T_KOL, s["kol_record_id"], {"UTM ID": utm_id_val})
+            except Exception as e:
+                print(f"[enrich] write KOL UTM ID fail rid={s['kol_record_id']}: {e}")
         # ban-phrase 失败 → 跳过 auto router, 强制走人审通道
         if s.get("ban_phrase_failed"):
             try:

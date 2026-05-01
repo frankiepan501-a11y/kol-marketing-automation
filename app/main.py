@@ -301,7 +301,10 @@ async def reply_drafter_dry_run(authorization: str = Header(default=""),
     contact_name = p.get("contact_name", "there")
     brand = p.get("brand", "FUNLAB")
     product_name = p.get("product_name", "our latest product")
-    product_link = p.get("product_link", "")
+    product_link_raw = p.get("product_link", "")
+    # Phase 1 ROI: dry-run 也注 UTM (与生产路径一致)
+    from .utm import make_utm_link as _make_utm
+    product_link = _make_utm(product_link_raw, brand, product_name, contact_name) if product_link_raw else ""
 
     sig_full = _sender_signature(brand)
     first = _first_name(contact_name)

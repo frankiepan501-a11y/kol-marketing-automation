@@ -406,7 +406,7 @@ async def draft_reply(
 
     # 默认产品占位 (从原始草稿继承 关联产品 — 暂用"主推产品"占位)
     product_name = "our latest product"
-    product_link = ""
+    product_link_raw = ""
     # 试图从 related_draft 拿产品名 (如有)
     if related_draft_id:
         try:
@@ -427,9 +427,14 @@ async def draft_reply(
                     if m: p_clean = p_clean[m.end():].strip() or p_raw
                     product_name = p_clean or product_name
                     print(f"[WARN] 产品 {prod_rid} 缺少「产品英文名」字段, 降级用中文名: {product_name}")
-                product_link = ext(pf.get("官网链接")) or ""
+                product_link_raw = ext(pf.get("官网链接")) or ""
         except Exception as e:
             print(f"[reply_drafter] fetch related product fail: {e}")
+
+    # Phase 1 ROI: 给 product_link 注 UTM
+    from . import utm as _utm
+    product_link = _utm.make_utm_link(product_link_raw, brand, product_name, contact_name) if product_link_raw else ""
+    utm_id_value = _utm.kol_utm_id(contact_name) if contact_name else ""
 
     sig_first = "Frankie"
     sig_full = _sender_signature(brand)
@@ -528,6 +533,7 @@ async def draft_reply(
         "建议发送时间": now_ms,
         "重生次数": 0,
         "收件邮箱": ext(cf.get("邮箱")) or "",
+        "UTM 链接": product_link,
     }
     if related_prod_rid:
         fields["关联产品"] = [related_prod_rid]
@@ -536,6 +542,16 @@ async def draft_reply(
 
     rid = await feishu.create_record(config.T_DRAFT, fields)
     print(f"[reply_drafter] created draft rid={rid} intent={intent_type} sub={sub}")
+
+    # Phase 1 ROI: 第一次写 UTM ID 到联系人主表 (idempotent)
+    if utm_id_value:
+        try:
+            target_table = config.T_EDITOR if contact_type == "editor" else config.T_KOL
+            cur_utm = ext(cf.get("UTM ID"))
+            if not cur_utm:
+                await feishu.update_record(target_table, contact_record["record_id"], {"UTM ID": utm_id_value})
+        except Exception as e:
+            print(f"[reply_drafter] write UTM ID fail: {e}")
 
     # ship_confirm 强制 committed=True → 走人审 (即便 score 高)
     # 通过预先写"承诺命中=True"+"命中关键词" 让 router 必走人审分支

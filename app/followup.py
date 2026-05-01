@@ -49,6 +49,12 @@ async def generate_followup(round_num: int, first_draft: dict, kol: dict, produc
     first_subject = ext(first_draft["fields"].get("邮件主题"))
     first_body = re.sub(r'<[^>]+>', ' ', ext(first_draft["fields"].get("邮件正文")))[:400]
 
+    # Phase 1 ROI: 给 product_url 注 UTM (与第 1 封 cold email 同 utm_content)
+    from . import utm as _utm
+    p_url_raw = ext(pf.get("官网链接")) or ""
+    kol_handle = ext(kf.get("账号名"))
+    p_url_utm = _utm.make_utm_link(p_url_raw, brand, p_name, kol_handle)
+
     lang_display = {"en":"English","de":"German","fr":"French","es":"Spanish","pt":"Portuguese",
                     "ja":"Japanese","it":"Italian","nl":"Dutch","sv":"Swedish"}.get(lang, "English")
 
@@ -57,7 +63,7 @@ async def generate_followup(round_num: int, first_draft: dict, kol: dict, produc
   ✓ 60-100 词 (比第1封短40%)
   ✓ 开头引用第1封 ("Last week I mentioned...")
   ✓ 换新角度: "for your audience" / 场景化 / 用户反馈
-  ✓ 保留产品链接 (<a href="{ext(pf.get('官网链接'))}">See it in action →</a>)
+  ✓ 保留产品链接 (<a href="{p_url_utm}">See it in action →</a>)
   ✓ 软 CTA: "any interest at all?"
   ✗ 禁重复第1封卖点
   ✗ 禁 "just following up" 套路"""
@@ -92,7 +98,10 @@ async def generate_followup(round_num: int, first_draft: dict, kol: dict, produc
 返回 JSON:
 {{"email_subject":"Re: 原主题 或 新主题","email_body":"<p>...</p><p>-- {signature}</p>"}}"""
 
-    return await deepseek.chat_json(prompt, max_tokens=600)
+    r = await deepseek.chat_json(prompt, max_tokens=600)
+    if isinstance(r, dict):
+        r["_utm_url"] = p_url_utm   # Phase 1 ROI: 让 run() 写到草稿
+    return r
 
 
 async def run():
@@ -198,6 +207,7 @@ async def run():
             "建议发送时间": int(send_dt.timestamp() * 1000),
             "Follow-up轮次": f"第{next_round}封",
             "重生次数": 0,
+            "UTM 链接": r.get("_utm_url", ""),
         }
         new_rid = await feishu.create_record(config.T_DRAFT, fields)
         stats["generated"] += 1
