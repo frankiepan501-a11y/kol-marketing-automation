@@ -108,6 +108,18 @@ async def run_reviewer_scan(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
+@app.post("/sales-attribution/run")
+async def run_sales_attribution(authorization: str = Header(default="")):
+    """Phase 3 ROI 闭环: Shopify 双店拉订单 + UTM 归因 + 写飞书 KOL 主表"""
+    _check_auth(authorization)
+    from . import sales_attribution
+    try:
+        return await sales_attribution.run()
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
 @app.post("/relabel/kol-test")
 async def run_relabel_kol_test(authorization: str = Header(default=""), limit: int = 10):
     """A 阶段验证: 重打前 N 个 KOL 标签 (基于近期视频标题). D3=c 云端反爬命中率测试."""
