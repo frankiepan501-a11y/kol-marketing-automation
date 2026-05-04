@@ -133,12 +133,13 @@ async def run_decision_feedback(authorization: str = Header(default="")):
 
 
 @app.post("/secondary-outreach/run")
-async def run_secondary_outreach(authorization: str = Header(default="")):
-    """Phase 3.3 二次维护: 给已合作 KOL 自动生新产品 warm follow-up"""
+async def run_secondary_outreach(authorization: str = Header(default=""), limit: int = 0):
+    """Phase 3.3 二次维护: 给已合作 KOL 自动生新产品 warm follow-up.
+    ?limit=5 仅跑前 5 (smoke test); 默认全跑."""
     _check_auth(authorization)
     from . import secondary_outreach
     try:
-        return await secondary_outreach.run()
+        return await secondary_outreach.run(limit=limit)
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}

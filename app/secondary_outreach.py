@@ -145,8 +145,9 @@ async def _eligible_kols():
     return eligible
 
 
-async def run():
-    """每周 cron: 扫已合作 KOL + 生 warm follow-up + 走 reviewer."""
+async def run(limit: int = 0):
+    """每周 cron: 扫已合作 KOL + 生 warm follow-up + 走 reviewer.
+    limit=0 跑全部, >0 只跑前 N 个 (smoke test 用)"""
     started = time.time()
     summary = {"eligible": 0, "drafts_created": 0, "errors": [], "details": []}
 
@@ -161,6 +162,9 @@ async def run():
     kols = await _eligible_kols()
     summary["eligible"] = len(kols)
     summary["product"] = p_en
+    if limit > 0 and len(kols) > limit:
+        kols = kols[:limit]
+        summary["limited_to"] = limit
 
     for k in kols:
         kf = k["fields"]
