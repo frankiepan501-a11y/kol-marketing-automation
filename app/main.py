@@ -2,7 +2,7 @@
 部署在 Zeabur, 由 n8n cron / webhook 触发
 """
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor, dashboard, followup, enrich, auto_send, draft_router, sla_check, dispatch, relabel
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
 
@@ -78,6 +78,18 @@ async def run_enrich_task(authorization: str = Header(default="")):
     _check_auth(authorization)
     try:
         result = await enrich.run()
+        return {"ok": True, **result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1500:]}
+
+
+@app.post("/enrich-task-editor/run")
+async def run_enrich_task_editor(authorization: str = Header(default="")):
+    """每 5 分钟扫 媒体人营销任务台 待触发任务 → score_editor 6 维 + DeepSeek 生 PR pitch + 调 reviewer"""
+    _check_auth(authorization)
+    try:
+        result = await enrich_editor.run()
         return {"ok": True, **result}
     except Exception as e:
         import traceback

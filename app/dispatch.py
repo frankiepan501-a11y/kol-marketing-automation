@@ -55,7 +55,9 @@ async def fetch_main_push_products() -> list:
 
 
 async def fetch_mapping_for_product(category: str, hosts: list) -> dict:
-    """读映射表,聚合品类×适配主机的所有 KOL 内容风格"""
+    """读映射表,聚合品类×适配主机的:
+       - KOL 内容风格 (派 KOL 任务用)
+       - 媒体人报道品类 / 媒体人媒体类型 (派 editor 任务用)"""
     rules = await feishu.search_records(T_MAPPING, [
         {"field_name": "产品品类", "operator": "is", "value": [category]},
         {"field_name": "是否启用", "operator": "is", "value": ["true"]},
@@ -63,14 +65,23 @@ async def fetch_mapping_for_product(category: str, hosts: list) -> dict:
     if not hosts:
         hosts = ["通用"]
     expected_styles = set()
+    expected_report_cats = set()
+    expected_media_types = set()
     matched = 0
     for rule in rules:
         f = rule.get("fields", {})
         rule_host = ext(f.get("适配主机"))
         if rule_host in hosts or rule_host == "通用":
             expected_styles |= _parse_multiselect(f.get("KOL内容风格"))
+            expected_report_cats |= _parse_multiselect(f.get("媒体人报道品类"))
+            expected_media_types |= _parse_multiselect(f.get("媒体人媒体类型"))
             matched += 1
-    return {"expected_styles": list(expected_styles), "matched_rules": matched}
+    return {
+        "expected_styles": list(expected_styles),
+        "expected_report_cats": list(expected_report_cats),
+        "expected_media_types": list(expected_media_types),
+        "matched_rules": matched,
+    }
 
 
 async def create_kol_task(product: dict, batch_size: int, mapping: dict) -> dict:
@@ -113,6 +124,48 @@ async def create_kol_task(product: dict, batch_size: int, mapping: dict) -> dict
         "product": p_name, "category": p_cat, "batch_size": batch_size,
         "platforms": platforms, "expected_styles": mapping["expected_styles"],
         "matched_rules": mapping["matched_rules"],
+    }
+
+
+# 媒体人派单参数 (池子 302, 比 KOL 1061 小, 配额自然减)
+EDITOR_DAILY_LIMIT = 30  # 每个产品每天最多派 30 个媒体人候选 (跑出来后过阈值的更少)
+
+
+async def create_editor_task(product: dict, mapping: dict) -> dict:
+    """在媒体人任务台建一条派单任务,触发=true.
+    阈值先用 70 占位,Phase A 后跑分数分布定型.
+    筛选条件: 媒体类型 + 报道品类 (从映射表), 不限国家/语言 (媒体人池小, 让 score_editor 自己扣分)"""
+    pf = product["fields"]
+    p_name = ext(pf.get("产品名"))
+    p_brand = ext(pf.get("品牌"))
+    p_cat = ext(pf.get("品类"))
+
+    today = datetime.now().strftime("%Y%m%d")
+    task_name = f"PR派单-{today}-{p_brand}-{p_name[:28]}"
+    sender_choice = "FUNLAB邮箱(@fireflyfunlab.com)" if p_brand == "FUNLAB" else "POWKONG邮箱(@powkong.com)"
+
+    fields = {
+        "任务名": task_name,
+        "品牌": p_brand,
+        "目标产品": [product["record_id"]],
+        "筛选-媒体类型": mapping["expected_media_types"],
+        "筛选-报道品类": mapping["expected_report_cats"],
+        "发送邮箱": sender_choice,
+        "人数上限": EDITOR_DAILY_LIMIT,
+        "匹配度阈值": 75,
+        "任务状态": "2-待触发",
+        "触发": True,
+        "备注": f"自动派单(媒体人) / 映射规则{mapping['matched_rules']}行",
+    }
+    rid = await feishu.create_record(config.T_TASK_EDITOR, fields)
+    return {
+        "task_rid": rid, "task_name": task_name, "brand": p_brand,
+        "product": p_name, "category": p_cat,
+        "limit": EDITOR_DAILY_LIMIT,
+        "expected_report_cats": mapping["expected_report_cats"],
+        "expected_media_types": mapping["expected_media_types"],
+        "matched_rules": mapping["matched_rules"],
+        "type": "editor",
     }
 
 
@@ -166,11 +219,33 @@ async def run() -> dict:
                     "product": ext(pf.get("产品名")),
                 })
 
+            # 媒体人派单 (产品库勾选「派单-需要媒体人」才建)
+            need_editor = bool(pf.get("派单-需要媒体人"))
+            if need_editor:
+                if not (mapping["expected_report_cats"] or mapping["expected_media_types"]):
+                    results.append({
+                        "skipped_editor": ext(pf.get("产品名")),
+                        "reason": "映射表无媒体人规则(报道品类+媒体类型均空)",
+                    })
+                else:
+                    try:
+                        re = await create_editor_task(product, mapping)
+                        results.append(re)
+                    except Exception as e:
+                        results.append({
+                            "error": f"editor: {str(e)[:200]}",
+                            "product": ext(pf.get("产品名")),
+                        })
+
+    n_kol = sum(1 for r in results if r.get("task_rid") and r.get("type") != "editor")
+    n_editor = sum(1 for r in results if r.get("type") == "editor")
     return {
-        "dispatched": sum(1 for r in results if r.get("task_rid")),
-        "skipped": sum(1 for r in results if r.get("skipped")),
+        "dispatched": n_kol + n_editor,  # backward compat
+        "dispatched_kol": n_kol,
+        "dispatched_editor": n_editor,
+        "skipped": sum(1 for r in results if r.get("skipped") or r.get("skipped_editor")),
         "errors": sum(1 for r in results if r.get("error")),
         "by_brand": {b: len(ps) for b, ps in by_brand.items()},
         "brand_limits": brand_limit,
-        "results": results[:30],
+        "results": results[:60],
     }
