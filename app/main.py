@@ -120,6 +120,30 @@ async def run_sales_attribution(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
+@app.post("/decision-feedback/run")
+async def run_decision_feedback(authorization: str = Header(default="")):
+    """Phase 3.2 决策反哺: 据 GMV/订单/上稿 自动升降级 KOL 合作状态"""
+    _check_auth(authorization)
+    from . import decision_feedback
+    try:
+        return await decision_feedback.run()
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
+@app.post("/secondary-outreach/run")
+async def run_secondary_outreach(authorization: str = Header(default="")):
+    """Phase 3.3 二次维护: 给已合作 KOL 自动生新产品 warm follow-up"""
+    _check_auth(authorization)
+    from . import secondary_outreach
+    try:
+        return await secondary_outreach.run()
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
 @app.post("/relabel/kol-test")
 async def run_relabel_kol_test(authorization: str = Header(default=""), limit: int = 10):
     """A 阶段验证: 重打前 N 个 KOL 标签 (基于近期视频标题). D3=c 云端反爬命中率测试."""
