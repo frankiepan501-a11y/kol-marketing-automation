@@ -133,11 +133,19 @@ async def run_decision_feedback(authorization: str = Header(default="")):
 
 
 @app.post("/secondary-outreach/run")
-async def run_secondary_outreach(authorization: str = Header(default=""), limit: int = 0):
+async def run_secondary_outreach(authorization: str = Header(default=""),
+                                   limit: int = 0, async_mode: bool = True):
     """Phase 3.3 二次维护: 给已合作 KOL 自动生新产品 warm follow-up.
-    ?limit=5 仅跑前 5 (smoke test); 默认全跑."""
+    - ?limit=5 仅跑前 5 (smoke test)
+    - ?async_mode=true (默认) 立即 ack 后台跑 (避开 Zeabur 165s 网关 timeout)
+    - ?async_mode=false 同步等结果 (仅 limit ≤ 10 时用)"""
     _check_auth(authorization)
     from . import secondary_outreach
+    if async_mode:
+        import asyncio
+        asyncio.create_task(secondary_outreach.run(limit=limit))
+        return {"ok": True, "started": "background", "limit": limit,
+                "msg": "查飞书草稿表 邮件草稿来源=secondary_outreach 看进度, ~14sec/KOL"}
     try:
         return await secondary_outreach.run(limit=limit)
     except Exception as e:
