@@ -40,9 +40,11 @@ def _decide_action(cur_status: str, gmv: float, orders: int,
         if gmv >= TIER_FREE_TO_RECURRING_GMV or orders >= TIER_FREE_TO_RECURRING_ORDERS:
             return {"to": "已合作-免费(多次)",
                     "reason": f"升多次免费: GMV=${gmv:.2f} 订单数={orders}"}
-        if days_since_sample >= COLD_DAYS_AFTER_SAMPLE and gmv == 0 and not has_publish:
-            return {"to": "不合适",
-                    "reason": f"冷藏: 寄样 {days_since_sample} 天 GMV=0 + 0 上稿"}
+        # v1 暂不主动冷藏 — 需要"上次状态变更时间"字段作精确寄样时间 proxy
+        # 否则用入库日期会误降所有历史迁移 KOL. v2 加字段后启用下面这段:
+        # if days_since_sample >= COLD_DAYS_AFTER_SAMPLE and gmv == 0 and not has_publish:
+        #     return {"to": "不合适",
+        #             "reason": f"冷藏: 寄样 {days_since_sample} 天 GMV=0 + 0 上稿"}
         return None
 
     if cur_status == "已合作-免费(多次)":
