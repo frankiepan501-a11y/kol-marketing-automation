@@ -1,8 +1,10 @@
 """KOL 营销自动化 Webhook 服务
 部署在 Zeabur, 由 n8n cron / webhook 触发
 """
+import asyncio
 from fastapi import FastAPI, Header, HTTPException
 from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel
+from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
 
@@ -453,3 +455,39 @@ async def reply_drafter_dry_run(authorization: str = Header(default=""),
         "would_route": path,
     })
     return {"ok": True, **result}
+
+
+@app.post("/weekly-report/run")
+async def run_weekly_report(authorization: str = Header(default=""),
+                              dry_run: bool = False,
+                              async_mode: bool = True):
+    """每周一 08:00 BJ 触发: 双品牌运营周报全自动生成 (12 sections + Lighthouse + 双框架 KPI).
+
+    设计方案: https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
+    - ?dry_run=true 跳过飞书发布, 返回 markdown 预览 + 缺口列表
+    - ?async_mode=true (默认) fire-and-forget 后台跑 (避开 Zeabur 165s 网关 timeout)
+    - ?async_mode=false 同步等结果 (仅 dry_run 调试用)
+    """
+    _check_auth(authorization)
+    if async_mode and not dry_run:
+        asyncio.create_task(weekly_report.main.run(dry_run=False))
+        return {"ok": True, "started": "background",
+                "msg": "weekly report run started, will push to feishu when done (~60s)"}
+    try:
+        result = await weekly_report.main.run(dry_run=dry_run)
+        return {"ok": True, **result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
+@app.post("/weekly-report/dry-run")
+async def weekly_report_dry_run(authorization: str = Header(default="")):
+    """显式 dry-run 接口: 同步跑 collectors + integrator + renderer, 不发飞书. 用于调试."""
+    _check_auth(authorization)
+    try:
+        result = await weekly_report.main.run(dry_run=True)
+        return {"ok": True, **result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1500:]}
