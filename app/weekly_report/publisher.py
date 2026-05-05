@@ -24,8 +24,9 @@ RECIPIENTS_OPEN_IDS = [
 ]
 
 # 飞书 wiki 父节点 - 周报 docx 挂这里
-DEFAULT_PARENT_NODE = os.environ.get("WEEKLY_REPORT_PARENT_NODE", "")  # 留空时不创建 wiki, 走 root drive
-DEFAULT_SPACE_ID = os.environ.get("WEEKLY_REPORT_SPACE_ID", "7610698300903214305")  # AI 知识库
+# .strip() 防 user 在 Zeabur env paste 时多个前导/尾随空格 (生产踩过坑)
+DEFAULT_PARENT_NODE = os.environ.get("WEEKLY_REPORT_PARENT_NODE", "").strip()
+DEFAULT_SPACE_ID = os.environ.get("WEEKLY_REPORT_SPACE_ID", "7610698300903214305").strip()
 
 # 历史 Bitable
 HISTORY_APP = "KiQQbf7HxaT8TKsYToecfo86noc"
@@ -277,8 +278,8 @@ def _build_card(title: str, summary: str, doc_url: str, gaps: list) -> dict:
     }
 
 
-async def _send_card(open_id: str, card: dict) -> bool:
-    """用聪哥 1 号 / notify app 发卡片."""
+async def _send_card(open_id: str, card: dict):
+    """用 notify app 发卡片. 返回 (ok, error_msg)."""
     from app import feishu
     body = {
         "receive_id": open_id,
@@ -287,10 +288,11 @@ async def _send_card(open_id: str, card: dict) -> bool:
     }
     try:
         await feishu.api("POST", "/im/v1/messages?receive_id_type=open_id", body, which="notify")
-        return True
+        return True, ""
     except Exception as e:
-        log.warning("send_card to %s failed: %s", open_id, e)
-        return False
+        msg = f"{type(e).__name__}: {str(e)[:300]}"
+        log.warning("send_card to %s failed: %s", open_id, msg)
+        return False, msg
 
 
 def _summary_from_collected(collected: dict, start_date, end_date) -> str:
@@ -365,8 +367,8 @@ async def publish(html_str: str, markdown: str, collected: dict, start_date, end
     card = _build_card(title, summary, doc_url, gaps)
     notified = []
     for name, oid in RECIPIENTS_OPEN_IDS:
-        ok = await _send_card(oid, card)
-        notified.append({"name": name, "ok": ok})
+        ok, err = await _send_card(oid, card)
+        notified.append({"name": name, "ok": ok, "error": err})
     result["actions"].append({"step": "notify", "recipients": notified})
 
     # 4. 数据缺口告警 (单独发 Frankie, 卡片更显眼)
@@ -378,7 +380,7 @@ async def publish(html_str: str, markdown: str, collected: dict, start_date, end
             doc_url,
             [],
         )
-        ok = await _send_card("ou_629ce01f4bc31de078e10fcb038dbf78", gap_card)
-        result["actions"].append({"step": "gap_alert", "ok": ok, "gap_count": len(gaps)})
+        ok, err = await _send_card("ou_629ce01f4bc31de078e10fcb038dbf78", gap_card)
+        result["actions"].append({"step": "gap_alert", "ok": ok, "error": err, "gap_count": len(gaps)})
 
     return result
