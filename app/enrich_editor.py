@@ -49,6 +49,63 @@ SIGNATURE_POOL = {
     "POWKONG": ["Lisa @ POWKONG PR", "Ryan from POWKONG Press", "Jamie / POWKONG Press"],
 }
 
+# 主题前缀池 — Python 端随机选 1 个传给 prompt, 避免 5 条全 "Exclusive:" 模板化
+SUBJECT_PREFIXES = [
+    {"prefix": "Exclusive:", "tone": "首发/独家发布感"},
+    {"prefix": "First Look:", "tone": "提前看到/预览感"},
+    {"prefix": "Preview:", "tone": "新品预览感"},
+    {"prefix": "Heads up:", "tone": "友善提示感, 不像营销"},
+    {"prefix": "Coming this week:", "tone": "时效紧迫感"},
+    {"prefix": "", "tone": "不带前缀, 直接产品 news angle 陈述"},
+]
+
+# 开头句模板池 — Python 端随机选 1 个传给 prompt, 避免 4/5 都用 "Given your coverage of X at Y,"
+OPENING_TEMPLATES = [
+    "Given your coverage of {cat} at {media}, I thought this might interest you.",
+    "Saw your work covers {cat} territory — wanted to flag this one.",
+    "Your {media} beat overlaps with what we're launching, so reaching out directly.",
+    "Quick one for someone covering {cat}: ",
+    "Thought of you given your focus on {cat}.",
+    "Reaching out because {media}'s readers tend to vibe with this kind of accessory.",
+]
+
+
+def _filter_endorsement_for_editor(p_media_endorse: str, editor_media: str) -> tuple:
+    """检测产品「媒体报道」是否引用了收件编辑自家媒体的话.
+    返回 (filtered_endorsement, was_filtered)
+    - 编辑「所属媒体」字段可能是 'IGN | IGN UK' / 'IGN, Kotaku' 等组合, 拆分隔符取每个媒体 token
+    - 任一 token (长度 ≥3, 跳过 stopword) 出现在背书原文 → 过滤含该 token 的整句"""
+    if not p_media_endorse or not editor_media:
+        return p_media_endorse, False
+    import re as _re
+    # 1. 拆 editor_media 为 token list (按 | / , ; 等分隔)
+    raw_tokens = _re.split(r'[|/,;、]', editor_media)
+    STOPWORDS = {"the", "a", "an", "of", "and", "or", "&", "-", "—", "uk", "us", "eu"}
+    tokens = []
+    for t in raw_tokens:
+        t = t.strip().lower()
+        if len(t) >= 3 and t not in STOPWORDS:
+            tokens.append(t)
+    if not tokens:
+        return p_media_endorse, False
+
+    endorse_lower = p_media_endorse.lower()
+    matched_tokens = [t for t in tokens if t in endorse_lower]
+    if not matched_tokens:
+        return p_media_endorse, False
+
+    # 2. 按句号/分号/管道分句, 移除含任一命中 token 的句
+    sentences = _re.split(r'(?<=[.!?。!?])\s+|;\s*|；\s*|\|', p_media_endorse)
+    kept = []
+    for s in sentences:
+        s_lower = s.lower()
+        if any(t in s_lower for t in matched_tokens):
+            continue
+        if s.strip():
+            kept.append(s.strip())
+    filtered = " | ".join(kept).strip()
+    return filtered, True
+
 COUNTRY_TZ = {"US": -5, "UK": 0, "DE": 1, "CA": -5, "PH": 8, "FR": 1, "ES": 1,
               "BR": -3, "AU": 10, "NL": 1, "IT": 1, "MX": -6, "IN": 5.5,
               "JP": 9, "TH": 7, "AE": 4, "ID": 7, "SE": 1, "PT": 0}
@@ -173,16 +230,28 @@ async def gen_pr_draft(editor_record: dict, product: dict, brand: str,
     p_url_raw = ext(pf.get("官网链接"))
     p_price = pf.get("报价(USD)", 0)
     p_audience = ext(pf.get("目标人群"))
-    p_media_endorse = ext(pf.get("媒体报道"))
+    p_media_endorse_raw = ext(pf.get("媒体报道"))
 
     # UTM 注入
     from . import utm as _utm
     p_url = _utm.make_utm_link(p_url_raw, brand, p_name, name)
     utm_id_value = _utm.kol_utm_id(name)  # 复用 KOL UTM ID 体系 (媒体人也按名字 hash)
 
+    # 防自家媒体引用: 如产品「媒体报道」含编辑所属媒体的引言, 过滤掉那句
+    p_media_endorse, was_filtered = _filter_endorsement_for_editor(p_media_endorse_raw, media)
+    if was_filtered:
+        print(f"[enrich-editor] 过滤自家媒体引言 ({media}) 给 {name}")
+
     lang_display = LANG_DISPLAY.get(lang, "English")
     high_dims = sorted(breakdown.items(), key=lambda x: x[1]["score"], reverse=True)[:3]
     angle_hints = " / ".join(f"{k}:{v['reason']}" for k, v in high_dims)
+
+    # 主题前缀 + 开头模板: Python 端随机选, 强制 5 条草稿用不同变体
+    chosen_prefix = random.choice(SUBJECT_PREFIXES)
+    primary_cat = cats[0] if cats else (p_cat or "gaming accessories")
+    chosen_opening = random.choice(OPENING_TEMPLATES).format(
+        cat=primary_cat, media=media or "your beat",
+    )
 
     prompt = f"""你是游戏配件品牌的公关 PR. 为游戏/科技媒体编辑撰写 pitch 邮件 (媒体外联, 比 KOL 带货更正式).
 
@@ -190,23 +259,25 @@ async def gen_pr_draft(editor_record: dict, product: dict, brand: str,
 
 📌 主题行 (<55 字符, 具体, 有新闻价值感)
   ✓ 点出产品 news angle, 不是 "collaboration" / "partnership"
-  ✓ 可用 "Exclusive:" / "Preview:" / "First Look:" 增加新闻感
   ✗ 禁: "Partnership", "Collab", "Looking to feature", "Quick question"
-  好例子:
-    - "Exclusive: Piranha Plant-shaped dock for Switch 2"
-    - "First look: this retro-style controller for Nintendo fans"
+  ✓ **本封必须用主题前缀**: "{chosen_prefix['prefix']}" (调性: {chosen_prefix['tone']})
+    - 如前缀为空, 不带前缀直接陈述 product news (例 "Piranha Plant dock for Switch 2 fans")
+    - 主题示范: "{chosen_prefix['prefix']} Piranha Plant dock for Switch 2".strip()
 
-📌 正文 (120-180 词)
-  ✓ 必须以 "Hi {{编辑名}}," 或 "Dear {{编辑名}}," 开头 (从姓名提取 first name) — 严禁 "Hi there," / 任何匿名开头
-  ✓ 第 1 句引用编辑专长 (基于报道品类/媒体名) — 不要假装看过具体文章
+📌 正文开头 (第 1 句, 必须用以下变体, **不要套路化**)
+  ✓ **本封建议开头**: "{chosen_opening}"
+  ✓ 你也可以基于编辑的 报道品类 / 媒体名 写一个语义类似的变体, 但**严禁**直接照搬下面这种已被滥用的开头:
+    ❌ "Given your coverage of [X] at [Y]," (已用过太多次, 显得是模板)
+  ✓ 模糊但真实 > 具体但编造 — 严禁 "I read your article on X" / "Your latest review" 等
+
+📌 正文整体 (120-180 词, 全文 {lang_display})
+  ✓ 必须以 "Hi {{编辑名}}," 或 "Dear {{编辑名}}," 开头 (从姓名提取 first name) — 严禁 "Hi there," / 任何匿名
   🚨 严禁编造具体文章/评测 — 我们只有标签, 没真看过内容
-    ✗ 禁 "I read your article on X" / "Your latest review of Y" / "That piece you wrote"
-    ✗ 禁 任何 "我看了你 [具体作品]" 句式 — LLM 幻觉
-    ✓ 用 "Saw your work covers {{cat}} territory" / "Your {{media}} coverage of accessories caught my eye"
-    ✓ 用 "Given your focus on retro gaming, this might be a fit"
-    ✓ 模糊但真实 > 具体但编造
+    ✗ 禁 "I saw/read your X article/review/piece"
+    ✗ 禁 任何 "你最近的 [具体作品]" 句式 — LLM 幻觉, 客户一眼识破
+    ✓ 用基于 报道品类 / 媒体名 的概括 (参考上面给的开头模板)
   ✓ 中段: 产品新闻角度 (为什么值得报道, 不是"产品多好"):
-    - 设计亮点 / 限量 / 与游戏 IP 关联 / 已有媒体背书
+    - 设计亮点 / 限量 / 与游戏 IP 关联 / 已有媒体背书 (但**不要引收件人自家媒体**, 见下方)
   ✓ 提供记者需要的: 产品页 (含图) / 报价 (${p_price} USD) / 寄测样意向
   ✓ 1 行产品链接独立段落: <p>📎 Press kit: <a href="{p_url}">Product page →</a></p>
      - en: "Product page →"  / de: "Produktseite →" / fr: "Fiche produit →"
@@ -216,7 +287,6 @@ async def gen_pr_draft(editor_record: dict, product: dict, brand: str,
   ✗ 严禁内部 SKU 代号 (YM24/PK02/FL-JC 等), 严禁 <img>, 严禁中文混杂
 
 📌 透明度: 说清品牌, 不暗示佣金, 不"求报道"
-📌 语言: 全文 {lang_display} (编辑国家: {country_cn or country})
 
 【媒体编辑】
 姓名: {name} | 媒体: {media} ({media_type or '?'}, 集团 {media_group or '?'})
@@ -230,7 +300,7 @@ async def gen_pr_draft(editor_record: dict, product: dict, brand: str,
 {p_name} ({p_brand} / {p_cat}) | 报价: ${p_price} USD
 卖点: {p_s1} | {p_s2} | {p_s3}
 官网: {p_url} | 目标人群: {p_audience or '游戏玩家'}
-已有媒体背书: {p_media_endorse or '(无)'}
+{"已有媒体背书 (注意: 已过滤掉收件人自家媒体的话, 安全引用即可): " + p_media_endorse if p_media_endorse else "已有媒体背书: (无, 不要硬编)"}
 
 【匹配亮点】(系统已确认 {total:.0f} 分, 基于以下维度)
 {angle_hints}
@@ -239,8 +309,8 @@ async def gen_pr_draft(editor_record: dict, product: dict, brand: str,
 
 返回 JSON:
 {{
-  "email_subject": "主题行(<55字符)",
-  "email_body": "<p>开头</p><p>新闻角度段</p><p>📎 Press kit: <a href='{p_url}'>...</a></p><p>CTA段</p><p>-- {signature}</p>",
+  "email_subject": "主题行(<55字符, **必须**以 '{chosen_prefix['prefix']}' 开头或不带前缀)",
+  "email_body": "<p>Dear/Hi {{first_name}},</p><p>开头(用建议的开头模板或语义类似变体)</p><p>新闻角度段</p><p>📎 Press kit: <a href='{p_url}'>...</a></p><p>CTA段</p><p>-- {signature}</p>",
   "highlights": "1句话总结这位编辑与产品的契合点",
   "angle": "建议 pitch 切入角度(英文,1句)"
 }}"""
