@@ -113,24 +113,47 @@ Body:
 async def ai_score(subject: str, body: str, source: str, contact_type: str, brand: str) -> dict:
     """
     5 项 checklist 评分 (每项 0-2 分, 满分 10)
+    KOL / 媒体人 用不同评分尺子 (DM 风格 vs PR pitch 风格).
     1. 字数合规
-    2. 主题合规 (<40 字符 / <=7 词)
-    3. 语气适配品牌 voice
+    2. 主题合规
+    3. 语气适配 (品牌 voice / PR pitch tone)
     4. SKU 内部代号未泄露
     5. 链接合法 + 无硬性承诺 (除非 source=reply 且明确无承诺)
     """
-    word_target = {
-        "cold": "100-150 词",
-        "followup": "60-100 词 (短于第一封)",
-        "reply": "灵活,但需控制在 200 词内",
-    }.get(source, "100-150 词")
+    is_editor = (contact_type == "媒体人")
 
-    brand_voice = {
-        "POWKONG": "直接、product-first、不啰嗦,offer 导向",
-        "FUNLAB": "亲和、creator-friendly、强调玩家社区共创",
-    }.get(brand.upper(), "专业且简洁")
+    if is_editor:
+        # 媒体人 PR pitch 风格
+        word_target = {
+            "cold": "100-180 词 (PR pitch 比 KOL DM 长)",
+            "followup": "60-120 词",
+            "reply": "灵活,但需控制在 250 词内",
+        }.get(source, "100-180 词")
+        subject_rule = "字符 ≤55 / 允许 'Exclusive:' / 'First Look:' / 'Preview:' 等新闻感前缀"
+        voice_desc = (
+            "PR pitch 应是: 正式商务调性, 'Dear [name],' 开头 (不是 'Hey'), "
+            "新闻角度切入 (不是 KOL 那种亲和/社区共创), 提供记者需要的事实 "
+            "(产品页/价格/寄测样意向), 引用编辑专长基于「报道品类」而不是具体文章"
+        )
+    else:
+        # KOL DM 风格 (沿用原逻辑)
+        word_target = {
+            "cold": "100-150 词",
+            "followup": "60-100 词 (短于第一封)",
+            "reply": "灵活,但需控制在 200 词内",
+        }.get(source, "100-150 词")
+        subject_rule = "字符 ≤40 / 词数 ≤7 / 不堆叠表情"
+        brand_voice = {
+            "POWKONG": "直接、product-first、不啰嗦,offer 导向",
+            "FUNLAB": "亲和、creator-friendly、强调玩家社区共创",
+        }.get(brand.upper(), "专业且简洁")
+        voice_desc = f"{brand} 的 voice 是 \"{brand_voice}\""
 
     prompt = f"""你是一名营销邮件审核员,审核一封 {source} 邮件 ({brand} 品牌, {contact_type}).
+
+【邮件类型说明】
+{"这是给媒体编辑的 PR pitch 邮件 (媒体外联), 评分尺子比 KOL DM 邮件**更宽**: 允许更长、更正式、'Dear' 开头、新闻感主题前缀。"
+  if is_editor else "这是给 KOL 创作者的 DM 邮件, 评分尺子: 简短亲和、像朋友 DM, 不像营销文案。"}
 
 【邮件】
 Subject: {subject}
@@ -139,8 +162,8 @@ Body:
 
 【5 项 checklist】 (每项 0-2 分,满分 10 分)
 1. 字数合规: 正文应在 {word_target} 范围内
-2. 主题合规: 字符 ≤40 / 词数 ≤7 / 不堆叠表情
-3. 语气适配品牌: {brand} 的 voice 是 "{brand_voice}"
+2. 主题合规: {subject_rule}
+3. 语气适配: {voice_desc}
 4. SKU/内部代号: 不能出现 "YM24" 等内部 SKU 代号或"内部代号"等措辞
 5. 链接 & 承诺: 链接必须看起来合法 (https://开头, 真实域名); 不应有硬性数字承诺 (具体佣金%/价格$),除非 source=reply 且承诺已明确无误
 
