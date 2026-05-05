@@ -5,3 +5,6 @@ n8n cron 每周一 08:00 BJ (UTC 0:00) 调用一次.
 
 设计方案: https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 """
+# Explicit submodule import - 让 `weekly_report.main` 可从 package namespace 直接访问
+# (否则 main.py 里 weekly_report.main.run() 会 AttributeError)
+from . import main  # noqa: F401
