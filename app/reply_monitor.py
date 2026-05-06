@@ -119,14 +119,22 @@ async def find_contact(email: str):
 
 
 async def find_draft(contact_rid: str, contact_type: str):
+    """找到该 contact 关联的"待监听"草稿。
+    优先取「未回复 + 发送时间最新」的草稿；都已回复时回 fallback 取最新一条。
+    修复 bug: 原实现遍历取第一个匹配,导致同一 KOL 后续轮次回复(cold→reply→ship_confirm)
+    被旧的"是否回复=True"草稿短路掉,错过监听。
+    """
     link_field = "关联媒体人" if contact_type == "editor" else "关联KOL"
     items = await feishu.search_records(config.T_DRAFT, [
         {"field_name": "邮件草稿状态", "operator": "is", "value": ["已发送"]}
     ])
-    for rec in items:
-        if xrid(rec["fields"].get(link_field)) == contact_rid:
-            return rec
-    return None
+    matched = [r for r in items if xrid(r["fields"].get(link_field)) == contact_rid]
+    if not matched:
+        return None
+    unreplied = [r for r in matched if not r["fields"].get("是否回复")]
+    pool = unreplied if unreplied else matched
+    pool.sort(key=lambda r: r["fields"].get("发送时间") or 0, reverse=True)
+    return pool[0]
 
 
 def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, subject: str):
