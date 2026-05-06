@@ -47,7 +47,10 @@ DEFAULT_BASE = "https://frankiepan501.zeabur.app/api/v1"
 TIMEOUT = 30.0
 
 WORKFLOWS = [
-    ("ee779GzBI8Bj4Bx3", "SEO 新闻稿", 6),
+    # 真实产能见 memory project_powkong_seo_automation.md 第 152-155 行:
+    # 周一至周六每天双站各 1 篇, PK 6 + FL 6 = 12/周
+    ("ee779GzBI8Bj4Bx3", "SEO 新闻稿 (双站)", 12),
+    # 周二/周四双站轮转, 共 2/周
     ("bxqthAOVFjGviUEr", "SEO 商业意图", 2),
     ("PEzTmqGwOqcHOPfc", "SEO 周报", 1),
     ("xLEIAVos3YmynRsq", "竞品 Gap 扫描", 1),
