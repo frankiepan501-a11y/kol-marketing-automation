@@ -49,12 +49,13 @@ TEMPLATE_SEND_ASSETS = (
 
 TEMPLATE_SHIP_CONFIRM = (
     "Hi {first_name},\n\n"
-    "Awesome — got the address! Your {product_name} is on its way via "
-    "[CARRIER 待填运营修改] — ETA roughly [ETA 待填].\n\n"
-    "I'll send the tracking number in a quick follow-up once it's assigned "
-    "(typically within 24 hours of dispatch).\n\n"
+    "Awesome — got the address! Your {product_name} is on its way:\n\n"
+    "Tracking #: [TRACKING# 待填运营修改]\n"
+    "Carrier: [CARRIER 待填运营修改]\n\n"
+    "Should arrive in the next few days — feel free to drop a line "
+    "once it lands.\n\n"
     "If you have any specific angles or formats in mind for the content, "
-    "feel free to share — happy to flex on what we send.\n\n"
+    "happy to flex on what we send.\n\n"
     "Best,\n{signature}"
 )
 
@@ -198,6 +199,7 @@ async def _classify_interest(original_body: str) -> dict:
   "confidence": 0.0-1.0,
   "extracted_address": "**只有真实邮寄地址才填**(必须含街道门牌号+邮编),签名/职位/网站绝对不算; 否则留空",
   "country_code": "如有真实地址, 推断出 ISO 国家代码 (US/UK/DE/JP/CA/AU/FR/ES/IT/NL/BR/MX 等); 否则留空",
+  "recipient_name": "**收件人姓名** (从地址首行/邮件签名抽,如 'John Smith' / 'Sarah Lee'); 没有真实地址时留空",
   "reason": "20 字以内说明判断依据"
 }}"""
     try:
@@ -219,11 +221,13 @@ async def _classify_interest(original_body: str) -> dict:
             "confidence": float(r.get("confidence", 0.5) or 0.5),
             "extracted_address": extracted_address,
             "country_code": (r.get("country_code") or "").strip().upper()[:5],
+            "recipient_name": (r.get("recipient_name") or "").strip()[:80],
             "reason": (r.get("reason") or "")[:80],
         }
     except Exception as e:
         return {"sub": "general", "confidence": 0.0, "extracted_address": "",
-                "country_code": "", "reason": f"AI 错误: {str(e)[:50]}"}
+                "country_code": "", "recipient_name": "",
+                "reason": f"AI 错误: {str(e)[:50]}"}
 
 
 async def _gen_general_interest_draft(contact_name: str, original_subject: str,
@@ -464,6 +468,7 @@ async def draft_reply(
     sub = ""
     extracted_address = ""
     country_code = ""
+    recipient_name = ""
 
     # 意图分发
     subj = ""
@@ -480,6 +485,7 @@ async def draft_reply(
         sub = sub_info["sub"]
         extracted_address = sub_info["extracted_address"]
         country_code = sub_info["country_code"]
+        recipient_name = sub_info.get("recipient_name", "") or contact_name
 
         subj = "Re: " + original_subject[:150]
         if sub == "ship_confirm":
@@ -529,10 +535,6 @@ async def draft_reply(
 
     # 写入「KOL·媒体人邮件草稿」
     now_ms = int(time.time() * 1000)
-    # ship_confirm 的元信息存到「匹配亮点」字段(临时复用,后续可加专用字段)
-    extras = ""
-    if sub == "ship_confirm" and extracted_address:
-        extras = f"[ship_confirm] country={country_code} | address={extracted_address[:300]}"
 
     # 拿 related_draft 的关联产品 record_id (用于关联到新 reply 草稿)
     related_prod_rid = None
@@ -562,11 +564,37 @@ async def draft_reply(
     }
     if related_prod_rid:
         fields["关联产品"] = [related_prod_rid]
-    if extras:
-        fields["匹配亮点"] = extras[:500]   # 临时承载寄样元信息
+
+    # ship_confirm 寄样订单字段 (12 字段,V1 寄样链路)
+    if sub == "ship_confirm" and extracted_address:
+        from datetime import datetime as _dt
+        handle_slug = re.sub(r'[^a-zA-Z0-9]', '', contact_name or "kol").lower()[:20] or "kol"
+        ship_order_id = f"SHIP-{handle_slug}-{_dt.now().strftime('%Y%m%d')}"
+        fields["寄样订单号"] = ship_order_id
+        fields["寄样阶段"] = "待发货"
+        fields["收件姓名"] = (recipient_name or contact_name)[:80]
+        fields["收件地址 full"] = extracted_address[:500]
+        fields["国家/地区"] = country_code
 
     rid = await feishu.create_record(config.T_DRAFT, fields)
     print(f"[reply_drafter] created draft rid={rid} intent={intent_type} sub={sub}")
+
+    # ship_confirm 主表回填 (默认地址 / 寄样次数+1 / 上次寄样日期 / 上次寄样订单号)
+    if sub == "ship_confirm" and extracted_address:
+        try:
+            target_table = config.T_EDITOR if contact_type == "editor" else config.T_KOL
+            cur_count = cf.get("寄样次数") or 0
+            try: cur_count = int(cur_count)
+            except (ValueError, TypeError): cur_count = 0
+            await feishu.update_record(target_table, contact_record["record_id"], {
+                "默认收件地址": extracted_address[:500],
+                "寄样次数": cur_count + 1,
+                "上次寄样日期": now_ms,
+                "上次寄样订单号": fields["寄样订单号"],
+            })
+            print(f"[reply_drafter] ship_order created {fields['寄样订单号']} for {contact_name}")
+        except Exception as e:
+            print(f"[reply_drafter] backfill master ship fields fail: {e}")
 
     # Phase 1 ROI: 第一次写 UTM ID 到联系人主表 (idempotent)
     if utm_id_value:

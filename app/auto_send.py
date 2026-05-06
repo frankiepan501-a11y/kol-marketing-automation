@@ -130,6 +130,19 @@ async def send_one(rec: dict) -> dict:
         })
         return {"rid": rid, "ok": False, "error": f"bad email: {to_email}"}
 
+    # ship_confirm 寄样邮件: 自动用「运单号/物流商」字段值替换正文占位符
+    # 张佳烨在草稿表填这两个字段(2 秒动作),无需进正文改文本
+    tracking_no = ext(f.get("运单号"))
+    carrier = ext(f.get("物流商"))
+    if tracking_no:
+        body_html = body_html.replace("[TRACKING# 待填运营修改]", tracking_no)
+        body_html = body_html.replace("[TRACKING#待填运营修改]", tracking_no)
+        body_html = body_html.replace("[TRACKING# 待填]", tracking_no)
+    if carrier:
+        body_html = body_html.replace("[CARRIER 待填运营修改]", carrier)
+        body_html = body_html.replace("[CARRIER待填运营修改]", carrier)
+        body_html = body_html.replace("[CARRIER 待填]", carrier)
+
     # 发送前占位符校验: 防止"[运单号待填]"等没换就发出去
     has_ph, ph_kw = has_unfilled_placeholder(subject, body_html)
     if has_ph:
@@ -150,11 +163,17 @@ async def send_one(rec: dict) -> dict:
         return {"rid": rid, "ok": False, "error": err}
 
     # 更新草稿
-    await feishu.update_record(config.T_DRAFT, rid, {
+    now_ms = int(time.time() * 1000)
+    update_payload = {
         "发送状态": "已发",
-        "发送时间": int(time.time() * 1000),
+        "发送时间": now_ms,
         "邮件草稿状态": "已发送",
-    })
+    }
+    # ship_confirm 寄样邮件: 发出后推进寄样阶段 待发货 → 已发货, 写发货时间
+    if ext(f.get("寄样订单号")) and tracking_no:
+        update_payload["寄样阶段"] = "已发货"
+        update_payload["发货时间"] = now_ms
+    await feishu.update_record(config.T_DRAFT, rid, update_payload)
 
     # 按对象类型 + 跟进
     obj_type = ext(f.get("对象类型"))
