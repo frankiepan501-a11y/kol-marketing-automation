@@ -58,6 +58,19 @@ TEMPLATE_SHIP_CONFIRM = (
     "Best,\n{signature}"
 )
 
+TEMPLATE_NEED_ADDRESS = (
+    "Hi {first_name},\n\n"
+    "Awesome — happy to send a {product_name} sample your way!\n\n"
+    "Could you reply with your shipping address? Just need:\n"
+    "- Full name\n"
+    "- Street address (incl. apt/suite if any)\n"
+    "- City, State/Region, ZIP\n"
+    "- Country\n\n"
+    "Once I have that I'll get it shipped and send the tracking number as "
+    "soon as it's on its way.\n\n"
+    "Best,\n{signature}"
+)
+
 # 第 2 封追加运单号 (auto_send 在第 1 封发出后自动建草稿, 待运营填运单号)
 TEMPLATE_TRACKING_FOLLOWUP = (
     "Hi {first_name},\n\n"
@@ -147,7 +160,7 @@ def _is_real_address(s: str) -> bool:
 
 async def _classify_interest(original_body: str) -> dict:
     """对方回复"感兴趣"时, 进一步细分子类.
-    Returns {"sub": "ship_confirm|send_assets|schedule_call|general",
+    Returns {"sub": "ship_confirm|need_address|send_assets|schedule_call|general",
              "confidence": 0.0-1.0,
              "extracted_address": "...",  # 仅 ship_confirm 命中时填
              "reason": "..."}
@@ -155,27 +168,33 @@ async def _classify_interest(original_body: str) -> dict:
     prompt = f"""一位 KOL/媒体人回复了我们的 cold email, 表达了感兴趣。
 请判断他的具体诉求属于以下哪一档:
 
-【4 个子类】
+【5 个子类】
 - ship_confirm: **必须满足两个条件**: ① 对方明确说想要实物 / "please send to..." / "my address is..." ② **回信原文里提供了具体邮寄地址 (含街道门牌号 + 城市 + 邮编)**。
   - ✗ **签名 (姓名+职位+公司网站)** 不算地址,例: "Kyle J. Beauregard, Director of Programming, www.wickedbinge.com" 是签名,不是地址
-  - ✗ 仅说 "Would love to check it out" / "Looks awesome" 没给地址 → 走 general
   - ✓ 例: "Send to: 123 Main St, Apt 4B, Brooklyn NY 11201, USA"
   - ✓ 例: "My address is 5-10-1 Shibuya, Shibuya-ku, Tokyo 150-0002, Japan"
+- need_address: **明确选了 sample 但没给地址** (典型: 我们上一封发了"sample/press kit/quick call 三选项",对方明确选了 sample 这个选项)
+  - ✓ "A sample would work" / "I'll take the sample" / "Send me the sample" / "Sample please"
+  - ✓ "Yes, please send" / "send it" (上下文是回复我们寄样邀请)
+  - ✓ "Option 1" / "1." (回复编号选项时选 1)
+  - ✓ "I would love a sample" / "happy to receive a sample"
+  - 关键判别: **明确表达"要 sample 这个东西"**, 但缺地址 → need_address (不是再问选项!)
 - send_assets: 想要更多产品资料 / PDF / 详细介绍 / 高清图 / 产品对比, 还没准备好接收实物
 - schedule_call: 想要视频会议 / 电话沟通 / Zoom / Meet / Google call
-- general: 表达了感兴趣但没具体诉求 (如 "Sounds cool, tell me more!" / "Interesting!" / "Looks awesome, would love to check it out"), 需要追问寄送地址
+- general: **泛泛感兴趣无明确诉求** (如 "Sounds cool, tell me more!" / "Interesting!" / "Looks awesome, would love to check it out"), 需要追问对方想要什么
 
-【判断口诀】
-- 看到 "looks awesome" / "would love to" 等没明示地址 → general (不是 ship_confirm!)
-- 看到完整邮寄地址(街道+城市+邮编)→ ship_confirm
-- 看到只是签名 → 不算地址, 按其他线索判断子类
+【判断口诀(关键)】
+- "sample would work / I'd love a sample / send me one" 等明确选 sample 但无地址 → **need_address** (不是 general!)
+- "looks awesome / would love to check it out" 泛泛兴趣无具体动作 → general
+- 完整邮寄地址(街道+城市+邮编)→ ship_confirm
+- 只是签名 → 不算地址, 按其他线索判断子类
 
 【对方回信原文 (前 800 字)】
 {original_body[:800]}
 
 返回 JSON:
 {{
-  "sub": "ship_confirm|send_assets|schedule_call|general",
+  "sub": "ship_confirm|need_address|send_assets|schedule_call|general",
   "confidence": 0.0-1.0,
   "extracted_address": "**只有真实邮寄地址才填**(必须含街道门牌号+邮编),签名/职位/网站绝对不算; 否则留空",
   "country_code": "如有真实地址, 推断出 ISO 国家代码 (US/UK/DE/JP/CA/AU/FR/ES/IT/NL/BR/MX 等); 否则留空",
@@ -184,14 +203,15 @@ async def _classify_interest(original_body: str) -> dict:
     try:
         r = await deepseek.chat_json(prompt, max_tokens=400, temperature=0.0)
         sub = r.get("sub", "general")
-        if sub not in ("ship_confirm", "send_assets", "schedule_call", "general"):
+        if sub not in ("ship_confirm", "need_address", "send_assets", "schedule_call", "general"):
             sub = "general"
         extracted_address = (r.get("extracted_address") or "").strip()[:500]
 
         # 后处理:即便 AI 判 ship_confirm,正则验证地址是否真实(防签名误识)
+        # 校验失败降级到 need_address (说明确选 sample 但地址不全), 而非 general (避免再问选项菜单)
         if sub == "ship_confirm" and not _is_real_address(extracted_address):
-            print(f"[reply_drafter] ship_confirm 降级 general: 地址正则校验失败 raw='{extracted_address[:120]}'")
-            sub = "general"
+            print(f"[reply_drafter] ship_confirm 降级 need_address: 地址正则校验失败 raw='{extracted_address[:120]}'")
+            sub = "need_address"
             extracted_address = ""
 
         return {
@@ -464,6 +484,11 @@ async def draft_reply(
         subj = "Re: " + original_subject[:150]
         if sub == "ship_confirm":
             body = TEMPLATE_SHIP_CONFIRM.format(
+                first_name=first, signature=sig_full,
+                product_name=product_name,
+            )
+        elif sub == "need_address":
+            body = TEMPLATE_NEED_ADDRESS.format(
                 first_name=first, signature=sig_full,
                 product_name=product_name,
             )
