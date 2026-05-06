@@ -252,8 +252,8 @@ from . import reply_drafter, reply_monitor
 from .reply_drafter import _classify_interest, _gen_general_interest_draft, _gen_quote_draft, _gen_clarify_draft, _gen_misspoke_apology_draft
 from .reply_drafter import (
     TEMPLATE_UNSUBSCRIBE, TEMPLATE_DECLINE, TEMPLATE_SEND_ASSETS,
-    TEMPLATE_SHIP_CONFIRM, TEMPLATE_NEED_ADDRESS, TEMPLATE_SCHEDULE_CALL,
-    CALENDLY_DEFAULT, _first_name, _sender_signature,
+    TEMPLATE_SHIP_CONFIRM, TEMPLATE_NEED_ADDRESS, TEMPLATE_AFFILIATE_UPSELL,
+    TEMPLATE_SCHEDULE_CALL, CALENDLY_DEFAULT, _first_name, _sender_signature,
 )
 
 
@@ -393,6 +393,11 @@ async def reply_drafter_dry_run(authorization: str = Header(default=""),
         elif sub_info["sub"] == "need_address":
             body = TEMPLATE_NEED_ADDRESS.format(first_name=first, signature=sig_full,
                                                   product_name=product_name)
+        elif sub_info["sub"] == "short_only" or sub_info["sub"] == "affiliate_upsell":
+            # dry-run 端点不知道 KOL 主平台,默认 affiliate_upsell 模板 (生产路径在 reply_drafter
+            # 主流程会用 KOL 主平台判断 YT vs 其他, 这里仅用于运营预览模板效果)
+            body = TEMPLATE_AFFILIATE_UPSELL.format(first_name=first, signature=sig_full,
+                                                     product_name=product_name)
         elif sub_info["sub"] == "schedule_call":
             body = TEMPLATE_SCHEDULE_CALL.format(first_name=first, signature=sig_full,
                                                    calendly_link=CALENDLY_DEFAULT)

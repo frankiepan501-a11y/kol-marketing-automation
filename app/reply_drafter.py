@@ -62,13 +62,37 @@ TEMPLATE_SHIP_CONFIRM = (
 TEMPLATE_NEED_ADDRESS = (
     "Hi {first_name},\n\n"
     "Awesome — happy to send a {product_name} sample your way!\n\n"
-    "Could you reply with your shipping address? Just need:\n"
+    "Could you reply with your shipping details? Just need:\n"
     "- Full name\n"
     "- Street address (incl. apt/suite if any)\n"
     "- City, State/Region, ZIP\n"
-    "- Country\n\n"
+    "- Country\n"
+    "- Phone number for delivery\n\n"
     "Once I have that I'll get it shipped and send the tracking number as "
     "soon as it's on its way.\n\n"
+    "Best,\n{signature}"
+)
+
+# YouTube Short-only KOL 专用 (其他平台不用此模板, 因为只有 YT normal video 能挂链接)
+# 一封信 3 合 1: 接受 Short 寄样 + 提议 normal video 联盟模式 + 求地址
+# 佣金比例/折扣码不在此模板写死, 等 KOL 同意进 ship_confirm 后人审定
+TEMPLATE_AFFILIATE_UPSELL = (
+    "Hi {first_name},\n\n"
+    "A YouTube Short works great for us, and we'd be happy to send you a "
+    "{product_name} sample for that.\n\n"
+    "For a normal YouTube video, we usually work with creators through an "
+    "affiliate commission model. We can provide you with a dedicated product "
+    "link and an exclusive discount for your audience. When your viewers "
+    "order through your link, they get the discount, and you earn commission "
+    "from the sales.\n\n"
+    "Would you be open to doing both a YouTube Short and a normal YouTube "
+    "video under this setup?\n\n"
+    "If that works for you, could you send over your shipping details?\n\n"
+    "- Full name\n"
+    "- Street address (incl. apt/suite if any)\n"
+    "- City, State/Region, ZIP\n"
+    "- Country\n"
+    "- Phone number for delivery\n\n"
     "Best,\n{signature}"
 )
 
@@ -172,15 +196,20 @@ def _is_real_address(s: str) -> bool:
 
 async def _classify_interest(original_body: str) -> dict:
     """对方回复"感兴趣"时, 进一步细分子类.
-    Returns {"sub": "ship_confirm|need_address|send_assets|schedule_call|general",
+    Returns {"sub": "ship_confirm|need_address|short_only|send_assets|schedule_call|general",
              "confidence": 0.0-1.0,
              "extracted_address": "...",  # 仅 ship_confirm 命中时填
+             "extracted_phone": "...",  # 仅 ship_confirm 命中时填
              "reason": "..."}
+
+    注: short_only 是 platform-agnostic 信号 (只表态 short-form). 主流程会根据
+    KOL 主平台决定: YouTube → AFFILIATE_UPSELL (有 normal 长视频 upsell 价值);
+    其他平台 (TikTok / IG) → 降级 need_address (无 upsell 路径).
     """
     prompt = f"""一位 KOL/媒体人回复了我们的 cold email, 表达了感兴趣。
 请判断他的具体诉求属于以下哪一档:
 
-【5 个子类】
+【6 个子类】
 - ship_confirm: **必须满足两个条件**: ① 对方明确说想要实物 / "please send to..." / "my address is..." ② **回信原文里提供了具体邮寄地址 (含街道门牌号 + 城市 + 邮编)**。
   - ✗ **签名 (姓名+职位+公司网站)** 不算地址,例: "Kyle J. Beauregard, Director of Programming, www.wickedbinge.com" 是签名,不是地址
   - ✓ 例: "Send to: 123 Main St, Apt 4B, Brooklyn NY 11201, USA"
@@ -191,12 +220,18 @@ async def _classify_interest(original_body: str) -> dict:
   - ✓ "Option 1" / "1." (回复编号选项时选 1)
   - ✓ "I would love a sample" / "happy to receive a sample"
   - 关键判别: **明确表达"要 sample 这个东西"**, 但缺地址 → need_address (不是再问选项!)
+- short_only: **明确表态只做 short-form 内容 (YouTube Short / TikTok / IG Reels)**
+  - ✓ "I only do shorts" / "shorts only" / "I only make YouTube Shorts"
+  - ✓ "I don't do long-form" / "no normal videos"
+  - ✓ "Just shorts" / "Reels only"
+  - ⚠️ 注意: 是表态"只做"短形式,不是"想要 sample 来拍 short"。后者归 need_address 或 ship_confirm。
 - send_assets: 想要更多产品资料 / PDF / 详细介绍 / 高清图 / 产品对比, 还没准备好接收实物
 - schedule_call: 想要视频会议 / 电话沟通 / Zoom / Meet / Google call
 - general: **泛泛感兴趣无明确诉求** (如 "Sounds cool, tell me more!" / "Interesting!" / "Looks awesome, would love to check it out"), 需要追问对方想要什么
 
 【判断口诀(关键)】
 - "sample would work / I'd love a sample / send me one" 等明确选 sample 但无地址 → **need_address** (不是 general!)
+- "I only do shorts / shorts only" 表态只做短形式 → **short_only** (不是 need_address)
 - "looks awesome / would love to check it out" 泛泛兴趣无具体动作 → general
 - 完整邮寄地址(街道+城市+邮编)→ ship_confirm
 - 只是签名 → 不算地址, 按其他线索判断子类
@@ -206,17 +241,18 @@ async def _classify_interest(original_body: str) -> dict:
 
 返回 JSON:
 {{
-  "sub": "ship_confirm|need_address|send_assets|schedule_call|general",
+  "sub": "ship_confirm|need_address|short_only|send_assets|schedule_call|general",
   "confidence": 0.0-1.0,
   "extracted_address": "**只有真实邮寄地址才填**(必须含街道门牌号+邮编),签名/职位/网站绝对不算; 否则留空",
   "country_code": "如有真实地址, 推断出 ISO 国家代码 (US/UK/DE/JP/CA/AU/FR/ES/IT/NL/BR/MX 等); 否则留空",
   "recipient_name": "**收件人姓名** (从地址首行/邮件签名抽,如 'John Smith' / 'Sarah Lee'); 没有真实地址时留空",
+  "extracted_phone": "**收件电话** (从邮件中抽出,带国家区号最佳如 +1 555-123-4567 / +44 20 1234 5678; 没有则留空)",
   "reason": "20 字以内说明判断依据"
 }}"""
     try:
         r = await deepseek.chat_json(prompt, max_tokens=400, temperature=0.0)
         sub = r.get("sub", "general")
-        if sub not in ("ship_confirm", "need_address", "send_assets", "schedule_call", "general"):
+        if sub not in ("ship_confirm", "need_address", "short_only", "send_assets", "schedule_call", "general"):
             sub = "general"
         extracted_address = (r.get("extracted_address") or "").strip()[:500]
 
@@ -233,11 +269,12 @@ async def _classify_interest(original_body: str) -> dict:
             "extracted_address": extracted_address,
             "country_code": (r.get("country_code") or "").strip().upper()[:5],
             "recipient_name": (r.get("recipient_name") or "").strip()[:80],
+            "extracted_phone": (r.get("extracted_phone") or "").strip()[:40],
             "reason": (r.get("reason") or "")[:80],
         }
     except Exception as e:
         return {"sub": "general", "confidence": 0.0, "extracted_address": "",
-                "country_code": "", "recipient_name": "",
+                "country_code": "", "recipient_name": "", "extracted_phone": "",
                 "reason": f"AI 错误: {str(e)[:50]}"}
 
 
@@ -475,11 +512,12 @@ async def draft_reply(
     sig_full = _sender_signature(brand)
     first = _first_name(contact_name)
 
-    # 子分类元信息 (仅 ship_confirm 用到)
+    # 子分类元信息 (仅 ship_confirm / affiliate_upsell 用到)
     sub = ""
     extracted_address = ""
     country_code = ""
     recipient_name = ""
+    recipient_phone = ""
 
     # 意图分发
     subj = ""
@@ -497,10 +535,27 @@ async def draft_reply(
         extracted_address = sub_info["extracted_address"]
         country_code = sub_info["country_code"]
         recipient_name = sub_info.get("recipient_name", "") or contact_name
+        recipient_phone = sub_info.get("extracted_phone", "")
+
+        # short_only 路由: 仅 YouTube 主平台 → AFFILIATE_UPSELL (有 normal video upsell 价值);
+        # 其他平台 (TikTok / IG) → 降级 need_address (Short / Reels 都无法挂链接,无 upsell)
+        # 决策依据: Frankie 2026-05-06 — YT normal 能挂独立站链接是 YT ROI 比 TK 好的根本原因
+        if sub == "short_only":
+            kol_main_platform = ext(cf.get("主平台")) if contact_type != "editor" else ""
+            if "youtube" in kol_main_platform.lower() or "yt" in kol_main_platform.lower():
+                sub = "affiliate_upsell"
+            else:
+                print(f"[reply_drafter] short_only 降级 need_address (主平台={kol_main_platform}, 非 YouTube 无 upsell 路径)")
+                sub = "need_address"
 
         subj = "Re: " + original_subject[:150]
         if sub == "ship_confirm":
             body = TEMPLATE_SHIP_CONFIRM.format(
+                first_name=first, signature=sig_full,
+                product_name=product_name,
+            )
+        elif sub == "affiliate_upsell":
+            body = TEMPLATE_AFFILIATE_UPSELL.format(
                 first_name=first, signature=sig_full,
                 product_name=product_name,
             )
@@ -586,23 +641,32 @@ async def draft_reply(
         fields["收件姓名"] = (recipient_name or contact_name)[:80]
         fields["收件地址 full"] = extracted_address[:500]
         fields["国家/地区"] = country_code
+        if recipient_phone:
+            fields["收件电话"] = recipient_phone
+
+    # affiliate_upsell 标记: 草稿打"内容形式受限"标签 (供 ROI 分析时区分 short-only KOL)
+    if sub == "affiliate_upsell":
+        fields["内容形式受限"] = "YouTube Short only"
 
     rid = await feishu.create_record(config.T_DRAFT, fields)
     print(f"[reply_drafter] created draft rid={rid} intent={intent_type} sub={sub}")
 
-    # ship_confirm 主表回填 (默认地址 / 寄样次数+1 / 上次寄样日期 / 上次寄样订单号)
+    # ship_confirm 主表回填 (默认地址 / 默认电话 / 寄样次数+1 / 上次寄样日期 / 上次寄样订单号)
     if sub == "ship_confirm" and extracted_address:
         try:
             target_table = config.T_EDITOR if contact_type == "editor" else config.T_KOL
             cur_count = cf.get("寄样次数") or 0
             try: cur_count = int(cur_count)
             except (ValueError, TypeError): cur_count = 0
-            await feishu.update_record(target_table, contact_record["record_id"], {
+            backfill_payload = {
                 "默认收件地址": extracted_address[:500],
                 "寄样次数": cur_count + 1,
                 "上次寄样日期": now_ms,
                 "上次寄样订单号": fields["寄样订单号"],
-            })
+            }
+            if recipient_phone:
+                backfill_payload["默认收件电话"] = recipient_phone
+            await feishu.update_record(target_table, contact_record["record_id"], backfill_payload)
             print(f"[reply_drafter] ship_order created {fields['寄样订单号']} for {contact_name}")
         except Exception as e:
             print(f"[reply_drafter] backfill master ship fields fail: {e}")
