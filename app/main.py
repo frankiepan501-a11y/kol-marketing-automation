@@ -446,6 +446,14 @@ async def reply_drafter_dry_run(authorization: str = Header(default=""),
     if intent_type == "质疑/澄清":
         committed = True
         forced_commit = True
+    # 同步生产 router 强制人审规则: 不明意图 / 要报价 / affiliate_upsell / short_only
+    # 防 dry-run endpoint 显示与生产路径不一致 (避免再误导调试)
+    if intent_type in ("不明意图", "要报价"):
+        committed = True
+        forced_commit = True
+    if sub_info and sub_info.get("sub") in ("affiliate_upsell", "short_only"):
+        committed = True
+        forced_commit = True
 
     # 路由决策
     if score >= 8 and not committed:
