@@ -219,7 +219,7 @@ async def _layer3_no_content_30d(now_ms: int) -> dict:
     cutoff_ms = now_ms - SLA_DAYS_NO_CONTENT * 86400 * 1000
 
     items = await feishu.search_records(config.T_DRAFT, [
-        {"field_name": "寄样阶段", "operator": "isAnyOf", "value": ["已签收", "已发货"]},
+        {"field_name": "寄样阶段", "operator": "is", "value": ["已签收", "已发货"]},
     ])
 
     flagged = 0
