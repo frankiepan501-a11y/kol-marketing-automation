@@ -278,69 +278,68 @@ body { background: var(--bg); color: var(--text); font-family: 'Noto Sans SC', s
     </div>
   </div>
 
+  {% if section_02.social_breakdown %}
   <div class="chart-card" style="margin-top:16px;">
     <div class="chart-title">社媒平台细分 (Social 流量内部占比)</div>
-    <div class="chart-subtitle">Social 总量 1,105 (Paid 840 + Organic 265) · 待接入 GA4 sessionSource dimension</div>
-    <div class="bar-row"><div class="bar-label">Facebook</div><div class="bar-bg"><div class="bar-fill" style="width:48%;background:var(--fb);"></div></div><div class="bar-val">~530 · ~48%</div></div>
-    <div class="bar-row"><div class="bar-label">Instagram</div><div class="bar-bg"><div class="bar-fill" style="width:30%;background:linear-gradient(90deg,#FCAF45 0%,#F77737 35%,#E4405F 70%,#9900FF 100%);"></div></div><div class="bar-val">~330 · ~30%</div></div>
-    <div class="bar-row"><div class="bar-label">TikTok</div><div class="bar-bg"><div class="bar-fill" style="width:14%;background:linear-gradient(90deg,#25F4EE 0%,#000 50%,#FE2C55 100%);"></div></div><div class="bar-val">~155 · ~14%</div></div>
-    <div class="bar-row"><div class="bar-label">YouTube</div><div class="bar-bg"><div class="bar-fill" style="width:5%;background:var(--yt);"></div></div><div class="bar-val">~55 · ~5%</div></div>
-    <div class="bar-row"><div class="bar-label">其他 (X/Reddit/Pinterest)</div><div class="bar-bg"><div class="bar-fill" style="width:3%;background:var(--muted);"></div></div><div class="bar-val">~35 · ~3%</div></div>
-    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据 (估算)</strong>：当前 GA4 collector 仅采集到 <code style="font-family:'DM Mono',monospace;">sessionDefaultChannelGroup</code> 粗分类。已升级 collector 加 <code style="font-family:'DM Mono',monospace;">sessionSource + sessionMedium</code> dimension，W19 报告将填入真实数据。</div>
+    <div class="chart-subtitle">来源 GA4 sessionSource + sessionMedium</div>
+    {% for s in section_02.social_breakdown %}
+    {% set bg_map = {'facebook':'var(--fb)','instagram':'linear-gradient(90deg,#FCAF45 0%,#F77737 35%,#E4405F 70%,#9900FF 100%)','tiktok':'linear-gradient(90deg,#25F4EE 0%,#000 50%,#FE2C55 100%)','youtube':'var(--yt)','twitter':'#1DA1F2','pinterest':'#E60023','reddit':'#FF4500','threads':'#000','other_social':'var(--muted)'} %}
+    {% set label_map = {'facebook':'Facebook','instagram':'Instagram','tiktok':'TikTok','youtube':'YouTube','twitter':'X (Twitter)','pinterest':'Pinterest','reddit':'Reddit','threads':'Threads','other_social':'其他社媒'} %}
+    <div class="bar-row"><div class="bar-label">{{ label_map.get(s.platform, s.platform) }}</div><div class="bar-bg"><div class="bar-fill" style="width:{{ (s.pct * 100) | round(0) }}%;background:{{ bg_map.get(s.platform, 'var(--muted)') }};"></div></div><div class="bar-val">{{ '{:,}'.format(s.sessions) }} · {{ (s.pct * 100) | round(1) }}%</div></div>
+    {% endfor %}
   </div>
+  {% endif %}
 </div>
 
 <!-- ===== 02.5 PK 国家流量分布 ===== -->
 <div class="section" id="powkong-geo">
   <div class="section-header"><span class="section-tag">02.5</span><span class="section-title brand-pw">Powkong · 国家流量分布</span><div class="section-line"></div></div>
+  {% if section_025._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: GA4 PK country dimension 无数据。</div>
+  {% else %}
   <div class="chart-card">
     <div class="chart-title">Top 10 国家 (sessions / 占比 / 收入)</div>
-    <div class="chart-subtitle">总会话 2,501 · 待接入 GA4 country dimension (W19 真实数据)</div>
+    <div class="chart-subtitle">总会话 {{ section_025.total_sessions }} · 来源 GA4 country dimension</div>
     <table class="diff-table">
       <thead><tr><th>排名</th><th>国家</th><th>会话</th><th>占比</th><th>购买</th><th>收入</th><th>转化率</th></tr></thead>
       <tbody>
-        <tr><td class="mono">1</td><td>🇺🇸 United States</td><td class="mono">~1,500</td><td class="mono num-blue">~60.0%</td><td class="mono">12</td><td class="mono num-green">~$1,490</td><td class="mono">0.80%</td></tr>
-        <tr><td class="mono">2</td><td>🇬🇧 United Kingdom</td><td class="mono">~225</td><td class="mono">~9.0%</td><td class="mono">2</td><td class="mono">~$248</td><td class="mono">0.89%</td></tr>
-        <tr><td class="mono">3</td><td>🇨🇦 Canada</td><td class="mono">~175</td><td class="mono">~7.0%</td><td class="mono">1</td><td class="mono">~$124</td><td class="mono">0.57%</td></tr>
-        <tr><td class="mono">4</td><td>🇩🇪 Germany</td><td class="mono">~125</td><td class="mono">~5.0%</td><td class="mono">1</td><td class="mono">~$124</td><td class="mono">0.80%</td></tr>
-        <tr><td class="mono">5</td><td>🇦🇺 Australia</td><td class="mono">~100</td><td class="mono">~4.0%</td><td class="mono">1</td><td class="mono">~$124</td><td class="mono">1.00%</td></tr>
-        <tr><td class="mono">6</td><td>🇫🇷 France</td><td class="mono">~75</td><td class="mono">~3.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
-        <tr><td class="mono">7</td><td>🇯🇵 Japan</td><td class="mono">~60</td><td class="mono">~2.4%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
-        <tr><td class="mono">8</td><td>🇳🇱 Netherlands</td><td class="mono">~50</td><td class="mono">~2.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
-        <tr><td class="mono">9</td><td>🇮🇹 Italy</td><td class="mono">~40</td><td class="mono">~1.6%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
-        <tr><td class="mono">10</td><td>🇪🇸 Spain</td><td class="mono">~35</td><td class="mono">~1.4%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
-        <tr style="border-top:2px solid var(--border);"><td class="mono">-</td><td style="color:var(--muted)">其他 (40+ 国)</td><td class="mono">~115</td><td class="mono">~4.6%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        {% for r in section_025.rows %}
+        <tr><td class="mono">{{ r.rank }}</td><td>{{ r.flag }} {{ r.country }}</td><td class="mono">{{ r.sessions }}</td><td class="mono {{ r.pct_class }}">{{ r.pct }}</td><td class="mono">{{ r.purchases }}</td><td class="mono {{ r.revenue_class }}">{{ r.revenue }}</td><td class="mono">{{ r.cvr }}</td></tr>
+        {% endfor %}
+        {% if section_025.other %}
+        <tr style="border-top:2px solid var(--border);"><td class="mono">-</td><td style="color:var(--muted)">其他 ({{ section_025.other.count }}+ 国)</td><td class="mono">{{ section_025.other.sessions }}</td><td class="mono">{{ section_025.other.pct }}</td><td class="mono">{{ section_025.other.purchases }}</td><td class="mono">{{ section_025.other.revenue }}</td><td class="mono">—</td></tr>
+        {% endif %}
       </tbody>
     </table>
-    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据</strong>：以历史平均估算。W19 起 ga4 collector 已加 country dimension 真实拉取。<strong>洞察：</strong>Top 5 国家贡献 85% 流量 + 100% 购买，建议 Meta 投放预算重点压在 US/UK/CA/DE/AU。</div>
+    {% if insights_html.get('025') %}<div class="callout" style="margin-top:12px;margin-bottom:0;">{{ insights_html['025'] | safe }}</div>{% endif %}
   </div>
+  {% endif %}
 </div>
 
 <!-- ===== 02.6 PK 产品销量排行 ===== -->
 <div class="section" id="powkong-products">
   <div class="section-header"><span class="section-tag">02.6</span><span class="section-title brand-pw">Powkong · 产品销量排行</span><div class="section-line"></div></div>
+  {% if section_026._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: Shopify line_items 聚合无数据 (本周可能 0 销售)。</div>
+  {% else %}
   <div class="chart-card">
     <div class="chart-title">Top 10 产品 (按销量 + 销售额 · 占比)</div>
-    <div class="chart-subtitle">总销量 19 单 · 总销售额 $2,266 · 来源 Shopify line_items</div>
+    <div class="chart-subtitle">总销量 {{ section_026.total_qty }} 单 · 总销售额 {{ section_026.total_revenue }} · 客单价 {{ section_026.aov }} · 来源 Shopify line_items</div>
     <table class="diff-table">
       <thead><tr><th>排名</th><th>产品 (SKU)</th><th>销量</th><th>销量占比</th><th>销售额</th><th>金额占比</th><th>客单价</th></tr></thead>
       <tbody>
-        <tr><td class="mono">1</td><td><strong>Cubedock Pro</strong> <span style="color:var(--muted);font-size:11px;">(造型底座)</span></td><td class="mono">6</td><td class="mono num-amber">31.6%</td><td class="mono num-green">$1,194</td><td class="mono num-amber">52.7%</td><td class="mono">$199</td></tr>
-        <tr><td class="mono">2</td><td><strong>Switch 2 Travel Dock</strong> <span style="color:var(--muted);font-size:11px;">(便携底座)</span></td><td class="mono">4</td><td class="mono">21.1%</td><td class="mono num-green">$552</td><td class="mono">24.4%</td><td class="mono">$138</td></tr>
-        <tr><td class="mono">3</td><td><strong>Mario Cable Pack</strong> <span style="color:var(--muted);font-size:11px;">(Mario IP)</span></td><td class="mono">3</td><td class="mono">15.8%</td><td class="mono">$234</td><td class="mono">10.3%</td><td class="mono">$78</td></tr>
-        <tr><td class="mono">4</td><td><strong>Toad Storage Bag</strong> <span style="color:var(--muted);font-size:11px;">(收纳)</span></td><td class="mono">2</td><td class="mono">10.5%</td><td class="mono">$130</td><td class="mono">5.7%</td><td class="mono">$65</td></tr>
-        <tr><td class="mono">5</td><td><strong>Luigi Charging Cable</strong> <span style="color:var(--muted);font-size:11px;">(Luigi IP)</span></td><td class="mono">2</td><td class="mono">10.5%</td><td class="mono">$80</td><td class="mono">3.5%</td><td class="mono">$40</td></tr>
-        <tr><td class="mono">6</td><td><strong>Bowser Dock Skin</strong> <span style="color:var(--muted);font-size:11px;">(Bowser IP)</span></td><td class="mono">1</td><td class="mono">5.3%</td><td class="mono">$36</td><td class="mono">1.6%</td><td class="mono">$36</td></tr>
-        <tr><td class="mono">7</td><td><strong>Yoshi Joycon Strap</strong> <span style="color:var(--muted);font-size:11px;">(Yoshi IP)</span></td><td class="mono">1</td><td class="mono">5.3%</td><td class="mono">$40</td><td class="mono">1.8%</td><td class="mono">$40</td></tr>
+        {% for r in section_026.rows %}
+        <tr><td class="mono">{{ r.rank }}</td><td><strong>{{ r.title }}</strong>{% if r.sku %} <span style="color:var(--muted);font-size:11px;">({{ r.sku }})</span>{% endif %}</td><td class="mono">{{ r.qty }}</td><td class="mono {{ r.qty_pct_class }}">{{ r.qty_pct }}</td><td class="mono {{ r.revenue_class }}">{{ r.revenue }}</td><td class="mono {{ r.revenue_pct_class }}">{{ r.revenue_pct }}</td><td class="mono">{{ r.unit_price }}</td></tr>
+        {% endfor %}
       </tbody>
     </table>
     <div style="margin-top:12px;display:flex;gap:24px;flex-wrap:wrap;font-size:12px;color:var(--muted);">
-      <div>📊 <strong style="color:var(--text);">Top 1 集中度</strong>: Cubedock Pro 占销售额 52.7% — 高度依赖单品</div>
-      <div>📊 <strong style="color:var(--text);">IP 系列贡献</strong>: Mario+Luigi+Bowser+Yoshi = 7 单 / 36.8% 销量</div>
-      <div>📊 <strong style="color:var(--text);">SKU 数</strong>: 7 个 SKU 售出 / 19 总单</div>
+      <div>📊 <strong style="color:var(--text);">Top 1 集中度</strong>: {{ section_026.top1_title }} 占销售额 {{ section_026.top1_pct }}</div>
+      <div>📊 <strong style="color:var(--text);">SKU 数</strong>: {{ section_026.sku_count }} 个 SKU 售出 / {{ section_026.total_qty }} 总单</div>
     </div>
-    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据</strong>：shopify.py collector 已拉 line_items 字段，但尚未做产品聚合。本周升级 _calc_metrics 加 top_products 字段，W19 真实回填。</div>
+    {% if insights_html.get('026') %}<div class="callout" style="margin-top:12px;margin-bottom:0;">{{ insights_html['026'] | safe }}</div>{% endif %}
   </div>
+  {% endif %}
 </div>
 
 <!-- ===== 03 POWKONG META ===== -->
@@ -551,68 +550,68 @@ body { background: var(--bg); color: var(--text); font-family: 'Noto Sans SC', s
     </div>
   </div>
 
+  {% if section_06.social_breakdown %}
   <div class="chart-card" style="margin-top:16px;">
     <div class="chart-title">社媒平台细分 (Social 流量内部占比)</div>
-    <div class="chart-subtitle">Social 总量 ~1,195 (Direct 25% Organic + 5% Paid) · 待接入 GA4 sessionSource dimension</div>
-    <div class="bar-row"><div class="bar-label">Instagram</div><div class="bar-bg"><div class="bar-fill" style="width:60%;background:linear-gradient(90deg,#FCAF45 0%,#F77737 35%,#E4405F 70%,#9900FF 100%);"></div></div><div class="bar-val">~717 · ~60%</div></div>
-    <div class="bar-row"><div class="bar-label">TikTok</div><div class="bar-bg"><div class="bar-fill" style="width:20%;background:linear-gradient(90deg,#25F4EE 0%,#000 50%,#FE2C55 100%);"></div></div><div class="bar-val">~239 · ~20%</div></div>
-    <div class="bar-row"><div class="bar-label">Facebook</div><div class="bar-bg"><div class="bar-fill" style="width:12%;background:var(--fb);"></div></div><div class="bar-val">~143 · ~12%</div></div>
-    <div class="bar-row"><div class="bar-label">YouTube</div><div class="bar-bg"><div class="bar-fill" style="width:5%;background:var(--yt);"></div></div><div class="bar-val">~60 · ~5%</div></div>
-    <div class="bar-row"><div class="bar-label">其他 (X/Reddit/Threads)</div><div class="bar-bg"><div class="bar-fill" style="width:3%;background:var(--muted);"></div></div><div class="bar-val">~36 · ~3%</div></div>
-    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据 (估算)</strong>：FUNLAB Instagram (@funlab.official) 是主战场。W19 collector 接入 sessionSource 后真实数据回填。</div>
+    <div class="chart-subtitle">来源 GA4 sessionSource + sessionMedium</div>
+    {% for s in section_06.social_breakdown %}
+    {% set bg_map = {'facebook':'var(--fb)','instagram':'linear-gradient(90deg,#FCAF45 0%,#F77737 35%,#E4405F 70%,#9900FF 100%)','tiktok':'linear-gradient(90deg,#25F4EE 0%,#000 50%,#FE2C55 100%)','youtube':'var(--yt)','twitter':'#1DA1F2','pinterest':'#E60023','reddit':'#FF4500','threads':'#000','other_social':'var(--muted)'} %}
+    {% set label_map = {'facebook':'Facebook','instagram':'Instagram','tiktok':'TikTok','youtube':'YouTube','twitter':'X (Twitter)','pinterest':'Pinterest','reddit':'Reddit','threads':'Threads','other_social':'其他社媒'} %}
+    <div class="bar-row"><div class="bar-label">{{ label_map.get(s.platform, s.platform) }}</div><div class="bar-bg"><div class="bar-fill" style="width:{{ (s.pct * 100) | round(0) }}%;background:{{ bg_map.get(s.platform, 'var(--muted)') }};"></div></div><div class="bar-val">{{ '{:,}'.format(s.sessions) }} · {{ (s.pct * 100) | round(1) }}%</div></div>
+    {% endfor %}
   </div>
+  {% endif %}
 </div>
 
 <!-- ===== 06.5 FL 国家流量分布 ===== -->
 <div class="section" id="funlab-geo">
   <div class="section-header"><span class="section-tag">06.5</span><span class="section-title brand-fl">FUNLAB · 国家流量分布</span><div class="section-line"></div></div>
+  {% if section_065._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: GA4 FL country dimension 无数据。</div>
+  {% else %}
   <div class="chart-card">
     <div class="chart-title">Top 10 国家 (sessions / 占比 / 收入)</div>
-    <div class="chart-subtitle">总会话 3,985 · 待接入 GA4 country dimension</div>
+    <div class="chart-subtitle">总会话 {{ section_065.total_sessions }} · 来源 GA4 country dimension</div>
     <table class="diff-table">
       <thead><tr><th>排名</th><th>国家</th><th>会话</th><th>占比</th><th>购买</th><th>收入</th><th>转化率</th></tr></thead>
       <tbody>
-        <tr><td class="mono">1</td><td>🇺🇸 United States</td><td class="mono">~1,000</td><td class="mono num-blue">~25.0%</td><td class="mono">2</td><td class="mono">~$86</td><td class="mono">0.20%</td></tr>
-        <tr><td class="mono">2</td><td>🇹🇼 Taiwan</td><td class="mono">~600</td><td class="mono">~15.0%</td><td class="mono">1</td><td class="mono">~$43</td><td class="mono">0.17%</td></tr>
-        <tr><td class="mono">3</td><td>🇭🇰 Hong Kong</td><td class="mono">~480</td><td class="mono">~12.0%</td><td class="mono">1</td><td class="mono">~$43</td><td class="mono">0.21%</td></tr>
-        <tr><td class="mono">4</td><td>🇯🇵 Japan</td><td class="mono">~400</td><td class="mono">~10.0%</td><td class="mono">1</td><td class="mono">~$43</td><td class="mono">0.25%</td></tr>
-        <tr><td class="mono">5</td><td>🇩🇪 Germany</td><td class="mono">~320</td><td class="mono">~8.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
-        <tr><td class="mono">6</td><td>🇬🇧 United Kingdom</td><td class="mono">~240</td><td class="mono">~6.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
-        <tr><td class="mono">7</td><td>🇨🇦 Canada</td><td class="mono">~200</td><td class="mono">~5.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
-        <tr><td class="mono">8</td><td>🇸🇬 Singapore</td><td class="mono">~160</td><td class="mono">~4.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
-        <tr><td class="mono">9</td><td>🇲🇾 Malaysia</td><td class="mono">~120</td><td class="mono">~3.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
-        <tr><td class="mono">10</td><td>🇦🇺 Australia</td><td class="mono">~100</td><td class="mono">~2.5%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
-        <tr style="border-top:2px solid var(--border);"><td class="mono">-</td><td style="color:var(--muted)">其他 (35+ 国)</td><td class="mono">~365</td><td class="mono">~9.5%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        {% for r in section_065.rows %}
+        <tr><td class="mono">{{ r.rank }}</td><td>{{ r.flag }} {{ r.country }}</td><td class="mono">{{ r.sessions }}</td><td class="mono {{ r.pct_class }}">{{ r.pct }}</td><td class="mono">{{ r.purchases }}</td><td class="mono {{ r.revenue_class }}">{{ r.revenue }}</td><td class="mono">{{ r.cvr }}</td></tr>
+        {% endfor %}
+        {% if section_065.other %}
+        <tr style="border-top:2px solid var(--border);"><td class="mono">-</td><td style="color:var(--muted)">其他 ({{ section_065.other.count }}+ 国)</td><td class="mono">{{ section_065.other.sessions }}</td><td class="mono">{{ section_065.other.pct }}</td><td class="mono">{{ section_065.other.purchases }}</td><td class="mono">{{ section_065.other.revenue }}</td><td class="mono">—</td></tr>
+        {% endif %}
       </tbody>
     </table>
-    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据</strong>：FUNLAB 与 PK 国家结构差异明显 — 大中华+东亚 (TW/HK/JP/SG/MY) 占 44%，US 仅 25%。<strong>洞察：</strong>建议 FL 投放 + KOL/Editor 重点压亚太，而非照搬 PK 北美打法。</div>
+    {% if insights_html.get('065') %}<div class="callout" style="margin-top:12px;margin-bottom:0;">{{ insights_html['065'] | safe }}</div>{% endif %}
   </div>
+  {% endif %}
 </div>
 
 <!-- ===== 06.55 FL 产品销量排行 ===== -->
 <div class="section" id="funlab-products">
   <div class="section-header"><span class="section-tag">06.55</span><span class="section-title brand-fl">FUNLAB · 产品销量排行</span><div class="section-line"></div></div>
+  {% if section_0655._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: Shopline line_items 聚合无数据 (本周可能 0 销售)。</div>
+  {% else %}
   <div class="chart-card">
     <div class="chart-title">Top 10 产品 (按销量 + 销售额 · 占比)</div>
-    <div class="chart-subtitle">总销量 16 单 · 总销售额 $797 · 客单价 $49.8 · 来源 Shopline line_items</div>
+    <div class="chart-subtitle">总销量 {{ section_0655.total_qty }} 单 · 总销售额 {{ section_0655.total_revenue }} · 客单价 {{ section_0655.aov }} · 来源 Shopline line_items</div>
     <table class="diff-table">
-      <thead><tr><th>排名</th><th>产品 (型号)</th><th>灯光等级</th><th>销量</th><th>销量占比</th><th>销售额</th><th>金额占比</th></tr></thead>
+      <thead><tr><th>排名</th><th>产品 (型号)</th><th>销量</th><th>销量占比</th><th>销售额</th><th>金额占比</th><th>客单价</th></tr></thead>
       <tbody>
-        <tr><td class="mono">1</td><td><strong>Funlite</strong> <span style="color:var(--muted);font-size:11px;">(FF11 / 澄夜)</span></td><td><span style="font-size:11px;color:var(--muted);">Spotlight RGB</span></td><td class="mono">5</td><td class="mono num-amber">31.3%</td><td class="mono num-green">$200</td><td class="mono num-amber">25.1%</td></tr>
-        <tr><td class="mono">2</td><td><strong>Firefly</strong> <span style="color:var(--muted);font-size:11px;">(FF01 / 灵萤)</span></td><td><span style="font-size:11px;color:var(--fl);">Hidden Glow™ Sync</span></td><td class="mono">4</td><td class="mono">25.0%</td><td class="mono num-green">$239</td><td class="mono">30.0%</td></tr>
-        <tr><td class="mono">3</td><td><strong>Lumindock</strong> <span style="color:var(--muted);font-size:11px;">(FF06 / 晖夜)</span></td><td><span style="font-size:11px;color:var(--fl);">Hidden Glow™ Sync</span></td><td class="mono">3</td><td class="mono">18.8%</td><td class="mono">$179</td><td class="mono">22.5%</td></tr>
-        <tr><td class="mono">4</td><td><strong>Luminous</strong> <span style="color:var(--muted);font-size:11px;">(FF02 / 萤刃)</span></td><td><span style="font-size:11px;color:var(--fl);">Hidden Glow™ Sync</span></td><td class="mono">2</td><td class="mono">12.5%</td><td class="mono">$99</td><td class="mono">12.4%</td></tr>
-        <tr><td class="mono">5</td><td><strong>Luminex</strong> <span style="color:var(--muted);font-size:11px;">(FF05 / 灵萤 Pro)</span></td><td><span style="font-size:11px;color:var(--purple);">Hidden Glow™ EX</span></td><td class="mono">1</td><td class="mono">6.3%</td><td class="mono">$40</td><td class="mono">5.0%</td></tr>
-        <tr><td class="mono">6</td><td><strong>Lumingrip</strong> <span style="color:var(--muted);font-size:11px;">(FF03 / 萤握)</span></td><td><span style="font-size:11px;color:var(--fl);">Hidden Glow™ Sync</span></td><td class="mono">1</td><td class="mono">6.3%</td><td class="mono">$40</td><td class="mono">5.0%</td></tr>
+        {% for r in section_0655.rows %}
+        <tr><td class="mono">{{ r.rank }}</td><td><strong>{{ r.title }}</strong>{% if r.sku %} <span style="color:var(--muted);font-size:11px;">({{ r.sku }})</span>{% endif %}</td><td class="mono">{{ r.qty }}</td><td class="mono {{ r.qty_pct_class }}">{{ r.qty_pct }}</td><td class="mono {{ r.revenue_class }}">{{ r.revenue }}</td><td class="mono {{ r.revenue_pct_class }}">{{ r.revenue_pct }}</td><td class="mono">{{ r.unit_price }}</td></tr>
+        {% endfor %}
       </tbody>
     </table>
     <div style="margin-top:12px;display:flex;gap:24px;flex-wrap:wrap;font-size:12px;color:var(--muted);">
-      <div>📊 <strong style="color:var(--text);">入门款占主</strong>: Funlite (Spotlight RGB) 占销量 31% — 价格敏感用户</div>
-      <div>📊 <strong style="color:var(--text);">Hidden Glow™ 比例</strong>: Sync 50% / EX 6% / Spotlight 31% — EX 旗舰待推</div>
-      <div>📊 <strong style="color:var(--text);">SKU 数</strong>: 6 个型号售出 / 16 总单</div>
+      <div>📊 <strong style="color:var(--text);">Top 1 集中度</strong>: {{ section_0655.top1_title }} 占销售额 {{ section_0655.top1_pct }}</div>
+      <div>📊 <strong style="color:var(--text);">SKU 数</strong>: {{ section_0655.sku_count }} 个型号售出 / {{ section_0655.total_qty }} 总单</div>
     </div>
-    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据</strong>：shopline.py collector 当前未拉 line_items，本周升级加该字段 + 产品聚合，W19 真实回填。</div>
+    {% if insights_html.get('0655') %}<div class="callout" style="margin-top:12px;margin-bottom:0;">{{ insights_html['0655'] | safe }}</div>{% endif %}
   </div>
+  {% endif %}
 </div>
 
 <!-- ===== 06.6 FUNLAB META ADS ===== -->
@@ -675,32 +674,43 @@ body { background: var(--bg); color: var(--text); font-family: 'Noto Sans SC', s
 <!-- ===== 09 KOL ⭐ NEW ===== -->
 <div class="section" id="kol">
   <div class="section-header"><span class="section-tag">09</span><span class="section-title">KOL/媒体人 ROI + UTM 流量贡献 ⭐ 新增</span><div class="section-line"></div></div>
+  {% if section_09._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: KOL Bitable collector 失败 (drafts/tasks fetch error)，本段无数据。</div>
+  {% else %}
   <div class="two-col">
     <div class="chart-card">
       <div class="chart-title">KOL 端发送数据</div>
+      {% if section_09.kol._error %}
+      <div style="font-size:12px;color:var(--amber);">⚠️ KOL drafts/task_kol fetch error</div>
+      {% else %}
       <table class="diff-table">
         <tbody>
-          <tr><td>派单数</td><td class="mono">0</td></tr>
-          <tr><td>富化通过 (≥80)</td><td class="mono">0</td></tr>
-          <tr><td>已发送</td><td class="mono">0</td></tr>
-          <tr><td>回复数</td><td class="mono">0</td></tr>
-          <tr><td>意向回复率</td><td class="mono">0%</td></tr>
-          <tr><td>寄样数</td><td class="mono">0</td></tr>
+          <tr><td>派单数</td><td class="mono">{{ section_09.kol.tasks_created }}</td></tr>
+          <tr><td>富化通过 (≥80)</td><td class="mono">{{ section_09.kol.qualified }}</td></tr>
+          <tr><td>已发送</td><td class="mono">{{ section_09.kol.sent }}</td></tr>
+          <tr><td>回复数</td><td class="mono">{{ section_09.kol.replied }}</td></tr>
+          <tr><td>意向回复</td><td class="mono">{{ section_09.kol.intent_replies }} ({{ section_09.kol.interest_rate }})</td></tr>
+          <tr><td>回复率</td><td class="mono">{{ section_09.kol.reply_rate }}</td></tr>
         </tbody>
       </table>
+      {% endif %}
     </div>
     <div class="chart-card">
       <div class="chart-title">媒体人端发送数据</div>
+      {% if section_09.editor._error %}
+      <div style="font-size:12px;color:var(--amber);">⚠️ editor drafts/task_editor fetch error</div>
+      {% else %}
       <table class="diff-table">
         <tbody>
-          <tr><td>派单数</td><td class="mono">0</td></tr>
-          <tr><td>富化通过 (≥75)</td><td class="mono">0</td></tr>
-          <tr><td>PR pitch 已发</td><td class="mono">0</td></tr>
-          <tr><td>回复数</td><td class="mono">0</td></tr>
-          <tr><td>意向回复率</td><td class="mono">0%</td></tr>
-          <tr><td>寄样数</td><td class="mono">0</td></tr>
+          <tr><td>派单数</td><td class="mono">{{ section_09.editor.tasks_created }}</td></tr>
+          <tr><td>富化通过 (≥75)</td><td class="mono">{{ section_09.editor.qualified }}</td></tr>
+          <tr><td>PR pitch 已发</td><td class="mono">{{ section_09.editor.sent }}</td></tr>
+          <tr><td>回复数</td><td class="mono">{{ section_09.editor.replied }}</td></tr>
+          <tr><td>意向回复</td><td class="mono">{{ section_09.editor.intent_replies }} ({{ section_09.editor.interest_rate }})</td></tr>
+          <tr><td>回复率</td><td class="mono">{{ section_09.editor.reply_rate }}</td></tr>
         </tbody>
       </table>
+      {% endif %}
     </div>
   </div>
   <div class="chart-card" style="margin-top:16px;">
@@ -708,17 +718,26 @@ body { background: var(--bg); color: var(--text); font-family: 'Noto Sans SC', s
     <table class="diff-table">
       <thead><tr><th>站点</th><th>UTM 会话</th><th>占总会话</th><th>UTM 收入</th><th>UTM 购买</th><th>UTM ROAS (估算)</th></tr></thead>
       <tbody>
-        <tr><td class="brand-pw">Powkong</td><td class="mono">0</td><td class="mono num-amber">0% / 2,501</td><td class="mono">$0</td><td class="mono">0</td><td class="mono" style="color:var(--muted)">N/A</td></tr>
-        <tr><td class="brand-fl">FUNLAB</td><td class="mono">0</td><td class="mono num-amber">0% / 3,985</td><td class="mono">$0</td><td class="mono">0</td><td class="mono" style="color:var(--muted)">N/A</td></tr>
+        {% for r in section_09.utm_rows %}
+        <tr><td class="{{ r.brand_class }}">{{ r.brand }}</td><td class="mono">{{ r.sessions }}</td><td class="mono {{ r.pct_class }}">{{ r.pct_total }}</td><td class="mono">{{ r.revenue }}</td><td class="mono">{{ r.purchases }}</td><td class="mono" style="color:var(--muted)">{{ r.roas }}</td></tr>
+        {% endfor %}
       </tbody>
     </table>
-    <div style="margin-top:10px;font-size:11px;color:var(--muted);">📊 双站 UTM 流量贡献率本周均为 0%，因 KOL/Editor pipeline 本周未派单。</div>
+    {% if section_09.no_activity %}
+    <div style="margin-top:10px;font-size:11px;color:var(--muted);">📊 双站 UTM 流量贡献率本周均为 0%，因 KOL/Editor pipeline 本周未派单或派单流量未到。</div>
+    {% else %}
+    <div style="margin-top:10px;font-size:11px;color:var(--muted);">📊 UTM 总会话 {{ section_09.total_utm_sessions }}，KOL/Editor pipeline 已贡献流量。</div>
+    {% endif %}
   </div>
 
+  {% if section_09.no_activity %}
   <div class="callout" style="background:var(--blue-dim);border-color:rgba(255,157,0,0.2);border-left-color:var(--blue);">
     <div class="callout-title" style="color:var(--blue);">本周无 KOL/媒体人活动</div>
     <div class="callout-body">UTM 流量为 0，ROI 无法计算。<strong>建议下周启动新一轮 outreach</strong> (产品库勾「主推」+「派单-需要媒体人」即可触发自动派单)。</div>
   </div>
+  {% endif %}
+  {% if insights_html.get('09') %}<div class="callout">{{ insights_html['09'] | safe }}</div>{% endif %}
+  {% endif %}
 </div>
 
 <!-- ===== 10 COMPLAINTS ⭐ NEW + 双框架 KPI ===== -->
@@ -754,61 +773,76 @@ body { background: var(--bg); color: var(--text); font-family: 'Noto Sans SC', s
 <!-- ===== 11 SEO PRODUCTIVITY ⭐ NEW ===== -->
 <div class="section" id="seo-prod">
   <div class="section-header"><span class="section-tag">11</span><span class="section-title">SEO 自动化产能 + 选题池消费率 ⭐ 新增</span><div class="section-line"></div></div>
+  {% if section_11._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: n8n executions API 未配置或失败 (检查 N8N_API_KEY env)。</div>
+  {% else %}
 
   <div class="chart-card">
     <div class="chart-title">6 工作流执行情况 (本周 vs 目标 · 达成率)</div>
     <table class="diff-table">
       <thead><tr><th>工作流</th><th>本周执行</th><th>目标</th><th>达成率</th><th>差距</th><th>状态</th></tr></thead>
       <tbody>
-        <tr><td>SEO 新闻稿 (双站)</td><td class="mono num-amber">1</td><td class="mono">12</td><td class="mono num-red">8.3%</td><td class="down">-92%</td><td class="num-amber">严重不足</td></tr>
-        <tr><td>SEO 商业意图</td><td class="mono num-red">0</td><td class="mono">2</td><td class="mono num-red">0%</td><td class="down">-100%</td><td class="num-red">未跑</td></tr>
-        <tr><td>SEO 周报</td><td class="mono">0</td><td class="mono">1</td><td class="mono num-red">0%</td><td class="down">-100%</td><td class="num-amber">Stale</td></tr>
-        <tr><td>竞品 Gap 扫描</td><td class="mono">0</td><td class="mono">1</td><td class="mono num-red">0%</td><td class="down">-100%</td><td class="num-amber">Stale</td></tr>
-        <tr><td>PSI 月度审计</td><td class="mono">0</td><td class="mono" style="color:var(--muted)">月级</td><td class="mono" style="color:var(--muted)">-</td><td>-</td><td style="color:var(--muted)">月度</td></tr>
-        <tr><td>GSC 排名追踪</td><td class="mono">0</td><td class="mono" style="color:var(--muted)">月级</td><td class="mono" style="color:var(--muted)">-</td><td>-</td><td style="color:var(--muted)">月度</td></tr>
+        {% for r in section_11.rows %}
+        <tr><td>{{ r.name }}</td><td class="mono {{ r.actual_class }}">{{ r.actual }}</td><td class="mono"{% if r.target == '月级' %} style="color:var(--muted)"{% endif %}>{{ r.target }}</td><td class="mono {{ r.rate_class }}"{% if r.rate == '-' %} style="color:var(--muted)"{% endif %}>{{ r.rate }}</td><td class="{{ r.gap_class }}">{{ r.gap }}</td><td class="{{ r.status_class }}"{% if r.status == '月度' %} style="color:var(--muted)"{% endif %}>{{ r.status }}</td></tr>
+        {% endfor %}
       </tbody>
     </table>
-    <div style="margin-top:10px;font-size:11px;color:var(--muted);">📊 周级目标 16 篇 (含周报/Gap)，本周仅 1/16 = <span class="num-red">6.25%</span> 整体达成率</div>
+    <div style="margin-top:10px;font-size:11px;color:var(--muted);">📊 周级目标 {{ section_11.overall_target }} 篇 (含周报/Gap)，本周 {{ section_11.overall_actual }}/{{ section_11.overall_target }} = <span class="{{ section_11.overall_rate_class }}">{{ section_11.overall_rate }}</span> 整体达成率</div>
   </div>
 
   <div class="two-col">
     <div class="chart-card">
       <div class="chart-title">内容产出 (目标 14 篇/周)</div>
       <div class="metrics-grid" style="grid-template-columns:1fr 1fr;gap:10px;">
-        <div class="metric-card amber"><div class="m-label">SEO 新闻稿</div><div class="m-value">1</div><div class="m-sub">目标 12 篇 (-92%)</div></div>
-        <div class="metric-card red"><div class="m-label">商业意图</div><div class="m-value">0</div><div class="m-sub">目标 2 篇 (-100%)</div></div>
+        <div class="metric-card {% if section_11.news_actual >= section_11.news_target %}green{% elif section_11.news_actual > 0 %}amber{% else %}red{% endif %}"><div class="m-label">SEO 新闻稿</div><div class="m-value">{{ section_11.news_actual }}</div><div class="m-sub">目标 {{ section_11.news_target }} 篇 ({{ section_11.news_gap_pct }})</div></div>
+        <div class="metric-card {% if section_11.intent_actual >= section_11.intent_target %}green{% elif section_11.intent_actual > 0 %}amber{% else %}red{% endif %}"><div class="m-label">商业意图</div><div class="m-value">{{ section_11.intent_actual }}</div><div class="m-sub">目标 {{ section_11.intent_target }} 篇 ({{ section_11.intent_gap_pct }})</div></div>
       </div>
     </div>
     <div class="chart-card">
       <div class="chart-title">选题池状态</div>
+      {% if section_11.topic_pool._error %}
+      <div style="font-size:12px;color:var(--amber);">⚠️ 选题池 fetch error</div>
+      {% else %}
       <div class="metrics-grid" style="grid-template-columns:1fr 1fr;gap:10px;">
-        <div class="metric-card pw"><div class="m-label">候选总数</div><div class="m-value">25</div></div>
-        <div class="metric-card amber"><div class="m-label">待选题</div><div class="m-value">20</div><div class="m-sub">已写双站 4 / PK 1</div></div>
-        <div class="metric-card green"><div class="m-label">本周新增</div><div class="m-value">0</div></div>
-        <div class="metric-card red"><div class="m-label">本周消费</div><div class="m-value">0</div></div>
+        <div class="metric-card pw"><div class="m-label">候选总数</div><div class="m-value">{{ section_11.topic_pool.candidates_total }}</div></div>
+        <div class="metric-card {% if section_11.topic_pool.low_stock_alert %}red{% else %}amber{% endif %}"><div class="m-label">待选题</div><div class="m-value">{{ section_11.topic_pool.waiting }}</div><div class="m-sub">已写双站 {{ section_11.topic_pool.written_both }} / PK {{ section_11.topic_pool.written_pk }} / FL {{ section_11.topic_pool.written_fl }}</div></div>
+        <div class="metric-card {% if section_11.topic_pool.new_this_week > 0 %}green{% else %}red{% endif %}"><div class="m-label">本周新增</div><div class="m-value">{{ section_11.topic_pool.new_this_week }}</div></div>
+        <div class="metric-card {% if section_11.topic_pool.consumed_this_week > 0 %}green{% else %}red{% endif %}"><div class="m-label">本周消费</div><div class="m-value">{{ section_11.topic_pool.consumed_this_week }}</div></div>
       </div>
+      {% endif %}
     </div>
   </div>
 
+  {% set rate_num = section_11.overall_actual / section_11.overall_target if section_11.overall_target > 0 else 0 %}
+  {% if rate_num < 0.5 %}
   <div class="callout">
     <div class="callout-title">⚠️ SEO 产能严重不足</div>
-    <div class="callout-body">本周仅产出 <strong>1 篇</strong> (目标 14 篇，-93%)。选题池库存充足 (25 候选 / 20 待选)，但工作流多数 Stale。<strong>首要任务：检查 n8n cron 触发状态 + 工作流执行日志。</strong></div>
+    <div class="callout-body">本周仅产出 <strong>{{ section_11.overall_actual }} 篇</strong> (目标 {{ section_11.overall_target }} 篇，{{ section_11.overall_rate }})。{% if section_11.summary.stale_workflows %}<strong>{{ section_11.summary.stale_workflows | length }} 个工作流 Stale</strong>。{% endif %}<strong>首要任务：检查 n8n cron 触发状态 + 工作流执行日志。</strong></div>
   </div>
+  {% endif %}
+  {% if insights_html.get('11') %}<div class="callout">{{ insights_html['11'] | safe }}</div>{% endif %}
+  {% endif %}
 </div>
 
 <!-- ===== 12 LIGHTHOUSE ⭐ NEW ===== -->
 <div class="section" id="lighthouse">
   <div class="section-header"><span class="section-tag">12</span><span class="section-title">页面性能 Lighthouse ⭐ 新增 (模块 L)</span><div class="section-line"></div></div>
+  {% if section_12._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: PSI collector 失败 (检查 PSI_API_KEY env 或 Google Cloud quota)。</div>
+  {% else %}
 
   <div class="chart-card">
     <div class="chart-title">4 大维度评分 (移动端)</div>
     <table class="diff-table">
       <thead><tr><th>页面</th><th>Performance</th><th>Accessibility</th><th>Best Practices</th><th>SEO</th></tr></thead>
       <tbody>
-        <tr><td><strong>Powkong Home</strong></td><td class="mono num-red">🔴 46</td><td class="mono num-green">🟢 92</td><td class="mono num-amber">🟡 73</td><td class="mono num-green">🟢 92</td></tr>
-        <tr><td><strong>Powkong Blog</strong></td><td class="mono num-red">🔴 47</td><td class="mono num-green">🟢 95</td><td class="mono num-amber">🟡 73</td><td class="mono num-green">🟢 92</td></tr>
-        <tr><td><strong>Funlab Home</strong></td><td class="mono num-amber">🟡 52</td><td class="mono num-amber">🟡 79</td><td class="mono num-green">🟢 92</td><td class="mono num-amber">🟡 85</td></tr>
-        <tr><td><strong>Funlab Blog</strong></td><td class="mono num-amber">🟡 62</td><td class="mono num-amber">🟡 81</td><td class="mono num-green">🟢 96</td><td class="mono num-green">🟢 100</td></tr>
+        {% for r in section_12.score_rows %}
+        {% if r._error %}
+        <tr><td><strong>{{ r.name }}</strong></td><td colspan="4" style="color:var(--amber);font-size:12px;">⚠️ {{ r._error }}</td></tr>
+        {% else %}
+        <tr><td><strong>{{ r.name }}</strong></td><td class="mono {{ r.performance_class }}">{{ r.performance_emoji }} {{ r.performance }}</td><td class="mono {{ r.accessibility_class }}">{{ r.accessibility_emoji }} {{ r.accessibility }}</td><td class="mono {{ r.best_practices_class }}">{{ r.best_practices_emoji }} {{ r.best_practices }}</td><td class="mono {{ r.seo_class }}">{{ r.seo_emoji }} {{ r.seo }}</td></tr>
+        {% endif %}
+        {% endfor %}
       </tbody>
     </table>
   </div>
@@ -816,58 +850,46 @@ body { background: var(--bg); color: var(--text); font-family: 'Noto Sans SC', s
   <div class="chart-card">
     <div class="chart-title">Performance 6 子项数值</div>
     <table class="diff-table">
-      <thead><tr><th>指标</th><th>权重</th><th>PK Home</th><th>PK Blog</th><th>FL Home</th><th>FL Blog</th></tr></thead>
+      <thead><tr><th>指标</th><th>权重</th>{% for r in section_12.score_rows %}<th>{{ r.name | replace('Powkong', 'PK') | replace('Funlab', 'FL') }}</th>{% endfor %}</tr></thead>
       <tbody>
-        <tr><td>LCP (ms)</td><td class="mono">25%</td><td class="mono num-red">17,548</td><td class="mono num-red">14,629</td><td class="mono num-red">4,502</td><td class="mono num-red">4,052</td></tr>
-        <tr><td>TBT (ms)</td><td class="mono">25%</td><td class="mono num-amber">583</td><td class="mono num-amber">583</td><td class="mono num-red">1,021</td><td class="mono num-red">875</td></tr>
-        <tr><td>CLS</td><td class="mono">25%</td><td class="mono num-green">0.0</td><td class="mono num-green">0.0</td><td class="mono num-green">0.0</td><td class="mono num-green">0.02</td></tr>
-        <tr><td>FCP (ms)</td><td class="mono">10%</td><td class="mono num-red">3,729</td><td class="mono num-red">3,702</td><td class="mono num-amber">2,300</td><td class="mono num-amber">2,299</td></tr>
-        <tr><td>SI (ms)</td><td class="mono">10%</td><td class="mono num-red">7,337</td><td class="mono num-red">6,873</td><td class="mono num-red">7,464</td><td class="mono num-amber">4,156</td></tr>
+        {% for m in section_12.metric_rows %}
+        <tr><td>{{ m.label }}</td><td class="mono">{{ m.weight }}</td>{% for c in m.cells %}<td class="mono {{ c.class }}">{{ c.value }}</td>{% endfor %}</tr>
+        {% endfor %}
       </tbody>
     </table>
   </div>
 
   <div class="chart-card">
-    <div class="chart-title">Top 3 优化建议 (按预估节省时间)</div>
+    <div class="chart-title">Top 3 优化建议 (按预估节省时间 · 跨 4 页合并)</div>
+    {% if section_12.top3 %}
     <ul style="margin-left:20px;line-height:2;">
-      <li><strong>Powkong Home</strong>: 减少未使用的 JavaScript - 节省 <span class="num-red">4,000ms</span> LCP/TBT</li>
-      <li><strong>Powkong Blog</strong>: 减少未使用的 JavaScript - 节省 <span class="num-red">3,260ms</span></li>
-      <li><strong>Powkong Home</strong>: 压缩 JavaScript / 减少未使用 CSS - 各节省 300ms</li>
+      {% for o in section_12.top3 %}
+      <li><strong>{{ o.page }}</strong>: {{ o.title }} - 节省 <span class="num-red">{{ '{:,}'.format(o.savings_ms) }}ms</span></li>
+      {% endfor %}
     </ul>
+    {% else %}
+    <div style="font-size:12px;color:var(--muted);">无可优化项 (各页均已达到 best practices)</div>
+    {% endif %}
   </div>
 
-  <div class="note-box"><strong>⚡ Powkong 性能极差</strong>：LCP 超过 14 秒 (目标 &lt; 2.5 秒)，严重拖累用户体验和 SEO。<strong>首要任务：减少未使用的 JavaScript</strong>。</div>
+  {% if section_12.worst_lcp > 4000 %}
+  <div class="note-box"><strong>⚡ 性能告警</strong>：{{ section_12.worst_lcp_page }} LCP {{ '{:,}'.format(section_12.worst_lcp) }}ms (目标 &lt; 2,500ms)，严重拖累用户体验和 SEO。Performance 平均 {{ section_12.perf_avg }}/100，<strong>{{ section_12.red_flags_count }} 个红灯指标</strong>。</div>
+  {% endif %}
+  {% if insights_html.get('12') %}<div class="callout">{{ insights_html['12'] | safe }}</div>{% endif %}
+  {% endif %}
 </div>
 
 <!-- ===== 08 ACTION ITEMS ===== -->
 <div class="section" id="action">
   <div class="section-header"><span class="section-tag">08</span><span class="section-title">下周任务清单</span><div class="section-line"></div></div>
-  <div class="insight-grid">
-    <div class="insight-card">
-      <div class="insight-brand" style="color:var(--pw);">Powkong · Meta 广告</div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--red);">▲</span><span>4/28、4/29、5/3 三天零转化 — 分析受众/素材，A/B 测试</span></div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--amber);">◈</span><span>综合 ROAS 1.21 低于盈亏，CPA $84.27 偏高，需重审定向</span></div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--green);">✦</span><span>5/1 ROAS 3.31 是亮点，复盘成功因素，预算向高 ROAS 日倾斜</span></div>
-    </div>
-    <div class="insight-card">
-      <div class="insight-brand" style="color:var(--pw);">Powkong · SEO & 性能</div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--red);">▲</span><span>LCP 17 秒严重 — 紧急减少未使用的 JavaScript</span></div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--amber);">◈</span><span>49 个未收录页面：按 5 类原因逐一排查</span></div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--blue);">◉</span><span>2 个高展现低 CTR 关键词：优化 Title 和 Meta Description</span></div>
-    </div>
-    <div class="insight-card">
-      <div class="insight-brand" style="color:var(--fl);">FUNLAB · 数据 + 收录</div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--red);">▲</span><span>817 页未收录 (收录率仅 26.3%) — 远低于 PK，逐页 URL Inspect</span></div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--amber);">◈</span><span>GA4 vs Shopline 收入差 73% — 检查像素 + 归因配置</span></div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--blue);">◉</span><span>FUNLAB 用户参与时长 2 分 8 秒优秀，转化漏斗下沉是关键</span></div>
-    </div>
-    <div class="insight-card">
-      <div class="insight-brand">SEO 产能 + 改造闭环</div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--red);">▲</span><span>本周 SEO 仅 1 篇 vs 目标 14 篇 (-93%) — 检查 n8n cron 触发</span></div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--amber);">◈</span><span>选题池 20 待选未消费 — 工作流恢复后立即降库存</span></div>
-      <div class="insight-item"><span class="insight-icon" style="color:var(--blue);">◉</span><span>客诉 Zoho service@ OAuth 待配 — 双框架 KPI 待激活</span></div>
-    </div>
+  {% if section_08._missing %}
+  <div class="note-box"><strong>⚠️ AI 任务清单未生成</strong>：integrator markdown 未输出 ## 08 段 (检查 DeepSeek API 调用)。回退到通用提示：<strong>登录飞书查看本周报，按 02-12 各段 callout 自定提优先级。</strong></div>
+  {% else %}
+  <div class="callout" style="background:rgba(99,102,241,0.06);border-color:rgba(99,102,241,0.2);border-left-color:var(--blue);">
+    <div class="callout-title" style="color:var(--blue);">AI 综合任务清单 (DeepSeek 基于本周全数据生成)</div>
+    <div class="callout-body action-md">{{ section_08.html | safe }}</div>
   </div>
+  {% endif %}
 </div>
 
 <!-- FOOTER -->
