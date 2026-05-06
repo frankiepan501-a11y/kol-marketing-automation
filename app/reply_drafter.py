@@ -73,6 +73,29 @@ TEMPLATE_NEED_ADDRESS = (
     "Best,\n{signature}"
 )
 
+# P5.11 要报价场景: KOL 主动来询价 → 不直接进商务谈判, 先邀请联盟模式
+# 策略: 80% KOL 看到联盟邀请会接受 (按效果分成,风险低); 拒绝才转人审给 Frankie 拍板
+# 不提佣金比例 (Frankie 决策: 不引导 KOL 期待数字),不留"如果你坚持付费"退路
+TEMPLATE_AFFILIATE_INVITATION_QUOTE = (
+    "Hi {first_name},\n\n"
+    "Thanks for reaching out about pricing!\n\n"
+    "Our standard collaboration model with creators is affiliate-based rather "
+    "than upfront fees: we provide you a dedicated product link + an exclusive "
+    "discount code for your audience. When viewers order through your link, "
+    "they get the discount and you earn commission on the sales — typically "
+    "much higher upside than a flat fee for high-converting creators.\n\n"
+    "For {product_name} (independent site price ${product_price}), would you "
+    "be open to trying this model?\n\n"
+    "If yes, I'd love to send a sample your way to start — could you reply "
+    "with shipping details:\n\n"
+    "- Full name\n"
+    "- Street address (incl. apt/suite if any)\n"
+    "- City, State/Region, ZIP\n"
+    "- Country\n"
+    "- Phone number for delivery\n\n"
+    "Best,\n{signature}"
+)
+
 # YouTube Short-only KOL 专用 (其他平台不用此模板, 因为只有 YT normal video 能挂链接)
 # 一封信 3 合 1: 接受 Short 寄样 + 提议 normal video 联盟模式 + 求地址
 # 佣金比例/折扣码不在此模板写死, 等 KOL 同意进 ship_confirm 后人审定
@@ -479,6 +502,7 @@ async def draft_reply(
     # 默认产品占位 (从原始草稿继承 关联产品 — 暂用"主推产品"占位)
     product_name = "our latest product"
     product_link_raw = ""
+    product_price = 0  # P5.11 affiliate_quote 模板需要独立站售价
     # 试图从 related_draft 拿产品名 (如有)
     if related_draft_id:
         try:
@@ -500,6 +524,11 @@ async def draft_reply(
                     product_name = p_clean or product_name
                     print(f"[WARN] 产品 {prod_rid} 缺少「产品英文名」字段, 降级用中文名: {product_name}")
                 product_link_raw = ext(pf.get("官网链接")) or ""
+                # P5.11: 拉「报价(USD)」字段作为独立站售价 (affiliate_quote 模板用)
+                try:
+                    product_price = float(pf.get("报价(USD)") or 0)
+                except (ValueError, TypeError):
+                    product_price = 0
         except Exception as e:
             print(f"[reply_drafter] fetch related product fail: {e}")
 
@@ -582,10 +611,14 @@ async def draft_reply(
             subj = d["subject"]
             body = d["body"]
     elif intent_type == "要报价":
-        d = await _gen_quote_draft(contact_name, original_subject, original_body,
-                                    intent_summary, brand, product_name, product_link)
-        subj = d["subject"]
-        body = d["body"]
+        # P5.11: 不直接走商务谈判,先发联盟邀请 (80% KOL 接受联盟,拒绝才转人审决策)
+        # 不再调用 _gen_quote_draft (DeepSeek 自由生成)→ 用固定模板, 价格从产品库报价(USD)
+        subj = "Re: " + original_subject[:150]
+        price_str = f"{int(product_price)}" if product_price else "TBD"
+        body = TEMPLATE_AFFILIATE_INVITATION_QUOTE.format(
+            first_name=first, signature=sig_full,
+            product_name=product_name, product_price=price_str,
+        )
     elif intent_type == "质疑/澄清":
         d = await _gen_misspoke_apology_draft(contact_name, original_subject, original_body,
                                                 intent_summary, brand, product_name, product_link)
@@ -611,14 +644,16 @@ async def draft_reply(
         except Exception:
             pass
 
+    # P5.11: intent_type=要报价 → 草稿来源标 affiliate_quote (区别一般 reply,便于追踪)
+    draft_source = "affiliate_quote" if intent_type == "要报价" else "reply"
     fields = {
-        "邮件草稿ID": f"reply-{contact_record['record_id'][-8:]}-{int(time.time())}",
+        "邮件草稿ID": f"{'aq' if intent_type == '要报价' else 'reply'}-{contact_record['record_id'][-8:]}-{int(time.time())}",
         link_field: [contact_record["record_id"]],
         "邮件主题": subj[:200],
         "邮件正文": body,
         "邮件语言": "en",
         "邮件草稿状态": "待审",
-        "邮件草稿来源": "reply",
+        "邮件草稿来源": draft_source,
         "对象类型": contact_type if contact_type == "KOL" else "媒体人",
         "发送邮箱": sender_alias,
         "发送人署名": sig_first,

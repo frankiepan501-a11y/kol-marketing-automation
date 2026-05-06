@@ -253,7 +253,8 @@ from .reply_drafter import _classify_interest, _gen_general_interest_draft, _gen
 from .reply_drafter import (
     TEMPLATE_UNSUBSCRIBE, TEMPLATE_DECLINE, TEMPLATE_SEND_ASSETS,
     TEMPLATE_SHIP_CONFIRM, TEMPLATE_NEED_ADDRESS, TEMPLATE_AFFILIATE_UPSELL,
-    TEMPLATE_SCHEDULE_CALL, CALENDLY_DEFAULT, _first_name, _sender_signature,
+    TEMPLATE_AFFILIATE_INVITATION_QUOTE, TEMPLATE_SCHEDULE_CALL, CALENDLY_DEFAULT,
+    _first_name, _sender_signature,
 )
 
 
@@ -410,9 +411,15 @@ async def reply_drafter_dry_run(authorization: str = Header(default=""),
                                                     brand, product_name, product_link)
             subj = d["subject"]; body = d["body"]
     elif intent_type == "要报价":
-        d = await _gen_quote_draft(contact_name, original_subject, original_body,
-                                    intent_summary, brand, product_name, product_link)
-        subj = d["subject"]; body = d["body"]
+        # P5.11: 改用 affiliate_invitation 固定模板,不再 DeepSeek 自由生成
+        # dry-run 默认 product_price=50,生产路径从产品库报价(USD)取
+        product_price = p.get("product_price", 50)
+        price_str = f"{int(product_price)}" if product_price else "TBD"
+        subj = "Re: " + original_subject[:150]
+        body = TEMPLATE_AFFILIATE_INVITATION_QUOTE.format(
+            first_name=first, signature=sig_full,
+            product_name=product_name, product_price=price_str,
+        )
     elif intent_type == "质疑/澄清":
         d = await _gen_misspoke_apology_draft(contact_name, original_subject, original_body,
                                                 intent_summary, brand, product_name, product_link)
