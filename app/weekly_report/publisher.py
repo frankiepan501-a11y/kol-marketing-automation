@@ -252,7 +252,7 @@ async def _write_history_bitable(fields: dict) -> dict:
 
 # ============== 4. 飞书消息推送 ==============
 def _build_card(title: str, summary: str, doc_url: str, gaps: list) -> dict:
-    """飞书 interactive 卡片. 标题 + 关键洞察 + docx 链接按钮 + 缺口标."""
+    """飞书 interactive 卡片 (v1 schema, 默认). 标题 + 关键洞察 + docx 链接按钮 + 缺口标."""
     elements = [
         {"tag": "div", "text": {"tag": "lark_md", "content": summary}},
     ]
@@ -271,8 +271,9 @@ def _build_card(title: str, summary: str, doc_url: str, gaps: list) -> dict:
                 "type": "primary", "url": doc_url,
             }],
         })
+    # v1 schema: 顶层 elements (无 schema 字段, 不要写 "schema": "2.0")
     return {
-        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
         "header": {"title": {"tag": "plain_text", "content": title}, "template": "blue"},
         "elements": elements,
     }
