@@ -706,12 +706,19 @@ async def draft_reply(
     # 调 router (惰性 import 防循环)
     try:
         from . import draft_router
-        # 给 router 传 ship_confirm 元信息 + intent (让 router 强制不明意图/质疑/要报价 走人审)
+        # 强制人审 label: 优先级 sub > intent_type
+        # sub == affiliate_upsell → 强制人审 (涉及佣金/折扣码谈判)
+        # intent ∈ {不明意图, 质疑/澄清, 要报价} → 强制人审 (Ashtvn 死循环类防御)
+        force_label = None
+        if sub == "affiliate_upsell":
+            force_label = "affiliate_upsell"
+        elif intent_type in ("不明意图", "质疑/澄清", "要报价"):
+            force_label = intent_type
         result = await draft_router.route_draft(
             rid,
             ship_confirm_meta={"address": extracted_address, "country": country_code,
                                  "product_name": product_name} if sub == "ship_confirm" else None,
-            force_review_intent=intent_type if intent_type in ("不明意图", "质疑/澄清", "要报价") else None,
+            force_review_intent=force_label,
         )
         print(f"[reply_drafter] router result: score={result['score']} path={result['path']}")
     except Exception as e:

@@ -69,13 +69,15 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
         if "ship-sample" not in hits:
             hits = list(hits) + ["ship-sample"]
 
-    # 不明意图 / 质疑澄清 / 要报价 强制 committed=True (防自动通过+自动发触发 KOL spam)
+    # 不明意图 / 质疑澄清 / 要报价 / affiliate_upsell 强制 committed=True (防自动通过+自动发)
     # _gen_clarify_draft 输出"专业、无承诺"的话术会被 reviewer 给 10 分自动通过, 导致
     # KOL 每次回复 (即便只是"Lol") 都被回一封跟进邮件, 形成死循环 (Ashtvn 5/6 9 封事故)
-    if force_review_intent in ("不明意图", "质疑/澄清", "要报价"):
+    # affiliate_upsell 涉及合作模式邀约 + 佣金谈判 + 折扣码,必须人审 (P5.12 Steve 案例)
+    if force_review_intent in ("不明意图", "质疑/澄清", "要报价", "affiliate_upsell"):
         committed = True
         intent_kw = {"不明意图": "unknown-intent", "质疑/澄清": "misspoke-correction",
-                     "要报价": "quote-negotiation"}[force_review_intent]
+                     "要报价": "quote-negotiation",
+                     "affiliate_upsell": "affiliate-negotiation"}[force_review_intent]
         if intent_kw not in hits:
             hits = list(hits) + [intent_kw]
 
