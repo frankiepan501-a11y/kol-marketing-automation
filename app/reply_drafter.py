@@ -642,11 +642,12 @@ async def draft_reply(
     # 调 router (惰性 import 防循环)
     try:
         from . import draft_router
-        # 给 router 传 ship_confirm 元信息, 让通知卡片含发货建议
+        # 给 router 传 ship_confirm 元信息 + intent (让 router 强制不明意图/质疑/要报价 走人审)
         result = await draft_router.route_draft(
             rid,
             ship_confirm_meta={"address": extracted_address, "country": country_code,
                                  "product_name": product_name} if sub == "ship_confirm" else None,
+            force_review_intent=intent_type if intent_type in ("不明意图", "质疑/澄清", "要报价") else None,
         )
         print(f"[reply_drafter] router result: score={result['score']} path={result['path']}")
     except Exception as e:

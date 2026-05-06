@@ -19,13 +19,18 @@ SCORE_RETRY_THRESHOLD = 5      # < 此分退回重生
 MAX_RETRIES = 2                # 重生上限
 
 
-async def route_draft(record_id: str, ship_confirm_meta: dict = None) -> dict:
+async def route_draft(record_id: str, ship_confirm_meta: dict = None,
+                       force_review_intent: str = None) -> dict:
     """
     主入口: 给定草稿 record_id → 评审 + 路由 → 返回结果摘要
 
     Args:
         ship_confirm_meta: reply_drafter 传入的 ship_confirm 元信息 {address, country, product_name}
             存在表示这是寄样确认草稿, 通知卡片要含仓库发货建议 + 高优先级 + SLA 24h
+        force_review_intent: 强制走人审的意图标记 (如 "不明意图" / "质疑/澄清" / "要报价")
+            因 reviewer 给低风险模板(如 _gen_clarify_draft)评高分会自动通过 + 自动发,
+            导致 KOL 被反复 spam (Ashtvn 案例: 9 封"是否需要更多 info"邮件死循环).
+            存在则强制 committed=True 让草稿停"待审", 防止 _gen_clarify_draft 输出被自动发.
     """
     # 1. 读草稿
     rec = await feishu.get_record(config.T_DRAFT, record_id)
@@ -63,6 +68,16 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None) -> dict:
         committed = True
         if "ship-sample" not in hits:
             hits = list(hits) + ["ship-sample"]
+
+    # 不明意图 / 质疑澄清 / 要报价 强制 committed=True (防自动通过+自动发触发 KOL spam)
+    # _gen_clarify_draft 输出"专业、无承诺"的话术会被 reviewer 给 10 分自动通过, 导致
+    # KOL 每次回复 (即便只是"Lol") 都被回一封跟进邮件, 形成死循环 (Ashtvn 5/6 9 封事故)
+    if force_review_intent in ("不明意图", "质疑/澄清", "要报价"):
+        committed = True
+        intent_kw = {"不明意图": "unknown-intent", "质疑/澄清": "misspoke-correction",
+                     "要报价": "quote-negotiation"}[force_review_intent]
+        if intent_kw not in hits:
+            hits = list(hits) + [intent_kw]
 
     reasons_text = " | ".join(f"{k}:{v}" for k, v in reasons.items())[:500]
     if judge["reason"]:

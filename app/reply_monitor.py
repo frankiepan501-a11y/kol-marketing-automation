@@ -119,10 +119,10 @@ async def find_contact(email: str):
 
 
 async def find_draft(contact_rid: str, contact_type: str):
-    """找到该 contact 关联的"待监听"草稿。
+    """找到该 contact 关联的"待监听"草稿 + 该 contact 的所有已发送草稿(供 body 去重用).
     优先取「未回复 + 发送时间最新」的草稿；都已回复时回 fallback 取最新一条。
-    修复 bug: 原实现遍历取第一个匹配,导致同一 KOL 后续轮次回复(cold→reply→ship_confirm)
-    被旧的"是否回复=True"草稿短路掉,错过监听。
+
+    Returns: (best_draft, all_matched_drafts) 或 (None, [])
     """
     link_field = "关联媒体人" if contact_type == "editor" else "关联KOL"
     items = await feishu.search_records(config.T_DRAFT, [
@@ -130,11 +130,11 @@ async def find_draft(contact_rid: str, contact_type: str):
     ])
     matched = [r for r in items if xrid(r["fields"].get(link_field)) == contact_rid]
     if not matched:
-        return None
+        return None, []
     unreplied = [r for r in matched if not r["fields"].get("是否回复")]
     pool = unreplied if unreplied else matched
     pool.sort(key=lambda r: r["fields"].get("发送时间") or 0, reverse=True)
-    return pool[0]
+    return pool[0], matched
 
 
 def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, subject: str):
@@ -205,7 +205,7 @@ async def run():
             contact, ctype = await find_contact(from_addr)
             if not contact: continue
 
-            draft = await find_draft(contact["record_id"], ctype)
+            draft, all_matched = await find_draft(contact["record_id"], ctype)
             if not draft: continue
             if draft["fields"].get("是否回复"): continue
 
@@ -215,6 +215,20 @@ async def run():
                 try: body_html = await zoho.get_message_content(brand, msg_id, folder_id)
                 except Exception: pass
             email_body = html_to_text(body_html) or msg.get("summary", "") or subject
+
+            # === Body 去重: 同一 inbox 邮件已被任何草稿"回复原文"记录过 → 跳过 ===
+            # 防 P0 patch 副作用 (Ashtvn 死循环): 自动通过的 reply 草稿"是否回复=False"
+            # 被下一轮当作未回复草稿,死循环重处理同一封 inbox 邮件。
+            new_body_key = (email_body or "")[:200].strip()
+            if new_body_key:
+                already_seen = any(
+                    (ext(d["fields"].get("回复原文")) or "")[:200].strip() == new_body_key
+                    for d in all_matched
+                )
+                if already_seen:
+                    print(f"[reply_monitor] dedup: skip {from_addr} body already processed")
+                    results.append({"brand": brand, "from": from_addr, "skipped": "duplicate_body"})
+                    continue
 
             # === OOO 自动回复检测 (在 AI 分类前) ===
             ooo_hit, ooo_frag = is_ooo(subject, email_body)
