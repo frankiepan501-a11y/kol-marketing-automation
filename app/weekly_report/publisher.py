@@ -283,42 +283,95 @@ def _safe_get(d: dict, *keys, default=None):
 
 
 def _build_bitable_fields(collected: dict, start_date, end_date, doc_url: str) -> dict:
-    """组装历史表 21 字段 (容错: collector 失败时跳过对应字段, 不写空值)."""
+    """组装历史表字段 (字段名带空格, 与 SEO 周报历史 Bitable schema 一致).
+
+    容错: collector 失败时跳过对应字段, 不写空值.
+    """
     fields = {
         "周次": f"{start_date}~{end_date}",
         "起始日期": int(datetime.datetime.combine(start_date, datetime.time.min).timestamp() * 1000),
         "文档链接": {"link": doc_url, "text": "查看周报"} if doc_url else None,
     }
 
-    # GA4 双站
+    # GA4 双站 - 注意字段名都带空格 + 跳出率%/平均停留秒 单位
     pk = _safe_get(collected, "ga4", "data", "powkong", "core") or {}
     fl = _safe_get(collected, "ga4", "data", "funlab", "core") or {}
     if pk.get("active_users") is not None:
-        fields["Powkong浏览量"] = pk.get("sessions")
-        fields["Powkong访客"] = pk.get("active_users")
-        fields["Powkong跳出率"] = pk.get("bounce_rate")
-        fields["Powkong平均停留"] = pk.get("avg_engagement_time")
+        fields["Powkong 浏览量"] = pk.get("sessions")
+        fields["Powkong 访客"] = pk.get("active_users")
+        # bounce_rate 是 0-1 的小数, 表里 "%" 字段存数字 (如 67.45)
+        fields["Powkong 跳出率%"] = round((pk.get("bounce_rate") or 0) * 100, 2)
+        fields["Powkong 平均停留秒"] = round(pk.get("avg_engagement_time") or 0, 1)
     if fl.get("active_users") is not None:
-        fields["Funlab浏览量"] = fl.get("sessions")
-        fields["Funlab访客"] = fl.get("active_users")
-        fields["Funlab跳出率"] = fl.get("bounce_rate")
-        fields["Funlab平均停留"] = fl.get("avg_engagement_time")
+        fields["Funlab 浏览量"] = fl.get("sessions")
+        fields["Funlab 访客"] = fl.get("active_users")
+        fields["Funlab 跳出率%"] = round((fl.get("bounce_rate") or 0) * 100, 2)
+        fields["Funlab 平均停留秒"] = round(fl.get("avg_engagement_time") or 0, 1)
 
-    # GSC
+    # GSC (字段名「Powkong GSC 点击」中间有空格)
     pk_g = _safe_get(collected, "gsc", "data", "powkong", "summary") or {}
     fl_g = _safe_get(collected, "gsc", "data", "funlab", "summary") or {}
     if pk_g.get("clicks") is not None:
-        fields["Powkong GSC点击"] = pk_g.get("clicks")
-        fields["Powkong GSC展现"] = pk_g.get("impressions")
+        fields["Powkong GSC 点击"] = pk_g.get("clicks")
+        fields["Powkong GSC 展现"] = pk_g.get("impressions")
     if fl_g.get("clicks") is not None:
-        fields["Funlab GSC点击"] = fl_g.get("clicks")
-        fields["Funlab GSC展现"] = fl_g.get("impressions")
+        fields["Funlab GSC 点击"] = fl_g.get("clicks")
+        fields["Funlab GSC 展现"] = fl_g.get("impressions")
 
-    # 博客占比 (来自 GA4 utm_kol 或简化)
-    # Phase 3.2: 加博客占比字段 (GA4 dimension landingPagePath ~ /blogs/news/)
+    # 周变化% / 博客占比% 等需要 history baseline, Phase 4.2 加
 
-    # drop None values
     return {k: v for k, v in fields.items() if v is not None}
+
+
+# ============== 2.6. HTML 上传 Bitable 附件字段 ==============
+HISTORY_HTML_FIELD = "📄 HTML 视觉版"  # field_id=fldSfCiBPF
+
+
+async def _upload_html_to_bitable(html_str: str, week_label: str) -> str:
+    """multipart 上传 HTML 到 bitable_file (parent_type=bitable_file). 返回 file_token."""
+    from app import feishu
+
+    tok = await feishu.token("bitable")
+    file_bytes = html_str.encode("utf-8")
+    file_name = f"周报视觉版_W{week_label}.html"
+
+    boundary = "WeeklyHTMLBoundary" + str(int(time.time() * 1000))
+    parts = []
+    fields = [
+        ("file_name", file_name),
+        ("parent_type", "bitable_file"),
+        ("parent_node", HISTORY_APP),
+        ("size", str(len(file_bytes))),
+    ]
+    for k, v in fields:
+        parts.append(f"--{boundary}\r\n".encode())
+        parts.append(f'Content-Disposition: form-data; name="{k}"\r\n\r\n'.encode())
+        parts.append(v.encode("utf-8"))
+        parts.append(b"\r\n")
+    parts.append(f"--{boundary}\r\n".encode())
+    parts.append(f'Content-Disposition: form-data; name="file"; filename="{file_name}"\r\n'.encode("utf-8"))
+    parts.append(b"Content-Type: text/html; charset=utf-8\r\n\r\n")
+    parts.append(file_bytes)
+    parts.append(b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+
+    body = b"".join(parts)
+
+    async with httpx.AsyncClient(timeout=120.0) as cli:
+        r = await cli.post(
+            "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
+            content=body,
+            headers={
+                "Authorization": f"Bearer {tok}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+        r.raise_for_status()
+        data = r.json()
+        ft = (data.get("data") or {}).get("file_token")
+        if not ft:
+            raise RuntimeError(f"upload no file_token: {data}")
+        return ft
 
 
 async def _write_history_bitable(fields: dict) -> dict:
@@ -330,8 +383,8 @@ async def _write_history_bitable(fields: dict) -> dict:
 
 
 # ============== 4. 飞书消息推送 ==============
-def _build_card(title: str, summary: str, doc_url: str, gaps: list) -> dict:
-    """飞书 interactive 卡片 (v1 schema, 默认). 标题 + 关键洞察 + docx 链接按钮 + 缺口标."""
+def _build_card(title: str, summary: str, doc_url: str, gaps: list, history_url: str = "") -> dict:
+    """飞书 interactive 卡片 (v1 schema). 标题 + 关键洞察 + docx 按钮 + HTML 视觉版按钮 + 缺口标."""
     elements = [
         {"tag": "div", "text": {"tag": "lark_md", "content": summary}},
     ]
@@ -342,14 +395,15 @@ def _build_card(title: str, summary: str, doc_url: str, gaps: list) -> dict:
                 "content": f"⚠️ **数据缺口 {len(gaps)} 项** — 部分 collector 失败, 详见周报「数据缺口」段",
             }
         })
+    btns = []
     if doc_url:
-        elements.append({
-            "tag": "action",
-            "actions": [{
-                "tag": "button", "text": {"tag": "plain_text", "content": "查看完整周报"},
-                "type": "primary", "url": doc_url,
-            }],
-        })
+        btns.append({"tag": "button", "text": {"tag": "plain_text", "content": "查看完整周报"},
+                     "type": "primary", "url": doc_url})
+    if history_url:
+        btns.append({"tag": "button", "text": {"tag": "plain_text", "content": "📄 HTML 视觉版"},
+                     "type": "default", "url": history_url})
+    if btns:
+        elements.append({"tag": "action", "actions": btns})
     # v1 schema: 顶层 elements (无 schema 字段, 不要写 "schema": "2.0")
     return {
         "config": {"wide_screen_mode": True},
@@ -435,30 +489,34 @@ async def publish(html_str: str, markdown: str, collected: dict, start_date, end
         result["actions"].append({"step": "docx_create", "ok": False,
                                     "error": "WEEKLY_REPORT_PARENT_NODE env 未设, 跳过 docx 创建"})
 
-    # 1.5. HTML 视觉版上传到 docx 末尾作 file 附件
-    if docx_obj and html_str:
+    # 1.5. HTML 视觉版 - 上传到 Bitable 作附件 (方案 c, Phase 4.1)
+    html_file_token = ""
+    if html_str:
         try:
-            ft = await _upload_html_to_docx(docx_obj, html_str, week_label.replace("W", ""))
-            await _append_html_file_block(docx_obj, ft, week_label.replace("W", ""), blocks_written)
-            result["actions"].append({"step": "html_attach", "ok": True,
-                                        "file_token": ft, "html_size": len(html_str)})
+            html_file_token = await _upload_html_to_bitable(html_str, week_label.replace("W", ""))
+            result["actions"].append({"step": "html_upload_bitable", "ok": True,
+                                        "file_token": html_file_token, "html_size": len(html_str)})
         except Exception as e:
-            log.exception("html attach failed")
-            result["actions"].append({"step": "html_attach", "ok": False, "error": str(e)[:300]})
+            log.exception("html upload to bitable failed")
+            result["actions"].append({"step": "html_upload_bitable", "ok": False, "error": str(e)[:300]})
 
-    # 2. Bitable 入历史
+    # 2. Bitable 入历史 (含 HTML 附件)
     try:
         fields = _build_bitable_fields(collected, start_date, end_date, doc_url)
+        if html_file_token:
+            fields[HISTORY_HTML_FIELD] = [{"file_token": html_file_token}]
         rec = await _write_history_bitable(fields)
         result["actions"].append({"step": "bitable_write", "ok": True,
-                                    "record_id": rec.get("record_id"), "fields_count": len(fields)})
+                                    "record_id": rec.get("record_id"), "fields_count": len(fields),
+                                    "html_attached": bool(html_file_token)})
     except Exception as e:
         log.exception("bitable write failed")
-        result["actions"].append({"step": "bitable_write", "ok": False, "error": str(e)})
+        result["actions"].append({"step": "bitable_write", "ok": False, "error": str(e)[:300]})
 
-    # 3. 飞书消息推送
+    # 3. 飞书消息推送 (含 HTML 视觉版按钮 if 上传成功)
     summary = _summary_from_collected(collected, start_date, end_date)
-    card = _build_card(title, summary, doc_url, gaps)
+    history_url = f"https://u1wpma3xuhr.feishu.cn/base/{HISTORY_APP}?table={HISTORY_TABLE}" if html_file_token else ""
+    card = _build_card(title, summary, doc_url, gaps, history_url=history_url)
     notified = []
     for name, oid in RECIPIENTS_OPEN_IDS:
         ok, err = await _send_card(oid, card)

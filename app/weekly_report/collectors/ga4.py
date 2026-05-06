@@ -41,8 +41,10 @@ import json
 log = logging.getLogger("weekly_report.ga4")
 
 # Property IDs
+# PK = powkong.com (Shopify)
+# FL = funlabswitch.com (Shopline) — 旧 memory 写 399581026 是错的, 真实值见 GA4 后台 Shopline—FUNLAB 账号
 PK_PROPERTY = "512451371"
-FL_PROPERTY = "399581026"
+FL_PROPERTY = "403214709"
 
 UTM_KOL_VALUES = ["kol_dm", "editor_pr", "kol", "editor", "kol_email"]
 
