@@ -220,11 +220,11 @@ async def _classify_interest(original_body: str) -> dict:
   - ✓ "Option 1" / "1." (回复编号选项时选 1)
   - ✓ "I would love a sample" / "happy to receive a sample"
   - 关键判别: **明确表达"要 sample 这个东西"**, 但缺地址 → need_address (不是再问选项!)
-- short_only: **明确表态只做 short-form 内容 (YouTube Short / TikTok / IG Reels)**
-  - ✓ "I only do shorts" / "shorts only" / "I only make YouTube Shorts"
-  - ✓ "I don't do long-form" / "no normal videos"
-  - ✓ "Just shorts" / "Reels only"
-  - ⚠️ 注意: 是表态"只做"短形式,不是"想要 sample 来拍 short"。后者归 need_address 或 ship_confirm。
+- short_only: **涉及 short-form 内容 + 不愿免费做 normal 长视频** 的两种 case:
+  ① 表态只做 short-form: "I only do shorts" / "shorts only" / "I only make YouTube Shorts" / "Just shorts" / "Reels only" / "I don't do long-form"
+  ② **愿意免费做 short + normal 长视频要付费 / 不愿做**: "I'd do a Short. Normal video would need a fee" / "Happy to do a Short, but for long-form I charge $XXX" / "Short is fine, normal video has a rate"
+  关键判别: 触达点是 **"short 可以免费 + long-form 不能免费"**。我们对此用 affiliate 模式回应 (短免费寄样 + 长视频按佣金分成),把"付费 normal"转换成"免费但按转化分成",所以这两 case 都归 short_only,不归 quote/general。
+  ⚠️ 注意: 不是"想要 sample 来拍 short" (这归 need_address)。是"表态了 short 形式偏好"。
 - send_assets: 想要更多产品资料 / PDF / 详细介绍 / 高清图 / 产品对比, 还没准备好接收实物
 - schedule_call: 想要视频会议 / 电话沟通 / Zoom / Meet / Google call
 - general: **泛泛感兴趣无明确诉求** (如 "Sounds cool, tell me more!" / "Interesting!" / "Looks awesome, would love to check it out"), 需要追问对方想要什么
