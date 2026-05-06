@@ -72,6 +72,17 @@ TEMPLATE_NEED_ADDRESS = (
     "Best,\n{signature}"
 )
 
+# +7d 内容提醒 (寄样签收后 7 天没动静,主动 ping)
+TEMPLATE_CONTENT_REMINDER = (
+    "Hi {first_name},\n\n"
+    "Hope the {product_name} arrived safely! Just a friendly nudge — would love "
+    "to hear your first impressions when you have a chance.\n\n"
+    "If you're working on a video / post around it, feel free to drop the link "
+    "or a draft thumbnail my way — happy to amplify on our end too.\n\n"
+    "Anything we can do to make it easier?\n\n"
+    "Best,\n{signature}"
+)
+
 # 第 2 封追加运单号 (auto_send 在第 1 封发出后自动建草稿, 待运营填运单号)
 TEMPLATE_TRACKING_FOLLOWUP = (
     "Hi {first_name},\n\n"
