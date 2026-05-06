@@ -115,13 +115,32 @@ async def _fetch_brand(property_id: str, start_date, end_date) -> dict:
         "metrics": [{"name": "userEngagementDuration"}, {"name": "engagedSessions"}],
     }
 
-    # 2. 流量来源
+    # 2. 流量来源 (粗分类)
     chan_body = {
         "dateRanges": [dr],
         "dimensions": [{"name": "sessionDefaultChannelGroup"}],
         "metrics": [{"name": "sessions"}, {"name": "totalRevenue"}],
         "orderBys": [{"metric": {"metricName": "sessions"}, "desc": True}],
         "limit": 12,
+    }
+
+    # 2.1 社媒平台细分 (sessionSource 含 social 类前缀, 后续过滤)
+    social_body = {
+        "dateRanges": [dr],
+        "dimensions": [{"name": "sessionSource"}, {"name": "sessionMedium"}],
+        "metrics": [{"name": "sessions"}, {"name": "totalRevenue"}],
+        "orderBys": [{"metric": {"metricName": "sessions"}, "desc": True}],
+        "limit": 30,
+    }
+
+    # 2.2 国家流量分布 Top 10
+    country_body = {
+        "dateRanges": [dr],
+        "dimensions": [{"name": "country"}],
+        "metrics": [{"name": "sessions"}, {"name": "totalRevenue"},
+                    {"name": "ecommercePurchases"}],
+        "orderBys": [{"metric": {"metricName": "sessions"}, "desc": True}],
+        "limit": 10,
     }
 
     # 3. UTM KOL/Editor 过滤
@@ -158,11 +177,13 @@ async def _fetch_brand(property_id: str, start_date, end_date) -> dict:
         },
     }
 
-    # 并发 5 个 reports
-    core_r, eng_r, chan_r, utm_r, utm_camp_r, funnel_r = await asyncio.gather(
+    # 并发 8 个 reports (含新加 social + country)
+    core_r, eng_r, chan_r, social_r, country_r, utm_r, utm_camp_r, funnel_r = await asyncio.gather(
         _run_report(property_id, core_body),
         _run_report(property_id, eng_body),
         _run_report(property_id, chan_body),
+        _run_report(property_id, social_body),
+        _run_report(property_id, country_body),
         _run_report(property_id, utm_body),
         _run_report(property_id, utm_camp_body),
         _run_report(property_id, funnel_body),
@@ -190,13 +211,74 @@ async def _fetch_brand(property_id: str, start_date, end_date) -> dict:
     core["engaged_sessions"] = int(engaged_sess)
     core["engagement_rate"] = round(engaged_sess / max(core["sessions"], 1), 4)
 
-    # 流量来源
+    # 流量来源 (粗分类)
     channels = []
     for row in (chan_r.get("rows") or []):
         name = (row.get("dimensionValues") or [{}])[0].get("value", "?")
         sess = int(_parse_metric(row, 0))
         rev = round(_parse_metric(row, 1), 2)
         channels.append({"channel": name, "sessions": sess, "revenue": rev})
+
+    # 社媒平台细分 (按 sessionSource 关键字归类)
+    SOCIAL_PLATFORMS = {
+        "facebook": ["facebook", "fb", "m.facebook", "l.facebook"],
+        "instagram": ["instagram", "ig", "l.instagram"],
+        "tiktok": ["tiktok", "tt", "ads.tiktok"],
+        "youtube": ["youtube", "yt", "m.youtube"],
+        "twitter": ["twitter", "x.com", "t.co"],
+        "pinterest": ["pinterest"],
+        "reddit": ["reddit", "old.reddit"],
+        "threads": ["threads"],
+    }
+    social_breakdown = {k: {"sessions": 0, "revenue": 0.0} for k in SOCIAL_PLATFORMS}
+    social_breakdown["other_social"] = {"sessions": 0, "revenue": 0.0}
+    for row in (social_r.get("rows") or []):
+        dvs = row.get("dimensionValues") or []
+        source = (dvs[0].get("value") if dvs else "").lower()
+        medium = (dvs[1].get("value") if len(dvs) > 1 else "").lower()
+        sess = int(_parse_metric(row, 0))
+        rev = round(_parse_metric(row, 1), 2)
+        # 仅算 social (medium 包含 social 或 source 命中已知社媒)
+        is_social = "social" in medium or any(
+            kw in source for kws in SOCIAL_PLATFORMS.values() for kw in kws
+        )
+        if not is_social:
+            continue
+        matched = None
+        for plat, kws in SOCIAL_PLATFORMS.items():
+            if any(kw in source for kw in kws):
+                matched = plat
+                break
+        bucket = matched or "other_social"
+        social_breakdown[bucket]["sessions"] += sess
+        social_breakdown[bucket]["revenue"] = round(social_breakdown[bucket]["revenue"] + rev, 2)
+    social_total = sum(v["sessions"] for v in social_breakdown.values())
+    social_list = []
+    for plat in ["facebook", "instagram", "tiktok", "youtube", "twitter",
+                 "pinterest", "reddit", "threads", "other_social"]:
+        v = social_breakdown[plat]
+        if v["sessions"] > 0:
+            social_list.append({
+                "platform": plat,
+                "sessions": v["sessions"],
+                "revenue": v["revenue"],
+                "pct": round(v["sessions"] / max(social_total, 1), 4),
+            })
+
+    # 国家流量分布 Top 10
+    countries = []
+    country_total_sess = 0
+    for row in (country_r.get("rows") or []):
+        name = (row.get("dimensionValues") or [{}])[0].get("value", "?")
+        sess = int(_parse_metric(row, 0))
+        rev = round(_parse_metric(row, 1), 2)
+        purch = int(_parse_metric(row, 2))
+        countries.append({"country": name, "sessions": sess, "revenue": rev,
+                           "purchases": purch})
+        country_total_sess += sess
+    for c in countries:
+        c["pct"] = round(c["sessions"] / max(country_total_sess, 1), 4)
+        c["cvr"] = round(c["purchases"] / max(c["sessions"], 1), 4)
 
     # UTM KOL
     utm_row = (utm_r.get("rows") or [{}])[0] if utm_r.get("rows") else {}
@@ -226,6 +308,8 @@ async def _fetch_brand(property_id: str, start_date, end_date) -> dict:
     return {
         "core": core,
         "channels": channels,
+        "social_breakdown": social_list,
+        "countries": countries,
         "utm_kol": utm,
         "funnel": funnel,
     }

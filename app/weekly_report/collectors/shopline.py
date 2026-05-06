@@ -80,6 +80,58 @@ async def _fetch_all_orders(start_date, end_date) -> list:
     return orders
 
 
+def _calc_top_products(orders: list, top_n: int = 10) -> list:
+    """聚合 line_items → 按销量排序的 top N 产品 (Shopline).
+
+    Shopline line_items 字段名兜底: items / line_items / order_items
+    单字段兜底: product_title/title, sku/product_sku, quantity, price/unit_price
+    """
+    by_product = defaultdict(lambda: {"title": "", "sku": "", "qty": 0,
+                                       "revenue": 0.0, "orders": set()})
+    total_qty = 0
+    total_revenue = 0.0
+    paid_only = [o for o in orders if (o.get("financial_status") or "").lower() == "paid"]
+
+    def li_field(li, *keys, default=None):
+        for k in keys:
+            v = li.get(k)
+            if v is not None:
+                return v
+        return default
+
+    for o in paid_only:
+        oid = o.get("id") or o.get("name") or o.get("order_number")
+        items = o.get("line_items") or o.get("items") or o.get("order_items") or []
+        for li in items:
+            pid = li_field(li, "product_id", "variant_id", "title", default="?")
+            qty = int(li_field(li, "quantity", "qty", default=0) or 0)
+            price = float(li_field(li, "price", "unit_price", "item_price", default=0) or 0)
+            rev = price * qty
+            entry = by_product[pid]
+            entry["title"] = li_field(li, "product_title", "title", "name") or entry["title"]
+            entry["sku"] = li_field(li, "sku", "product_sku") or entry["sku"]
+            entry["qty"] += qty
+            entry["revenue"] += rev
+            entry["orders"].add(oid)
+            total_qty += qty
+            total_revenue += rev
+
+    products = []
+    for pid, e in by_product.items():
+        products.append({
+            "product_id": pid,
+            "title": e["title"],
+            "sku": e["sku"],
+            "qty": e["qty"],
+            "revenue": round(e["revenue"], 2),
+            "qty_pct": round(e["qty"] / max(total_qty, 1), 4),
+            "revenue_pct": round(e["revenue"] / max(total_revenue, 1), 4),
+            "orders": len(e["orders"]),
+        })
+    products.sort(key=lambda p: (-p["qty"], -p["revenue"]))
+    return products[:top_n]
+
+
 def _calc_metrics(orders: list) -> dict:
     """从 Shopline 订单列表计算周报指标.
 
@@ -137,6 +189,7 @@ def _calc_metrics(orders: list) -> dict:
             "duplicate_email_24h": duplicate_24h,
         },
         "currency": currency,
+        "top_products": _calc_top_products(orders, top_n=10),
     }
 
 

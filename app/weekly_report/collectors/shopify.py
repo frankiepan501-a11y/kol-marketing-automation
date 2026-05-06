@@ -79,6 +79,48 @@ async def _fetch_all_orders(brand: str, start_date, end_date) -> list:
     return orders
 
 
+def _calc_top_products(orders: list, top_n: int = 10) -> list:
+    """聚合 line_items → 按销量排序的 top N 产品.
+
+    返回 [{product_id, title, sku, qty, revenue, qty_pct, revenue_pct, orders}, ...]
+    """
+    by_product = defaultdict(lambda: {"title": "", "sku": "", "qty": 0,
+                                       "revenue": 0.0, "orders": set()})
+    total_qty = 0
+    total_revenue = 0.0
+    paid_only = [o for o in orders if o.get("financial_status") == "paid"]
+    for o in paid_only:
+        oid = o.get("id") or o.get("name")
+        for li in (o.get("line_items") or []):
+            pid = li.get("product_id") or li.get("variant_id") or li.get("title")
+            qty = int(li.get("quantity") or 0)
+            price = float(li.get("price") or 0)
+            rev = price * qty
+            entry = by_product[pid]
+            entry["title"] = li.get("title") or entry["title"]
+            entry["sku"] = li.get("sku") or entry["sku"]
+            entry["qty"] += qty
+            entry["revenue"] += rev
+            entry["orders"].add(oid)
+            total_qty += qty
+            total_revenue += rev
+
+    products = []
+    for pid, e in by_product.items():
+        products.append({
+            "product_id": pid,
+            "title": e["title"],
+            "sku": e["sku"],
+            "qty": e["qty"],
+            "revenue": round(e["revenue"], 2),
+            "qty_pct": round(e["qty"] / max(total_qty, 1), 4),
+            "revenue_pct": round(e["revenue"] / max(total_revenue, 1), 4),
+            "orders": len(e["orders"]),
+        })
+    products.sort(key=lambda p: (-p["qty"], -p["revenue"]))
+    return products[:top_n]
+
+
 def _calc_metrics(orders: list) -> dict:
     """从订单列表计算周报指标."""
     paid = [o for o in orders if o.get("financial_status") == "paid"]
@@ -135,6 +177,7 @@ def _calc_metrics(orders: list) -> dict:
             "cancelled": len(cancelled),
             "duplicate_email_24h": duplicate_24h,
         },
+        "top_products": _calc_top_products(orders, top_n=10),
     }
 
 

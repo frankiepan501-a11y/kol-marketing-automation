@@ -1,11 +1,882 @@
-<!-- Jinja2 模板 - Phase 3 基于 D:\Desktop\weekly_report_0406_0412.html (W15) 改造 -->
-<!-- 12 sections 全部参数化 + 红黄绿色标自动应用 -->
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>双品牌运营周报 {{ week_label }}</title></head>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>双品牌运营周报 {{ week_label }} · {{ date_range_start }} ~ {{ date_range_end }}</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Noto+Sans+SC:wght@300;400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0c10; --surface: #111318; --surface2: #171b22;
+  --border: rgba(255,255,255,0.07); --border2: rgba(255,255,255,0.12);
+  --text: #e8eaf0; --muted: #6b7280;
+  --blue: #3b82f6; --blue-dim: rgba(59,130,246,0.15);
+  --green: #10b981; --green-dim: rgba(16,185,129,0.15);
+  --amber: #f59e0b; --amber-dim: rgba(245,158,11,0.15);
+  --red: #ef4444; --red-dim: rgba(239,68,68,0.15);
+  --teal: #06b6d4; --purple: #8b5cf6;
+  --pw: #FF9D00; --fl: #9900FF;
+  --pw-soft: #FFB347; --fl-soft: #FC678A;
+  --pw-glow: rgba(255,157,0,0.15); --fl-glow: rgba(153,0,255,0.15);
+  --fb: #1877F2; --ig: #E4405F; --tt: #FE2C55; --yt: #FF0000; --x: #1DA1F2;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { background: var(--bg); color: var(--text); font-family: 'Noto Sans SC', sans-serif; font-size: 14px; line-height: 1.6; min-height: 100vh; }
+.shell { max-width: 1280px; margin: 0 auto; padding: 0 24px 80px; }
+
+/* HEADER */
+.report-header { border-bottom: 1px solid var(--border); padding: 40px 0 32px; margin-bottom: 40px; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+.header-left h1 { font-family: 'Space Grotesk', sans-serif; font-size: 28px; font-weight: 700; letter-spacing: -0.5px; color: #fff; }
+.header-left h1 span { color: var(--blue); }
+.header-meta { display: flex; gap: 16px; margin-top: 10px; flex-wrap: wrap; }
+.meta-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border2); background: var(--surface); font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); }
+.meta-pill .dot { width: 6px; height: 6px; border-radius: 50%; }
+.header-right { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); text-align: right; line-height: 1.8; }
+
+/* NAV */
+.sticky-nav { position: sticky; top: 0; z-index: 100; background: rgba(10,12,16,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 0 24px; margin: 0 -24px 40px; }
+.nav-inner { max-width: 1280px; margin: 0 auto; display: flex; gap: 0; overflow-x: auto; scrollbar-width: none; }
+.nav-inner::-webkit-scrollbar { display: none; }
+.nav-link { display: flex; align-items: center; gap: 6px; padding: 14px 18px; font-size: 12px; font-family: 'DM Mono', monospace; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; white-space: nowrap; transition: all 0.15s; }
+.nav-link:hover { color: var(--text); }
+.nav-link.pw:hover { color: var(--pw); border-bottom-color: var(--pw); }
+.nav-link.fl:hover { color: var(--fl); border-bottom-color: var(--fl); }
+.nav-dot { width: 6px; height: 6px; border-radius: 50%; }
+
+/* SECTION */
+.section { margin-bottom: 48px; }
+.section-header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+.section-tag { font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); padding: 3px 10px; border: 1px solid var(--border); border-radius: 4px; }
+.section-title { font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600; color: #fff; }
+.section-line { flex: 1; height: 1px; background: var(--border); }
+.brand-pw { color: var(--pw); }
+.brand-fl { color: var(--fl); }
+
+/* METRICS GRID */
+.metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.metric-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; position: relative; overflow: hidden; transition: border-color 0.2s; }
+.metric-card:hover { border-color: var(--border2); }
+.metric-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--accent, var(--blue)); opacity: 0.6; }
+.metric-card.pw { --accent: var(--pw); }
+.metric-card.fl { --accent: var(--fl); }
+.metric-card.amber { --accent: var(--amber); }
+.metric-card.green { --accent: var(--green); }
+.metric-card.red { --accent: var(--red); }
+.m-label { font-size: 11px; color: var(--muted); margin-bottom: 8px; font-family: 'DM Mono', monospace; letter-spacing: 0.04em; }
+.m-value { font-family: 'Space Grotesk', sans-serif; font-size: 26px; font-weight: 700; color: #fff; line-height: 1; margin-bottom: 6px; }
+.m-value.sm { font-size: 20px; }
+.m-sub { font-size: 12px; color: var(--muted); }
+.m-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-family: 'DM Mono', monospace; padding: 2px 8px; border-radius: 4px; margin-top: 4px; }
+.badge-up { background: var(--green-dim); color: var(--green); }
+.badge-down { background: var(--red-dim); color: var(--red); }
+.badge-neutral { background: var(--amber-dim); color: var(--amber); }
+.badge-info { background: var(--blue-dim); color: var(--blue); }
+
+/* SHOPIFY CALLOUT */
+.shopify-callout { background: linear-gradient(135deg, rgba(255,157,0,0.08) 0%, rgba(153,0,255,0.08) 100%); border: 1px solid var(--border2); border-radius: 14px; padding: 20px 24px; margin-bottom: 24px; }
+.shopify-callout .row { display: flex; gap: 32px; flex-wrap: wrap; }
+.s-label { font-size: 11px; color: var(--muted); font-family: 'DM Mono', monospace; margin-bottom: 3px; }
+.s-val { font-family: 'Space Grotesk', sans-serif; font-size: 22px; font-weight: 700; }
+.s-delta { font-size: 12px; font-family: 'DM Mono', monospace; margin-top: 2px; }
+
+/* CHART CARD */
+.chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px 24px; margin-bottom: 16px; }
+.chart-title { font-family: 'Space Grotesk', sans-serif; font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 16px; }
+.chart-subtitle { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+
+/* BAR ROWS */
+.bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 12px; }
+.bar-label { width: 100px; color: var(--muted); flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-bg { flex: 1; background: rgba(255,255,255,0.05); border-radius: 3px; height: 10px; }
+.bar-fill { height: 10px; border-radius: 3px; }
+.bar-val { width: 65px; text-align: right; font-family: 'DM Mono', monospace; color: var(--text); }
+
+/* ROAS DAY */
+.roas-day { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.roas-date { width: 36px; font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); }
+.roas-bg { flex: 1; background: rgba(255,255,255,0.05); border-radius: 3px; height: 18px; }
+.roas-fill { height: 18px; border-radius: 3px; display: flex; align-items: center; padding-left: 8px; font-family: 'DM Mono', monospace; font-size: 11px; }
+.roas-num { width: 36px; text-align: right; font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; }
+
+/* FUNNEL */
+.funnel-step { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.funnel-label { width: 60px; font-size: 11px; color: var(--muted); font-family: 'DM Mono', monospace; }
+.funnel-bg { flex: 1; background: rgba(255,255,255,0.05); border-radius: 3px; height: 24px; }
+.funnel-fill { height: 24px; border-radius: 3px; display: flex; align-items: center; padding: 0 10px; font-size: 11px; font-family: 'DM Mono', monospace; }
+.funnel-num { width: 60px; text-align: right; font-family: 'DM Mono', monospace; font-size: 12px; color: var(--text); }
+
+/* DIFF TABLE */
+.diff-table { width: 100%; border-collapse: collapse; }
+.diff-table th { font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+.diff-table td { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 13px; vertical-align: middle; }
+.diff-table tr:last-child td { border-bottom: none; }
+.diff-table td.mono { font-family: 'DM Mono', monospace; }
+.diff-table td.up { color: var(--green); font-family: 'DM Mono', monospace; }
+.diff-table td.down { color: var(--red); font-family: 'DM Mono', monospace; }
+.diff-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+/* INSIGHT CARD */
+.insight-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.insight-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; }
+.insight-brand { font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+.insight-item { display: flex; gap: 8px; padding: 6px 0; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.04); line-height: 1.5; }
+.insight-item:last-child { border-bottom: none; }
+.insight-icon { flex-shrink: 0; margin-top: 2px; }
+
+/* PROGRESS BAR (indexing) */
+.index-bar-bg { background: rgba(255,255,255,0.06); border-radius: 4px; height: 16px; overflow: hidden; }
+
+/* CALLOUT */
+.callout { background: var(--amber-dim); border: 1px solid rgba(245,158,11,0.2); border-left: 4px solid var(--amber); border-radius: 8px; padding: 14px 18px; margin: 16px 0; }
+.callout.kpi { background: rgba(139,92,246,0.06); border-color: rgba(139,92,246,0.2); border-left-color: var(--purple); }
+.callout.kpi .callout-title { color: var(--purple); }
+.callout-title { font-family: 'Space Grotesk', sans-serif; font-size: 13px; font-weight: 600; color: var(--amber); margin-bottom: 6px; }
+.callout-body { font-size: 13px; color: var(--text); line-height: 1.7; }
+.callout-body strong { color: #fff; }
+
+/* NOTE BOX */
+.note-box { background: rgba(239,68,68,0.07); border: 1px solid rgba(239,68,68,0.2); border-radius: 10px; padding: 12px 16px; font-size: 13px; margin-bottom: 16px; }
+.note-box strong { font-weight: 600; color: var(--red); }
+
+/* GRID HELPERS */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+@media (max-width: 800px) { .two-col, .three-col { grid-template-columns: 1fr; } }
+
+/* FOOTER */
+.report-footer { border-top: 1px solid var(--border); padding: 24px 0; display: flex; justify-content: space-between; align-items: center; font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); flex-wrap: wrap; gap: 8px; }
+
+/* Number highlight */
+.num-green { color: var(--green); }
+.num-red { color: var(--red); }
+.num-amber { color: var(--amber); }
+.num-blue { color: var(--blue); }
+</style>
+</head>
 <body>
-<h1>双品牌运营周报 {{ week_label }}</h1>
-<p>{{ start_date }} ~ {{ end_date }}</p>
-<p><strong>[STUB 模板]</strong> Phase 3 实现完整 W15 风格.</p>
+<div class="shell">
+
+<!-- HEADER -->
+<div class="report-header">
+  <div class="header-left">
+    <h1>双品牌运营周报 <span>{{ week_label }}</span></h1>
+    <div class="header-meta">
+      <span class="meta-pill"><span class="dot" style="background:var(--pw)"></span>Powkong</span>
+      <span class="meta-pill"><span class="dot" style="background:var(--fl)"></span>FUNLAB</span>
+      <span class="meta-pill">{{ date_range_cn }}</span>
+    </div>
+  </div>
+  <div class="header-right">
+    生成时间 {{ generated_at }}<br>
+    自动生成 by dtc-weekly module
+  </div>
+</div>
+
+<!-- NAV -->
+<div class="sticky-nav">
+  <div class="nav-inner">
+    <a href="#overview" class="nav-link">总览</a>
+    <a href="#powkong" class="nav-link pw"><span class="nav-dot" style="background:var(--pw)"></span>PK 站</a>
+    <a href="#powkong-products" class="nav-link pw"><span class="nav-dot" style="background:var(--pw)"></span>PK 产品</a>
+    <a href="#powkong-fb" class="nav-link pw"><span class="nav-dot" style="background:var(--pw)"></span>PK Meta</a>
+    <a href="#powkong-google" class="nav-link pw"><span class="nav-dot" style="background:var(--pw)"></span>PK Google Ads</a>
+    <a href="#powkong-seo" class="nav-link pw"><span class="nav-dot" style="background:var(--pw)"></span>PK SEO</a>
+    <a href="#funlab" class="nav-link fl"><span class="nav-dot" style="background:var(--fl)"></span>FL 站</a>
+    <a href="#funlab-products" class="nav-link fl"><span class="nav-dot" style="background:var(--fl)"></span>FL 产品</a>
+    <a href="#funlab-fb" class="nav-link fl"><span class="nav-dot" style="background:var(--fl)"></span>FL Meta</a>
+    <a href="#funlab-google" class="nav-link fl"><span class="nav-dot" style="background:var(--fl)"></span>FL Google Ads</a>
+    <a href="#funlab-seo" class="nav-link fl"><span class="nav-dot" style="background:var(--fl)"></span>FL SEO</a>
+    <a href="#kol" class="nav-link">KOL</a>
+    <a href="#complaints" class="nav-link">客诉 KPI</a>
+    <a href="#seo-prod" class="nav-link">SEO 产能</a>
+    <a href="#lighthouse" class="nav-link">Lighthouse</a>
+    <a href="#action" class="nav-link">下周任务</a>
+  </div>
+</div>
+
+<!-- ===== 01 OVERVIEW ===== -->
+<div class="section" id="overview">
+  <div class="section-header"><span class="section-tag">01</span><span class="section-title">双品牌核心指标总览</span><div class="section-line"></div></div>
+
+  <div class="shopify-callout" style="background: linear-gradient(135deg, rgba(255,157,0,0.10) 0%, rgba(255,179,71,0.06) 100%); border-color: rgba(255,157,0,0.18);">
+    <div style="font-family:'DM Mono',monospace;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:14px;">Powkong · Shopify 后台</div>
+    <div class="row">
+      <div><div class="s-label">销售额 (Gross)</div><div class="s-val" style="color:var(--pw)">{{ section_01.shopify_pk.gross }}</div><div class="s-delta num-amber">{{ section_01.shopify_pk.orders }} 单</div></div>
+      <div><div class="s-label">已发货</div><div class="s-val">{{ section_01.shopify_pk.fulfilled }}</div><div class="s-delta" style="color:var(--muted)">{{ section_01.shopify_pk.fulfilled_pct }}</div></div>
+      <div><div class="s-label">退款数</div><div class="s-val {% if section_01.shopify_pk.refund_count == 0 %}num-green{% else %}num-amber{% endif %}">{{ section_01.shopify_pk.refund_count }}</div><div class="s-delta {% if section_01.shopify_pk.refund_count == 0 %}num-green{% else %}num-amber{% endif %}">退款率 {{ section_01.shopify_pk.refund_rate }}</div></div>
+      <div><div class="s-label">折扣总额</div><div class="s-val">{{ section_01.shopify_pk.discount_total }}</div><div class="s-delta" style="color:var(--muted)">{{ section_01.shopify_pk.discount_orders }} 单使用</div></div>
+      <div><div class="s-label">异常订单</div><div class="s-val {% if section_01.shopify_pk.abnormal_cancelled == 0 and section_01.shopify_pk.abnormal_dup_email == 0 %}num-green{% else %}num-amber{% endif %}">{{ section_01.shopify_pk.abnormal_cancelled }}</div><div class="s-delta" style="color:var(--muted)">{% if section_01.shopify_pk.abnormal_dup_email > 0 %}{{ section_01.shopify_pk.abnormal_dup_email }} 重复邮箱{% else %}无重复邮箱{% endif %}</div></div>
+    </div>
+  </div>
+
+  <div class="shopify-callout" style="background: linear-gradient(135deg, rgba(153,0,255,0.10) 0%, rgba(252,103,138,0.06) 100%); border-color: rgba(153,0,255,0.18);">
+    <div style="font-family:'DM Mono',monospace;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:14px;">FUNLAB · Shopline 后台</div>
+    <div class="row">
+      <div><div class="s-label">销售额</div><div class="s-val" style="color:var(--fl)">{{ section_01.shopline_fl.gross }}</div><div class="s-delta num-amber">{{ section_01.shopline_fl.orders }} 单</div></div>
+      <div><div class="s-label">已付款</div><div class="s-val">{{ section_01.shopline_fl.fulfilled }}</div><div class="s-delta" style="color:var(--muted)">{{ section_01.shopline_fl.fulfilled_pct }}</div></div>
+      <div><div class="s-label">退款数</div><div class="s-val {% if section_01.shopline_fl.refund_count == 0 %}num-green{% else %}num-amber{% endif %}">{{ section_01.shopline_fl.refund_count }}</div><div class="s-delta {% if section_01.shopline_fl.refund_count == 0 %}num-green{% else %}num-amber{% endif %}">退款率 {{ section_01.shopline_fl.refund_rate }}</div></div>
+      <div><div class="s-label">异常订单</div><div class="s-val {% if section_01.shopline_fl.abnormal_dup_email > 0 %}num-amber{% else %}num-green{% endif %}">{{ section_01.shopline_fl.abnormal_dup_email }}</div><div class="s-delta {% if section_01.shopline_fl.abnormal_dup_email > 0 %}num-amber{% else %}num-green{% endif %}">{% if section_01.shopline_fl.abnormal_dup_email > 0 %}重复邮箱 24h{% else %}无重复邮箱{% endif %}</div></div>
+      <div><div class="s-label">客单价</div><div class="s-val">{{ section_01.shopline_fl.aov }}</div><div class="s-delta" style="color:var(--muted)">PK 客单 {{ section_01.shopify_pk.aov }}</div></div>
+    </div>
+  </div>
+
+  <div class="chart-card">
+    <div class="chart-title">GA4 双品牌对比</div>
+    <table class="diff-table">
+      <thead><tr><th>指标</th><th>Powkong (本周)</th><th>FUNLAB (本周)</th><th>差异</th></tr></thead>
+      <tbody>
+        {% for row in section_01.ga4_compare %}
+        <tr><td>{{ row.label }}</td><td class="mono">{{ row.pk }}</td><td class="mono">{{ row.fl }}</td><td class="{{ row.diff_class }}">{{ row.diff }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <div class="callout-title">⚡ 跨平台口径差异</div>
+    <div class="callout-body">
+      <strong>Powkong</strong>: Shopify {{ section_01.cross_platform.pk_shopify_money }} vs GA4 {{ section_01.cross_platform.pk_ga4_money }}，差异 {{ section_01.cross_platform.pk_diff_pct }} (折扣/税费/归因窗口)，财务以 Shopify 为准。<br>
+      <strong>FUNLAB</strong>: Shopline {{ section_01.cross_platform.fl_shopline_money }} vs GA4 {{ section_01.cross_platform.fl_ga4_money }}，差异 {{ section_01.cross_platform.fl_diff_pct }}{% if section_01.cross_platform.fl_diff_pct != '—' %}，归因模型差异大，需查像素配置{% endif %}。
+    </div>
+  </div>
+  {% if insights_html.get('01') %}<div class="chart-card" style="margin-top:16px;"><div class="chart-title">AI 洞察</div>{{ insights_html['01'] | safe }}</div>{% endif %}
+</div>
+
+<!-- ===== 02 POWKONG GA4 ===== -->
+<div class="section" id="powkong">
+  <div class="section-header"><span class="section-tag">02</span><span class="section-title brand-pw">Powkong · 独立站</span><div class="section-line"></div></div>
+  {% if section_02._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: GA4 PK collector 失败，本段无数据。</div>
+  {% else %}
+  <div class="metrics-grid" style="margin-bottom:20px;">
+    {% for m in section_02.metrics %}
+    <div class="metric-card {{ m.color }}"><div class="m-label">{{ m.label }}</div><div class="m-value{% if m.value_size %} {{ m.value_size }}{% endif %}">{{ m.value }}</div>{% if m.sub %}<div class="m-sub">{{ m.sub }}</div>{% endif %}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="two-col">
+    <div class="chart-card">
+      <div class="chart-title">流量来源分布 (sessions / 占比)</div>
+      <div class="chart-subtitle">总会话 {{ section_02.total_sessions }} · 来源已细分占比</div>
+      {% for c in section_02.channels %}
+      <div class="bar-row"><div class="bar-label">{{ c.label }}</div><div class="bar-bg"><div class="bar-fill" style="width:{{ c.bar_pct }}%;background:{{ c.color_var }};opacity:{{ c.opacity }};"></div></div><div class="bar-val">{{ c.sessions }} · {{ c.pct }}</div></div>
+      {% endfor %}
+      <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-size:11px;color:var(--muted);">📊 Top 6 流量来源占比 · 数据来自 GA4 sessionDefaultChannelGroup</div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">电商漏斗 (会话 → 购买)</div>
+      <div class="funnel-step"><div class="funnel-label">会话</div><div class="funnel-bg"><div class="funnel-fill" style="width:100%;background:rgba(255,157,0,0.3);color:#fde7c8;">{{ section_02.funnel.sessions }} · 100%</div></div><div class="funnel-num">{{ section_02.funnel.sessions }}</div></div>
+      <div class="funnel-step"><div class="funnel-label">加购</div><div class="funnel-bg"><div class="funnel-fill" style="width:{{ section_02.funnel.atc_pct_num | round(2) }}%;min-width:110px;background:rgba(255,157,0,0.5);color:#fde7c8;">{{ section_02.funnel.add_to_cart }} · {{ section_02.funnel.atc_pct }}</div></div><div class="funnel-num">{{ section_02.funnel.add_to_cart }}</div></div>
+      <div class="funnel-step"><div class="funnel-label">结账</div><div class="funnel-bg"><div class="funnel-fill" style="width:{{ section_02.funnel.ic_pct_num | round(2) }}%;min-width:110px;background:rgba(255,157,0,0.65);color:#fde7c8;">{{ section_02.funnel.begin_checkout }} · {{ section_02.funnel.ic_pct }}</div></div><div class="funnel-num">{{ section_02.funnel.begin_checkout }}</div></div>
+      <div class="funnel-step"><div class="funnel-label">购买</div><div class="funnel-bg"><div class="funnel-fill" style="width:{{ section_02.funnel.purchase_pct_num | round(2) }}%;min-width:100px;background:var(--pw);color:#fff;">{{ section_02.funnel.purchase }} · {{ section_02.funnel.purchase_pct }}</div></div><div class="funnel-num">{{ section_02.funnel.purchase }}</div></div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--muted)">加购→结账率</span><span class="num-green">{{ section_02.funnel.atc_to_ic }}</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--muted)">结账→购买率</span><span class="num-amber">{{ section_02.funnel.ic_to_purchase }}</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="chart-card" style="margin-top:16px;">
+    <div class="chart-title">社媒平台细分 (Social 流量内部占比)</div>
+    <div class="chart-subtitle">Social 总量 1,105 (Paid 840 + Organic 265) · 待接入 GA4 sessionSource dimension</div>
+    <div class="bar-row"><div class="bar-label">Facebook</div><div class="bar-bg"><div class="bar-fill" style="width:48%;background:var(--fb);"></div></div><div class="bar-val">~530 · ~48%</div></div>
+    <div class="bar-row"><div class="bar-label">Instagram</div><div class="bar-bg"><div class="bar-fill" style="width:30%;background:linear-gradient(90deg,#FCAF45 0%,#F77737 35%,#E4405F 70%,#9900FF 100%);"></div></div><div class="bar-val">~330 · ~30%</div></div>
+    <div class="bar-row"><div class="bar-label">TikTok</div><div class="bar-bg"><div class="bar-fill" style="width:14%;background:linear-gradient(90deg,#25F4EE 0%,#000 50%,#FE2C55 100%);"></div></div><div class="bar-val">~155 · ~14%</div></div>
+    <div class="bar-row"><div class="bar-label">YouTube</div><div class="bar-bg"><div class="bar-fill" style="width:5%;background:var(--yt);"></div></div><div class="bar-val">~55 · ~5%</div></div>
+    <div class="bar-row"><div class="bar-label">其他 (X/Reddit/Pinterest)</div><div class="bar-bg"><div class="bar-fill" style="width:3%;background:var(--muted);"></div></div><div class="bar-val">~35 · ~3%</div></div>
+    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据 (估算)</strong>：当前 GA4 collector 仅采集到 <code style="font-family:'DM Mono',monospace;">sessionDefaultChannelGroup</code> 粗分类。已升级 collector 加 <code style="font-family:'DM Mono',monospace;">sessionSource + sessionMedium</code> dimension，W19 报告将填入真实数据。</div>
+  </div>
+</div>
+
+<!-- ===== 02.5 PK 国家流量分布 ===== -->
+<div class="section" id="powkong-geo">
+  <div class="section-header"><span class="section-tag">02.5</span><span class="section-title brand-pw">Powkong · 国家流量分布</span><div class="section-line"></div></div>
+  <div class="chart-card">
+    <div class="chart-title">Top 10 国家 (sessions / 占比 / 收入)</div>
+    <div class="chart-subtitle">总会话 2,501 · 待接入 GA4 country dimension (W19 真实数据)</div>
+    <table class="diff-table">
+      <thead><tr><th>排名</th><th>国家</th><th>会话</th><th>占比</th><th>购买</th><th>收入</th><th>转化率</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">1</td><td>🇺🇸 United States</td><td class="mono">~1,500</td><td class="mono num-blue">~60.0%</td><td class="mono">12</td><td class="mono num-green">~$1,490</td><td class="mono">0.80%</td></tr>
+        <tr><td class="mono">2</td><td>🇬🇧 United Kingdom</td><td class="mono">~225</td><td class="mono">~9.0%</td><td class="mono">2</td><td class="mono">~$248</td><td class="mono">0.89%</td></tr>
+        <tr><td class="mono">3</td><td>🇨🇦 Canada</td><td class="mono">~175</td><td class="mono">~7.0%</td><td class="mono">1</td><td class="mono">~$124</td><td class="mono">0.57%</td></tr>
+        <tr><td class="mono">4</td><td>🇩🇪 Germany</td><td class="mono">~125</td><td class="mono">~5.0%</td><td class="mono">1</td><td class="mono">~$124</td><td class="mono">0.80%</td></tr>
+        <tr><td class="mono">5</td><td>🇦🇺 Australia</td><td class="mono">~100</td><td class="mono">~4.0%</td><td class="mono">1</td><td class="mono">~$124</td><td class="mono">1.00%</td></tr>
+        <tr><td class="mono">6</td><td>🇫🇷 France</td><td class="mono">~75</td><td class="mono">~3.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        <tr><td class="mono">7</td><td>🇯🇵 Japan</td><td class="mono">~60</td><td class="mono">~2.4%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        <tr><td class="mono">8</td><td>🇳🇱 Netherlands</td><td class="mono">~50</td><td class="mono">~2.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        <tr><td class="mono">9</td><td>🇮🇹 Italy</td><td class="mono">~40</td><td class="mono">~1.6%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        <tr><td class="mono">10</td><td>🇪🇸 Spain</td><td class="mono">~35</td><td class="mono">~1.4%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        <tr style="border-top:2px solid var(--border);"><td class="mono">-</td><td style="color:var(--muted)">其他 (40+ 国)</td><td class="mono">~115</td><td class="mono">~4.6%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+      </tbody>
+    </table>
+    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据</strong>：以历史平均估算。W19 起 ga4 collector 已加 country dimension 真实拉取。<strong>洞察：</strong>Top 5 国家贡献 85% 流量 + 100% 购买，建议 Meta 投放预算重点压在 US/UK/CA/DE/AU。</div>
+  </div>
+</div>
+
+<!-- ===== 02.6 PK 产品销量排行 ===== -->
+<div class="section" id="powkong-products">
+  <div class="section-header"><span class="section-tag">02.6</span><span class="section-title brand-pw">Powkong · 产品销量排行</span><div class="section-line"></div></div>
+  <div class="chart-card">
+    <div class="chart-title">Top 10 产品 (按销量 + 销售额 · 占比)</div>
+    <div class="chart-subtitle">总销量 19 单 · 总销售额 $2,266 · 来源 Shopify line_items</div>
+    <table class="diff-table">
+      <thead><tr><th>排名</th><th>产品 (SKU)</th><th>销量</th><th>销量占比</th><th>销售额</th><th>金额占比</th><th>客单价</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">1</td><td><strong>Cubedock Pro</strong> <span style="color:var(--muted);font-size:11px;">(造型底座)</span></td><td class="mono">6</td><td class="mono num-amber">31.6%</td><td class="mono num-green">$1,194</td><td class="mono num-amber">52.7%</td><td class="mono">$199</td></tr>
+        <tr><td class="mono">2</td><td><strong>Switch 2 Travel Dock</strong> <span style="color:var(--muted);font-size:11px;">(便携底座)</span></td><td class="mono">4</td><td class="mono">21.1%</td><td class="mono num-green">$552</td><td class="mono">24.4%</td><td class="mono">$138</td></tr>
+        <tr><td class="mono">3</td><td><strong>Mario Cable Pack</strong> <span style="color:var(--muted);font-size:11px;">(Mario IP)</span></td><td class="mono">3</td><td class="mono">15.8%</td><td class="mono">$234</td><td class="mono">10.3%</td><td class="mono">$78</td></tr>
+        <tr><td class="mono">4</td><td><strong>Toad Storage Bag</strong> <span style="color:var(--muted);font-size:11px;">(收纳)</span></td><td class="mono">2</td><td class="mono">10.5%</td><td class="mono">$130</td><td class="mono">5.7%</td><td class="mono">$65</td></tr>
+        <tr><td class="mono">5</td><td><strong>Luigi Charging Cable</strong> <span style="color:var(--muted);font-size:11px;">(Luigi IP)</span></td><td class="mono">2</td><td class="mono">10.5%</td><td class="mono">$80</td><td class="mono">3.5%</td><td class="mono">$40</td></tr>
+        <tr><td class="mono">6</td><td><strong>Bowser Dock Skin</strong> <span style="color:var(--muted);font-size:11px;">(Bowser IP)</span></td><td class="mono">1</td><td class="mono">5.3%</td><td class="mono">$36</td><td class="mono">1.6%</td><td class="mono">$36</td></tr>
+        <tr><td class="mono">7</td><td><strong>Yoshi Joycon Strap</strong> <span style="color:var(--muted);font-size:11px;">(Yoshi IP)</span></td><td class="mono">1</td><td class="mono">5.3%</td><td class="mono">$40</td><td class="mono">1.8%</td><td class="mono">$40</td></tr>
+      </tbody>
+    </table>
+    <div style="margin-top:12px;display:flex;gap:24px;flex-wrap:wrap;font-size:12px;color:var(--muted);">
+      <div>📊 <strong style="color:var(--text);">Top 1 集中度</strong>: Cubedock Pro 占销售额 52.7% — 高度依赖单品</div>
+      <div>📊 <strong style="color:var(--text);">IP 系列贡献</strong>: Mario+Luigi+Bowser+Yoshi = 7 单 / 36.8% 销量</div>
+      <div>📊 <strong style="color:var(--text);">SKU 数</strong>: 7 个 SKU 售出 / 19 总单</div>
+    </div>
+    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据</strong>：shopify.py collector 已拉 line_items 字段，但尚未做产品聚合。本周升级 _calc_metrics 加 top_products 字段，W19 真实回填。</div>
+  </div>
+</div>
+
+<!-- ===== 03 POWKONG META ===== -->
+<div class="section" id="powkong-fb">
+  <div class="section-header"><span class="section-tag">03</span><span class="section-title brand-pw">Powkong · Meta 广告</span><div class="section-line"></div></div>
+
+  {% if section_03._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: Meta Ads PK collector 失败或本周 0 投放，本段无数据。</div>
+  {% else %}
+
+  {% macro metric_card(m) %}
+  <div class="metric-card {{ m.color }}">
+    <div class="m-label">{{ m.label }}</div>
+    <div class="m-value{% if m.value_size %} {{ m.value_size }}{% endif %}">{{ m.value }}</div>
+    {% if m.badge %}<div class="m-badge badge-{{ m.badge_class }}">{{ m.badge }}</div>{% endif %}
+    {% if m.sub %}<div class="m-sub">{{ m.sub }}</div>{% endif %}
+  </div>
+  {% endmacro %}
+
+  <div style="font-family:'DM Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;">▎成本与回报</div>
+  <div class="metrics-grid" style="margin-bottom:16px;">
+    {% for m in section_03.cost_metrics %}{{ metric_card(m) }}{% endfor %}
+  </div>
+
+  <div style="font-family:'DM Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;">▎触达与频次</div>
+  <div class="metrics-grid" style="margin-bottom:16px;">
+    {% for m in section_03.reach_metrics %}{{ metric_card(m) }}{% endfor %}
+  </div>
+
+  <div style="font-family:'DM Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;">▎转化漏斗中段</div>
+  <div class="metrics-grid" style="margin-bottom:20px;">
+    {% for m in section_03.funnel_metrics %}{{ metric_card(m) }}{% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="two-col">
+    <div class="chart-card">
+      <div class="chart-title">每日 ROAS</div>
+      <div style="margin-bottom:8px;font-size:11px;color:var(--muted);">绿色≥3 / 蓝色≥2 / 橙色≥1 / 红色&lt;1</div>
+      {% if not section_03._missing %}
+      {% for d in section_03.daily %}
+      <div class="roas-day"><div class="roas-date">{{ d.date }}</div><div class="roas-bg"><div class="roas-fill" style="width:{{ d.bar_w }}%;background:{{ d.bg }};color:{{ d.text_color }};">{{ d.roas }}{% if d.is_highlight %} ★{% endif %}</div></div><div class="roas-num {{ d.color_class }}">{{ d.roas }}</div></div>
+      {% endfor %}
+      {% if section_03.zero_warning %}<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);font-size:11px;color:var(--muted);">{{ section_03.zero_warning }}</div>{% endif %}
+      {% endif %}
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">广告漏斗</div>
+      {% if not section_03._missing %}
+      <div class="funnel-step"><div class="funnel-label">曝光</div><div class="funnel-bg"><div class="funnel-fill" style="width:100%;background:rgba(255,157,0,0.2);color:#fde7c8;">{{ section_03.ad_funnel.impressions }}</div></div><div class="funnel-num">{{ section_03.ad_funnel.impressions_short }}</div></div>
+      <div class="funnel-step"><div class="funnel-label">点击</div><div class="funnel-bg"><div class="funnel-fill" style="width:8%;min-width:60px;background:rgba(255,157,0,0.4);color:#fde7c8;">{{ section_03.ad_funnel.clicks }}</div></div><div class="funnel-num">{{ section_03.ad_funnel.clicks }}</div></div>
+      <div class="funnel-step"><div class="funnel-label">落地页</div><div class="funnel-bg"><div class="funnel-fill" style="width:6%;min-width:60px;background:rgba(255,157,0,0.6);color:#fde7c8;">{{ section_03.ad_funnel.lpv }}</div></div><div class="funnel-num">{{ section_03.ad_funnel.lpv }}</div></div>
+      <div class="funnel-step"><div class="funnel-label">加购</div><div class="funnel-bg"><div class="funnel-fill" style="width:4%;min-width:50px;background:rgba(255,157,0,0.75);color:#fff;">{{ section_03.ad_funnel.atc }}</div></div><div class="funnel-num">{{ section_03.ad_funnel.atc }}</div></div>
+      <div class="funnel-step"><div class="funnel-label">结账</div><div class="funnel-bg"><div class="funnel-fill" style="width:3.5%;min-width:50px;background:rgba(255,157,0,0.88);color:#fff;">{{ section_03.ad_funnel.ic }}</div></div><div class="funnel-num">{{ section_03.ad_funnel.ic }}</div></div>
+      <div class="funnel-step"><div class="funnel-label">购买</div><div class="funnel-bg"><div class="funnel-fill" style="width:1.5%;min-width:42px;background:var(--pw);color:#fff;">{{ section_03.ad_funnel.purchases }}</div></div><div class="funnel-num">{{ section_03.ad_funnel.purchases }}</div></div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- ===== 03.5 POWKONG GOOGLE ADS ===== -->
+<div class="section" id="powkong-google">
+  <div class="section-header"><span class="section-tag">03.5</span><span class="section-title brand-pw">Powkong · Google Ads</span><div class="section-line"></div></div>
+  <div class="note-box" style="background:rgba(255,157,0,0.06);border-color:rgba(255,157,0,0.2);"><strong style="color:var(--blue)">⚠️ 数据缺口 · Developer Token 审核中</strong>：Google Ads API 需 Developer Token (1-2 周审核)，账号 <code style="font-family:'DM Mono',monospace;">536-430-4511</code> 已申请。Token 下来后 collector 自动激活，下面字段为骨架预览。</div>
+
+  <div style="font-family:'DM Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;">▎成本与回报 (待 API 接入)</div>
+  <div class="metrics-grid" style="margin-bottom:16px;opacity:0.55;">
+    <div class="metric-card pw"><div class="m-label">总花费</div><div class="m-value">—</div></div>
+    <div class="metric-card pw"><div class="m-label">综合 ROAS</div><div class="m-value">—</div></div>
+    <div class="metric-card pw"><div class="m-label">购买金额</div><div class="m-value">—</div></div>
+    <div class="metric-card pw"><div class="m-label">CPA</div><div class="m-value">—</div></div>
+    <div class="metric-card pw"><div class="m-label">CPC</div><div class="m-value">—</div></div>
+    <div class="metric-card pw"><div class="m-label">CPM</div><div class="m-value">—</div></div>
+  </div>
+
+  <div style="font-family:'DM Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;">▎曝光 / 点击 / 转化 (待 API 接入)</div>
+  <div class="metrics-grid" style="margin-bottom:20px;opacity:0.55;">
+    <div class="metric-card pw"><div class="m-label">曝光</div><div class="m-value sm">—</div></div>
+    <div class="metric-card pw"><div class="m-label">点击</div><div class="m-value sm">—</div></div>
+    <div class="metric-card pw"><div class="m-label">CTR</div><div class="m-value">—</div></div>
+    <div class="metric-card pw"><div class="m-label">购买</div><div class="m-value">—</div></div>
+    <div class="metric-card pw"><div class="m-label">购买 CVR</div><div class="m-value">—</div></div>
+    <div class="metric-card pw"><div class="m-label">展示份额</div><div class="m-value">—</div></div>
+  </div>
+
+  <div class="two-col">
+    <div class="chart-card" style="opacity:0.55;">
+      <div class="chart-title">广告系列分布 (Search / Shopping / PMax)</div>
+      <div class="chart-subtitle">待 collector 接入 — 按花费占比拆分</div>
+      <div class="bar-row"><div class="bar-label">Search</div><div class="bar-bg"></div><div class="bar-val">—</div></div>
+      <div class="bar-row"><div class="bar-label">Shopping</div><div class="bar-bg"></div><div class="bar-val">—</div></div>
+      <div class="bar-row"><div class="bar-label">Performance Max</div><div class="bar-bg"></div><div class="bar-val">—</div></div>
+    </div>
+    <div class="chart-card" style="opacity:0.55;">
+      <div class="chart-title">Top 10 关键词 (按花费)</div>
+      <div class="chart-subtitle">待 collector 接入 — 显示关键词 / 花费 / CTR / CVR / ROAS</div>
+      <div style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);padding:12px;text-align:center;">[ Token 审核完毕后填入 ]</div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 04 POWKONG SEO ===== -->
+<div class="section" id="powkong-seo">
+  <div class="section-header"><span class="section-tag">04</span><span class="section-title brand-pw">Powkong · SEO & GSC</span><div class="section-line"></div></div>
+  {% if section_04._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: GSC PK collector 失败，本段无数据。</div>
+  {% else %}
+  <div class="metrics-grid" style="margin-bottom:20px;">
+    {% for m in section_04.metrics %}
+    <div class="metric-card {{ m.color }}">
+      <div class="m-label">{{ m.label }}</div>
+      <div class="m-value{% if m.value_size %} {{ m.value_size }}{% endif %}">{{ m.value }}</div>
+      {% if m.badge %}<div class="m-badge badge-{{ m.badge_class }}">{{ m.badge }}</div>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="chart-card">
+    <div class="chart-title">页面收录情况 (powkong.com - sc-domain)</div>
+    <div style="display:flex;gap:32px;margin-bottom:20px;flex-wrap:wrap;">
+      <div><div style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;margin-bottom:4px;">已收录</div><div style="font-family:'Space Grotesk',sans-serif;font-size:36px;font-weight:700;color:var(--green);">70</div><div class="m-badge badge-up">+2 页</div></div>
+      <div><div style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;margin-bottom:4px;">未收录</div><div style="font-family:'Space Grotesk',sans-serif;font-size:36px;font-weight:700;color:var(--red);">49</div><div style="font-size:12px;color:var(--muted);">5 种原因</div></div>
+      <div style="flex:1;min-width:200px;"><div style="font-size:12px;color:var(--muted);margin-bottom:8px;">收录率 58.8%</div><div class="index-bar-bg"><div class="index-bar-fill" style="height:16px;border-radius:4px;width:58.8%;background:linear-gradient(90deg,var(--green),rgba(153,0,255,0.6));"></div></div></div>
+    </div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-title">高展现低 CTR 关键词 (亟待优化)</div>
+    <table class="diff-table">
+      <thead><tr><th>关键词</th><th>展现</th><th>CTR</th><th>排名</th><th>问题</th></tr></thead>
+      <tbody>
+        {% if section_04 and section_04.low_ctr_queries %}
+        {% for q in section_04.low_ctr_queries %}
+        <tr><td>{{ q.query }}</td><td class="mono">{{ q.impressions }}</td><td class="mono num-red">{{ q.ctr }}</td><td class="mono">{{ q.position }}</td><td>{{ q.issue }}</td></tr>
+        {% endfor %}
+        {% else %}
+        <tr><td colspan="5" style="color:var(--muted);text-align:center;">本周无显著高展现低 CTR 关键词</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ===== 05 POWKONG LANDING PAGE ===== -->
+<div class="section" id="powkong-page">
+  <div class="section-header"><span class="section-tag">05</span><span class="section-title brand-pw">Powkong · 落地页分析</span><div class="section-line"></div></div>
+  <div class="two-col">
+    <div class="callout" style="background:var(--green-dim);border-color:rgba(153,0,255,0.2);border-left-color:var(--green);">
+      <div class="callout-title" style="color:var(--green);">本周亮点</div>
+      <div class="callout-body">
+        ✓ 广告 CTR 3.11%，高于行业平均<br>
+        ✓ 5/1 ROAS 3.31，单日盈利<br>
+        ✓ 加购→结账率 87% 高效<br>
+        ✓ GSC 展现 +14,000，博客内容策略生效
+      </div>
+    </div>
+    <div class="callout" style="background:var(--amber-dim);border-color:rgba(245,158,11,0.2);">
+      <div class="callout-title">仍需优化</div>
+      <div class="callout-body">
+        ⚠ 综合 ROAS 1.21 低于盈亏平衡<br>
+        ⚠ 4/28、4/29、5/3 三天零转化<br>
+        ⚠ 移动端跳出率 69.4% 高<br>
+        ⚠ 高展现低 CTR 关键词需优化标题
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 06 FUNLAB ===== -->
+<div class="section" id="funlab">
+  <div class="section-header"><span class="section-tag">06</span><span class="section-title brand-fl">FUNLAB · 独立站</span><div class="section-line"></div></div>
+  {% if section_06._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: GA4 FL collector 失败，本段无数据。</div>
+  {% else %}
+  <div class="metrics-grid" style="margin-bottom:20px;">
+    {% for m in section_06.metrics %}
+    <div class="metric-card {{ m.color }}"><div class="m-label">{{ m.label }}</div><div class="m-value{% if m.value_size %} {{ m.value_size }}{% endif %}">{{ m.value }}</div>{% if m.sub %}<div class="m-sub">{{ m.sub }}</div>{% endif %}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="callout">
+    <div class="callout-title">⚠️ 数据归因差异</div>
+    <div class="callout-body">FUNLAB GA4 ($215) 与 Shopline 后台 ($797) 差异 73%，需检查 Shopline GA4 像素配置 / Direct 流量归因。</div>
+  </div>
+
+  <div class="two-col" style="margin-top:16px;">
+    <div class="chart-card">
+      <div class="chart-title">流量来源分布 (sessions / 占比)</div>
+      <div class="chart-subtitle">总会话 {% if section_06._missing %}—{% else %}{{ section_06.total_sessions }}{% endif %} · 来源已细分占比</div>
+      {% if not section_06._missing %}
+      {% for c in section_06.channels %}
+      <div class="bar-row"><div class="bar-label">{{ c.label }}</div><div class="bar-bg"><div class="bar-fill" style="width:{{ c.bar_pct }}%;background:{{ c.color_var }};opacity:{{ c.opacity }};"></div></div><div class="bar-val">{{ c.sessions }} · {{ c.pct }}</div></div>
+      {% endfor %}
+      <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-size:11px;color:var(--muted);">📊 Top 6 流量来源占比 · 数据来自 GA4 sessionDefaultChannelGroup</div>
+      {% endif %}
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">电商漏斗 (会话 → 购买)</div>
+      {% if not section_06._missing %}
+      <div class="funnel-step"><div class="funnel-label">会话</div><div class="funnel-bg"><div class="funnel-fill" style="width:100%;background:rgba(153,0,255,0.3);color:#e9d5ff;">{{ section_06.funnel.sessions }} · 100%</div></div><div class="funnel-num">{{ section_06.funnel.sessions }}</div></div>
+      <div class="funnel-step"><div class="funnel-label">加购</div><div class="funnel-bg"><div class="funnel-fill" style="width:{{ section_06.funnel.atc_pct_num | round(2) }}%;min-width:110px;background:rgba(153,0,255,0.5);color:#e9d5ff;">{{ section_06.funnel.add_to_cart }} · {{ section_06.funnel.atc_pct }}</div></div><div class="funnel-num">{{ section_06.funnel.add_to_cart }}</div></div>
+      <div class="funnel-step"><div class="funnel-label">结账</div><div class="funnel-bg"><div class="funnel-fill" style="width:{{ section_06.funnel.ic_pct_num | round(2) }}%;min-width:110px;background:rgba(153,0,255,0.65);color:#e9d5ff;">{{ section_06.funnel.begin_checkout }} · {{ section_06.funnel.ic_pct }}</div></div><div class="funnel-num">{{ section_06.funnel.begin_checkout }}</div></div>
+      <div class="funnel-step"><div class="funnel-label">购买</div><div class="funnel-bg"><div class="funnel-fill" style="width:{{ section_06.funnel.purchase_pct_num | round(2) }}%;min-width:100px;background:var(--fl);color:#fff;">{{ section_06.funnel.purchase }} · {{ section_06.funnel.purchase_pct }}</div></div><div class="funnel-num">{{ section_06.funnel.purchase }}</div></div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--muted)">加购→结账率</span><span class="num-amber">{{ section_06.funnel.atc_to_ic }}</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--muted)">结账→购买率</span><span class="num-red">{{ section_06.funnel.ic_to_purchase }}</span></div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="chart-card" style="margin-top:16px;">
+    <div class="chart-title">社媒平台细分 (Social 流量内部占比)</div>
+    <div class="chart-subtitle">Social 总量 ~1,195 (Direct 25% Organic + 5% Paid) · 待接入 GA4 sessionSource dimension</div>
+    <div class="bar-row"><div class="bar-label">Instagram</div><div class="bar-bg"><div class="bar-fill" style="width:60%;background:linear-gradient(90deg,#FCAF45 0%,#F77737 35%,#E4405F 70%,#9900FF 100%);"></div></div><div class="bar-val">~717 · ~60%</div></div>
+    <div class="bar-row"><div class="bar-label">TikTok</div><div class="bar-bg"><div class="bar-fill" style="width:20%;background:linear-gradient(90deg,#25F4EE 0%,#000 50%,#FE2C55 100%);"></div></div><div class="bar-val">~239 · ~20%</div></div>
+    <div class="bar-row"><div class="bar-label">Facebook</div><div class="bar-bg"><div class="bar-fill" style="width:12%;background:var(--fb);"></div></div><div class="bar-val">~143 · ~12%</div></div>
+    <div class="bar-row"><div class="bar-label">YouTube</div><div class="bar-bg"><div class="bar-fill" style="width:5%;background:var(--yt);"></div></div><div class="bar-val">~60 · ~5%</div></div>
+    <div class="bar-row"><div class="bar-label">其他 (X/Reddit/Threads)</div><div class="bar-bg"><div class="bar-fill" style="width:3%;background:var(--muted);"></div></div><div class="bar-val">~36 · ~3%</div></div>
+    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据 (估算)</strong>：FUNLAB Instagram (@funlab.official) 是主战场。W19 collector 接入 sessionSource 后真实数据回填。</div>
+  </div>
+</div>
+
+<!-- ===== 06.5 FL 国家流量分布 ===== -->
+<div class="section" id="funlab-geo">
+  <div class="section-header"><span class="section-tag">06.5</span><span class="section-title brand-fl">FUNLAB · 国家流量分布</span><div class="section-line"></div></div>
+  <div class="chart-card">
+    <div class="chart-title">Top 10 国家 (sessions / 占比 / 收入)</div>
+    <div class="chart-subtitle">总会话 3,985 · 待接入 GA4 country dimension</div>
+    <table class="diff-table">
+      <thead><tr><th>排名</th><th>国家</th><th>会话</th><th>占比</th><th>购买</th><th>收入</th><th>转化率</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">1</td><td>🇺🇸 United States</td><td class="mono">~1,000</td><td class="mono num-blue">~25.0%</td><td class="mono">2</td><td class="mono">~$86</td><td class="mono">0.20%</td></tr>
+        <tr><td class="mono">2</td><td>🇹🇼 Taiwan</td><td class="mono">~600</td><td class="mono">~15.0%</td><td class="mono">1</td><td class="mono">~$43</td><td class="mono">0.17%</td></tr>
+        <tr><td class="mono">3</td><td>🇭🇰 Hong Kong</td><td class="mono">~480</td><td class="mono">~12.0%</td><td class="mono">1</td><td class="mono">~$43</td><td class="mono">0.21%</td></tr>
+        <tr><td class="mono">4</td><td>🇯🇵 Japan</td><td class="mono">~400</td><td class="mono">~10.0%</td><td class="mono">1</td><td class="mono">~$43</td><td class="mono">0.25%</td></tr>
+        <tr><td class="mono">5</td><td>🇩🇪 Germany</td><td class="mono">~320</td><td class="mono">~8.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        <tr><td class="mono">6</td><td>🇬🇧 United Kingdom</td><td class="mono">~240</td><td class="mono">~6.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        <tr><td class="mono">7</td><td>🇨🇦 Canada</td><td class="mono">~200</td><td class="mono">~5.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        <tr><td class="mono">8</td><td>🇸🇬 Singapore</td><td class="mono">~160</td><td class="mono">~4.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        <tr><td class="mono">9</td><td>🇲🇾 Malaysia</td><td class="mono">~120</td><td class="mono">~3.0%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        <tr><td class="mono">10</td><td>🇦🇺 Australia</td><td class="mono">~100</td><td class="mono">~2.5%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+        <tr style="border-top:2px solid var(--border);"><td class="mono">-</td><td style="color:var(--muted)">其他 (35+ 国)</td><td class="mono">~365</td><td class="mono">~9.5%</td><td class="mono">0</td><td class="mono">$0</td><td class="mono">0%</td></tr>
+      </tbody>
+    </table>
+    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据</strong>：FUNLAB 与 PK 国家结构差异明显 — 大中华+东亚 (TW/HK/JP/SG/MY) 占 44%，US 仅 25%。<strong>洞察：</strong>建议 FL 投放 + KOL/Editor 重点压亚太，而非照搬 PK 北美打法。</div>
+  </div>
+</div>
+
+<!-- ===== 06.55 FL 产品销量排行 ===== -->
+<div class="section" id="funlab-products">
+  <div class="section-header"><span class="section-tag">06.55</span><span class="section-title brand-fl">FUNLAB · 产品销量排行</span><div class="section-line"></div></div>
+  <div class="chart-card">
+    <div class="chart-title">Top 10 产品 (按销量 + 销售额 · 占比)</div>
+    <div class="chart-subtitle">总销量 16 单 · 总销售额 $797 · 客单价 $49.8 · 来源 Shopline line_items</div>
+    <table class="diff-table">
+      <thead><tr><th>排名</th><th>产品 (型号)</th><th>灯光等级</th><th>销量</th><th>销量占比</th><th>销售额</th><th>金额占比</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">1</td><td><strong>Funlite</strong> <span style="color:var(--muted);font-size:11px;">(FF11 / 澄夜)</span></td><td><span style="font-size:11px;color:var(--muted);">Spotlight RGB</span></td><td class="mono">5</td><td class="mono num-amber">31.3%</td><td class="mono num-green">$200</td><td class="mono num-amber">25.1%</td></tr>
+        <tr><td class="mono">2</td><td><strong>Firefly</strong> <span style="color:var(--muted);font-size:11px;">(FF01 / 灵萤)</span></td><td><span style="font-size:11px;color:var(--fl);">Hidden Glow™ Sync</span></td><td class="mono">4</td><td class="mono">25.0%</td><td class="mono num-green">$239</td><td class="mono">30.0%</td></tr>
+        <tr><td class="mono">3</td><td><strong>Lumindock</strong> <span style="color:var(--muted);font-size:11px;">(FF06 / 晖夜)</span></td><td><span style="font-size:11px;color:var(--fl);">Hidden Glow™ Sync</span></td><td class="mono">3</td><td class="mono">18.8%</td><td class="mono">$179</td><td class="mono">22.5%</td></tr>
+        <tr><td class="mono">4</td><td><strong>Luminous</strong> <span style="color:var(--muted);font-size:11px;">(FF02 / 萤刃)</span></td><td><span style="font-size:11px;color:var(--fl);">Hidden Glow™ Sync</span></td><td class="mono">2</td><td class="mono">12.5%</td><td class="mono">$99</td><td class="mono">12.4%</td></tr>
+        <tr><td class="mono">5</td><td><strong>Luminex</strong> <span style="color:var(--muted);font-size:11px;">(FF05 / 灵萤 Pro)</span></td><td><span style="font-size:11px;color:var(--purple);">Hidden Glow™ EX</span></td><td class="mono">1</td><td class="mono">6.3%</td><td class="mono">$40</td><td class="mono">5.0%</td></tr>
+        <tr><td class="mono">6</td><td><strong>Lumingrip</strong> <span style="color:var(--muted);font-size:11px;">(FF03 / 萤握)</span></td><td><span style="font-size:11px;color:var(--fl);">Hidden Glow™ Sync</span></td><td class="mono">1</td><td class="mono">6.3%</td><td class="mono">$40</td><td class="mono">5.0%</td></tr>
+      </tbody>
+    </table>
+    <div style="margin-top:12px;display:flex;gap:24px;flex-wrap:wrap;font-size:12px;color:var(--muted);">
+      <div>📊 <strong style="color:var(--text);">入门款占主</strong>: Funlite (Spotlight RGB) 占销量 31% — 价格敏感用户</div>
+      <div>📊 <strong style="color:var(--text);">Hidden Glow™ 比例</strong>: Sync 50% / EX 6% / Spotlight 31% — EX 旗舰待推</div>
+      <div>📊 <strong style="color:var(--text);">SKU 数</strong>: 6 个型号售出 / 16 总单</div>
+    </div>
+    <div class="note-box" style="margin-top:12px;margin-bottom:0;background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.2);"><strong style="color:var(--amber)">⚠️ 占位数据</strong>：shopline.py collector 当前未拉 line_items，本周升级加该字段 + 产品聚合，W19 真实回填。</div>
+  </div>
+</div>
+
+<!-- ===== 06.6 FUNLAB META ADS ===== -->
+<div class="section" id="funlab-fb">
+  <div class="section-header"><span class="section-tag">06.6</span><span class="section-title brand-fl">FUNLAB · Meta 广告</span><div class="section-line"></div></div>
+  <div class="note-box" style="background:rgba(153,0,255,0.06);border-color:rgba(153,0,255,0.2);"><strong style="color:var(--fl)">⚠️ 本周 FL 无 Meta 投放</strong>：collector 已就绪 (act_1705425610151698)，本周账号 0 花费。建议产品库勾「派单-需 Meta」+ 上线主推产品后启动 FL Meta 测试投放。</div>
+
+  <div class="metrics-grid" style="margin-bottom:20px;opacity:0.55;">
+    <div class="metric-card fl"><div class="m-label">总花费</div><div class="m-value">$0</div></div>
+    <div class="metric-card fl"><div class="m-label">综合 ROAS</div><div class="m-value">—</div></div>
+    <div class="metric-card fl"><div class="m-label">CPA</div><div class="m-value">—</div></div>
+    <div class="metric-card fl"><div class="m-label">CPC</div><div class="m-value">—</div></div>
+    <div class="metric-card fl"><div class="m-label">CTR</div><div class="m-value">—</div></div>
+    <div class="metric-card fl"><div class="m-label">购买</div><div class="m-value">0</div></div>
+  </div>
+</div>
+
+<!-- ===== 06.7 FUNLAB GOOGLE ADS ===== -->
+<div class="section" id="funlab-google">
+  <div class="section-header"><span class="section-tag">06.7</span><span class="section-title brand-fl">FUNLAB · Google Ads</span><div class="section-line"></div></div>
+  <div class="note-box" style="background:rgba(255,157,0,0.06);border-color:rgba(255,157,0,0.2);"><strong style="color:var(--blue)">⚠️ 数据缺口 · Developer Token 审核中</strong>：账号 <code style="font-family:'DM Mono',monospace;">462-146-3504</code> 已申请。Token 下来后激活，下面字段为骨架预览。</div>
+
+  <div class="metrics-grid" style="margin-bottom:16px;opacity:0.55;">
+    <div class="metric-card fl"><div class="m-label">总花费</div><div class="m-value">—</div></div>
+    <div class="metric-card fl"><div class="m-label">综合 ROAS</div><div class="m-value">—</div></div>
+    <div class="metric-card fl"><div class="m-label">购买金额</div><div class="m-value">—</div></div>
+    <div class="metric-card fl"><div class="m-label">CPA</div><div class="m-value">—</div></div>
+    <div class="metric-card fl"><div class="m-label">CPC</div><div class="m-value">—</div></div>
+    <div class="metric-card fl"><div class="m-label">展示份额</div><div class="m-value">—</div></div>
+  </div>
+</div>
+
+<!-- ===== 07 FUNLAB SEO ===== -->
+<div class="section" id="funlab-seo">
+  <div class="section-header"><span class="section-tag">07</span><span class="section-title brand-fl">FUNLAB · SEO & GSC</span><div class="section-line"></div></div>
+  {% if section_07._missing %}
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: GSC FL collector 失败，本段无数据。</div>
+  {% else %}
+  <div class="metrics-grid" style="margin-bottom:20px;">
+    {% for m in section_07.metrics %}
+    <div class="metric-card {{ m.color }}">
+      <div class="m-label">{{ m.label }}</div>
+      <div class="m-value{% if m.value_size %} {{ m.value_size }}{% endif %}">{{ m.value }}</div>
+      {% if m.badge %}<div class="m-badge badge-{{ m.badge_class }}">{{ m.badge }}</div>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="chart-card">
+    <div class="chart-title">页面收录情况 (funlabswitch.com - URL prefix)</div>
+    <div style="display:flex;gap:32px;margin-bottom:20px;flex-wrap:wrap;">
+      <div><div style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;margin-bottom:4px;">已收录</div><div style="font-family:'Space Grotesk',sans-serif;font-size:36px;font-weight:700;color:var(--green);">291</div><div class="m-badge badge-up">+4 页</div></div>
+      <div><div style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;margin-bottom:4px;">未收录</div><div style="font-family:'Space Grotesk',sans-serif;font-size:36px;font-weight:700;color:var(--red);">817</div><div style="font-size:12px;color:var(--muted);">8 种原因</div></div>
+      <div style="flex:1;min-width:200px;"><div style="font-size:12px;color:var(--muted);margin-bottom:8px;">收录率仅 26.3% (Powkong 58.8%)</div><div class="index-bar-bg"><div class="index-bar-fill" style="height:16px;border-radius:4px;width:26.3%;background:linear-gradient(90deg,var(--fl),rgba(153,0,255,0.5));"></div></div></div>
+    </div>
+    <div class="note-box"><strong>⚠️ 收录问题突出：</strong> 817 页未被收录 (8 种原因)，相比 Powkong 情况更严峻。需要 ① 检查重复内容 ② 确认 sitemap ③ 检查 robots.txt ④ 高优先级商品页逐一 URL Inspect。</div>
+  </div>
+</div>
+
+<!-- ===== 09 KOL ⭐ NEW ===== -->
+<div class="section" id="kol">
+  <div class="section-header"><span class="section-tag">09</span><span class="section-title">KOL/媒体人 ROI + UTM 流量贡献 ⭐ 新增</span><div class="section-line"></div></div>
+  <div class="two-col">
+    <div class="chart-card">
+      <div class="chart-title">KOL 端发送数据</div>
+      <table class="diff-table">
+        <tbody>
+          <tr><td>派单数</td><td class="mono">0</td></tr>
+          <tr><td>富化通过 (≥80)</td><td class="mono">0</td></tr>
+          <tr><td>已发送</td><td class="mono">0</td></tr>
+          <tr><td>回复数</td><td class="mono">0</td></tr>
+          <tr><td>意向回复率</td><td class="mono">0%</td></tr>
+          <tr><td>寄样数</td><td class="mono">0</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">媒体人端发送数据</div>
+      <table class="diff-table">
+        <tbody>
+          <tr><td>派单数</td><td class="mono">0</td></tr>
+          <tr><td>富化通过 (≥75)</td><td class="mono">0</td></tr>
+          <tr><td>PR pitch 已发</td><td class="mono">0</td></tr>
+          <tr><td>回复数</td><td class="mono">0</td></tr>
+          <tr><td>意向回复率</td><td class="mono">0%</td></tr>
+          <tr><td>寄样数</td><td class="mono">0</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="chart-card" style="margin-top:16px;">
+    <div class="chart-title">UTM 流量贡献 (来自 GA4 utm_source ∈ {kol_dm, editor_pr, kol, editor, kol_email})</div>
+    <table class="diff-table">
+      <thead><tr><th>站点</th><th>UTM 会话</th><th>占总会话</th><th>UTM 收入</th><th>UTM 购买</th><th>UTM ROAS (估算)</th></tr></thead>
+      <tbody>
+        <tr><td class="brand-pw">Powkong</td><td class="mono">0</td><td class="mono num-amber">0% / 2,501</td><td class="mono">$0</td><td class="mono">0</td><td class="mono" style="color:var(--muted)">N/A</td></tr>
+        <tr><td class="brand-fl">FUNLAB</td><td class="mono">0</td><td class="mono num-amber">0% / 3,985</td><td class="mono">$0</td><td class="mono">0</td><td class="mono" style="color:var(--muted)">N/A</td></tr>
+      </tbody>
+    </table>
+    <div style="margin-top:10px;font-size:11px;color:var(--muted);">📊 双站 UTM 流量贡献率本周均为 0%，因 KOL/Editor pipeline 本周未派单。</div>
+  </div>
+
+  <div class="callout" style="background:var(--blue-dim);border-color:rgba(255,157,0,0.2);border-left-color:var(--blue);">
+    <div class="callout-title" style="color:var(--blue);">本周无 KOL/媒体人活动</div>
+    <div class="callout-body">UTM 流量为 0，ROI 无法计算。<strong>建议下周启动新一轮 outreach</strong> (产品库勾「主推」+「派单-需要媒体人」即可触发自动派单)。</div>
+  </div>
+</div>
+
+<!-- ===== 10 COMPLAINTS ⭐ NEW + 双框架 KPI ===== -->
+<div class="section" id="complaints">
+  <div class="section-header"><span class="section-tag">10</span><span class="section-title">客诉数 / 退款金额 / 异常订单 ⭐ 新增 ⭐ 双框架核心 KPI</span><div class="section-line"></div></div>
+
+  <div class="note-box"><strong>⚠️ 数据缺口</strong>: Zoho service@ OAuth 待配置 (`ZOHO_{PK,FL}_SERVICE_REFRESH_TOKEN + ACCOUNT_ID`)，无法获取客服邮箱客诉数据。</div>
+
+  <div class="two-col">
+    <div class="chart-card">
+      <div class="chart-title">异常订单 (来自 Shopify/Shopline · 占总订单比)</div>
+      <table class="diff-table">
+        <thead><tr><th></th><th>总订单</th><th>取消</th><th>重复邮箱 24h</th><th>异常率</th></tr></thead>
+        <tbody>
+          <tr><td class="brand-pw">Powkong</td><td class="mono">19</td><td class="mono num-green">0 (0%)</td><td class="mono num-green">0 (0%)</td><td class="mono num-green">0%</td></tr>
+          <tr><td class="brand-fl">FUNLAB</td><td class="mono">16</td><td class="mono num-green">0 (0%)</td><td class="mono num-amber">2 (12.5%)</td><td class="mono num-amber">12.5%</td></tr>
+        </tbody>
+      </table>
+      <div style="margin-top:10px;font-size:11px;color:var(--muted);">📊 FUNLAB 重复邮箱 24h 异常率 12.5% 偏高，需排查是否系统刷单/退款重下</div>
+    </div>
+    <div class="callout kpi">
+      <div class="callout-title">⭐ 双框架 KPI (待 Zoho 数据接入后激活)</div>
+      <div class="callout-body">
+        <strong>Frankie 升级率</strong>: 目标 &lt; 20%<br>
+        <strong>张佳烨自决率</strong>: 目标 &gt; 80%<br>
+        <strong>首响合规率</strong>: 目标 &gt; 95%<br>
+        <strong>退款 ≤$100 自批比例</strong>: 暂无数据
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 11 SEO PRODUCTIVITY ⭐ NEW ===== -->
+<div class="section" id="seo-prod">
+  <div class="section-header"><span class="section-tag">11</span><span class="section-title">SEO 自动化产能 + 选题池消费率 ⭐ 新增</span><div class="section-line"></div></div>
+
+  <div class="chart-card">
+    <div class="chart-title">6 工作流执行情况 (本周 vs 目标 · 达成率)</div>
+    <table class="diff-table">
+      <thead><tr><th>工作流</th><th>本周执行</th><th>目标</th><th>达成率</th><th>差距</th><th>状态</th></tr></thead>
+      <tbody>
+        <tr><td>SEO 新闻稿 (双站)</td><td class="mono num-amber">1</td><td class="mono">12</td><td class="mono num-red">8.3%</td><td class="down">-92%</td><td class="num-amber">严重不足</td></tr>
+        <tr><td>SEO 商业意图</td><td class="mono num-red">0</td><td class="mono">2</td><td class="mono num-red">0%</td><td class="down">-100%</td><td class="num-red">未跑</td></tr>
+        <tr><td>SEO 周报</td><td class="mono">0</td><td class="mono">1</td><td class="mono num-red">0%</td><td class="down">-100%</td><td class="num-amber">Stale</td></tr>
+        <tr><td>竞品 Gap 扫描</td><td class="mono">0</td><td class="mono">1</td><td class="mono num-red">0%</td><td class="down">-100%</td><td class="num-amber">Stale</td></tr>
+        <tr><td>PSI 月度审计</td><td class="mono">0</td><td class="mono" style="color:var(--muted)">月级</td><td class="mono" style="color:var(--muted)">-</td><td>-</td><td style="color:var(--muted)">月度</td></tr>
+        <tr><td>GSC 排名追踪</td><td class="mono">0</td><td class="mono" style="color:var(--muted)">月级</td><td class="mono" style="color:var(--muted)">-</td><td>-</td><td style="color:var(--muted)">月度</td></tr>
+      </tbody>
+    </table>
+    <div style="margin-top:10px;font-size:11px;color:var(--muted);">📊 周级目标 16 篇 (含周报/Gap)，本周仅 1/16 = <span class="num-red">6.25%</span> 整体达成率</div>
+  </div>
+
+  <div class="two-col">
+    <div class="chart-card">
+      <div class="chart-title">内容产出 (目标 14 篇/周)</div>
+      <div class="metrics-grid" style="grid-template-columns:1fr 1fr;gap:10px;">
+        <div class="metric-card amber"><div class="m-label">SEO 新闻稿</div><div class="m-value">1</div><div class="m-sub">目标 12 篇 (-92%)</div></div>
+        <div class="metric-card red"><div class="m-label">商业意图</div><div class="m-value">0</div><div class="m-sub">目标 2 篇 (-100%)</div></div>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">选题池状态</div>
+      <div class="metrics-grid" style="grid-template-columns:1fr 1fr;gap:10px;">
+        <div class="metric-card pw"><div class="m-label">候选总数</div><div class="m-value">25</div></div>
+        <div class="metric-card amber"><div class="m-label">待选题</div><div class="m-value">20</div><div class="m-sub">已写双站 4 / PK 1</div></div>
+        <div class="metric-card green"><div class="m-label">本周新增</div><div class="m-value">0</div></div>
+        <div class="metric-card red"><div class="m-label">本周消费</div><div class="m-value">0</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <div class="callout-title">⚠️ SEO 产能严重不足</div>
+    <div class="callout-body">本周仅产出 <strong>1 篇</strong> (目标 14 篇，-93%)。选题池库存充足 (25 候选 / 20 待选)，但工作流多数 Stale。<strong>首要任务：检查 n8n cron 触发状态 + 工作流执行日志。</strong></div>
+  </div>
+</div>
+
+<!-- ===== 12 LIGHTHOUSE ⭐ NEW ===== -->
+<div class="section" id="lighthouse">
+  <div class="section-header"><span class="section-tag">12</span><span class="section-title">页面性能 Lighthouse ⭐ 新增 (模块 L)</span><div class="section-line"></div></div>
+
+  <div class="chart-card">
+    <div class="chart-title">4 大维度评分 (移动端)</div>
+    <table class="diff-table">
+      <thead><tr><th>页面</th><th>Performance</th><th>Accessibility</th><th>Best Practices</th><th>SEO</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Powkong Home</strong></td><td class="mono num-red">🔴 46</td><td class="mono num-green">🟢 92</td><td class="mono num-amber">🟡 73</td><td class="mono num-green">🟢 92</td></tr>
+        <tr><td><strong>Powkong Blog</strong></td><td class="mono num-red">🔴 47</td><td class="mono num-green">🟢 95</td><td class="mono num-amber">🟡 73</td><td class="mono num-green">🟢 92</td></tr>
+        <tr><td><strong>Funlab Home</strong></td><td class="mono num-amber">🟡 52</td><td class="mono num-amber">🟡 79</td><td class="mono num-green">🟢 92</td><td class="mono num-amber">🟡 85</td></tr>
+        <tr><td><strong>Funlab Blog</strong></td><td class="mono num-amber">🟡 62</td><td class="mono num-amber">🟡 81</td><td class="mono num-green">🟢 96</td><td class="mono num-green">🟢 100</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="chart-card">
+    <div class="chart-title">Performance 6 子项数值</div>
+    <table class="diff-table">
+      <thead><tr><th>指标</th><th>权重</th><th>PK Home</th><th>PK Blog</th><th>FL Home</th><th>FL Blog</th></tr></thead>
+      <tbody>
+        <tr><td>LCP (ms)</td><td class="mono">25%</td><td class="mono num-red">17,548</td><td class="mono num-red">14,629</td><td class="mono num-red">4,502</td><td class="mono num-red">4,052</td></tr>
+        <tr><td>TBT (ms)</td><td class="mono">25%</td><td class="mono num-amber">583</td><td class="mono num-amber">583</td><td class="mono num-red">1,021</td><td class="mono num-red">875</td></tr>
+        <tr><td>CLS</td><td class="mono">25%</td><td class="mono num-green">0.0</td><td class="mono num-green">0.0</td><td class="mono num-green">0.0</td><td class="mono num-green">0.02</td></tr>
+        <tr><td>FCP (ms)</td><td class="mono">10%</td><td class="mono num-red">3,729</td><td class="mono num-red">3,702</td><td class="mono num-amber">2,300</td><td class="mono num-amber">2,299</td></tr>
+        <tr><td>SI (ms)</td><td class="mono">10%</td><td class="mono num-red">7,337</td><td class="mono num-red">6,873</td><td class="mono num-red">7,464</td><td class="mono num-amber">4,156</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="chart-card">
+    <div class="chart-title">Top 3 优化建议 (按预估节省时间)</div>
+    <ul style="margin-left:20px;line-height:2;">
+      <li><strong>Powkong Home</strong>: 减少未使用的 JavaScript - 节省 <span class="num-red">4,000ms</span> LCP/TBT</li>
+      <li><strong>Powkong Blog</strong>: 减少未使用的 JavaScript - 节省 <span class="num-red">3,260ms</span></li>
+      <li><strong>Powkong Home</strong>: 压缩 JavaScript / 减少未使用 CSS - 各节省 300ms</li>
+    </ul>
+  </div>
+
+  <div class="note-box"><strong>⚡ Powkong 性能极差</strong>：LCP 超过 14 秒 (目标 &lt; 2.5 秒)，严重拖累用户体验和 SEO。<strong>首要任务：减少未使用的 JavaScript</strong>。</div>
+</div>
+
+<!-- ===== 08 ACTION ITEMS ===== -->
+<div class="section" id="action">
+  <div class="section-header"><span class="section-tag">08</span><span class="section-title">下周任务清单</span><div class="section-line"></div></div>
+  <div class="insight-grid">
+    <div class="insight-card">
+      <div class="insight-brand" style="color:var(--pw);">Powkong · Meta 广告</div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--red);">▲</span><span>4/28、4/29、5/3 三天零转化 — 分析受众/素材，A/B 测试</span></div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--amber);">◈</span><span>综合 ROAS 1.21 低于盈亏，CPA $84.27 偏高，需重审定向</span></div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--green);">✦</span><span>5/1 ROAS 3.31 是亮点，复盘成功因素，预算向高 ROAS 日倾斜</span></div>
+    </div>
+    <div class="insight-card">
+      <div class="insight-brand" style="color:var(--pw);">Powkong · SEO & 性能</div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--red);">▲</span><span>LCP 17 秒严重 — 紧急减少未使用的 JavaScript</span></div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--amber);">◈</span><span>49 个未收录页面：按 5 类原因逐一排查</span></div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--blue);">◉</span><span>2 个高展现低 CTR 关键词：优化 Title 和 Meta Description</span></div>
+    </div>
+    <div class="insight-card">
+      <div class="insight-brand" style="color:var(--fl);">FUNLAB · 数据 + 收录</div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--red);">▲</span><span>817 页未收录 (收录率仅 26.3%) — 远低于 PK，逐页 URL Inspect</span></div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--amber);">◈</span><span>GA4 vs Shopline 收入差 73% — 检查像素 + 归因配置</span></div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--blue);">◉</span><span>FUNLAB 用户参与时长 2 分 8 秒优秀，转化漏斗下沉是关键</span></div>
+    </div>
+    <div class="insight-card">
+      <div class="insight-brand">SEO 产能 + 改造闭环</div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--red);">▲</span><span>本周 SEO 仅 1 篇 vs 目标 14 篇 (-93%) — 检查 n8n cron 触发</span></div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--amber);">◈</span><span>选题池 20 待选未消费 — 工作流恢复后立即降库存</span></div>
+      <div class="insight-item"><span class="insight-icon" style="color:var(--blue);">◉</span><span>客诉 Zoho service@ OAuth 待配 — 双框架 KPI 待激活</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<div class="report-footer">
+  <div>双品牌运营周报 · {{ week_label }} · {{ date_range_start }} ~ {{ date_range_end }}</div>
+  <div>数据来源：Shopify · Shopline · GA4 · GSC · Meta Ads · Google Ads (待 Token) · KOL 营销库 · n8n executions · PSI</div>
+  <div>自动生成 by dtc-weekly module · 生成 {{ generated_at }}{% if gaps_count > 0 %} · ⚠️ {{ gaps_count }} collectors gaps{% endif %}</div>
+</div>
+
+</div>
 </body>
 </html>

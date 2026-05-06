@@ -1,180 +1,89 @@
-"""HTML 渲染层. markdown → HTML body, 套 W15 暗黑风 CSS wrapper.
+r"""HTML 渲染层. 用 jinja2 模板 + data_shaper view model 渲染 W18 风周报.
 
-输入:
-- markdown: integrator 产出的 12 sections markdown
-- collected: 原始 collected_data (供后续可参数化扩展)
-- start_date / end_date: 周区间
+Phase 3.2 (2026-05-06): 从纯 markdown 渲染升级为结构化 view model 驱动.
+- markdown (integrator 出) → 仅作为 AI 文字洞察, 在每段底部 callout 嵌入
+- 数据可视化 (指标卡 / 漏斗 / 流量分布 / GSC 关键词) → collected_data + data_shaper
 
-输出: 完整 self-contained HTML (含 CSS, 可直接看 / 上传飞书云盘)
-
-Phase 3.1: 用 markdown lib + 内嵌 CSS, 不复杂 jinja2.
-Phase 3.2 升级方向: 完整 W15 模板参数化 (12 sections 全独立组件)
+模板: templates/weekly.html.j2 (基于 D:/Desktop/weekly_report_W18_prototype.html v3)
+- 6 个核心段数据驱动: 01 总览 / 02 PK GA4 / 03 PK Meta / 04 PK SEO / 06 FL GA4 / 07 FL SEO
+- 其他段保持占位 (02.5 国家分布 / 02.6 产品销量 / 03.5 Google Ads / 05 落地页 /
+  06.5 FL 国家 / 06.55 FL 产品 / 06.6 FL Meta / 06.7 FL Google Ads / 08 任务 /
+  09 KOL/UTM / 10 客诉 / 11 SEO 产能 / 12 Lighthouse). W19 之前 follow-up 补.
 """
 import logging
-import datetime
-import html
+import os
+
+from . import data_shaper
 
 log = logging.getLogger("weekly_report.renderer")
 
-
-# W15 暗黑风核心 CSS (基于 D:\Desktop\weekly_report_0406_0412.html, 精简版)
-CSS = """
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  background: #0a0c10; color: #e8eaf0;
-  font-family: 'Noto Sans SC', -apple-system, sans-serif;
-  font-size: 14px; line-height: 1.7;
-  padding: 40px 24px 80px;
-}
-.shell { max-width: 1100px; margin: 0 auto; }
-.report-header {
-  border-bottom: 1px solid rgba(255,255,255,0.07);
-  padding-bottom: 24px; margin-bottom: 36px;
-}
-h1 {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 28px; font-weight: 700; color: #fff;
-  letter-spacing: -0.5px; margin-bottom: 10px;
-}
-h2 {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 18px; font-weight: 600; color: #fff;
-  margin: 36px 0 16px; padding-bottom: 8px;
-  border-bottom: 1px solid rgba(255,255,255,0.07);
-}
-h3 { font-size: 15px; font-weight: 600; color: #fff; margin: 20px 0 10px; }
-h4 { font-size: 13px; color: #93c5fd; margin: 14px 0 8px;
-     font-family: 'DM Mono', monospace; letter-spacing: 0.05em; }
-p { margin: 8px 0; }
-strong { color: #fff; font-weight: 600; }
-em { color: #93c5fd; font-style: normal; }
-ul, ol { margin: 10px 0 10px 22px; }
-li { margin: 4px 0; }
-table {
-  width: 100%; border-collapse: collapse;
-  background: #111318; border: 1px solid rgba(255,255,255,0.07);
-  border-radius: 12px; overflow: hidden; margin: 16px 0;
-}
-thead { background: rgba(255,255,255,0.03); }
-th, td {
-  padding: 10px 14px; text-align: left;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
-  font-size: 13px;
-}
-th {
-  font-family: 'DM Mono', monospace;
-  font-size: 10px; letter-spacing: 0.08em;
-  text-transform: uppercase; color: #6b7280;
-}
-td { font-family: 'DM Mono', monospace; }
-tr:hover td { background: rgba(255,255,255,0.02); }
-tr:last-child td { border-bottom: none; }
-blockquote {
-  background: rgba(245,158,11,0.06);
-  border: 1px solid rgba(245,158,11,0.2);
-  border-left: 4px solid #f59e0b;
-  border-radius: 8px;
-  padding: 14px 18px; margin: 16px 0;
-  color: #fde68a;
-}
-code {
-  font-family: 'DM Mono', monospace;
-  background: rgba(255,255,255,0.05);
-  padding: 2px 6px; border-radius: 3px;
-  font-size: 12px; color: #93c5fd;
-}
-pre {
-  background: #171b22; border: 1px solid rgba(255,255,255,0.07);
-  border-radius: 8px; padding: 14px 18px; margin: 14px 0;
-  overflow-x: auto; font-size: 12px;
-}
-pre code { background: none; padding: 0; color: #e8eaf0; }
-.report-meta {
-  display: flex; gap: 12px; margin-top: 8px;
-  font-family: 'DM Mono', monospace;
-  font-size: 11px; color: #6b7280;
-}
-.report-meta .pill {
-  padding: 4px 10px; border-radius: 20px;
-  background: #111318; border: 1px solid rgba(255,255,255,0.12);
-}
-.report-footer {
-  margin-top: 60px; padding-top: 24px;
-  border-top: 1px solid rgba(255,255,255,0.07);
-  font-size: 11px; color: #6b7280;
-  font-family: 'DM Mono', monospace;
-}
-/* 涨/跌 inline 配色 (LLM 输出含 ↑/↓ emoji 时手动找 + 套 span) */
-.up { color: #10b981; }
-.down { color: #ef4444; }
-.amber { color: #f59e0b; }
-"""
+TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+TEMPLATE_NAME = "weekly.html.j2"
 
 
-HTML_SHELL = """<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title}</title>
-<link href="https://fonts.googleapis.com/css2?family=DM+Mono&family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
-<style>{css}</style>
-</head>
-<body>
-<div class="shell">
-<div class="report-header">
-  <h1>{title}</h1>
-  <div class="report-meta">
-    <span class="pill">Powkong + FUNLAB</span>
-    <span class="pill">{start_date} ~ {end_date}</span>
-    <span class="pill">生成 {generated_at}</span>
-  </div>
-</div>
-{body}
-<div class="report-footer">
-  双品牌运营周报 · {start_date} ~ {end_date} · 数据来源: Shopify / Shopline / GA4 / GSC / Meta Ads / KOL 营销库 / Zoho 客服 / n8n / PSI<br>
-  自动生成 by dtc-weekly module @ kol-auto.zeabur.app
-</div>
-</div>
-</body>
-</html>"""
-
-
-def _markdown_to_html(md: str) -> str:
-    """markdown → html body. 用 markdown lib (Phase 3.1)."""
-    try:
-        import markdown as md_lib
-        return md_lib.markdown(md, extensions=["tables", "fenced_code", "nl2br", "sane_lists"])
-    except ImportError:
-        # 降级: 简易处理 (markdown 包未安装时, Zeabur 应该已装)
-        log.warning("markdown lib not installed, using crude fallback")
-        return f"<pre>{html.escape(md)}</pre>"
-
-
-def _add_color_spans(html_body: str) -> str:
-    """给 ↑/↓ 数字加颜色 span. LLM 输出可能含 ↑X% / ↓X%."""
-    import re
-    # ↑XX% / ↑XX → green
-    html_body = re.sub(r'(↑[\d.]+%?)', r'<span class="up">\1</span>', html_body)
-    html_body = re.sub(r'(↓[\d.]+%?)', r'<span class="down">\1</span>', html_body)
-    # 🔴/🟡/🟢/✅ 保持 emoji
-    return html_body
+def _build_env():
+    """构建 jinja2 环境. lazy import 避免模块 import 时强制依赖."""
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+    env = Environment(
+        loader=FileSystemLoader(TEMPLATE_DIR),
+        autoescape=select_autoescape(default=False),  # 我们手动过滤 (insights_html | safe)
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    return env
 
 
 async def render(markdown: str, collected: dict, start_date, end_date) -> str:
-    """渲染 HTML."""
-    log.info("renderer.render %s ~ %s, md_len=%d", start_date, end_date, len(markdown))
-    week = f"W{start_date.isocalendar()[1]}"
-    title = f"双品牌运营周报 {week}"
+    """渲染 HTML.
 
-    body_html = _markdown_to_html(markdown)
-    body_html = _add_color_spans(body_html)
+    输入:
+      markdown - integrator 产出的 12 sections markdown (用于 AI 文字洞察嵌入)
+      collected - 各 collector 的原始结果
+      start_date / end_date - 周区间
 
-    return HTML_SHELL.format(
-        title=html.escape(title),
-        css=CSS,
-        start_date=start_date.isoformat(),
-        end_date=end_date.isoformat(),
-        generated_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-        body=body_html,
+    输出: 完整 self-contained HTML.
+    """
+    log.info("renderer.render %s ~ %s, md_len=%d", start_date, end_date, len(markdown or ""))
+
+    # 1. 构造 view model
+    view_model = data_shaper.shape(
+        collected=collected,
+        start_date=start_date,
+        end_date=end_date,
+        gaps=[],  # gaps 由 main.py 传过来时填, 这里 view_model 内部用 dict
+        markdown_insights=markdown or "",
     )
+
+    # 2. 渲染 jinja2 模板
+    try:
+        env = _build_env()
+        tpl = env.get_template(TEMPLATE_NAME)
+        html = tpl.render(**view_model)
+        log.info("renderer.render done. html_size=%d", len(html))
+        return html
+    except Exception as e:
+        log.exception("renderer jinja2 render failed, falling back to markdown")
+        return _fallback_markdown_render(markdown, start_date, end_date, e)
+
+
+def _fallback_markdown_render(markdown: str, start_date, end_date, err) -> str:
+    """jinja2 渲染失败时的兜底: 简易 markdown→HTML, 至少让运营拿到内容."""
+    import datetime as _dt
+    import html as _html
+    try:
+        import markdown as md_lib
+        body = md_lib.markdown(markdown or "", extensions=["tables", "fenced_code", "nl2br"])
+    except Exception:
+        body = f"<pre>{_html.escape(markdown or '')}</pre>"
+    week = f"W{start_date.isocalendar()[1]}"
+    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>双品牌运营周报 {week} (fallback)</title>
+<style>body{{font-family:system-ui;max-width:900px;margin:24px auto;padding:0 20px;background:#0a0c10;color:#e8eaf0;}}
+table{{border-collapse:collapse;width:100%;margin:16px 0;}}
+th,td{{border:1px solid #333;padding:6px 10px;}}
+.warn{{background:#7f1d1d;color:#fff;padding:12px;border-radius:6px;margin-bottom:16px;}}</style>
+</head><body>
+<div class="warn">⚠️ jinja2 模板渲染失败, fallback 到 markdown 兜底输出. 错误: {_html.escape(str(err))}</div>
+<h1>双品牌运营周报 {week} · {start_date} ~ {end_date}</h1>
+{body}
+</body></html>"""
