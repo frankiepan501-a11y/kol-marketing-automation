@@ -29,7 +29,11 @@ from .ga4 import _get_credentials  # 复用 service account loader
 
 log = logging.getLogger("weekly_report.gsc")
 
-PK_SITE = "https://powkong.com/"
+# GSC site URL 格式必须与 GSC 后台 property 注册类型完全一致 (借鉴 D:/scripts/gsc-mcp.js):
+# - powkong: domain property → "sc-domain:powkong.com" (不是 https://powkong.com/)
+# - funlab: URL prefix property → "https://funlabswitch.com/"
+# 之前用 https://powkong.com/ 报 403 - service account 加的是 sc-domain:powkong.com 的权限
+PK_SITE = "sc-domain:powkong.com"
 FL_SITE = "https://funlabswitch.com/"
 
 
