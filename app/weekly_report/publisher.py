@@ -14,6 +14,10 @@ import json
 import logging
 import os
 import re
+import time
+import uuid
+
+import httpx
 
 log = logging.getLogger("weekly_report.publisher")
 
@@ -191,6 +195,81 @@ async def _write_docx_blocks(doc_obj: str, blocks: list) -> int:
     return total
 
 
+# ============== 2.5. HTML 视觉版上传到 docx 末尾作 file 附件 ==============
+async def _upload_html_to_docx(docx_obj: str, html_str: str, week_label: str) -> str:
+    """multipart 上传 HTML 文件到 docx (parent_type=docx_file). 返回 file_token."""
+    from app import feishu
+
+    tok = await feishu.token("bitable")
+    file_bytes = html_str.encode("utf-8")
+    file_name = f"周报视觉版_W{week_label}.html"
+
+    boundary = "WeeklyHTMLBoundary" + str(int(time.time() * 1000))
+    parts = []
+    fields = [
+        ("file_name", file_name),
+        ("parent_type", "docx_file"),
+        ("parent_node", docx_obj),
+        ("size", str(len(file_bytes))),
+    ]
+    for k, v in fields:
+        parts.append(f"--{boundary}\r\n".encode())
+        parts.append(f'Content-Disposition: form-data; name="{k}"\r\n\r\n'.encode())
+        parts.append(v.encode("utf-8"))
+        parts.append(b"\r\n")
+    parts.append(f"--{boundary}\r\n".encode())
+    # filename 用 UTF-8 直传 (飞书接受) - 浏览器/curl 可能要 RFC 2231 编码, 但 multipart filename Web Server 一般容错
+    parts.append(f'Content-Disposition: form-data; name="file"; filename="{file_name}"\r\n'.encode("utf-8"))
+    parts.append(b"Content-Type: text/html; charset=utf-8\r\n\r\n")
+    parts.append(file_bytes)
+    parts.append(b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+
+    body = b"".join(parts)
+
+    async with httpx.AsyncClient(timeout=120.0) as cli:
+        r = await cli.post(
+            "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
+            content=body,
+            headers={
+                "Authorization": f"Bearer {tok}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+        r.raise_for_status()
+        data = r.json()
+        ft = (data.get("data") or {}).get("file_token")
+        if not ft:
+            raise RuntimeError(f"upload no file_token: {data}")
+        return ft
+
+
+async def _append_html_file_block(docx_obj: str, file_token: str, week_label: str, after_index: int):
+    """在 docx 末尾追加 file block (block_type=23) 引用 HTML 附件."""
+    from app import feishu
+    block_id = f"html_{uuid.uuid4().hex[:8]}"
+    # 先写一个分隔 + 标题
+    divider_id = f"div_{uuid.uuid4().hex[:8]}"
+    title_id = f"ttl_{uuid.uuid4().hex[:8]}"
+    blocks = [
+        {"block_id": divider_id, "block_type": 22, "divider": {}},
+        {"block_id": title_id, "block_type": 4,
+         "heading2": {"elements": [{"text_run": {"content": f"📄 视觉版（HTML 暗黑风）"}}]}},
+        {"block_id": block_id, "block_type": 23,
+         "file": {"token": file_token, "name": f"周报视觉版_W{week_label}.html"}},
+    ]
+    body = {
+        "index": after_index,
+        "children_id": [b["block_id"] for b in blocks],
+        "descendants": blocks,
+    }
+    await feishu.api(
+        "POST",
+        f"/docx/v1/documents/{docx_obj}/blocks/{docx_obj}/descendant",
+        body,
+    )
+
+
 # ============== 3. 历史 Bitable 入库 ==============
 def _safe_get(d: dict, *keys, default=None):
     cur = d
@@ -338,20 +417,34 @@ async def publish(html_str: str, markdown: str, collected: dict, start_date, end
     doc_url = ""
 
     # 1. 创建 docx + 写 blocks
+    docx_obj = None
+    blocks_written = 0
     if DEFAULT_PARENT_NODE:
         try:
             tokens = await _create_docx_in_wiki(title, DEFAULT_PARENT_NODE, DEFAULT_SPACE_ID)
             blocks = _md_to_blocks(markdown)
-            written = await _write_docx_blocks(tokens["obj_token"], blocks)
+            blocks_written = await _write_docx_blocks(tokens["obj_token"], blocks)
             doc_url = f"https://u1wpma3xuhr.feishu.cn/wiki/{tokens['node_token']}"
+            docx_obj = tokens["obj_token"]
             result["actions"].append({"step": "docx_create", "ok": True,
-                                        "node": tokens["node_token"], "blocks": written, "url": doc_url})
+                                        "node": tokens["node_token"], "blocks": blocks_written, "url": doc_url})
         except Exception as e:
             log.exception("docx create failed")
             result["actions"].append({"step": "docx_create", "ok": False, "error": str(e)})
     else:
         result["actions"].append({"step": "docx_create", "ok": False,
                                     "error": "WEEKLY_REPORT_PARENT_NODE env 未设, 跳过 docx 创建"})
+
+    # 1.5. HTML 视觉版上传到 docx 末尾作 file 附件
+    if docx_obj and html_str:
+        try:
+            ft = await _upload_html_to_docx(docx_obj, html_str, week_label.replace("W", ""))
+            await _append_html_file_block(docx_obj, ft, week_label.replace("W", ""), blocks_written)
+            result["actions"].append({"step": "html_attach", "ok": True,
+                                        "file_token": ft, "html_size": len(html_str)})
+        except Exception as e:
+            log.exception("html attach failed")
+            result["actions"].append({"step": "html_attach", "ok": False, "error": str(e)[:300]})
 
     # 2. Bitable 入历史
     try:

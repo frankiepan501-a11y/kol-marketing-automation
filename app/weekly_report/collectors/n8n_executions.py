@@ -60,7 +60,10 @@ def _get_creds():
     api_key = os.environ.get("N8N_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("N8N_API_KEY env 未设")
-    base = os.environ.get("N8N_BASE_URL", DEFAULT_BASE).rstrip("/")
+    # .strip() + 补 https:// schema 防 user paste 时去掉了协议
+    base = os.environ.get("N8N_BASE_URL", DEFAULT_BASE).strip().rstrip("/")
+    if not base.startswith("http"):
+        base = "https://" + base
     return api_key, base
 
 

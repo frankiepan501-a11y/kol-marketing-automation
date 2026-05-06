@@ -113,10 +113,11 @@ async def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 8000
         return r.json()["choices"][0]["message"]["content"]
 
 
-def _trim_collected(collected: dict, max_chars_per_collector: int = 4000) -> dict:
+def _trim_collected(collected: dict, max_chars_per_collector: int = 12000) -> dict:
     """裁掉过长的 raw 数据 (如 Shopify orders 数组). 保留指标摘要.
 
     避免 LLM context 超载. 每个 collector data 序列化后超 max_chars 时, 删 raw 字段.
+    GSC / KOL Bitable 数据本身就大 (top10 queries + pages + blogs), 上限放宽到 12K.
     """
     out = {}
     for k, v in collected.items():
@@ -128,11 +129,12 @@ def _trim_collected(collected: dict, max_chars_per_collector: int = 4000) -> dic
             out[k] = v
         else:
             # 截取: 保留 status + data 的顶层指标, 删除嵌套 raw
+            # 单 sub-key 上限放到 5000 (足够装 top 10 entries 详情)
             data = v.get("data", {})
             trimmed_data = {}
             for dk, dv in data.items():
                 ds = json.dumps(dv, ensure_ascii=False, default=str)
-                if len(ds) <= 1500:
+                if len(ds) <= 5000:
                     trimmed_data[dk] = dv
                 else:
                     trimmed_data[dk] = {"_truncated": True, "_size": len(ds)}
