@@ -26,6 +26,17 @@ LANG_DISPLAY = {
     "pt": "Portuguese", "ja": "Japanese", "it": "Italian", "nl": "Dutch", "sv": "Swedish",
 }
 
+# V1.5 直控筛选: 任务台「筛选-语言」中文 options → KOL/媒体人主表「语言」字段 ISO 代码
+# 双向兼容: 中文 options(运营友好) + ISO 代码(老数据/媒体人端原任务台 ISO options)
+LANG_CN_TO_ISO = {
+    "英语": "en", "德语": "de", "日语": "ja", "法语": "fr",
+    "西班牙语": "es", "葡萄牙语": "pt", "中文": "zh",
+    "意大利语": "it", "荷兰语": "nl", "瑞典语": "sv", "其他": "其他",
+    "en": "en", "de": "de", "ja": "ja", "fr": "fr",
+    "es": "es", "pt": "pt", "zh": "zh", "it": "it",
+    "nl": "nl", "sv": "sv",
+}
+
 # ===== ban-phrase: 防 LLM 软幻觉(假装看过 KOL 具体作品) =====
 # 触发任一 → 重生 1 次, 仍命中 → 标记 _ban_phrase_failed 走人审通道
 BAN_PHRASE_PATTERNS = [
@@ -140,9 +151,12 @@ async def filter_kols(task_fields: dict) -> list:
     platforms_want = task_fields.get("筛选-平台") or []
     countries_want = task_fields.get("筛选-国家") or []
     styles_want = task_fields.get("筛选-内容风格") or []
+    langs_want_raw = task_fields.get("筛选-语言") or []
     if not isinstance(platforms_want, list): platforms_want = [platforms_want]
     if not isinstance(countries_want, list): countries_want = [countries_want]
     if not isinstance(styles_want, list): styles_want = [styles_want]
+    if not isinstance(langs_want_raw, list): langs_want_raw = [langs_want_raw]
+    langs_want = {LANG_CN_TO_ISO.get(l, l) for l in langs_want_raw}
 
     f_min = int(task_fields.get("筛选-粉丝下限") or 0)
     f_max = int(task_fields.get("筛选-粉丝上限") or 10_000_000)
@@ -153,6 +167,7 @@ async def filter_kols(task_fields: dict) -> list:
         {"field_name": "合作状态", "operator": "is", "value": ["未建联"]},
         {"field_name": "邮箱", "operator": "isNotEmpty", "value": []},
     ])
+    pool_total = len(items)
 
     hits = []
     for rec in items:
@@ -163,6 +178,9 @@ async def filter_kols(task_fields: dict) -> list:
         if countries_want:
             country = ext(f.get("国家"))
             if country not in countries_want: continue
+        if langs_want:
+            kol_lang = ext(f.get("语言"))
+            if kol_lang not in langs_want: continue
         sub = f.get("粉丝数", 0) or 0
         try: sub = int(sub)
         except (ValueError, TypeError): sub = 0
@@ -172,6 +190,10 @@ async def filter_kols(task_fields: dict) -> list:
             if not any(s in styles_list for s in styles_want): continue
         hits.append(rec)
         if len(hits) >= hard_pool: break
+
+    if langs_want or countries_want:
+        print(f"[enrich V1.5] whitelist filter: pool={pool_total} → hits={len(hits)} "
+              f"(countries={countries_want}, langs={list(langs_want)})")
 
     return hits[:hard_pool]
 

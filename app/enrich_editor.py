@@ -25,6 +25,16 @@ LANG_DISPLAY = {
     "pt": "Portuguese", "ja": "Japanese", "it": "Italian", "nl": "Dutch", "sv": "Swedish",
 }
 
+# V1.5 直控筛选: 任务台「筛选-语言」中文 options → 媒体人主表「语言」字段 ISO 代码
+LANG_CN_TO_ISO = {
+    "英语": "en", "德语": "de", "日语": "ja", "法语": "fr",
+    "西班牙语": "es", "葡萄牙语": "pt", "中文": "zh",
+    "意大利语": "it", "荷兰语": "nl", "瑞典语": "sv", "其他": "其他",
+    "en": "en", "de": "de", "ja": "ja", "fr": "fr",
+    "es": "es", "pt": "pt", "zh": "zh", "it": "it",
+    "nl": "nl", "sv": "sv",
+}
+
 # Ban phrases (媒体人 PR 也需要防 LLM 假装看过具体文章)
 BAN_PHRASE_PATTERNS = [
     re.compile(r"\bI\s+(saw|read|caught|loved|enjoyed)\s+(your|the)\b", re.I),
@@ -171,6 +181,8 @@ async def filter_editors(task_fields: dict) -> list:
     groups_want = [_opt_text(x) for x in groups_want]
     countries_want = [_opt_text(x) for x in countries_want]
     langs_want = [_opt_text(x) for x in langs_want]
+    # V1.5: 任务台 options 由 ISO 改成中文(如「英语」), 此处统一映射成 ISO 跟主表「语言」比对
+    langs_want_iso = {LANG_CN_TO_ISO.get(l, l) for l in langs_want}
 
     batch_limit = int(task_fields.get("人数上限") or 30)
     hard_pool = max(batch_limit * 5, 100)
@@ -179,12 +191,13 @@ async def filter_editors(task_fields: dict) -> list:
         {"field_name": "合作状态", "operator": "is", "value": ["未建联"]},
         {"field_name": "邮箱", "operator": "isNotEmpty", "value": []},
     ])
+    pool_total = len(items)
 
     hits = []
     for rec in items:
         f = rec.get("fields", {})
         if countries_want and ext(f.get("国家")) not in countries_want: continue
-        if langs_want and ext(f.get("语言")) not in langs_want: continue
+        if langs_want_iso and ext(f.get("语言")) not in langs_want_iso: continue
         if types_want and ext(f.get("媒体类型")) not in types_want: continue
         if groups_want and ext(f.get("媒体集团")) not in groups_want: continue
         if cats_want:
@@ -192,6 +205,10 @@ async def filter_editors(task_fields: dict) -> list:
             if not any(c in ed_cats for c in cats_want): continue
         hits.append(rec)
         if len(hits) >= hard_pool: break
+
+    if langs_want_iso or countries_want:
+        print(f"[enrich_editor V1.5] whitelist filter: pool={pool_total} → hits={len(hits)} "
+              f"(countries={countries_want}, langs={list(langs_want_iso)})")
 
     return hits[:hard_pool]
 
