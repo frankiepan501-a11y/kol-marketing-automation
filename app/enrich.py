@@ -146,8 +146,18 @@ async def get_mapping_rules(category: str, hosts: list) -> dict:
 
 
 # ===== 3. KOL 候选筛选 =====
-async def filter_kols(task_fields: dict) -> list:
-    """按任务条件筛选 KOL"""
+# 草稿状态白名单(可重发) — 已否决 / 发送失败 之外的状态都视作"已锁定 KOL", 跳过
+_DRAFT_REUSABLE_STATES = {"已否决", "发送失败"}
+
+
+async def filter_kols(task_fields: dict, product_rid: str = "") -> list:
+    """按任务条件筛选 KOL.
+
+    去重双层防御:
+    1. 「合作状态」语义: 仅放行 "" / "未建联" (跟 scoring.py L106 对齐).
+       已发邮件的 KOL 状态会被 auto_send 切到 "待回复" → 自然排除.
+    2. T_DRAFT 同产品已存在草稿的 KOL → 排除 (防同产品并发任务窗口期重发).
+    """
     platforms_want = task_fields.get("筛选-平台") or []
     countries_want = task_fields.get("筛选-国家") or []
     styles_want = task_fields.get("筛选-内容风格") or []
@@ -163,15 +173,38 @@ async def filter_kols(task_fields: dict) -> list:
     batch_limit = int(task_fields.get("批量大小") or 50)
     hard_pool = max(batch_limit * 5, 200)
 
+    # 同产品已存在草稿的 KOL → exclude_set
+    exclude_kol_ids = set()
+    if product_rid:
+        existing = await feishu.search_records(config.T_DRAFT, [
+            {"field_name": "关联产品", "operator": "contains", "value": [product_rid]},
+            {"field_name": "对象类型", "operator": "is", "value": ["KOL"]},
+        ])
+        for d in existing:
+            f = d.get("fields", {})
+            if ext(f.get("邮件草稿状态")) in _DRAFT_REUSABLE_STATES: continue
+            kol_rid = xrid(f.get("关联KOL"))
+            if kol_rid: exclude_kol_ids.add(kol_rid)
+
+    # 池: 邮箱有值 (放开 合作状态 严格 filter, 改 in-loop check)
     items = await feishu.search_records(config.T_KOL, [
-        {"field_name": "合作状态", "operator": "is", "value": ["未建联"]},
         {"field_name": "邮箱", "operator": "isNotEmpty", "value": []},
     ])
     pool_total = len(items)
 
     hits = []
+    skipped_status, skipped_dedup = 0, 0
     for rec in items:
         f = rec.get("fields", {})
+        # 防骚扰 #1: 合作状态 仅放 "" / "未建联" (scoring.py 对齐, 修历史 enrich/scoring 不一致 bug)
+        coop = ext(f.get("合作状态"))
+        if coop not in ("", "未建联"):
+            skipped_status += 1
+            continue
+        # 防骚扰 #2: 同产品已有非可重发草稿 → 跳过 (防并发窗口期 KOL 收 2 封)
+        if rec["record_id"] in exclude_kol_ids:
+            skipped_dedup += 1
+            continue
         if platforms_want:
             mp = ext(f.get("主平台"))
             if mp not in platforms_want: continue
@@ -191,9 +224,9 @@ async def filter_kols(task_fields: dict) -> list:
         hits.append(rec)
         if len(hits) >= hard_pool: break
 
-    if langs_want or countries_want:
-        print(f"[enrich V1.5] whitelist filter: pool={pool_total} → hits={len(hits)} "
-              f"(countries={countries_want}, langs={list(langs_want)})")
+    print(f"[enrich V1.5] filter: pool={pool_total} → hits={len(hits)} "
+          f"(已联系跳过={skipped_status}, 同产品已有草稿跳过={skipped_dedup}, "
+          f"countries={countries_want}, langs={list(langs_want)})")
 
     return hits[:hard_pool]
 
@@ -513,7 +546,7 @@ async def enrich_task(task_record: dict) -> dict:
 
     await feishu.update_record(config.T_TASK_KOL, task_rid, {"任务状态": "3-富化中"})
 
-    candidates = await filter_kols(tf)
+    candidates = await filter_kols(tf, product_rid=prod_rid)
     if not candidates:
         await feishu.update_record(config.T_TASK_KOL, task_rid, {
             "任务状态": "7-已完成", "富化候选数": 0, "通过阈值数": 0, "备注": "无候选",
