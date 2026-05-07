@@ -75,9 +75,10 @@ Body (前 800 字):
 {body[:800]}
 
 【意图类型】
-- 感兴趣: 主动表达兴趣或好评 ("Sounds cool!"/"Looks awesome"/"Would love to check it out"/"Tell me more"/给地址要寄样)
+- 感兴趣: 主动表达兴趣或好评 + **没有保留条件** ("Sounds cool!"/"Looks awesome"/"Would love to check it out"/"Tell me more"/给地址要寄样)
+  - ⚠️ 注意: "产品很酷,但我没设备测试" / "酷但我现在不做这个" / "looks great BUT I don't have a Switch" 这种**称赞 + 但保留条件**类不是感兴趣! 是委婉拒绝 (decline_reason=不匹配_条件)
 - 要报价: 询问价格/佣金/合作条款 (commission/MOQ/rate card)
-- 委婉拒绝: "不适合"/"暂无档期"/"not a fit"/"thanks but no"
+- 委婉拒绝: "不适合"/"暂无档期"/"not a fit"/"thanks but no" + **缺条件软拒绝** (产品好但没设备/没受众/不做该赛道)
 - 退订: unsubscribe/please remove me/stop emailing
 - 质疑/澄清: 对方在**纠正/反驳**我们 cold email 里的某个具体说法 (典型: "I've never made X video"/"That's not my channel"/"You have me confused with someone else"/"I don't cover that category"/"Where did you see that?")。这种回复**不是表达兴趣**,是在打脸我们对他的描述错误,必须人审 + 道歉 + 重新切入,绝不能当作"感兴趣"自动发寄样确认。
 - 不明意图: out-of-office/自动回复/无法判断
@@ -86,6 +87,7 @@ Body (前 800 字):
 - 一封"我从没做过 X"/"那不是我"/"你搞错人了"类回复,即便语气客气,也是 质疑/澄清,不是 感兴趣。
 - 含有 "I've never"/"I don't"/"that's not"/"you have the wrong"/"actually, I"/"to clarify"/"correction"等纠错语气强信号。
 - "Tell me more" 不带纠错 = 感兴趣;"I don't make those, but tell me more about the product" = 质疑/澄清(因有纠错前置)。
+- ⚠️ **称赞 + BUT 缺条件**铁律 (okamikazz 5/7 反例): KOL 说"产品很酷但我没 Switch / 我现在不做这个 / 我没这种受众" → **委婉拒绝 (decline_reason=不匹配_条件)**, 不是感兴趣。AI 之前错把 okamikazz "muito legal seu produto, uma pena que não tenho um switch para testa-lo" 归感兴趣 → 系统又自动发"sample/press kit/quick call"三选项给一个明说没 Switch 的 KOL,KOL 困惑。
 
 【委婉拒绝细分(仅 type=委婉拒绝 时填 decline_reason 字段)】
 - 不匹配_品类: KOL 不做这类产品 (例: "I focus on cooking content not gaming gear" / "wrong niche for me" / "my audience isn't into this")
@@ -94,6 +96,8 @@ Body (前 800 字):
   → retry_days = 30/60/90 (根据时机长短: 提到"周/月" → 30; "季度" → 60; "半年/年" → 90; 默认 60)
 - 不匹配_方式: 只做付费 / 不做免费寄样 / 只做大品牌 ambassador (例: "I only work with paid sponsorships" / "no free seeding" / "only ambassador deals")
   → retry_days = 0 (转付费路径,无需重发)
+- **不匹配_条件: 缺核心硬件 / 缺受众 / 暂时不做该赛道但保留未来可能** (例: "I don't have a Switch to test it" / "no audience for gaming" / "if one day I start covering Switch content I'd love to try"/ "uma pena que não tenho um switch")
+  → retry_days = 180 (半年后再触达, KOL 可能买设备/转赛道)
 - 不感兴趣_其他: 兜底 (例: "thanks but no" 没说原因 / "not interested")
   → retry_days = 0
 
@@ -104,8 +108,8 @@ Body (前 800 字):
   "summary":"一句总结",
   "key_quote":"原文 1 句",
   "suggested_action":"下一步建议",
-  "decline_reason":"不匹配_品类|不匹配_时机|不匹配_方式|不感兴趣_其他 (仅 type=委婉拒绝 填,否则空)",
-  "retry_days":0-90 整数 (仅 委婉拒绝+不匹配_时机 才>0,其他都填 0)
+  "decline_reason":"不匹配_品类|不匹配_时机|不匹配_方式|不匹配_条件|不感兴趣_其他 (仅 type=委婉拒绝 填,否则空)",
+  "retry_days":0-180 整数 (不匹配_时机=30/60/90; 不匹配_条件=180; 其他都填 0)
 }}"""
     try:
         return await deepseek.chat_json(prompt, max_tokens=500)
@@ -298,9 +302,9 @@ async def run():
                 "回复意图": intent_type,
                 "回复原文": email_body[:500],
             }
-            # P5.10 委婉拒绝原因分类 + 下次重发日期
+            # P5.10 委婉拒绝原因分类 + 下次重发日期 (5 类含 不匹配_条件,V1.5 加)
             if intent_type == "委婉拒绝" and decline_reason in (
-                "不匹配_品类", "不匹配_时机", "不匹配_方式", "不感兴趣_其他"):
+                "不匹配_品类", "不匹配_时机", "不匹配_方式", "不匹配_条件", "不感兴趣_其他"):
                 draft_update["拒绝原因分类"] = decline_reason
                 if retry_days > 0:
                     draft_update["下次重发日期"] = now_ms + retry_days * 86400 * 1000
