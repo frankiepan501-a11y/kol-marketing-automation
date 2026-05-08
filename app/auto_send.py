@@ -143,6 +143,18 @@ async def send_one(rec: dict) -> dict:
         body_html = body_html.replace("[CARRIER待填运营修改]", carrier)
         body_html = body_html.replace("[CARRIER 待填]", carrier)
 
+    # 发送前 body 长度 sanity check (V1 最小防御, 防 feishu.ext() multi-segment bug 类再触发)
+    # 5/8 ctatechdesk 事故根因: 草稿表 body 是 multi-segment array, ext() 只拿 [0].text 几字符
+    # → KOL 收到空白邮件. 修了 ext() 后, 这层 sanity check 是兜底保险.
+    plain_body = re.sub(r'<[^>]+>', '', body_html or '').strip()
+    if len(plain_body) < 50:
+        await feishu.update_record(config.T_DRAFT, rid, {
+            "邮件草稿状态": "待修改",
+            "审核路径": "需人改",
+            "审批意见": f"[发送前 sanity check] body 仅 {len(plain_body)} 纯文本字符, 疑似截断 bug, 拒发. 检查草稿正文 + feishu.ext() 是否拼接所有 segments.",
+        })
+        return {"rid": rid, "ok": False, "error": f"body too short ({len(plain_body)} chars), suspected truncation"}
+
     # 发送前占位符校验: 防止"[运单号待填]"等没换就发出去
     has_ph, ph_kw = has_unfilled_placeholder(subject, body_html)
     if has_ph:
