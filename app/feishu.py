@@ -45,10 +45,27 @@ async def api(method: str, path: str, body=None, which: str = "bitable"):
 
 # ===== Helpers =====
 def ext(f):
+    """从飞书字段值抽取文本.
+
+    🚨 5/8 root cause fix: 飞书 search/get API 对**多段文本**字段返回:
+      [{"text":"Hi CTA,\\n", "type":"text"}, {"text":"\\n"}, {"text":"段 2..."}, ...]
+    历史只取 [0].text → 拿到 8 字符 "Hi CTA,\\n" → 发出去 KOL 收到 8 字符空白邮件.
+    受害事故: 4/26 Scott Stein (CNET) / 5/6+5/8 ctatechdesk / 5/8 mafastudios+gameknight3227.
+    之前 memory zoho-mailformat-html-pitfall 误归因 Zoho HTML, 真正根因是 ext() bug.
+
+    修复: array of dict 拼接所有 segment 的 text 字段.
+    单选/链接字段不受影响 (链接通常 1 个 element, 单选直接是 string).
+    """
     if f is None: return ""
     if isinstance(f, list):
         if not f: return ""
-        if isinstance(f[0], dict): return f[0].get("text") or f[0].get("link") or f[0].get("name") or ""
+        if isinstance(f[0], dict):
+            parts = []
+            for item in f:
+                if not isinstance(item, dict): continue
+                t = item.get("text") or item.get("link") or item.get("name")
+                if t: parts.append(t)
+            return "".join(parts) if parts else ""
         return str(f[0])
     if isinstance(f, dict): return f.get("text") or f.get("link") or ""
     return f or ""
