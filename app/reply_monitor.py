@@ -145,6 +145,14 @@ async def find_draft(contact_rid: str, contact_type: str):
     """找到该 contact 关联的"待监听"草稿 + 该 contact 的所有已发送草稿(供 body 去重用).
     优先取「未回复 + 发送时间最新」的草稿；都已回复时回 fallback 取最新一条。
 
+    V3 加固方案 B (2026-05-08, 1upBinge 6 封事故根因修法):
+        unreplied 候选池**排除 邮件草稿来源=reply 的草稿** — reply 草稿"未回复"语义是
+        "等 KOL 对我们 reply 的再次回复", 不该作为新 inbox email 的匹配目标. 否则
+        死循环: KOL 回复 1 次 → 我们发 reply → reply 草稿"是否回复=false" → 下一轮
+        reply_monitor 把它当 unreplied cold 草稿 → 重新处理同一封 inbox → 又生 reply.
+        排除 reply 后 cold/followup/tracking_followup 才是 unreplied 候选, 根因消除.
+        all_matched 仍含 reply (dedup 时用).
+
     Returns: (best_draft, all_matched_drafts) 或 (None, [])
     """
     link_field = "关联媒体人" if contact_type == "editor" else "关联KOL"
@@ -154,8 +162,14 @@ async def find_draft(contact_rid: str, contact_type: str):
     matched = [r for r in items if xrid(r["fields"].get(link_field)) == contact_rid]
     if not matched:
         return None, []
-    unreplied = [r for r in matched if not r["fields"].get("是否回复")]
-    pool = unreplied if unreplied else matched
+    # V3-B: unreplied + fallback pool 都排除 来源=reply 草稿
+    # 否则 KOL 多轮回复时, fallback 仍会选到最新的 reply 草稿 → guard 是否回复=false 不拦 → 死循环
+    non_reply = [r for r in matched if ext(r["fields"].get("邮件草稿来源")) != "reply"]
+    unreplied = [r for r in non_reply if not r["fields"].get("是否回复")]
+    pool = unreplied if unreplied else non_reply
+    if not pool:
+        # 该 contact 只有 reply 草稿 (异常状态: 没 cold/followup 但已有 reply) → 拒绝处理新 inbox
+        return None, matched
     pool.sort(key=lambda r: r["fields"].get("发送时间") or 0, reverse=True)
     return pool[0], matched
 
@@ -239,19 +253,36 @@ async def run():
                 except Exception: pass
             email_body = html_to_text(body_html) or msg.get("summary", "") or subject
 
-            # === Body 去重: 同一 inbox 邮件已被任何草稿"回复原文"记录过 → 跳过 ===
-            # 防 P0 patch 副作用 (Ashtvn 死循环): 自动通过的 reply 草稿"是否回复=False"
-            # 被下一轮当作未回复草稿,死循环重处理同一封 inbox 邮件。
+            # === V3-C: messageId-first dedup (优先), body[:200] fallback (兼容老数据) ===
+            # Layer-1 hotfix (5/6 commit 848e83a) 用 body[:200] dedup 拦死循环, 但有 2 个边界:
+            #   1. Zoho 渲染管线让前 200 字微变 → dedup 失效
+            #   2. body 含动态时间戳/签名变量 → 同一封 email 第 2 次拉时 body 变了
+            # V3-C (2026-05-08): 写"回复原文"时拼 [MID:{messageId}] token 前缀, dedup 时
+            # 优先按 token 精确匹配; 兼容老数据 (没 token) 仍用 body[:200] 匹配。
+            new_msg_token = f"[MID:{msg_id}]" if msg_id else ""
             new_body_key = (email_body or "")[:200].strip()
-            if new_body_key:
+            already_seen = False
+            if new_msg_token:
                 already_seen = any(
-                    (ext(d["fields"].get("回复原文")) or "")[:200].strip() == new_body_key
+                    new_msg_token in (ext(d["fields"].get("回复原文")) or "")
                     for d in all_matched
                 )
-                if already_seen:
-                    print(f"[reply_monitor] dedup: skip {from_addr} body already processed")
-                    results.append({"brand": brand, "from": from_addr, "skipped": "duplicate_body"})
-                    continue
+            if not already_seen and new_body_key:
+                # 拿出"回复原文", 剥掉可能的 [MID:xxx] / [OOO 自动回复] 前缀, 再比 200 字
+                def _strip_token(s: str) -> str:
+                    if s.startswith("[MID:") or s.startswith("[OOO "):
+                        i = s.find("] ")
+                        if i > 0:
+                            return s[i + 2:]
+                    return s
+                already_seen = any(
+                    _strip_token(ext(d["fields"].get("回复原文")) or "")[:200].strip() == new_body_key
+                    for d in all_matched
+                )
+            if already_seen:
+                print(f"[reply_monitor] dedup: skip {from_addr} (msgid={msg_id} body_head={new_body_key[:60]!r})")
+                results.append({"brand": brand, "from": from_addr, "skipped": "duplicate_body"})
+                continue
 
             # === OOO 自动回复检测 (在 AI 分类前) ===
             ooo_hit, ooo_frag = is_ooo(subject, email_body)
@@ -295,12 +326,14 @@ async def run():
                 retry_days = 0
             now_ms = int(time.time() * 1000)
 
-            # 回写草稿
+            # 回写草稿 (V3-C: 前缀 [MID:xxx] token 让下一轮 dedup 走精确匹配)
+            mid_prefix = f"[MID:{msg_id}] " if msg_id else ""
+            # body 截到 460 让总长 ≤ 500 (Zoho msg_id ~19 位 + token wrap = 27 chars)
             draft_update = {
                 "是否回复": True,
                 "回复日期": now_ms,
                 "回复意图": intent_type,
-                "回复原文": email_body[:500],
+                "回复原文": (mid_prefix + (email_body or ""))[:500],
             }
             # P5.10 委婉拒绝原因分类 + 下次重发日期 (5 类含 不匹配_条件,V1.5 加)
             if intent_type == "委婉拒绝" and decline_reason in (
