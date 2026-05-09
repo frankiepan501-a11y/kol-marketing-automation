@@ -3,7 +3,7 @@
 """
 import asyncio
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
@@ -93,6 +93,18 @@ async def run_enrich_task_editor(authorization: str = Header(default="")):
     try:
         result = await enrich_editor.run()
         return {"ok": True, **result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1500:]}
+
+
+@app.post("/kol-keyword-cron/run")
+async def run_kol_keyword_cron(authorization: str = Header(default="")):
+    """周一/四 09:00 BJ 自动从词库抽 5 关键词建 YT 爬虫任务 (KOL 持续开发)"""
+    _check_auth(authorization)
+    try:
+        result = await keyword_cron.run()
+        return result
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1500:]}
