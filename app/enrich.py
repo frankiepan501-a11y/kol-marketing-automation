@@ -149,15 +149,42 @@ async def get_mapping_rules(category: str, hosts: list) -> dict:
 # 草稿状态白名单(可重发) — 已否决 / 发送失败 之外的状态都视作"已锁定 KOL", 跳过
 _DRAFT_REUSABLE_STATES = {"已否决", "发送失败"}
 
+# === KOL 资产化 V2 — 品牌感知三层防御 ===
+# 跨品牌可派 (新人 + 已合作老朋友推下一款, 任何品牌都通过 Layer 1)
+DISPATCHABLE_ANY_BRAND = {"", "未建联", "已合作-免费", "已合作-免费(多次)", "已合作-付费"}
+# 永久排除 (拒绝 — 任何品牌都不派)
+EXCLUDE_HARD = {"不合适", "黑名单"}
+# 同品牌流程中 (含: 待回复 / 洽谈中 / 未产出 — 仅排除产生此状态的品牌, 跨品牌可派)
+# 任何不在 DISPATCHABLE_ANY_BRAND 也不在 EXCLUDE_HARD 的状态, 默认按"同品牌流程中"处理
 
-async def filter_kols(task_fields: dict, product_rid: str = "") -> list:
-    """按任务条件筛选 KOL.
+# 7 天同品牌轰炸窗 (跨品牌不算)
+RECENT_BLAST_DAYS_SAME_BRAND = 7
 
-    去重双层防御:
-    1. 「合作状态」语义: 仅放行 "" / "未建联" (跟 scoring.py L106 对齐).
-       已发邮件的 KOL 状态会被 auto_send 切到 "待回复" → 自然排除.
-    2. T_DRAFT 同产品已存在草稿的 KOL → 排除 (防同产品并发任务窗口期重发).
+
+def _brand_from_email(email: str) -> str:
+    """通过 partner@ 邮箱反推品牌, 用于草稿表的品牌识别."""
+    if not email: return ""
+    e = str(email).lower()
+    if "powkong" in e: return "POWKONG"
+    if "funlab" in e or "firefly" in e: return "FUNLAB"
+    return ""
+
+
+async def filter_kols(task_fields: dict, product_rid: str = "", brand: str = "") -> list:
+    """按任务条件筛选 KOL — 品牌感知三层防重派单 (KOL 资产化 V2).
+
+    Layer 1 (合作状态品牌感知白名单):
+        - 不合适/黑名单 → 任何品牌都排除
+        - 未建联/已合作-免费/已合作-免费(多次)/已合作-付费/空 → 任何品牌都通过
+        - 待回复/洽谈中/未产出 → 仅排除"产生此状态的品牌" (查最近草稿的发送邮箱反推)
+
+    Layer 2 (同 KOL × 同产品永久去重): T_DRAFT 同产品已存在非否决/失败草稿 → 永久排除.
+        保证老朋友不会被重推已合作过的产品.
+
+    Layer 3 (7 天同品牌轰炸窗): T_DRAFT 同品牌任意产品 7 天内已派 → 排除.
+        跨品牌可派 (POWKONG 派完 7 天内, FUNLAB 仍可派同 KOL).
     """
+    import time as _time
     platforms_want = task_fields.get("筛选-平台") or []
     countries_want = task_fields.get("筛选-国家") or []
     styles_want = task_fields.get("筛选-内容风格") or []
@@ -173,18 +200,51 @@ async def filter_kols(task_fields: dict, product_rid: str = "") -> list:
     batch_limit = int(task_fields.get("批量大小") or 50)
     hard_pool = max(batch_limit * 5, 200)
 
-    # 同产品已存在草稿的 KOL → exclude_set
+    # === 一次性拉全量 KOL 草稿 (Layer 1/2/3 共享, 避免多次 API) ===
+    all_kol_drafts = await feishu.search_records(config.T_DRAFT, [
+        {"field_name": "对象类型", "operator": "is", "value": ["KOL"]},
+    ])
+
+    # Layer 1 数据准备: 每个 KOL 最近一次"非否决/失败"草稿 → 反推该 KOL 当前流程中是哪个品牌
+    # 用于"待回复/洽谈中/未产出"状态时, 决定是否同品牌
+    kol_active_brand = {}  # kol_rid → brand (POWKONG / FUNLAB / "")
+    kol_latest_ms = {}
+    for d in all_kol_drafts:
+        f = d.get("fields", {})
+        if ext(f.get("邮件草稿状态")) in _DRAFT_REUSABLE_STATES: continue
+        kol_rid = xrid(f.get("关联KOL"))
+        if not kol_rid: continue
+        gen_ms = f.get("生成时间", 0) or 0
+        if not isinstance(gen_ms, (int, float)): gen_ms = 0
+        if kol_latest_ms.get(kol_rid, 0) < gen_ms:
+            kol_latest_ms[kol_rid] = gen_ms
+            kol_active_brand[kol_rid] = _brand_from_email(ext(f.get("发送邮箱")))
+
+    # Layer 2: 同产品已存在草稿的 KOL → 永久排除
     exclude_kol_ids = set()
     if product_rid:
-        existing = await feishu.search_records(config.T_DRAFT, [
-            {"field_name": "关联产品", "operator": "contains", "value": [product_rid]},
-            {"field_name": "对象类型", "operator": "is", "value": ["KOL"]},
-        ])
-        for d in existing:
+        for d in all_kol_drafts:
             f = d.get("fields", {})
             if ext(f.get("邮件草稿状态")) in _DRAFT_REUSABLE_STATES: continue
+            # 检查关联产品是否包含 product_rid
+            link_products = f.get("关联产品") or {}
+            link_ids = link_products.get("link_record_ids") or [] if isinstance(link_products, dict) else []
+            if product_rid not in link_ids: continue
             kol_rid = xrid(f.get("关联KOL"))
             if kol_rid: exclude_kol_ids.add(kol_rid)
+
+    # Layer 3: 7 天内同品牌任意产品已派的 KOL → 排除 (跨品牌不算)
+    recent_blasted_same_brand = set()
+    cutoff_ms = int(_time.time() * 1000) - RECENT_BLAST_DAYS_SAME_BRAND * 86400 * 1000
+    for d in all_kol_drafts:
+        f = d.get("fields", {})
+        if ext(f.get("邮件草稿状态")) in _DRAFT_REUSABLE_STATES: continue
+        gen_ms = f.get("生成时间")
+        if not isinstance(gen_ms, (int, float)) or gen_ms < cutoff_ms: continue
+        draft_brand = _brand_from_email(ext(f.get("发送邮箱")))
+        if brand and draft_brand and draft_brand != brand: continue  # 跨品牌不算轰炸
+        kol_rid = xrid(f.get("关联KOL"))
+        if kol_rid: recent_blasted_same_brand.add(kol_rid)
 
     # 池: 邮箱有值 (放开 合作状态 严格 filter, 改 in-loop check)
     items = await feishu.search_records(config.T_KOL, [
@@ -193,18 +253,26 @@ async def filter_kols(task_fields: dict, product_rid: str = "") -> list:
     pool_total = len(items)
 
     hits = []
-    skipped_status, skipped_dedup = 0, 0
+    skipped_status, skipped_dedup, skipped_blast = 0, 0, 0
     for rec in items:
         f = rec.get("fields", {})
-        # 防骚扰 #1: 合作状态 仅放 "" / "未建联" (scoring.py 对齐, 修历史 enrich/scoring 不一致 bug)
+        rid = rec["record_id"]
         coop = ext(f.get("合作状态"))
-        if coop not in ("", "未建联"):
-            skipped_status += 1
-            continue
-        # 防骚扰 #2: 同产品已有非可重发草稿 → 跳过 (防并发窗口期 KOL 收 2 封)
-        if rec["record_id"] in exclude_kol_ids:
-            skipped_dedup += 1
-            continue
+        # Layer 1 (品牌感知):
+        if coop in EXCLUDE_HARD:
+            skipped_status += 1; continue
+        if coop not in DISPATCHABLE_ANY_BRAND:
+            # 流程中状态 (待回复/洽谈中/未产出) → 仅同品牌排除
+            active_brand = kol_active_brand.get(rid, "")
+            if active_brand and brand and active_brand == brand:
+                skipped_status += 1; continue
+            # 跨品牌或查不到品牌, 放行
+        # Layer 2: 同 KOL × 同产品 永久不重派
+        if rid in exclude_kol_ids:
+            skipped_dedup += 1; continue
+        # Layer 3: 7 天内同 KOL 同品牌任意产品已派 → 跳过 (跨品牌不算)
+        if rid in recent_blasted_same_brand:
+            skipped_blast += 1; continue
         if platforms_want:
             mp = ext(f.get("主平台"))
             if mp not in platforms_want: continue
@@ -224,9 +292,9 @@ async def filter_kols(task_fields: dict, product_rid: str = "") -> list:
         hits.append(rec)
         if len(hits) >= hard_pool: break
 
-    print(f"[enrich V1.5] filter: pool={pool_total} → hits={len(hits)} "
-          f"(已联系跳过={skipped_status}, 同产品已有草稿跳过={skipped_dedup}, "
-          f"countries={countries_want}, langs={list(langs_want)})")
+    print(f"[enrich V2 品牌感知] filter: pool={pool_total} → hits={len(hits)} "
+          f"brand={brand} (L1同品牌流程中/拒绝={skipped_status}, L2同产品永久={skipped_dedup}, "
+          f"L3同品牌7天轰炸={skipped_blast}, countries={countries_want}, langs={list(langs_want)})")
 
     return hits[:hard_pool]
 
@@ -546,7 +614,7 @@ async def enrich_task(task_record: dict) -> dict:
 
     await feishu.update_record(config.T_TASK_KOL, task_rid, {"任务状态": "3-富化中"})
 
-    candidates = await filter_kols(tf, product_rid=prod_rid)
+    candidates = await filter_kols(tf, product_rid=prod_rid, brand=brand)
     if not candidates:
         await feishu.update_record(config.T_TASK_KOL, task_rid, {
             "任务状态": "7-已完成", "富化候选数": 0, "通过阈值数": 0, "备注": "无候选",

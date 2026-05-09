@@ -157,14 +157,36 @@ async def find_pending_tasks() -> list:
 # 草稿状态白名单(可重发) — 已否决 / 发送失败 之外的状态视作"已锁定", 跳过
 _DRAFT_REUSABLE_STATES = {"已否决", "发送失败"}
 
+# === 媒体人 V2 — 品牌感知三层防御 ===
+# 跨品牌可派 (媒体人合作完后状态会回 "已合作")
+DISPATCHABLE_ANY_BRAND_EDITOR = {"", "未建联", "已合作"}
+# 永久排除
+EXCLUDE_HARD_EDITOR = {"不合适"}
+# 流程中状态 (建联中 / 洽谈中 / 样品评估 / 未产出) → 仅同品牌排除
 
-async def filter_editors(task_fields: dict, product_rid: str = "") -> list:
-    """按任务条件筛选媒体人.
+# 7 天同品牌轰炸窗
+RECENT_BLAST_DAYS_EDITOR = 7
 
-    去重双层防御 (跟 enrich.py filter_kols 对齐):
-    1. 「合作状态」语义: 仅放行 "" / "未建联" (跟 scoring.py L200 对齐).
-    2. T_DRAFT 同产品已存在媒体人草稿 → 排除 (防同产品并发任务窗口期重发).
+
+def _brand_from_email_editor(email: str) -> str:
+    if not email: return ""
+    e = str(email).lower()
+    if "powkong" in e: return "POWKONG"
+    if "funlab" in e or "firefly" in e: return "FUNLAB"
+    return ""
+
+
+async def filter_editors(task_fields: dict, product_rid: str = "", brand: str = "") -> list:
+    """按任务条件筛选媒体人 — 品牌感知三层防重派单 (KOL 资产化 V2).
+
+    Layer 1: 合作状态品牌感知
+        - 不合适 → 任何品牌都排除
+        - 未建联 / 已合作 / 空 → 任何品牌都通过
+        - 建联中 / 洽谈中 / 样品评估 / 未产出 → 仅排除"产生此状态的品牌"
+    Layer 2: 同媒体人 × 同产品 永久不重派.
+    Layer 3: 7 天内同媒体人同品牌任意产品已派 → 排除 (跨品牌不算).
     """
+    import time as _time
     cats_want = task_fields.get("筛选-报道品类") or []
     types_want = task_fields.get("筛选-媒体类型") or []
     groups_want = task_fields.get("筛选-媒体集团") or []
@@ -193,18 +215,49 @@ async def filter_editors(task_fields: dict, product_rid: str = "") -> list:
     batch_limit = int(task_fields.get("人数上限") or 30)
     hard_pool = max(batch_limit * 5, 100)
 
-    # 同产品已存在媒体人草稿 → exclude_set
+    # 一次性拉全量媒体人草稿 (Layer 1/2/3 共享)
+    all_ed_drafts = await feishu.search_records(config.T_DRAFT, [
+        {"field_name": "对象类型", "operator": "is", "value": ["媒体人"]},
+    ])
+
+    # Layer 1 数据准备: 每个媒体人最近一次"非否决/失败"草稿 → 反推当前流程中是哪个品牌
+    editor_active_brand = {}
+    editor_latest_ms = {}
+    for d in all_ed_drafts:
+        f = d.get("fields", {})
+        if ext(f.get("邮件草稿状态")) in _DRAFT_REUSABLE_STATES: continue
+        ed_rid = xrid(f.get("关联媒体人"))
+        if not ed_rid: continue
+        gen_ms = f.get("生成时间", 0) or 0
+        if not isinstance(gen_ms, (int, float)): gen_ms = 0
+        if editor_latest_ms.get(ed_rid, 0) < gen_ms:
+            editor_latest_ms[ed_rid] = gen_ms
+            editor_active_brand[ed_rid] = _brand_from_email_editor(ext(f.get("发送邮箱")))
+
+    # Layer 2: 同产品已存在媒体人草稿 → 永久排除
     exclude_editor_ids = set()
     if product_rid:
-        existing = await feishu.search_records(config.T_DRAFT, [
-            {"field_name": "关联产品", "operator": "contains", "value": [product_rid]},
-            {"field_name": "对象类型", "operator": "is", "value": ["媒体人"]},
-        ])
-        for d in existing:
+        for d in all_ed_drafts:
             f = d.get("fields", {})
             if ext(f.get("邮件草稿状态")) in _DRAFT_REUSABLE_STATES: continue
+            link_products = f.get("关联产品") or {}
+            link_ids = link_products.get("link_record_ids") or [] if isinstance(link_products, dict) else []
+            if product_rid not in link_ids: continue
             ed_rid = xrid(f.get("关联媒体人"))
             if ed_rid: exclude_editor_ids.add(ed_rid)
+
+    # Layer 3: 7 天内同品牌任意产品已派 → 排除 (跨品牌不算)
+    recent_blasted_same_brand = set()
+    cutoff_ms = int(_time.time() * 1000) - RECENT_BLAST_DAYS_EDITOR * 86400 * 1000
+    for d in all_ed_drafts:
+        f = d.get("fields", {})
+        if ext(f.get("邮件草稿状态")) in _DRAFT_REUSABLE_STATES: continue
+        gen_ms = f.get("生成时间")
+        if not isinstance(gen_ms, (int, float)) or gen_ms < cutoff_ms: continue
+        draft_brand = _brand_from_email_editor(ext(f.get("发送邮箱")))
+        if brand and draft_brand and draft_brand != brand: continue
+        ed_rid = xrid(f.get("关联媒体人"))
+        if ed_rid: recent_blasted_same_brand.add(ed_rid)
 
     # 池: 仅 邮箱 isNotEmpty (放开 合作状态 严格 filter, 改 in-loop check)
     items = await feishu.search_records(config.T_EDITOR, [
@@ -213,18 +266,24 @@ async def filter_editors(task_fields: dict, product_rid: str = "") -> list:
     pool_total = len(items)
 
     hits = []
-    skipped_status, skipped_dedup = 0, 0
+    skipped_status, skipped_dedup, skipped_blast = 0, 0, 0
     for rec in items:
         f = rec.get("fields", {})
-        # 防骚扰 #1: 合作状态 仅 "" / "未建联"
+        rid = rec["record_id"]
         coop = ext(f.get("合作状态"))
-        if coop not in ("", "未建联"):
-            skipped_status += 1
-            continue
-        # 防骚扰 #2: 同产品已有非可重发草稿 → 跳过
-        if rec["record_id"] in exclude_editor_ids:
-            skipped_dedup += 1
-            continue
+        # Layer 1 (品牌感知)
+        if coop in EXCLUDE_HARD_EDITOR:
+            skipped_status += 1; continue
+        if coop not in DISPATCHABLE_ANY_BRAND_EDITOR:
+            active_brand = editor_active_brand.get(rid, "")
+            if active_brand and brand and active_brand == brand:
+                skipped_status += 1; continue
+        # Layer 2: 同媒体人 × 同产品永久不重派
+        if rid in exclude_editor_ids:
+            skipped_dedup += 1; continue
+        # Layer 3: 7 天同媒体人同品牌轰炸 (跨品牌不算)
+        if rid in recent_blasted_same_brand:
+            skipped_blast += 1; continue
         if countries_want and ext(f.get("国家")) not in countries_want: continue
         if langs_want_iso and ext(f.get("语言")) not in langs_want_iso: continue
         if types_want and ext(f.get("媒体类型")) not in types_want: continue
@@ -235,9 +294,9 @@ async def filter_editors(task_fields: dict, product_rid: str = "") -> list:
         hits.append(rec)
         if len(hits) >= hard_pool: break
 
-    print(f"[enrich_editor V1.5] filter: pool={pool_total} → hits={len(hits)} "
-          f"(已联系跳过={skipped_status}, 同产品已有草稿跳过={skipped_dedup}, "
-          f"countries={countries_want}, langs={list(langs_want_iso)})")
+    print(f"[enrich_editor V2 品牌感知] filter: pool={pool_total} → hits={len(hits)} "
+          f"brand={brand} (L1同品牌流程中/拒绝={skipped_status}, L2同产品永久={skipped_dedup}, "
+          f"L3同品牌7天轰炸={skipped_blast}, countries={countries_want}, langs={list(langs_want_iso)})")
 
     return hits[:hard_pool]
 
@@ -559,7 +618,7 @@ async def enrich_task(task_record: dict) -> dict:
 
     await feishu.update_record(config.T_TASK_EDITOR, task_rid, {"任务状态": "3-富化中"})
 
-    candidates = await filter_editors(tf, product_rid=prod_rid)
+    candidates = await filter_editors(tf, product_rid=prod_rid, brand=brand)
     if not candidates:
         await feishu.update_record(config.T_TASK_EDITOR, task_rid, {
             "任务状态": "7-已完成", "富化候选数": 0, "通过阈值数": 0, "备注": "无候选",
