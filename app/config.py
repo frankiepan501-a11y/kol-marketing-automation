@@ -1,10 +1,22 @@
-"""配置 - 全部从环境变量读"""
+"""配置 - 全部从环境变量读
+
+⚠️ 设计决策 (2026-05-11 拆 dtc-weekly service 时改):
+原来 required=True 在 import 时 raise, 导致 dtc-weekly service (不用 KOL env)
+启动就 crash. 改为: required=True 时仅 warn, 返回空字符串.
+调用方用到该字段时自然会因空值失败 (401 / API error), 不影响 KOL 系统行为,
+但允许同一 image 跑在没有完整 env 的 service 上.
+"""
+import logging
 import os
+
+_log = logging.getLogger("config")
+
 
 def env(k, default=None, required=False):
     v = os.environ.get(k, default)
     if required and not v:
-        raise RuntimeError(f"Missing env: {k}")
+        _log.warning("env %s not set (required); usage will fail at call site", k)
+        return ""
     return v
 
 # 飞书 App 2号 (多维表格 + 消息)
