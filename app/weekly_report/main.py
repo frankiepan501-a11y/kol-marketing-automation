@@ -69,11 +69,22 @@ async def run(dry_run: bool = False, start_date=None, end_date=None) -> dict:
 
     # dry-run 跳过发布
     if dry_run:
+        # 检测是否走了 fallback 路径 (HTML size 极小且含 warn class)
+        is_fallback = len(html) < 20000 and 'class="warn"' in html
+        fallback_msg = None
+        if is_fallback:
+            # 提取 <div class="warn">...</div> 内容
+            import re
+            m = re.search(r'<div class="warn">(.+?)</div>', html, re.S)
+            fallback_msg = m.group(1).strip() if m else "(无法提取错误信息)"
         return {
             "ok": True, "dry_run": True,
             "week": f"{start}~{end}",
             "html_size": len(html),
             "md_preview": md[:500],
+            "html_preview": html[:3000],
+            "is_fallback": is_fallback,
+            "fallback_error": fallback_msg,
             "gaps": gaps,
             "collectors_summary": {k: collected[k].get("status") for k in keys},
         }
