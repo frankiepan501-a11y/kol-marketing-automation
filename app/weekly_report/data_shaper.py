@@ -215,10 +215,32 @@ def _shape_section_01_overview(collected: dict) -> dict:
     }
 
 
+_EMPTY_GA4 = {
+    "_missing": True,
+    "error": "",
+    "metrics": [],
+    "channels": [],
+    "funnel": {
+        "sessions": "—", "add_to_cart": "—", "begin_checkout": "—", "purchase": "—",
+        "atc_pct": "—", "atc_pct_num": 0,
+        "ic_pct": "—", "ic_pct_num": 0,
+        "purchase_pct": "—", "purchase_pct_num": 0,
+        "atc_to_ic": "—", "ic_to_purchase": "—",
+    },
+    "total_sessions": "—", "total_sessions_num": 0,
+    "social_breakdown": [], "countries": [],
+    "utm": {"sessions": 0, "revenue": 0, "purchases": 0, "top5_campaigns": []},
+}
+
+
 def _shape_ga4_brand(brand_data: dict, brand_color: str = "pw") -> dict:
     """02 PK GA4 / 06 FL GA4: 6 个 metric cards + 流量来源 + 漏斗."""
     if not brand_data or "error" in brand_data:
-        return {"_missing": True, "error": (brand_data or {}).get("error", "no data")}
+        stub = dict(_EMPTY_GA4)
+        stub["error"] = (brand_data or {}).get("error", "no data")
+        # 深拷贝 funnel 避免外部修改影响默认值
+        stub["funnel"] = dict(_EMPTY_GA4["funnel"])
+        return stub
 
     core = brand_data.get("core", {}) or {}
     channels_raw = brand_data.get("channels", []) or []
@@ -305,13 +327,27 @@ def _shape_ga4_brand(brand_data: dict, brand_color: str = "pw") -> dict:
     }
 
 
+_EMPTY_META = {
+    "_missing": True,
+    "cost_metrics": [], "reach_metrics": [], "funnel_metrics": [],
+    "daily": [],
+    "ad_funnel": {
+        "impressions": "—", "impressions_short": "—",
+        "clicks": "—", "lpv": "—", "atc": "—", "ic": "—", "purchases": "—",
+    },
+    "zero_warning": "",
+}
+
+
 def _shape_meta_pk(collected: dict) -> dict:
     """03 PK Meta 广告: 指标矩阵 (3 组) + 7 天 ROAS + 漏斗."""
     pk = safe_get(collected, "meta_ads", "data", "powkong", default={}) or {}
     s = pk.get("summary", {}) or {}
     daily = pk.get("daily", []) or []
     if not s or s.get("empty") or "error" in pk:
-        return {"_missing": True}
+        stub = dict(_EMPTY_META)
+        stub["ad_funnel"] = dict(_EMPTY_META["ad_funnel"])
+        return stub
 
     spend = s.get("spend", 0)
     roas = s.get("roas", 0)
@@ -419,10 +455,18 @@ def _shape_meta_pk(collected: dict) -> dict:
     }
 
 
+_EMPTY_GSC = {
+    "_missing": True,
+    "metrics": [], "site_url": "", "low_ctr_queries": [],
+}
+
+
 def _shape_gsc(brand_data: dict, brand_label: str, site_url: str) -> dict:
     """04/07 GSC: 4 个核心指标 + 收录情况 (无收录数据时 placeholder) + 高展现低 CTR 关键词."""
     if not brand_data or "error" in brand_data:
-        return {"_missing": True}
+        stub = dict(_EMPTY_GSC)
+        stub["site_url"] = site_url
+        return stub
 
     summary = brand_data.get("summary", {}) or {}
     queries = brand_data.get("top_queries", []) or []
