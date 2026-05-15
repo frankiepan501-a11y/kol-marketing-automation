@@ -156,7 +156,7 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
     if ship_confirm_meta:
         card = _build_ship_confirm_card(record_id, rec, score, summary, ship_confirm_meta, base_url)
         # 寄样: 主审 (独立站运营专员) + CC (Frankie + 吴晓丹)
-        main_targets, cc_targets = _ship_confirm_targets()
+        main_targets, cc_targets = await _ship_confirm_targets()
         targets = main_targets + cc_targets
     else:
         template_color = "orange" if path == "待人审" else "red"
@@ -181,8 +181,27 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
                 ]},
             ],
         }
-        # 个人通知 (Frankie 一定要,需人改时全员)
-        targets = [u for u in config.NOTIFY_USERS if u[0].startswith("潘")]
+        # 通知策略 (2026-05-15 改: 按职务实时查, 不硬编码 open_id):
+        # - "待人审" (5-7 分 / 承诺命中): 发独立站运营专员实时名单 + Frankie CC
+        #   旧 bug: 只发 Frankie → 张佳烨等运营收不到 → thunderstashgaming/Thao
+        #   千万粉丝 KOL 卡 12+ 小时没人审 (memory kol-status-2026-05-14)
+        # - "需人改" (<5 分): 仍全员通知 (含 Frankie 让他知道质量异常)
+        reviewers = await feishu.fetch_users_by_job_title(
+            config.KOL_REVIEWER_JOB_TITLE
+        )
+        frankie_cc = [u for u in config.NOTIFY_USERS if u[0].startswith("潘")]
+        # 去重 (按 open_id)
+        seen_oids = set()
+        targets = []
+        for name, oid in reviewers + frankie_cc:
+            if oid in seen_oids:
+                continue
+            seen_oids.add(oid)
+            targets.append((name, oid))
+        # reviewers 查空时降级到 NOTIFY_USERS 全员 (防 contact API 故障静默漏告警)
+        if not reviewers:
+            print(f"[draft_router] WARN: 0 reviewers from job_title={config.KOL_REVIEWER_JOB_TITLE!r}, fallback to all NOTIFY_USERS")
+            targets = config.NOTIFY_USERS
         if path == "需人改":
             targets = config.NOTIFY_USERS
 
@@ -287,17 +306,18 @@ def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str
     }
 
 
-def _ship_confirm_targets() -> tuple:
+async def _ship_confirm_targets() -> tuple:
     """ship_confirm 通知目标分主审 + CC
+    2026-05-15: 主审改用 fetch_users_by_job_title 按职务实时查 (不再硬编码人名匹配).
     Returns: (main_targets, cc_targets) 都是 [(name, open_id), ...]
     """
-    main = []     # 主审: 独立站运营专员
-    cc = []       # CC: 潘志聪 + 吴晓丹
-    for name, oid in config.NOTIFY_USERS:
-        if "独立站" in name:
-            main.append((name, oid))
-        elif name.startswith("潘") or "晓丹" in name:
-            cc.append((name, oid))
+    main = await feishu.fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)
+    cc = [u for u in config.NOTIFY_USERS
+          if u[0].startswith("潘") or "晓丹" in u[0]]
+    # 主审查空时降级 (防 contact API 故障)
+    if not main:
+        print(f"[draft_router] WARN: ship_confirm main empty, fallback to NOTIFY_USERS 独立站")
+        main = [u for u in config.NOTIFY_USERS if "独立站" in u[0]]
     return main, cc
 
 

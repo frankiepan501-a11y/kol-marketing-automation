@@ -141,3 +141,85 @@ async def send_card_message(receive_type: str, receive_id: str, card: dict):
         "content": json.dumps(card, ensure_ascii=False),
     }
     await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="notify")
+
+
+# ===== 按职务实时查在职员工 (聪哥1号 contact:contact:readonly) =====
+# 遵守 feishu-people-as-source-of-truth 铁律: 不硬编码 open_id, 按职务实时查飞书人事
+# 缓存 1h: 避免每次发卡片都拉一遍部门列表 (大约 7-10 个部门 + 每部门 1 次 user list)
+_job_title_cache = {}  # {title: (timestamp, [(name, open_id), ...])}
+_JOB_TITLE_TTL = 3600
+
+
+async def fetch_users_by_job_title(title: str):
+    """按职务名拿当前在职员工 [(name, open_id), ...].
+    用聪哥1号 (notify app) contact API, 已开通 contact:contact:readonly.
+    1h 缓存. 失败时返回空列表 (调用方应有降级路径).
+    """
+    cached = _job_title_cache.get(title)
+    if cached and (time.time() - cached[0]) < _JOB_TITLE_TTL:
+        return cached[1]
+
+    tok = await token("notify")
+    results = []
+    try:
+        # 1. 列所有顶级部门 (fetch_child=true 拿全树)
+        async with httpx.AsyncClient(timeout=30.0) as cli:
+            r = await cli.get(
+                "https://open.feishu.cn/open-apis/contact/v3/departments",
+                params={"page_size": 50, "fetch_child": "true",
+                        "parent_department_id": "0",
+                        "department_id_type": "open_department_id"},
+                headers={"Authorization": f"Bearer {tok}"},
+            )
+            r.raise_for_status()
+            depts = (r.json().get("data") or {}).get("items") or []
+
+            # 2. 按部门列用户 (含 job_title + status)
+            seen = set()
+            for d in depts:
+                dept_id = d.get("open_department_id")
+                if not dept_id:
+                    continue
+                page_token = ""
+                while True:
+                    params = {"department_id": dept_id, "page_size": 50,
+                              "user_id_type": "open_id",
+                              "department_id_type": "open_department_id"}
+                    if page_token:
+                        params["page_token"] = page_token
+                    ur = await cli.get(
+                        "https://open.feishu.cn/open-apis/contact/v3/users",
+                        params=params,
+                        headers={"Authorization": f"Bearer {tok}"},
+                    )
+                    if ur.status_code >= 400:
+                        break
+                    ud = ur.json()
+                    if ud.get("code") != 0:
+                        break
+                    items = (ud.get("data") or {}).get("items") or []
+                    for u in items:
+                        oid = u.get("open_id")
+                        if not oid or oid in seen:
+                            continue
+                        seen.add(oid)
+                        if u.get("job_title") != title:
+                            continue
+                        s = u.get("status") or {}
+                        is_active = (s.get("is_activated") and
+                                     not s.get("is_resigned") and
+                                     not s.get("is_frozen"))
+                        if is_active:
+                            results.append((u.get("name", ""), oid))
+                    if not (ud.get("data") or {}).get("has_more"):
+                        break
+                    page_token = (ud.get("data") or {}).get("page_token") or ""
+                    if not page_token:
+                        break
+    except Exception as e:
+        print(f"[feishu.fetch_users_by_job_title] {title} err: {e}")
+        # 失败不缓存, 下次重试
+        return []
+
+    _job_title_cache[title] = (time.time(), results)
+    return results

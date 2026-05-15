@@ -68,6 +68,10 @@ NOTIFY_USERS_STR = env("NOTIFY_USERS",
 )
 NOTIFY_USERS = [(p.split(":", 1)[0], p.split(":", 1)[1]) for p in NOTIFY_USERS_STR.split(",") if ":" in p]
 
+# KOL/编辑 草稿待审通知的"主审"职务 (按飞书人事「职务」列原文, feishu-people-as-source-of-truth 铁律)
+# 2026-05-15: draft_router._notify_human_review + sla_check L1 都用此职务实时查在职名单
+KOL_REVIEWER_JOB_TITLE = env("KOL_REVIEWER_JOB_TITLE", "独立站运营专员")
+
 # 服务鉴权 (n8n 调用 webhook 时 Header: Authorization: Bearer <INTERNAL_TOKEN>)
 INTERNAL_TOKEN = env("INTERNAL_TOKEN", required=True)
 

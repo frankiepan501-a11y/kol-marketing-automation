@@ -45,18 +45,25 @@ async def _mark_escalated(record_id: str):
     await feishu.update_record(config.T_DRAFT, record_id, {"审批意见": new_note})
 
 
-# ===== 层 1: ship_confirm 待审 24h 升级 (沿用旧逻辑,数据源换成新字段) =====
+# ===== 层 1: 所有待审 24h 升级 (2026-05-15 扩大: 不再只扫寄样类) =====
 async def _layer1_review_overdue(now_ms: int) -> dict:
+    """
+    扫所有「邮件草稿状态=待审」且生成 ≥24h 的草稿.
+    旧版只扫「寄样阶段=待发货」→ reply 类待审 (千万粉丝 KOL 回复) 永远兜不到.
+    新版按草稿类型分支:
+      - 寄样类 (寄样阶段=待发货): 用 _build_ship_confirm_card escalation=True + ship_confirm_targets
+      - 非寄样 (reply/cold/followup): 用通用红色超时升级卡 + 独立站运营专员
+    """
     cutoff_ms = now_ms - SLA_HOURS_REVIEW * 3600 * 1000
 
     items = await feishu.search_records(config.T_DRAFT, [
         {"field_name": "邮件草稿状态", "operator": "is", "value": ["待审"]},
-        {"field_name": "寄样阶段", "operator": "is", "value": ["待发货"]},
     ])
 
     escalated = 0
     skipped = 0
     not_yet = 0
+    base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_DRAFT}"
 
     for rec in items:
         f = rec["fields"]
@@ -71,30 +78,75 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
             skipped += 1
             continue
 
-        meta = {
-            "country": ext(f.get("国家/地区")),
-            "address": ext(f.get("收件地址 full")),
-            "product_name": "the product",
-        }
-        prod_rid = xrid(f.get("关联产品"))
-        if prod_rid:
-            try:
-                prod = await feishu.get_record(config.T_PRODUCT, prod_rid)
-                meta["product_name"] = ext(prod["fields"].get("产品英文名")) or ext(prod["fields"].get("产品名")) or "the product"
-            except Exception:
-                pass
+        is_ship_confirm = ext(f.get("寄样阶段")) == "待发货"
 
-        score = int(f.get("AI评分") or 0)
-        summary = (ext(f.get("AI评分理由")) or "(无)")[:100]
-        base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_DRAFT}"
-        card = draft_router._build_ship_confirm_card(rid, rec, score, summary, meta, base_url, escalation=True)
+        if is_ship_confirm:
+            meta = {
+                "country": ext(f.get("国家/地区")),
+                "address": ext(f.get("收件地址 full")),
+                "product_name": "the product",
+            }
+            prod_rid = xrid(f.get("关联产品"))
+            if prod_rid:
+                try:
+                    prod = await feishu.get_record(config.T_PRODUCT, prod_rid)
+                    meta["product_name"] = ext(prod["fields"].get("产品英文名")) or ext(prod["fields"].get("产品名")) or "the product"
+                except Exception:
+                    pass
 
-        main, cc = draft_router._ship_confirm_targets()
+            score = int(f.get("AI评分") or 0)
+            summary = (ext(f.get("AI评分理由")) or "(无)")[:100]
+            card = draft_router._build_ship_confirm_card(rid, rec, score, summary, meta, base_url, escalation=True)
+            main, cc = await draft_router._ship_confirm_targets()
+            personal_targets = main + cc
+        else:
+            # 非寄样类待审 24h+ → 通用红色超时升级卡
+            source = ext(f.get("邮件草稿来源")) or "cold"
+            contact_type = ext(f.get("对象类型")) or "KOL"
+            subject = ext(f.get("邮件主题"))[:100]
+            score = int(f.get("AI评分") or 0)
+            summary = (ext(f.get("AI评分理由")) or "(无)")[:200]
+            age_hours = int((now_ms - gen_time) / 3600 / 1000) if gen_time else 24
+            card = {
+                "header": {
+                    "template": "red",
+                    "title": {"tag": "plain_text",
+                              "content": f"🚨 [SLA 超时] {source} 草稿待审 {age_hours}h — {contact_type}"},
+                },
+                "elements": [
+                    {"tag": "div", "fields": [
+                        {"is_short": True, "text": {"tag": "lark_md", "content": f"**AI 评分**: {score}/10"}},
+                        {"is_short": True, "text": {"tag": "lark_md", "content": f"**已等待**: {age_hours} 小时"}},
+                    ]},
+                    {"tag": "div", "text": {"tag": "lark_md", "content": f"**主题**: {subject}"}},
+                    {"tag": "div", "text": {"tag": "lark_md", "content": f"**评分总评**: {summary}"}},
+                    {"tag": "hr"},
+                    {"tag": "div", "text": {"tag": "lark_md",
+                        "content": "**请立即审核**: 大 KOL 回复或商务承诺类草稿超时未审会流失转化机会"}},
+                    {"tag": "action", "actions": [
+                        {"tag": "button", "text": {"tag": "plain_text", "content": "打开KOL·媒体人邮件草稿"},
+                         "url": base_url, "type": "primary"},
+                    ]},
+                ],
+            }
+            reviewers = await feishu.fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)
+            frankie_cc = [u for u in config.NOTIFY_USERS if u[0].startswith("潘")]
+            seen = set()
+            personal_targets = []
+            for name, oid in reviewers + frankie_cc:
+                if oid in seen:
+                    continue
+                seen.add(oid)
+                personal_targets.append((name, oid))
+            if not reviewers:
+                print(f"[sla_check L1] WARN: 0 reviewers from job_title, fallback NOTIFY_USERS")
+                personal_targets = config.NOTIFY_USERS
+
         try:
             await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
         except Exception as e:
             print(f"[sla_check L1] notify chat fail: {e}")
-        for name, oid in main + cc:
+        for name, oid in personal_targets:
             try:
                 await feishu.send_card_message("open_id", oid, card)
             except Exception as e:
@@ -294,7 +346,11 @@ async def _layer3_no_content_30d(now_ms: int) -> dict:
                 await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
             except Exception:
                 pass
-            for name, oid in draft_router._ship_confirm_targets()[0]:  # 主审 only
+            try:
+                main_targets = (await draft_router._ship_confirm_targets())[0]
+            except Exception:
+                main_targets = []
+            for name, oid in main_targets:  # 主审 only
                 try:
                     await feishu.send_card_message("open_id", oid, card)
                 except Exception:
@@ -383,7 +439,11 @@ async def _layer4_low_roi_60d(now_ms: int) -> dict:
                 await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
             except Exception:
                 pass
-            for name, oid in draft_router._ship_confirm_targets()[0]:
+            try:
+                main_targets = (await draft_router._ship_confirm_targets())[0]
+            except Exception:
+                main_targets = []
+            for name, oid in main_targets:
                 try:
                     await feishu.send_card_message("open_id", oid, card)
                 except Exception:
