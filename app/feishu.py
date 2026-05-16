@@ -131,14 +131,19 @@ async def fetch_all_records(table_id: str):
     return items
 
 
-async def search_records(table_id: str, filters: list):
-    """filters: [{"field_name":..., "operator":..., "value": [...]}, ...]"""
+async def search_records(table_id: str, filters: list, field_names: list = None):
+    """filters: [{"field_name":..., "operator":..., "value": [...]}, ...]
+    field_names: 只拉这些字段, 减少 payload (2026-05-17 A4 性能优化, 可选)"""
     items = []
     page_token = ""
     while True:
-        path = f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records/search?page_size=100"
+        path = f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records/search?page_size=500"
         if page_token: path += f"&page_token={page_token}"
-        body = {"filter": {"conjunction": "and", "conditions": filters}} if filters else {}
+        body = {}
+        if filters:
+            body["filter"] = {"conjunction": "and", "conditions": filters}
+        if field_names:
+            body["field_names"] = field_names
         r = await api("POST", path, body)
         d = r.get("data") or {}
         items.extend(d.get("items") or [])

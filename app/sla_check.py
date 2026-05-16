@@ -34,15 +34,18 @@ LOW_ROI_ORDER_THRESHOLD = 3
 
 
 async def _is_already_escalated(rec: dict) -> bool:
-    note = ext(rec["fields"].get("审批意见")) or ""
-    return "[SLA-ESCALATED]" in note
+    """2026-05-17 A3: 改用专用字段 SLA已升级 (checkbox), 防审批意见字段 500 字截断丢 token.
+    兼容: 老草稿审批意见含 [SLA-ESCALATED] 仍识别 (字段迁移脚本已跑, 但兜底防漏)"""
+    f = rec["fields"]
+    if f.get("SLA已升级"):
+        return True
+    note = ext(f.get("审批意见")) or ""
+    return "[SLA-ESCALATED" in note  # 兼容老数据
 
 
 async def _mark_escalated(record_id: str):
-    rec = await feishu.get_record(config.T_DRAFT, record_id)
-    note = ext(rec["fields"].get("审批意见")) or ""
-    new_note = (note + f" [SLA-ESCALATED@{int(time.time())}]")[:500]
-    await feishu.update_record(config.T_DRAFT, record_id, {"审批意见": new_note})
+    """2026-05-17 A3: 写专用字段 SLA已升级=True, 不再往审批意见塞 token"""
+    await feishu.update_record(config.T_DRAFT, record_id, {"SLA已升级": True})
 
 
 # ===== 层 1: 所有待审 24h 升级 (2026-05-15 扩大: 不再只扫寄样类) =====
@@ -56,8 +59,13 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
     """
     cutoff_ms = now_ms - SLA_HOURS_REVIEW * 3600 * 1000
 
+    # 2026-05-17 A4: 加 field_names 减 payload (47 字段 → 13 字段)
     items = await feishu.search_records(config.T_DRAFT, [
         {"field_name": "邮件草稿状态", "operator": "is", "value": ["待审"]},
+    ], field_names=[
+        "邮件主题", "邮件草稿来源", "对象类型", "AI评分", "AI评分理由",
+        "生成时间", "寄样阶段", "国家/地区", "收件地址 full", "关联产品",
+        "审批意见", "SLA已升级",
     ])
 
     escalated = 0

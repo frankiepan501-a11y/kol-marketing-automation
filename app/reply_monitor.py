@@ -141,24 +141,45 @@ async def find_contact(email: str):
     return None, None
 
 
+# 2026-05-17 A4 性能: process-level cache 让一次 reply_monitor cron 内多 inbox 共用一次全表扫
+# TTL 5min, 跨 cron 自然过期 (cron 间隔 15min). 单次 cron 内最多 60 inbox 复用 1 次查询.
+_sent_drafts_cache = {"timestamp": 0, "items": None}
+_SENT_CACHE_TTL = 300
+
+
+async def _get_sent_drafts():
+    """拉所有 状态=已发送 草稿, 带 5min cache. 只取 link_field/来源/回复/原文/时间 等关键字段减 payload."""
+    import time as _t
+    if _sent_drafts_cache["items"] is not None and \
+       _t.time() - _sent_drafts_cache["timestamp"] < _SENT_CACHE_TTL:
+        return _sent_drafts_cache["items"]
+    items = await feishu.search_records(
+        config.T_DRAFT,
+        [{"field_name": "邮件草稿状态", "operator": "is", "value": ["已发送"]}],
+        field_names=["关联KOL", "关联媒体人", "邮件草稿来源", "是否回复",
+                     "回复原文", "发送时间", "邮件主题"],
+    )
+    _sent_drafts_cache["items"] = items
+    _sent_drafts_cache["timestamp"] = _t.time()
+    return items
+
+
 async def find_draft(contact_rid: str, contact_type: str):
     """找到该 contact 关联的"待监听"草稿 + 该 contact 的所有已发送草稿(供 body 去重用).
     优先取「未回复 + 发送时间最新」的草稿；都已回复时回 fallback 取最新一条。
 
     V3 加固方案 B (2026-05-08, 1upBinge 6 封事故根因修法):
         unreplied 候选池**排除 邮件草稿来源=reply 的草稿** — reply 草稿"未回复"语义是
-        "等 KOL 对我们 reply 的再次回复", 不该作为新 inbox email 的匹配目标. 否则
-        死循环: KOL 回复 1 次 → 我们发 reply → reply 草稿"是否回复=false" → 下一轮
-        reply_monitor 把它当 unreplied cold 草稿 → 重新处理同一封 inbox → 又生 reply.
+        "等 KOL 对我们 reply 的再次回复", 不该作为新 inbox email 的匹配目标.
         排除 reply 后 cold/followup/tracking_followup 才是 unreplied 候选, 根因消除.
         all_matched 仍含 reply (dedup 时用).
+
+    2026-05-17 A4: 用 _get_sent_drafts cache 减少全表扫 (一次 cron 内 60 inbox 共用 1 次查询).
 
     Returns: (best_draft, all_matched_drafts) 或 (None, [])
     """
     link_field = "关联媒体人" if contact_type == "editor" else "关联KOL"
-    items = await feishu.search_records(config.T_DRAFT, [
-        {"field_name": "邮件草稿状态", "operator": "is", "value": ["已发送"]}
-    ])
+    items = await _get_sent_drafts()
     matched = [r for r in items if xrid(r["fields"].get(link_field)) == contact_rid]
     if not matched:
         return None, []
