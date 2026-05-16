@@ -181,36 +181,18 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
                 ]},
             ],
         }
-        # 通知策略 (2026-05-15 改: 按职务实时查, 不硬编码 open_id):
-        # - "待人审" (5-7 分 / 承诺命中): 发独立站运营专员实时名单 + Frankie CC
-        #   旧 bug: 只发 Frankie → 张佳烨等运营收不到 → thunderstashgaming/Thao
-        #   千万粉丝 KOL 卡 12+ 小时没人审 (memory kol-status-2026-05-14)
-        # - "需人改" (<5 分): 仍全员通知 (含 Frankie 让他知道质量异常)
-        reviewers = await feishu.fetch_users_by_job_title(
-            config.KOL_REVIEWER_JOB_TITLE
-        )
-        frankie_cc = [u for u in config.NOTIFY_USERS if u[0].startswith("潘")]
-        # 去重 (按 open_id)
-        seen_oids = set()
-        targets = []
-        for name, oid in reviewers + frankie_cc:
-            if oid in seen_oids:
-                continue
-            seen_oids.add(oid)
-            targets.append((name, oid))
-        # reviewers 查空时降级到 NOTIFY_USERS 全员 (防 contact API 故障静默漏告警)
-        if not reviewers:
-            print(f"[draft_router] WARN: 0 reviewers from job_title={config.KOL_REVIEWER_JOB_TITLE!r}, fallback to all NOTIFY_USERS")
-            targets = config.NOTIFY_USERS
-        if path == "需人改":
-            targets = config.NOTIFY_USERS
+        # 2026-05-17 A9: 改用 feishu.resolve_notify_targets helper (统一决策)
+        role = "needs_rewrite" if path == "需人改" else "reviewer"
+        targets = await feishu.resolve_notify_targets(role)
 
     # 群通知 + 个人通知, 统计成败回写草稿表「卡片发送状态/错误/时间」(2026-05-16)
+    # 2026-05-17 A5: 保存群 msg_id 用于结束态 update card 标"已审"
     success = 0
     fail = 0
     errors = []
+    group_msg_id = ""
     try:
-        await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+        group_msg_id = await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
         success += 1
     except Exception as e:
         fail += 1
@@ -224,7 +206,7 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
             fail += 1
             errors.append(f"{name}: {str(e)[:80]}")
             print(f"[draft_router] notify {name} fail: {e}")
-    await feishu.mark_card_receipt(record_id, success, fail, errors)
+    await feishu.mark_card_receipt(record_id, success, fail, errors, group_msg_id=group_msg_id)
 
 
 # ===== ship_confirm 卡片 (V2: SOP 清单, 不查领星 API) =====
@@ -317,16 +299,11 @@ def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str
 
 async def _ship_confirm_targets() -> tuple:
     """ship_confirm 通知目标分主审 + CC
-    2026-05-15: 主审改用 fetch_users_by_job_title 按职务实时查 (不再硬编码人名匹配).
+    2026-05-17 A9: 改用 feishu.resolve_notify_targets helper
     Returns: (main_targets, cc_targets) 都是 [(name, open_id), ...]
     """
-    main = await feishu.fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)
-    cc = [u for u in config.NOTIFY_USERS
-          if u[0].startswith("潘") or "晓丹" in u[0]]
-    # 主审查空时降级 (防 contact API 故障)
-    if not main:
-        print(f"[draft_router] WARN: ship_confirm main empty, fallback to NOTIFY_USERS 独立站")
-        main = [u for u in config.NOTIFY_USERS if "独立站" in u[0]]
+    main = await feishu.resolve_notify_targets("ship_main")
+    cc = await feishu.resolve_notify_targets("ship_cc")
     return main, cc
 
 

@@ -201,6 +201,12 @@ async def send_one(rec: dict) -> dict:
         update_payload["发货时间"] = now_ms
     await feishu.update_record(config.T_DRAFT, rid, update_payload)
 
+    # 2026-05-17 A5: 发送成功 → 标"已审"群卡片 (防多人审同张卡 race)
+    try:
+        await feishu.mark_card_resolved(rid, "已发送")
+    except Exception as e:
+        print(f"[auto_send] mark_card_resolved fail: {e}")
+
     # 按对象类型 + 跟进
     obj_type = ext(f.get("对象类型"))
     source = ext(f.get("邮件草稿来源"))    # cold / followup / reply / tracking_followup

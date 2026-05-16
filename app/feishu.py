@@ -169,19 +169,86 @@ async def create_record(table_id: str, fields: dict):
     return r["data"]["record"]["record_id"]
 
 
-async def send_card_message(receive_type: str, receive_id: str, card: dict):
-    """用聪哥分身1号发飞书互动卡片"""
+async def send_card_message(receive_type: str, receive_id: str, card: dict) -> str:
+    """用聪哥分身1号发飞书互动卡片. 2026-05-17 返回 message_id (供 A5 后续 update).
+    返回空字符串 = 拿不到 msg_id (不影响主流程)
+    """
     import json
     body = {
         "receive_id": receive_id,
         "msg_type": "interactive",
         "content": json.dumps(card, ensure_ascii=False),
     }
-    await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="notify")
+    resp = await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="notify")
+    return (resp.get("data") or {}).get("message_id") or ""
+
+
+async def update_card_message(message_id: str, new_card: dict) -> bool:
+    """PATCH 互动卡片消息 (2026-05-17 A5 用, 标"已审" 重渲染卡片)
+    成功返 True, 失败返 False (静默 print, 不阻塞主流程)
+    """
+    import json
+    if not message_id:
+        return False
+    try:
+        body = {"content": json.dumps(new_card, ensure_ascii=False)}
+        await api("PATCH", f"/im/v1/messages/{message_id}", body, which="notify")
+        return True
+    except Exception as e:
+        print(f"[feishu.update_card_message] {message_id} fail: {e}")
+        return False
+
+
+async def mark_card_resolved(draft_rid: str, result_label: str, table_id: str = None):
+    """草稿状态结束 (已发送/已否决/退回重生) 时, 把原群卡片标题前缀加 [✅已审-xxx]
+    让群里其他 reviewer 不会再点开作废卡片. 2026-05-17 A5.
+
+    Args:
+        draft_rid: 草稿记录 id
+        result_label: "已发送" / "已否决" / "已重生" 等结束态描述
+        table_id: 默认 config.T_DRAFT
+    """
+    from . import config
+    table_id = table_id or config.T_DRAFT
+    try:
+        rec = await get_record(table_id, draft_rid)
+    except Exception as e:
+        print(f"[mark_card_resolved] get_record fail: {e}")
+        return
+
+    f = rec["fields"]
+    msg_id = ext(f.get("卡片群消息ID"))
+    if not msg_id:
+        return  # 没存群 msg_id, 不需要 update
+    if f.get("卡片已标记已审"):
+        return  # 已经标过, 防重复 update
+
+    subject = ext(f.get("邮件主题"))[:80]
+    source = ext(f.get("邮件草稿来源")) or "cold"
+    contact_type = ext(f.get("对象类型")) or "KOL"
+
+    # 简化版"已审"卡片 (灰色, 防误点)
+    resolved_card = {
+        "header": {
+            "template": "grey",
+            "title": {"tag": "plain_text",
+                      "content": f"✅ [已审-{result_label}] {source} / {contact_type} 草稿已处理"},
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md",
+                "content": f"**主题**: {subject}\n\n**结果**: {result_label}\n\n_此卡片已作废, 无需再审_"}},
+        ],
+    }
+    ok = await update_card_message(msg_id, resolved_card)
+    if ok:
+        try:
+            await update_record(table_id, draft_rid, {"卡片已标记已审": True})
+        except Exception:
+            pass
 
 
 async def mark_card_receipt(draft_rid: str, success_count: int, fail_count: int,
-                             errors: list, table_id: str = None):
+                             errors: list, group_msg_id: str = "", table_id: str = None):
     """回写卡片发送状态到草稿表 (T_DRAFT) — 让运营从飞书看哪些卡片发成功了.
 
     Args:
@@ -189,6 +256,7 @@ async def mark_card_receipt(draft_rid: str, success_count: int, fail_count: int,
         success_count: 发成功的卡片数 (含群通知 + 个人通知)
         fail_count: 失败数
         errors: [str, ...] 各 target 的错误描述, 截断到 300 字
+        group_msg_id: 群卡片消息 id (2026-05-17 A5, 用于状态结束时 update card)
         table_id: 默认 config.T_DRAFT, 测试时可注入
     """
     import time as _t
@@ -208,6 +276,8 @@ async def mark_card_receipt(draft_rid: str, success_count: int, fail_count: int,
     }
     if errors:
         fields["卡片发送错误"] = (" | ".join(errors))[:500]
+    if group_msg_id:
+        fields["卡片群消息ID"] = group_msg_id
     try:
         await update_record(table_id, draft_rid, fields)
     except Exception as e:
@@ -220,6 +290,49 @@ async def mark_card_receipt(draft_rid: str, success_count: int, fail_count: int,
 # 缓存 1h: 避免每次发卡片都拉一遍部门列表 (大约 7-10 个部门 + 每部门 1 次 user list)
 _job_title_cache = {}  # {title: (timestamp, [(name, open_id), ...])}
 _JOB_TITLE_TTL = 3600
+
+
+async def resolve_notify_targets(role: str) -> list:
+    """统一草稿通知 targets 决策 (2026-05-17 A9 抽 helper, 消除 draft_router/sla_check 重复).
+
+    role:
+      - "reviewer": 待审草稿主审 → 独立站运营专员 + Frankie CC (含去重)
+      - "needs_rewrite": 需人改 → NOTIFY_USERS 全员 (Frankie 必收防质量异常漏看)
+      - "ship_main": 寄样确认主审 → 独立站运营专员
+      - "ship_cc": 寄样 CC → Frankie + 吴晓丹
+
+    所有 role 在职务查询失败时降级到 NOTIFY_USERS 关键字过滤, 防 contact API 故障漏告警.
+    """
+    from . import config
+    if role == "needs_rewrite":
+        return list(config.NOTIFY_USERS)
+
+    if role == "ship_cc":
+        return [u for u in config.NOTIFY_USERS
+                if u[0].startswith("潘") or "晓丹" in u[0]]
+
+    # reviewer / ship_main 都用职务实时查
+    by_title = await fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)
+    if not by_title:
+        # 降级: 用 NOTIFY_USERS 关键字过滤 "独立站"
+        print(f"[resolve_notify_targets] WARN: job_title={config.KOL_REVIEWER_JOB_TITLE!r} returned empty, fallback")
+        by_title = [u for u in config.NOTIFY_USERS if "独立站" in u[0]]
+
+    if role == "ship_main":
+        return by_title
+
+    if role == "reviewer":
+        # 独立站运营专员 + Frankie CC, 去重
+        frankie_cc = [u for u in config.NOTIFY_USERS if u[0].startswith("潘")]
+        seen = set()
+        merged = []
+        for name, oid in by_title + frankie_cc:
+            if oid in seen: continue
+            seen.add(oid)
+            merged.append((name, oid))
+        return merged
+
+    raise ValueError(f"unknown role: {role!r}")
 
 
 async def fetch_users_by_job_title(title: str):

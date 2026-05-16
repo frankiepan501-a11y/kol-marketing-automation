@@ -232,12 +232,14 @@ def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, 
 
 
 async def notify_all(card, draft_rid: str = None):
-    """发卡片到群 + 全员个人. 2026-05-16: 如 draft_rid 给了, 回写发送回执到草稿表."""
+    """发卡片到群 + 全员个人. 2026-05-16: 回写发送回执. 2026-05-17 A5: 群 msg_id 用于 update card.
+    """
     success = 0
     fail = 0
     errors = []
+    group_msg_id = ""
     try:
-        await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+        group_msg_id = await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
         success += 1
     except Exception as e:
         fail += 1
@@ -252,7 +254,7 @@ async def notify_all(card, draft_rid: str = None):
             errors.append(f"{name}: {str(e)[:80]}")
             print(f"notify {name} fail: {e}")
     if draft_rid:
-        await feishu.mark_card_receipt(draft_rid, success, fail, errors)
+        await feishu.mark_card_receipt(draft_rid, success, fail, errors, group_msg_id=group_msg_id)
 
 
 async def run():

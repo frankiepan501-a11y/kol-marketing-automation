@@ -137,24 +137,15 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
                     ]},
                 ],
             }
-            reviewers = await feishu.fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)
-            frankie_cc = [u for u in config.NOTIFY_USERS if u[0].startswith("潘")]
-            seen = set()
-            personal_targets = []
-            for name, oid in reviewers + frankie_cc:
-                if oid in seen:
-                    continue
-                seen.add(oid)
-                personal_targets.append((name, oid))
-            if not reviewers:
-                print(f"[sla_check L1] WARN: 0 reviewers from job_title, fallback NOTIFY_USERS")
-                personal_targets = config.NOTIFY_USERS
+            # 2026-05-17 A9: 改用 feishu.resolve_notify_targets helper
+            personal_targets = await feishu.resolve_notify_targets("reviewer")
 
         success = 0
         fail = 0
         errors = []
+        group_msg_id = ""
         try:
-            await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+            group_msg_id = await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
             success += 1
         except Exception as e:
             fail += 1
@@ -168,7 +159,7 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
                 fail += 1
                 errors.append(f"{name}: {str(e)[:80]}")
                 print(f"[sla_check L1] notify {name} fail: {e}")
-        await feishu.mark_card_receipt(rid, success, fail, errors)
+        await feishu.mark_card_receipt(rid, success, fail, errors, group_msg_id=group_msg_id)
 
         try:
             await _mark_escalated(rid)
