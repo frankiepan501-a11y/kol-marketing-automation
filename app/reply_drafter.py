@@ -635,12 +635,15 @@ async def draft_reply(
     # 写入「KOL·媒体人邮件草稿」
     now_ms = int(time.time() * 1000)
 
-    # 拿 related_draft 的关联产品 record_id (用于关联到新 reply 草稿)
+    # 拿 related_draft 的关联产品 + 关联任务 record_id (继承到新 reply 草稿)
+    # 2026-05-17 A2: 历史漏写「关联任务」导致任务台「已发送数」回写失败 (5/14 status pre-existing bug)
     related_prod_rid = None
+    related_task_rid = None
     if related_draft_id:
         try:
             related_full = await feishu.get_record(config.T_DRAFT, related_draft_id)
             related_prod_rid = xrid(related_full["fields"].get("关联产品"))
+            related_task_rid = xrid(related_full["fields"].get("关联任务"))
         except Exception:
             pass
 
@@ -665,6 +668,8 @@ async def draft_reply(
     }
     if related_prod_rid:
         fields["关联产品"] = [related_prod_rid]
+    if related_task_rid:
+        fields["关联任务"] = [related_task_rid]
 
     # ship_confirm 寄样订单字段 (12 字段,V1 寄样链路)
     if sub == "ship_confirm" and extracted_address:

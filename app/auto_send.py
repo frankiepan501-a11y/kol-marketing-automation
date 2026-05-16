@@ -353,6 +353,10 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
         fields[link_field] = [link_rid]
     if prod_rid:
         fields["关联产品"] = [prod_rid]
+    # 2026-05-17 A2: 从父草稿继承关联任务 (任务台「已发送数」统计需要)
+    parent_task_rid = xrid(pf.get("关联任务"))
+    if parent_task_rid:
+        fields["关联任务"] = [parent_task_rid]
 
     new_rid = await feishu.create_record(config.T_DRAFT, fields)
     print(f"[auto_send] created tracking_followup draft rid={new_rid} (schedule +24h)")

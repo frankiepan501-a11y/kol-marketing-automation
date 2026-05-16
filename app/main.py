@@ -2,11 +2,17 @@
 部署在 Zeabur, 由 n8n cron / webhook 触发
 """
 import asyncio
+import time
+import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
+
+# Endpoint 失败告警 dedup: {endpoint: last_alert_ts} (60 min 内同 endpoint 只告 1 次)
+_alert_last = {}
+_ALERT_COOLDOWN = 3600
 
 
 def _check_auth(auth: str):
@@ -14,6 +20,40 @@ def _check_auth(auth: str):
         raise HTTPException(401, "Missing Bearer token")
     if auth[7:] != config.INTERNAL_TOKEN:
         raise HTTPException(401, "Invalid token")
+
+
+async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
+    """n8n cron 触发的 endpoint 失败时, 发飞书卡片告警给 Frankie.
+    Dedup: 同 endpoint 60min 内只发 1 次, 防 cron 5min 跑一次轰炸 Frankie.
+
+    2026-05-17 加入 (Bug A8): 替代每个 n8n workflow 加 OnError node.
+    """
+    now = time.time()
+    last = _alert_last.get(endpoint, 0)
+    if now - last < _ALERT_COOLDOWN:
+        return  # 冷却期内, 跳过
+    _alert_last[endpoint] = now
+
+    card = {
+        "header": {
+            "template": "red",
+            "title": {"tag": "plain_text", "content": f"🚨 KOL service endpoint 异常: {endpoint}"},
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md",
+                "content": f"**错误**: {error[:300]}\n\n**冷却**: 同 endpoint 1h 内只告 1 次, 重复失败请查 Zeabur 日志"}},
+            {"tag": "div", "text": {"tag": "lark_md",
+                "content": f"**Trace 末段**:\n```\n{trace[-400:] if trace else '(无)'}\n```"}},
+        ],
+    }
+    try:
+        await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+        for name, oid in config.NOTIFY_USERS:
+            if name.startswith("潘"):  # 只发 Frankie 防其他人误以为要处理
+                try: await feishu.send_card_message("open_id", oid, card)
+                except Exception: pass
+    except Exception as e:
+        print(f"[_alert_endpoint_failure] {endpoint} self-alert fail: {e}")
 
 
 @app.get("/")
@@ -34,8 +74,9 @@ async def run_reply_monitor(authorization: str = Header(default="")):
         result = await reply_monitor.run()
         return {"ok": True, **result}
     except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/reply-monitor/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
 
 
 @app.post("/dashboard/refresh")
@@ -70,8 +111,9 @@ async def run_dispatch(authorization: str = Header(default="")):
         result = await dispatch.run()
         return {"ok": True, **result}
     except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1500:]}
+        tr = _tb.format_exc()[-1500:]
+        await _alert_endpoint_failure("/dispatch/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
 
 
 @app.post("/enrich-task/run")
@@ -82,8 +124,9 @@ async def run_enrich_task(authorization: str = Header(default="")):
         result = await enrich.run()
         return {"ok": True, **result}
     except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1500:]}
+        tr = _tb.format_exc()[-1500:]
+        await _alert_endpoint_failure("/enrich-task/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
 
 
 @app.post("/enrich-task-editor/run")
@@ -94,8 +137,9 @@ async def run_enrich_task_editor(authorization: str = Header(default="")):
         result = await enrich_editor.run()
         return {"ok": True, **result}
     except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1500:]}
+        tr = _tb.format_exc()[-1500:]
+        await _alert_endpoint_failure("/enrich-task-editor/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
 
 
 @app.post("/kol-keyword-cron/run")
@@ -118,8 +162,9 @@ async def run_auto_send(authorization: str = Header(default="")):
         result = await auto_send.run()
         return {"ok": True, **result}
     except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/auto-send/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
 
 
 @app.post("/reviewer/scan")
@@ -240,8 +285,9 @@ async def run_sla_check(authorization: str = Header(default="")):
         result = await sla_check.run()
         return {"ok": True, **result}
     except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/sla/check", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
 
 
 @app.post("/reviewer/run-one")

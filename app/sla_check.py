@@ -255,11 +255,15 @@ async def _layer2_content_reminder(now_ms: int) -> dict:
             "生成时间": now_ms,
             "建议发送时间": now_ms,
             "重生次数": 0,
-            "收件邮箱": ext(cf.get("邮箱")) or "",
+            "收件邮箱": feishu.clean_email(ext(cf.get("邮箱")))[0] or "",
             "命中关键词": "content-reminder (sla L2 +7d)",
         }
         if prod_rid:
             new_fields["关联产品"] = [prod_rid]
+        # 2026-05-17 A2: 继承父草稿关联任务 (任务台统计需要)
+        task_rid = xrid(f.get("关联任务"))
+        if task_rid:
+            new_fields["关联任务"] = [task_rid]
 
         try:
             new_rid = await feishu.create_record(config.T_DRAFT, new_fields)
