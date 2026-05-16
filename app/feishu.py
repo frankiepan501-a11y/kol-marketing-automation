@@ -20,8 +20,10 @@ async def _refresh_token(which: str):
         r.raise_for_status()
         data = r.json()
         tok = data["tenant_access_token"]
-        # Feishu token expires in ~2h, cache 90 min
-        _tokens[which] = (tok, time.time() + 5400)
+        # 用飞书返回的真实 expire (实测 ~3822-4100s = 63-68min), 提前 5min 刷新
+        # 修复 2026-05-16: 旧版写死 5400s (90min) > 实际有效期 → 偶发 99991663
+        expire = int(data.get("expire") or 3600) - 300
+        _tokens[which] = (tok, time.time() + max(60, expire))
         return tok
 
 
