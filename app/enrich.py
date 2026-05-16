@@ -65,9 +65,17 @@ SIGNATURE_POOL = {
     "POWKONG": ["Lisa @ POWKONG Team", "Ryan from POWKONG", "Jamie / POWKONG Partnership"],
 }
 
-COUNTRY_TZ = {"US": -5, "UK": 0, "DE": 1, "CA": -5, "PH": 8, "FR": 1, "ES": 1,
-              "BR": -3, "AU": 10, "NL": 1, "IT": 1, "MX": -6, "IN": 5.5,
-              "JP": 9, "TH": 7, "AE": 4, "ID": 7, "SE": 1, "PT": 0}
+# 2026-05-17 A6: 从写死 UTC offset 改成 IANA tz name, 用 zoneinfo 自动处理 DST
+# 旧版 US=-5 永远是 EST, 但 3/9-11/2 应该是 EDT (-4) → 5/16 (夏令时) 发件全晚 1h
+COUNTRY_TZ_IANA = {
+    "US": "America/New_York", "UK": "Europe/London", "DE": "Europe/Berlin",
+    "CA": "America/Toronto",  "PH": "Asia/Manila",  "FR": "Europe/Paris",
+    "ES": "Europe/Madrid",    "BR": "America/Sao_Paulo", "AU": "Australia/Sydney",
+    "NL": "Europe/Amsterdam", "IT": "Europe/Rome",  "MX": "America/Mexico_City",
+    "IN": "Asia/Kolkata",     "JP": "Asia/Tokyo",   "TH": "Asia/Bangkok",
+    "AE": "Asia/Dubai",       "ID": "Asia/Jakarta", "SE": "Europe/Stockholm",
+    "PT": "Europe/Lisbon",
+}
 APAC = {"JP", "TH", "PH", "ID", "IN", "AE"}
 
 # 映射规则表 ID
@@ -75,24 +83,31 @@ T_MAPPING = "tblA63dLsAYTwjT8"
 
 
 def _next_send_time(country_iso: str):
+    """返回 (target_utc_ms, human_desc). DST 自动处理 (Python 3.9+ zoneinfo)."""
     from datetime import datetime, timedelta, timezone
-    now_utc = datetime.now(timezone.utc)
-    offset = COUNTRY_TZ.get(country_iso, 0)
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        # Python <3.9 fallback (Zeabur Python 3.11+ 应该有)
+        from backports.zoneinfo import ZoneInfo
+
+    tz_name = COUNTRY_TZ_IANA.get(country_iso, "UTC")
+    tz = ZoneInfo(tz_name)
+    local = datetime.now(tz)
     best_hour = 15 if country_iso in APAC else 10
-    local = now_utc + timedelta(hours=offset)
     target = local.replace(hour=best_hour, minute=0, second=0, microsecond=0)
     if target <= local:
         target += timedelta(days=1)
     while True:
         wd = target.weekday()
         if country_iso in APAC:
-            if wd == 3: break
+            if wd == 3: break  # 周四
         else:
-            if wd in (1, 2, 3): break
+            if wd in (1, 2, 3): break  # 周二/三/四
         target += timedelta(days=1)
         target = target.replace(hour=best_hour, minute=0, second=0, microsecond=0)
-    target_utc = target - timedelta(hours=offset)
-    desc = f"{['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][target.weekday()]} {best_hour:02d}:00 local ({country_iso})"
+    target_utc = target.astimezone(timezone.utc)
+    desc = f"{['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][target.weekday()]} {best_hour:02d}:00 {tz_name} ({country_iso})"
     return int(target_utc.timestamp() * 1000), desc
 
 

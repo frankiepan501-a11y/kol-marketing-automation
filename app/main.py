@@ -250,6 +250,30 @@ async def zoho_test_send(authorization: str = Header(default=""),
         return {"ok": False, "error": str(e)[:300], "trace": traceback.format_exc()[-500:]}
 
 
+@app.post("/zoho/health")
+async def zoho_health(authorization: str = Header(default="")):
+    """2026-05-17 A7: Zoho OAuth daily smoke test (轻量, 不发邮件).
+    验 POWKONG + FUNLAB 各自的 list_folders (需 folders.ALL scope) →
+    任一品牌 401 时自动调 _alert_endpoint_failure 发飞书告警给 Frankie.
+    建议 n8n cron 每日 09:30 BJ 跑一次, OAuth scope 静默失效从 72h 缩短到 24h 发现.
+    """
+    _check_auth(authorization)
+    from . import zoho
+    results = {}
+    has_fail = False
+    for brand in ("POWKONG", "FUNLAB"):
+        try:
+            folders = await zoho.list_folders(brand)
+            results[brand] = {"ok": True, "folder_count": len(folders)}
+        except Exception as e:
+            results[brand] = {"ok": False, "error": str(e)[:200]}
+            has_fail = True
+    if has_fail:
+        msg = " | ".join(f"{b}: {r.get('error', 'ok')}" for b, r in results.items() if not r["ok"])
+        await _alert_endpoint_failure("/zoho/health", f"Zoho OAuth 失效: {msg}", "")
+    return {"ok": not has_fail, "results": results}
+
+
 @app.get("/zoho/sent-check")
 async def zoho_sent_check(authorization: str = Header(default=""),
                           brand: str = "POWKONG", to: str = ""):
