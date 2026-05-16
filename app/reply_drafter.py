@@ -660,7 +660,7 @@ async def draft_reply(
         "生成时间": now_ms,
         "建议发送时间": now_ms,
         "重生次数": 0,
-        "收件邮箱": ext(cf.get("邮箱")) or "",
+        "收件邮箱": feishu.clean_email(ext(cf.get("邮箱")))[0] or "",
         "UTM 链接": product_link,
     }
     if related_prod_rid:

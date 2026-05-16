@@ -205,17 +205,26 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
         if path == "需人改":
             targets = config.NOTIFY_USERS
 
-    # 群通知
+    # 群通知 + 个人通知, 统计成败回写草稿表「卡片发送状态/错误/时间」(2026-05-16)
+    success = 0
+    fail = 0
+    errors = []
     try:
         await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+        success += 1
     except Exception as e:
+        fail += 1
+        errors.append(f"群: {str(e)[:80]}")
         print(f"[draft_router] notify chat fail: {e}")
-    # 个人通知
     for name, oid in targets:
         try:
             await feishu.send_card_message("open_id", oid, card)
+            success += 1
         except Exception as e:
+            fail += 1
+            errors.append(f"{name}: {str(e)[:80]}")
             print(f"[draft_router] notify {name} fail: {e}")
+    await feishu.mark_card_receipt(record_id, success, fail, errors)
 
 
 # ===== ship_confirm 卡片 (V2: SOP 清单, 不查领星 API) =====

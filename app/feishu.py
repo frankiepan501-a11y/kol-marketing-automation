@@ -73,6 +73,36 @@ def ext(f):
     return f or ""
 
 
+import re as _re
+# RFC 5322-lite, 实际飞书/Zoho 都用这种简化校验
+_EMAIL_RE = _re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+')
+
+def clean_email(raw: str) -> tuple:
+    """从 KOL 主表「邮箱」字段抽出一个能发送的邮箱.
+
+    处理场景:
+    - 单个干净邮箱 → 原样返回
+    - 多邮箱换行/分号/逗号分隔 (e.g. "a@x.com\\nb@y.com") → 取第一个
+    - 含 "dm" / "待补" / 中文等非邮箱字符 → 返回 ("", reason)
+    - 含 @ 但无有效域名 (e.g. "@username") → 返回 ("", reason)
+
+    Returns: (clean_email_or_empty, reason_if_skipped)
+        - clean_email 非空 = 可发
+        - reason 非空 = 跳过原因 (写进发送错误字段方便运营定位)
+    """
+    if not raw:
+        return "", "邮箱字段为空"
+    raw = str(raw).strip()
+    matches = _EMAIL_RE.findall(raw)
+    if not matches:
+        return "", f"未找到有效邮箱: {raw[:60]!r}"
+    first = matches[0].lower()
+    if len(matches) > 1:
+        # 多邮箱: 用第一个 + 写原因供运营追溯
+        return first, f"原始字段含 {len(matches)} 个邮箱, 已自动选第一个: {first} (全部: {matches})"
+    return first, ""
+
+
 def xrid(f):
     if not f: return None
     if isinstance(f, dict):
@@ -143,6 +173,41 @@ async def send_card_message(receive_type: str, receive_id: str, card: dict):
         "content": json.dumps(card, ensure_ascii=False),
     }
     await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="notify")
+
+
+async def mark_card_receipt(draft_rid: str, success_count: int, fail_count: int,
+                             errors: list, table_id: str = None):
+    """回写卡片发送状态到草稿表 (T_DRAFT) — 让运营从飞书看哪些卡片发成功了.
+
+    Args:
+        draft_rid: 草稿记录 id
+        success_count: 发成功的卡片数 (含群通知 + 个人通知)
+        fail_count: 失败数
+        errors: [str, ...] 各 target 的错误描述, 截断到 300 字
+        table_id: 默认 config.T_DRAFT, 测试时可注入
+    """
+    import time as _t
+    from . import config
+    table_id = table_id or config.T_DRAFT
+    if success_count == 0 and fail_count > 0:
+        status = "失败"
+    elif success_count > 0 and fail_count > 0:
+        status = "部分成功"
+    elif success_count > 0:
+        status = "已发送"
+    else:
+        return  # 没发任何卡片, 不写
+    fields = {
+        "卡片发送状态": status,
+        "卡片发送时间": int(_t.time() * 1000),
+    }
+    if errors:
+        fields["卡片发送错误"] = (" | ".join(errors))[:500]
+    try:
+        await update_record(table_id, draft_rid, fields)
+    except Exception as e:
+        # 回写本身失败不该影响主流程, 但 print 出来
+        print(f"[feishu.mark_card_receipt] rid={draft_rid} fail: {e}")
 
 
 # ===== 按职务实时查在职员工 (聪哥1号 contact:contact:readonly) =====

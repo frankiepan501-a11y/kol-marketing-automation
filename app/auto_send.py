@@ -118,17 +118,31 @@ async def scan_ready() -> tuple:
 async def send_one(rec: dict) -> dict:
     f = rec["fields"]
     rid = rec["record_id"]
-    to_email = ext(f.get("收件邮箱"))
+    raw_to = ext(f.get("收件邮箱"))
     subject = ext(f.get("邮件主题"))
     body_html = ext(f.get("邮件正文"))
     sender_alias = ext(f.get("发送邮箱"))
     brand = _brand_from_alias(sender_alias)
 
-    if not to_email or "@" not in to_email:
+    # 严格邮箱清洗 (2026-05-16): 历史 multi-email 换行 (SwitchUp/techbymidas) 含 @
+    # 通过旧 "@" not in 校验 → Zoho 500; "dm"/"待补" 也不带 @
+    to_email, clean_reason = feishu.clean_email(raw_to)
+    if not to_email:
         await feishu.update_record(config.T_DRAFT, rid, {
-            "发送状态": "失败", "发送错误": f"邮箱格式错误: {to_email}",
+            "发送状态": "失败",
+            "发送错误": f"邮箱格式错误: {clean_reason}",
+            "邮件草稿状态": "发送失败",
         })
-        return {"rid": rid, "ok": False, "error": f"bad email: {to_email}"}
+        return {"rid": rid, "ok": False, "error": f"bad email: {raw_to[:60]}"}
+    # 多邮箱选第一个时把原因写回审批意见, 方便运营追溯
+    if clean_reason:
+        try:
+            old_note = ext(f.get("审批意见"))
+            await feishu.update_record(config.T_DRAFT, rid, {
+                "审批意见": (old_note + " | " + clean_reason)[:500],
+            })
+        except Exception:
+            pass
 
     # ship_confirm 寄样邮件: 自动用「运单号/物流商」字段值替换正文占位符
     # 张佳烨在草稿表填这两个字段(2 秒动作),无需进正文改文本

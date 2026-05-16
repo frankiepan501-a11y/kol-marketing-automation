@@ -210,14 +210,28 @@ def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, 
     }
 
 
-async def notify_all(card):
-    # 群
-    try: await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
-    except Exception as e: print(f"notify chat fail: {e}")
-    # 个人
+async def notify_all(card, draft_rid: str = None):
+    """发卡片到群 + 全员个人. 2026-05-16: 如 draft_rid 给了, 回写发送回执到草稿表."""
+    success = 0
+    fail = 0
+    errors = []
+    try:
+        await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+        success += 1
+    except Exception as e:
+        fail += 1
+        errors.append(f"群: {str(e)[:80]}")
+        print(f"notify chat fail: {e}")
     for name, oid in config.NOTIFY_USERS:
-        try: await feishu.send_card_message("open_id", oid, card)
-        except Exception as e: print(f"notify {name} fail: {e}")
+        try:
+            await feishu.send_card_message("open_id", oid, card)
+            success += 1
+        except Exception as e:
+            fail += 1
+            errors.append(f"{name}: {str(e)[:80]}")
+            print(f"notify {name} fail: {e}")
+    if draft_rid:
+        await feishu.mark_card_receipt(draft_rid, success, fail, errors)
 
 
 async def run():
@@ -398,7 +412,7 @@ async def run():
                 "email": from_addr,
             }
             card = build_card(ctype, contact_info, brand, intent, subject)
-            await notify_all(card)
+            await notify_all(card, draft_rid=draft["record_id"])
 
             # === 自动生成回复草稿 (走 reviewer 自审通道) ===
             try:

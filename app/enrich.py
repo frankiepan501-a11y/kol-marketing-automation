@@ -309,10 +309,11 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
     kol_sub = k.get("粉丝数", 0) or 0
     kol_styles = ext(k.get("内容风格"))
     kol_ip = ext(k.get("IP喜好"))
-    kol_email = ext(k.get("邮箱"))
+    # 2026-05-16: 清洗 multi-email / "dm" / "待补" 等异常邮箱
+    kol_email, _email_reason = feishu.clean_email(ext(k.get("邮箱")))
     kol_url = ext(k.get("主链接"))
     if not kol_email:
-        return {"skip": "无邮箱"}
+        return {"skip": f"无有效邮箱: {_email_reason}"}
 
     pf = product["fields"]
     # 海外营销邮件优先用「产品英文名」, 缺则降级中文剥前缀
@@ -450,10 +451,11 @@ async def score_and_draft_one(kol_record: dict, product: dict, brand: str,
                                 expected_styles: set, want_platforms: set) -> dict:
     k = kol_record["fields"]
     kol_name = ext(k.get("账号名"))
-    kol_email = ext(k.get("邮箱"))
+    # 2026-05-16: 清洗 multi-email / 异常邮箱
+    kol_email, _email_reason = feishu.clean_email(ext(k.get("邮箱")))
     kol_country = ext(k.get("国家"))
     if not kol_email:
-        return {"skip": "无邮箱", "kol_record_id": kol_record["record_id"]}
+        return {"skip": f"无有效邮箱: {_email_reason}", "kol_record_id": kol_record["record_id"]}
 
     # 本地打分
     total, breakdown = score_kol(k, product["fields"], expected_styles, want_platforms)

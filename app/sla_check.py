@@ -142,15 +142,25 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
                 print(f"[sla_check L1] WARN: 0 reviewers from job_title, fallback NOTIFY_USERS")
                 personal_targets = config.NOTIFY_USERS
 
+        success = 0
+        fail = 0
+        errors = []
         try:
             await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+            success += 1
         except Exception as e:
+            fail += 1
+            errors.append(f"群: {str(e)[:80]}")
             print(f"[sla_check L1] notify chat fail: {e}")
         for name, oid in personal_targets:
             try:
                 await feishu.send_card_message("open_id", oid, card)
+                success += 1
             except Exception as e:
+                fail += 1
+                errors.append(f"{name}: {str(e)[:80]}")
                 print(f"[sla_check L1] notify {name} fail: {e}")
+        await feishu.mark_card_receipt(rid, success, fail, errors)
 
         try:
             await _mark_escalated(rid)
