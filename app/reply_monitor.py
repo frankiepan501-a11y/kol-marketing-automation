@@ -262,6 +262,15 @@ async def notify_all(card, draft_rid: str = None):
 async def run():
     processed = 0
     results = []
+    # Plan A v3 (2026-05-19): 每次 run() 入口强制刷新 _get_sent_drafts cache。
+    # A4 的 5min cache 本意是"一轮 cron 内多 sender 共用 1 次全表扫"(轮内有效),
+    # 但跨轮 stale → 上一轮 line 381 写的 [MID:] 对本轮 dedup 不可见 → 同一封
+    # email 每轮 re-gen (v2 把 burst 收成 1/sender/轮, 但跨轮仍 1/轮 = 慢速循环,
+    # 且依赖 "cron 间隔 > cache TTL" 的隐式时序, 改 cron/TTL 就复发)。
+    # 入口清空 → 本轮首次 find_draft 拉最新(含所有历史 [MID:]), 轮内仍共用,
+    # 跨轮必新 → dedup 恒准, 与 cron 间隔/TTL 解耦。轮内 A4 性能收益不变。
+    _sent_drafts_cache["items"] = None
+    _sent_drafts_cache["timestamp"] = 0
     for brand in ("POWKONG", "FUNLAB"):
         alias = config.BRAND_CONFIG[brand]["alias_from"]
         try:
