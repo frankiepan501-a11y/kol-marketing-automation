@@ -168,11 +168,14 @@ async def find_draft(contact_rid: str, contact_type: str):
     """找到该 contact 关联的"待监听"草稿 + 该 contact 的所有已发送草稿(供 body 去重用).
     优先取「未回复 + 发送时间最新」的草稿；都已回复时回 fallback 取最新一条。
 
-    V3 加固方案 B (2026-05-08, 1upBinge 6 封事故根因修法):
-        unreplied 候选池**排除 邮件草稿来源=reply 的草稿** — reply 草稿"未回复"语义是
-        "等 KOL 对我们 reply 的再次回复", 不该作为新 inbox email 的匹配目标.
-        排除 reply 后 cold/followup/tracking_followup 才是 unreplied 候选, 根因消除.
-        all_matched 仍含 reply (dedup 时用).
+    2026-05-19 Plan A (Metalfear4 多轮丢回信根因修, 取代 V3-B 排除法):
+        V3-B 曾排除 邮件草稿来源=reply 的草稿以修 1upBinge 死循环, 但副作用 =
+        KOL 第 2 轮+ 回信 (典型: 我们 need_address 问地址 → KOL 补地址) 永远没有
+        可匹配的 unreplied 草稿 → 被 run() 的 `if 是否回复: continue` guard 全量
+        丢弃, ship_confirm 链路实测 0% 成功 (4/4 KOL 卡死)。
+        现改为: reply 草稿可作匹配目标; 防环职责完全交给 V3-C dedup
+        ([MID:] 精确 + body[:200] fallback, 对 all_matched 全量比对) — 那才是
+        真正的幂等防御 (同一封 inbox email 不会被处理两次), 不需靠排除 reply。
 
     2026-05-17 A4: 用 _get_sent_drafts cache 减少全表扫 (一次 cron 内 60 inbox 共用 1 次查询).
 
@@ -183,14 +186,13 @@ async def find_draft(contact_rid: str, contact_type: str):
     matched = [r for r in items if xrid(r["fields"].get(link_field)) == contact_rid]
     if not matched:
         return None, []
-    # V3-B: unreplied + fallback pool 都排除 来源=reply 草稿
-    # 否则 KOL 多轮回复时, fallback 仍会选到最新的 reply 草稿 → guard 是否回复=false 不拦 → 死循环
-    non_reply = [r for r in matched if ext(r["fields"].get("邮件草稿来源")) != "reply"]
-    unreplied = [r for r in non_reply if not r["fields"].get("是否回复")]
-    pool = unreplied if unreplied else non_reply
-    if not pool:
-        # 该 contact 只有 reply 草稿 (异常状态: 没 cold/followup 但已有 reply) → 拒绝处理新 inbox
-        return None, matched
+    # Plan A (2026-05-19): 不再按 邮件草稿来源 排除 reply 草稿。
+    # 取最新一封"未回复"草稿 (任意来源, 含 reply); 都已回复时 fallback 取最新一封。
+    # matched 此处必非空 (上面已 `if not matched: return None, []`), 故 pool 必非空。
+    # 1upBinge 类死循环由下游 V3-C dedup 拦 (同一 inbox email 的 [MID:] 已写进
+    # 匹配草稿的「回复原文」, 再次拉到同封 email 时 already_seen=True 直接 skip)。
+    unreplied = [r for r in matched if not r["fields"].get("是否回复")]
+    pool = unreplied if unreplied else matched
     pool.sort(key=lambda r: r["fields"].get("发送时间") or 0, reverse=True)
     return pool[0], matched
 
@@ -281,7 +283,10 @@ async def run():
 
             draft, all_matched = await find_draft(contact["record_id"], ctype)
             if not draft: continue
-            if draft["fields"].get("是否回复"): continue
+            # Plan A (2026-05-19): 删掉旧的 `if 是否回复: continue` 短路 —
+            # 它会把 KOL 第 2 轮+ 回信 (含给地址那封) 全量丢弃。
+            # 防重复处理改由下方 V3-C dedup 块决定 ([MID:] 精确 + body[:200]
+            # 对 all_matched 全量比对, already_seen 时 continue)。
 
             # 拉正文
             body_html = ""

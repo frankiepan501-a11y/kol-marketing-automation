@@ -198,8 +198,18 @@ def _is_real_address(s: str) -> bool:
     if any(t in s_lower for t in title_kws) and any(x in s_lower for x in [".com", ".net", ".org", ".io", ".tv", ".gg"]):
         return False
 
-    # 必须含街道关键词
-    street_kw_pattern = r"\b(street|st\.?|avenue|ave\.?|boulevard|blvd\.?|road|rd\.?|lane|ln\.?|drive|dr\.?|way|court|ct\.?|plaza|place|pl\.?|terrace|circle|cir\.?|parkway|pkwy|highway|hwy|suite|ste\.?|apt\.?|unit|floor|building|bldg)\b"
+    # 街道关键词 (BUG#2 2026-05-19: 加非英文街道词 — 原表纯英文/美式,
+    # 把 Cirne 巴西 "Rua…"/Robert 菲律宾 "Block…Lot…" 等合法地址判否, ship_confirm
+    # 被降级 need_address → 给已给过地址的 KOL 再发一封要地址 (déjà-vu 尴尬))
+    street_kw_pattern = (
+        r"\b(street|st\.?|avenue|ave\.?|boulevard|blvd\.?|road|rd\.?|lane|ln\.?|"
+        r"drive|dr\.?|way|court|ct\.?|plaza|place|pl\.?|terrace|circle|cir\.?|"
+        r"parkway|pkwy|highway|hwy|suite|ste\.?|apt\.?|unit|floor|building|bldg|"
+        # 非英文/本地化街道词: 葡/西/德/法/意/印尼/菲
+        r"rua|avenida|calle|carrera|estrada|rodovia|bloco|quadra|lote|"
+        r"strasse|straße|rue|via|viale|jalan|barangay|brgy|purok|sitio|"
+        r"block|blk|lot|distrito|bairro|colonia)\b"
+    )
     has_street_kw = bool(re.search(street_kw_pattern, s_lower))
 
     # 邮编模式: US 5 digits / US 5+4 / UK / 加拿大 / 5位欧洲邮编
@@ -214,7 +224,24 @@ def _is_real_address(s: str) -> bool:
     # 街道门牌号(开头数字 + 字母街道名)
     has_street_num = bool(re.search(r"\b\d{1,5}\s+[A-Z][a-zA-Z]+", s))
 
-    return has_street_kw and (has_zip or has_street_num)
+    # BUG#2 兜底: 无已知街道词但 邮编 + 国家名 + 多行/多逗号结构 → 仍是真地址
+    # (覆盖未枚举到的本地化格式; 签名极少同时含 邮编+国家+≥3 段, 不会误放行)
+    country_kw = [
+        "united states", "usa", "u.s.a", "united kingdom", "u.k", "canada",
+        "australia", "brazil", "brasil", "philippines", "germany", "deutschland",
+        "france", "spain", "españa", "italy", "italia", "netherlands",
+        "mexico", "méxico", "japan", "saudi arabia", "ksa", "indonesia",
+        "india", "portugal", "poland", "sweden", "norway", "ireland",
+        "new zealand", "south africa", "singapore", "malaysia", "thailand",
+        "vietnam", "turkey", "türkiye", "uae", "united arab emirates",
+        "argentina", "chile", "colombia", "peru", "austria", "switzerland",
+        "belgium", "denmark", "finland", "greece", "czech", "hungary", "romania",
+    ]
+    has_country = any(c in s_lower for c in country_kw)
+    has_struct = s.count("\n") >= 2 or s.count(",") >= 3
+
+    return (has_street_kw and (has_zip or has_street_num)) or \
+           (has_zip and has_country and (has_street_num or has_struct))
 
 
 async def _classify_interest(original_body: str) -> dict:
