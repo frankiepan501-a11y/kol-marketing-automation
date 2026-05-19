@@ -270,6 +270,21 @@ async def run():
             results.append({"brand": brand, "error": str(e)[:200]})
             continue
 
+        # Plan A v2 (2026-05-19): 每个发件人本轮只处理「最新一封」。
+        # 根因: 多邮件 KOL (如 PlayTopia 费率拉锯 6+ 封都在 30 封窗口内) 会被
+        # 逐封生成草稿; 叠加 _get_sent_drafts 5min cache 让 [MID:] dedup 写入
+        # 在同轮/相邻轮不可见 + 行尾 `回复原文` 单字段被覆盖只留最后一个 [MID:]
+        # → 每轮 re-gen → 卡片洪水 (1upBinge 同级)。KOL 最新一封即代表其最新诉求
+        # (给地址 / 新问题), 旧封由 thread 承载, 无需逐封自动回。一轮一发件人一封
+        # → 彻底消除 burst; 跨轮同一封由 [MID:] dedup 拦 (此时单字段不再被竞争覆盖)。
+        _newest = {}
+        for _m in sorted(msgs, key=lambda x: x.get("receivedTime") or 0, reverse=True):
+            _fa = parse_email(_m.get("fromAddress") or _m.get("sender") or "")
+            if not _fa or _fa in _newest:
+                continue
+            _newest[_fa] = _m
+        msgs = list(_newest.values())
+
         for msg in msgs:
             from_addr = parse_email(msg.get("fromAddress") or msg.get("sender") or "")
             if not from_addr or alias.lower() in from_addr.lower():
