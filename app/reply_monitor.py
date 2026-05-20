@@ -33,6 +33,30 @@ def is_ooo(subject: str, body: str) -> tuple:
     m = OOO_RE.search(text[:1500])
     return (bool(m), m.group(0) if m else "")
 
+
+# ===== "已收到样品" 关键词检测 (2026-05-21 P0-C) =====
+# 触发条件: KOL/媒体人回复明确表达物理收到样品.
+# 副作用: 推进 ship_confirm 草稿 寄样阶段=已发货 → 已签收, 写"签收时间=now_ms".
+# 复活整个 sla_check L2 (+7d 催稿) / L3 (+30d) / L4 (+60d) 寄样后闭环 — 之前是 dead code.
+RECEIVED_PATTERNS = [
+    r"\b(received|got)\s+(it|the|the\s+package|the\s+sample|the\s+dock|the\s+box|your\s+package)\b",
+    r"\b(it|the\s+package|the\s+sample|the\s+dock|the\s+box)\s+(arrived|came|just\s+came|landed|showed\s+up|got\s+here)\b",
+    r"\bit'?s\s+here\b",
+    r"\bjust\s+got\s+(it|the|the\s+package|the\s+sample)\b",
+    r"\bpackage\s+arrived\b",
+    r"\bsample\s+arrived\b",
+    r"\b(dock|product)\s+arrived\b",
+    r"\bthanks\s+for\s+(sending|the\s+sample|the\s+package|the\s+dock)\b",
+    r"\b(it|this)\s+just\s+came\s+in\b",
+]
+RECEIVED_RE = re.compile("|".join(RECEIVED_PATTERNS), re.IGNORECASE)
+
+
+def check_received(body: str) -> tuple:
+    """检测回复是否表达"已收到样品" → (bool, 命中片段). 仅扫前 800 字防长邮件干扰."""
+    m = RECEIVED_RE.search((body or "")[:800])
+    return (bool(m), m.group(0) if m else "")
+
 POSITIVE = {"感兴趣", "要报价"}
 INTENT_TO_STATUS_KOL = {
     "感兴趣": "洽谈中", "要报价": "洽谈中",
@@ -431,6 +455,36 @@ async def run():
             target_table = config.T_EDITOR if ctype == "editor" else config.T_KOL
             if master_update:
                 await feishu.update_record(target_table, contact["record_id"], master_update)
+
+            # 2026-05-21 P0-C: KOL 说"已收到样品" → 推进 ship_confirm 草稿 寄样阶段=已签收 + 签收时间.
+            # 触发条件: intent in {感兴趣, 要报价} AND body 含 received 类关键词.
+            # 副作用: 复活 sla_check L2(+7d 催稿) / L3(+30d) / L4(+60d) 寄样后闭环 dead code.
+            ship_advanced_rid = None
+            if intent_type in ("感兴趣", "要报价"):
+                hit_received, received_frag = check_received(email_body)
+                if hit_received:
+                    # 找该 contact 当前"寄样阶段=已发货"且"签收时间"为空的草稿
+                    link_field = "关联媒体人" if ctype == "editor" else "关联KOL"
+                    try:
+                        ship_drafts = await feishu.search_records(config.T_DRAFT, [
+                            {"field_name": link_field, "operator": "contains", "value": [contact["record_id"]]},
+                            {"field_name": "寄样阶段", "operator": "is", "value": ["已发货"]},
+                        ])
+                        for sd in ship_drafts:
+                            if sd['fields'].get('签收时间'):
+                                continue  # 已签收过, 跳过
+                            try:
+                                await feishu.update_record(config.T_DRAFT, sd['record_id'], {
+                                    "寄样阶段": "已签收",
+                                    "签收时间": now_ms,
+                                })
+                                ship_advanced_rid = sd['record_id']
+                                print(f"[reply_monitor P0-C] 推进 寄样阶段 已发货→已签收: {sd['record_id']} ({contact.get('record_id')}) hit={received_frag!r}")
+                                break  # 一个 contact 推进 1 个草稿就够
+                            except Exception as e:
+                                print(f"[reply_monitor P0-C] 推进失败 {sd['record_id']}: {e}")
+                    except Exception as e:
+                        print(f"[reply_monitor P0-C] 查 ship_confirm 草稿失败: {e}")
 
             if ctype == "editor":
                 await feishu.create_record(config.T_EDITOR_FU, {

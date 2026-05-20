@@ -171,6 +171,89 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
             "skipped": skipped, "not_yet": not_yet}
 
 
+# ===== 层 1b: tracking_followup 第 2 封"待修改" 24h 兜底 (2026-05-21 P0-B) =====
+async def _layer1b_tracking_followup_overdue(now_ms: int) -> dict:
+    """24h 兜底: 第 1 封 ship_confirm 发出后, auto_send 自动建第 2 条 tracking_followup
+    草稿状态=待修改 等运营回填运单号. 如果运营不回表 24h, 这条永远不发,
+    KOL 拿不到运单号 → 黑洞. L1 只扫"待审"扫不到"待修改", 这层补.
+
+    5/14 thunderstashgaming/Thao 大 KOL 之前就是踩了这个黑洞 (虽然运营最终手填了,
+    但没有兜底 push 提醒, 完全靠运营记忆力). 现加这层主动 push."""
+    cutoff_ms = now_ms - SLA_HOURS_REVIEW * 3600 * 1000  # 24h
+
+    items = await feishu.search_records(config.T_DRAFT, [
+        {"field_name": "邮件草稿状态", "operator": "is", "value": ["待修改"]},
+        {"field_name": "邮件草稿来源", "operator": "is", "value": ["tracking_followup"]},
+    ], field_names=["邮件主题", "生成时间", "对象类型",
+                    "关联KOL", "关联媒体人", "审批意见"])
+
+    pushed, skipped, not_yet = 0, 0, 0
+    base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_DRAFT}"
+
+    for rec in items:
+        f = rec["fields"]
+        rid = rec["record_id"]
+        gen_time = int(f.get("生成时间") or 0)
+        if gen_time > cutoff_ms:
+            not_yet += 1; continue
+
+        note = ext(f.get("审批意见")) or ""
+        if "[TRACK-FOLLOWUP-PUSH]" in note:
+            skipped += 1; continue
+
+        age_hours = int((now_ms - gen_time) / 3600 / 1000) if gen_time else 24
+        subject = ext(f.get("邮件主题"))[:100]
+
+        card = {
+            "header": {"template": "orange",
+                "title": {"tag": "plain_text",
+                    "content": f"📦 [兜底提醒] 第 2 封运单号待填 {age_hours}h"}},
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md",
+                    "content": f"**KOL 已收到第 1 封寄样确认邮件**, 系统已建好第 2 条 tracking_followup "
+                               f"跟进草稿, 等运营回填运单号 — 已等 **{age_hours} 小时**.\n\n"
+                               f"请打开草稿表, 在「运单号」「物流商」字段填值, 把「邮件草稿状态」改为 **通过** → 自动发出.\n\n"
+                               f"⚠️ 不要手动改邮件正文字段 (5/15 已有错位事故)"}},
+                {"tag": "div", "text": {"tag": "lark_md", "content": f"**主题**: {subject}"}},
+                {"tag": "action", "actions": [
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "打开草稿表填运单号"},
+                     "url": base_url, "type": "primary"},
+                ]},
+            ],
+        }
+        personal_targets = await feishu.resolve_notify_targets("ship_confirm")
+
+        success, fail, errors, group_msg_id = 0, 0, [], ""
+        try:
+            group_msg_id = await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+            success += 1
+        except Exception as e:
+            fail += 1; errors.append(f"群: {str(e)[:80]}")
+            print(f"[sla_check L1b] notify chat fail: {e}")
+        for name, oid in personal_targets:
+            try:
+                await feishu.send_card_message("open_id", oid, card)
+                success += 1
+            except Exception as e:
+                fail += 1; errors.append(f"{name}: {str(e)[:80]}")
+                print(f"[sla_check L1b] notify {name} fail: {e}")
+        try:
+            await feishu.mark_card_receipt(rid, success, fail, errors, group_msg_id=group_msg_id)
+        except Exception:
+            pass
+
+        try:
+            new_note = (note + f" [TRACK-FOLLOWUP-PUSH@{int(time.time())}]")[:500]
+            await feishu.update_record(config.T_DRAFT, rid, {"审批意见": new_note})
+        except Exception as e:
+            print(f"[sla_check L1b] mark fail: {e}")
+
+        pushed += 1
+
+    return {"layer": "1b", "checked": len(items), "pushed": pushed,
+            "skipped": skipped, "not_yet": not_yet}
+
+
 # ===== 层 2: +7d 已签收无回应 → 自动生 CONTENT_REMINDER =====
 async def _layer2_content_reminder(now_ms: int) -> dict:
     cutoff_ms = now_ms - SLA_DAYS_CONTENT_REMINDER * 86400 * 1000
@@ -474,8 +557,8 @@ async def run() -> dict:
     """4 层 SLA 全跑一遍 (n8n cron 每日 09:30 BJ 调用)"""
     now_ms = int(time.time() * 1000)
     results = {}
-    for layer_fn in (_layer1_review_overdue, _layer2_content_reminder,
-                      _layer3_no_content_30d, _layer4_low_roi_60d):
+    for layer_fn in (_layer1_review_overdue, _layer1b_tracking_followup_overdue,
+                      _layer2_content_reminder, _layer3_no_content_30d, _layer4_low_roi_60d):
         try:
             r = await layer_fn(now_ms)
             results[f"layer_{r['layer']}"] = r
