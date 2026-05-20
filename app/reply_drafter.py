@@ -131,11 +131,14 @@ TEMPLATE_CONTENT_REMINDER = (
 )
 
 # 第 2 封追加运单号 (auto_send 在第 1 封发出后自动建草稿, 待运营填运单号)
+# 2026-05-20 P1-D 止血: 去掉 [ETA 待填] 占位符 — 运营手填 ETA 时复制粘贴错位置,
+# 5/15 thunderstashgaming/Thao 千万粉 KOL 收到 "arrive in the next 2026-05-15 20:00:00".
+# 写死 "in the next few days" 跟 ship_confirm 第 1 封统一, 运营少 1 项要填的 = 少 1 个错位风险.
 TEMPLATE_TRACKING_FOLLOWUP = (
     "Hi {first_name},\n\n"
     "Quick update — here's the tracking number for your {product_name} sample:\n\n"
     "**[TRACKING# 待填运营修改]** (via [CARRIER 待填运营修改])\n\n"
-    "Should arrive in the next [ETA 待填]. Excited to hear what you think — "
+    "Should arrive in the next few days. Excited to hear what you think — "
     "feel free to drop a line if anything comes up after it lands.\n\n"
     "Best,\n{signature}"
 )
