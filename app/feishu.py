@@ -35,14 +35,44 @@ async def token(which: str = "bitable"):
 
 
 async def api(method: str, path: str, body=None, which: str = "bitable"):
+    """飞书 API 调用. 5xx 自动重试 2 次 (5s + 10s 指数退避).
+
+    2026-05-21 加 5xx retry: 飞书 Bitable API 偶发 code=2200 Internal Error / 502 / 503,
+    实战 5/21 15:30 触发 1 次 endpoint 告警, 下次 cron 15min 后自然恢复.
+    加 in-call retry 避免 cron 周期等待, 同时减少 endpoint 告警噪音.
+
+    重试范围: HTTP 500/502/503/504 (服务端瞬态). 不重试 4xx (auth/permission/业务错误).
+    """
+    import asyncio
     tok = await token(which)
     url = f"https://open.feishu.cn/open-apis{path}"
     headers = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json; charset=utf-8"}
-    async with httpx.AsyncClient(timeout=60.0) as cli:
-        r = await cli.request(method, url, json=body, headers=headers)
-        if r.status_code >= 400:
-            raise Exception(f"{method} {path} → {r.status_code}: {r.text[:300]}")
-        return r.json()
+    retry_delays = [5, 10]  # 2 次重试间隔 (s)
+    last_exc = None
+    for attempt in range(len(retry_delays) + 1):  # 0=首次, 1+2=2 次重试
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as cli:
+                r = await cli.request(method, url, json=body, headers=headers)
+                if 500 <= r.status_code < 600 and attempt < len(retry_delays):
+                    # 5xx 重试
+                    print(f"[feishu.api] {method} {path[:80]} → {r.status_code} retry {attempt+1}/{len(retry_delays)} in {retry_delays[attempt]}s")
+                    await asyncio.sleep(retry_delays[attempt])
+                    continue
+                if r.status_code >= 400:
+                    raise Exception(f"{method} {path} → {r.status_code}: {r.text[:300]}")
+                return r.json()
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            # 网络层瞬态错误也重试
+            last_exc = e
+            if attempt < len(retry_delays):
+                print(f"[feishu.api] {method} {path[:80]} network err retry {attempt+1}/{len(retry_delays)} in {retry_delays[attempt]}s: {e}")
+                await asyncio.sleep(retry_delays[attempt])
+                continue
+            raise
+    # 重试 2 次仍 5xx, 最后一次抛
+    if last_exc:
+        raise last_exc
+    raise Exception(f"{method} {path} → exhausted retries")
 
 
 # ===== Helpers =====
