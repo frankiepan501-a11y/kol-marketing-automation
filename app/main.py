@@ -47,10 +47,10 @@ async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
         ],
     }
     try:
-        await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+        await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card, biz="AUDIT")
         for name, oid in config.NOTIFY_USERS:
             if name.startswith("潘"):  # 只发 Frankie 防其他人误以为要处理
-                try: await feishu.send_card_message("open_id", oid, card)
+                try: await feishu.send_card_message("open_id", oid, card, biz="AUDIT")
                 except Exception: pass
     except Exception as e:
         print(f"[_alert_endpoint_failure] {endpoint} self-alert fail: {e}")

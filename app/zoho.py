@@ -317,7 +317,7 @@ async def verify_sent_after(brand: str, msg_id: str, sent_fid: str,
                     from . import feishu
                     for _, oid in config.NOTIFY_USERS:
                         try:
-                            await feishu.send_card_message("open_id", oid, card)
+                            await feishu.send_card_message("open_id", oid, card, biz="AUDIT")
                         except Exception as e:
                             print(f"[zoho.verify_sent feishu alert fail oid={oid}] {e}")
                 except Exception as e:

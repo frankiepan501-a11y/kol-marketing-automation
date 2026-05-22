@@ -199,11 +199,44 @@ async def create_record(table_id: str, fields: dict):
     return r["data"]["record"]["record_id"]
 
 
-async def send_card_message(receive_type: str, receive_id: str, card: dict) -> str:
+# ===== 飞书通知统一格式 (Phase 1, 2026-05-22) =====
+# 镜像 ~/scripts/_lib/feishu_title.py + memory reference_feishu_notification_rules.md.
+# 云端无该 helper 文件, 故在此内联实现. 改格式规则时两边必须同步.
+_LEVEL_EMOJI = {"P0": "🔴", "P1": "🟠", "P2": "🟡", "P3": "🟢"}
+
+
+def _format_card_title(card: dict, biz: str = "KOL", level: str = "P1") -> dict:
+    """给 card.header.title.content 加统一前缀 {emoji} [{biz}·{level}].
+    ⚠️ P0 系统铁律: 标题格式化绝不能影响卡片送达 — 任何异常都 try/except 吞掉, 回退原 card.
+    幂等: content 已以优先级 emoji + '[' 开头则跳过 (防重发重复加前缀).
+    """
+    try:
+        emoji = _LEVEL_EMOJI.get(level, "🟠")
+        header = card.get("header") or {}
+        title = header.get("title") or {}
+        orig = title.get("content", "") or ""
+        if orig[:1] in ("🔴", "🟠", "🟡", "🟢") and "[" in orig[:8]:
+            return card  # 已有统一前缀, 幂等跳过
+        title["tag"] = "plain_text"
+        title["content"] = f"{emoji} [{biz}·{level}] {orig}".rstrip()
+        header["title"] = title
+        card["header"] = header
+    except Exception as e:
+        print(f"[_format_card_title] skip (non-fatal): {e}")
+    return card
+
+
+async def send_card_message(receive_type: str, receive_id: str, card: dict,
+                            biz: str = "KOL", level: str = "P1") -> str:
     """用聪哥分身1号发飞书互动卡片. 2026-05-17 返回 message_id (供 A5 后续 update).
     返回空字符串 = 拿不到 msg_id (不影响主流程)
+    2026-05-22 Phase 1: 自动给卡片标题加 {emoji} [{biz}·{level}] 统一前缀.
+      - KOL 业务通知 (草稿/SLA/寄样/回复) 默认 biz=KOL level=P1
+      - 系统告警 (main endpoint / zoho health) 调用方传 biz=AUDIT
+      - 标题格式化失败回退原 card, 不影响送达
     """
     import json
+    card = _format_card_title(card, biz, level)
     body = {
         "receive_id": receive_id,
         "msg_type": "interactive",
