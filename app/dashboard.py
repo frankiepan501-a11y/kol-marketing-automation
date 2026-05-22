@@ -101,6 +101,33 @@ async def run():
     enriched_kol = [enrich_kol(d) for d in kol_drafts]
     enriched_ed = [enrich_editor(d) for d in editor_drafts]
 
+    # 2026-05-22 Bug1 修复: 回写任务台「已发送数/回复数/感兴趣数」(5/14 看板数据缺失).
+    # 任务台 schema 早有这 3 个字段但从无代码写 → 运营看板一直空.
+    # 按草稿「关联任务」分组重算 (drafts 已过滤=已发送), 幂等无 race; KOL/媒体人 分写各自任务台.
+    task_stats = defaultdict(lambda: {"sent": 0, "replied": 0, "interested": 0})
+    for d in drafts:
+        f = d["fields"]
+        task_rid = xrid(f.get("关联任务"))
+        if not task_rid:
+            continue
+        obj = "媒体人" if ext(f.get("对象类型")) == "媒体人" else "KOL"
+        st = task_stats[(obj, task_rid)]
+        st["sent"] += 1
+        if bool(f.get("是否回复")):
+            st["replied"] += 1
+        if ext(f.get("回复意图")) in POSITIVE:
+            st["interested"] += 1
+    task_written = 0
+    for (obj, task_rid), st in task_stats.items():
+        table = config.T_TASK_EDITOR if obj == "媒体人" else config.T_TASK_KOL
+        try:
+            await feishu.update_record(table, task_rid, {
+                "已发送数": st["sent"], "回复数": st["replied"], "感兴趣数": st["interested"],
+            })
+            task_written += 1
+        except Exception as e:
+            print(f"[dashboard] 任务台计数回写失败 task={task_rid}: {e}")
+
     def agg(records):
         n = len(records)
         if n == 0: return None
@@ -189,4 +216,5 @@ async def run():
             f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{config.T_DASH}/records/batch_create",
             {"records": records[i:i+500]})
 
-    return {"snapshots": len(snapshots), "kol_drafts": len(kol_drafts), "editor_drafts": len(editor_drafts)}
+    return {"snapshots": len(snapshots), "kol_drafts": len(kol_drafts), "editor_drafts": len(editor_drafts),
+            "tasks_stat_written": task_written}
