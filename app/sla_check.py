@@ -612,9 +612,12 @@ async def run() -> dict:
     """4 层 SLA 全跑一遍 (n8n cron 每日 09:30 BJ 调用)"""
     now_ms = int(time.time() * 1000)
     results = {}
+    # 2026-05-22: L1c(自动签收) + L2(content reminder 催稿) 暂时下线 — 寄样后流程重设计中.
+    # 催稿放错了位置: 正确应是 已签收 → "确认收到 + brief recap" 暖信 (合一, 含卖点/追踪链接/
+    # 优惠码/#ad/建议角度, 过人审), 真催稿降级成更晚更软的关怀. 见 memory kol-ship-flow-redesign.
+    # A(auto_send 发出即推进已发货) + C(ship_recon 对账) 保留; L1/L1b/L3/L4 继续正常跑.
     for layer_fn in (_layer1_review_overdue, _layer1b_tracking_followup_overdue,
-                      _layer1c_auto_sign_by_carrier,
-                      _layer2_content_reminder, _layer3_no_content_30d, _layer4_low_roi_60d):
+                      _layer3_no_content_30d, _layer4_low_roi_60d):
         try:
             r = await layer_fn(now_ms)
             results[f"layer_{r['layer']}"] = r
