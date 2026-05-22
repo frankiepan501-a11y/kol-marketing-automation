@@ -205,20 +205,28 @@ async def create_record(table_id: str, fields: dict):
 _LEVEL_EMOJI = {"P0": "🔴", "P1": "🟠", "P2": "🟡", "P3": "🟢"}
 
 
+def format_title_str(biz: str = "KOL", level: str = "P1", title: str = "", suffix: str = "") -> str:
+    """返回统一格式标题字符串 {emoji} [{biz}·{level}] {title} · {suffix}.
+    text 消息首行 + card 标题共用, 保证两种 msg_type 格式一致.
+    """
+    emoji = _LEVEL_EMOJI.get(level, "🟠")
+    head = f"{emoji} [{biz}·{level}] {title}".rstrip()
+    return f"{head} · {suffix}" if suffix else head
+
+
 def _format_card_title(card: dict, biz: str = "KOL", level: str = "P1") -> dict:
     """给 card.header.title.content 加统一前缀 {emoji} [{biz}·{level}].
     ⚠️ P0 系统铁律: 标题格式化绝不能影响卡片送达 — 任何异常都 try/except 吞掉, 回退原 card.
     幂等: content 已以优先级 emoji + '[' 开头则跳过 (防重发重复加前缀).
     """
     try:
-        emoji = _LEVEL_EMOJI.get(level, "🟠")
         header = card.get("header") or {}
         title = header.get("title") or {}
         orig = title.get("content", "") or ""
         if orig[:1] in ("🔴", "🟠", "🟡", "🟢") and "[" in orig[:8]:
             return card  # 已有统一前缀, 幂等跳过
         title["tag"] = "plain_text"
-        title["content"] = f"{emoji} [{biz}·{level}] {orig}".rstrip()
+        title["content"] = format_title_str(biz, level, orig)
         header["title"] = title
         card["header"] = header
     except Exception as e:

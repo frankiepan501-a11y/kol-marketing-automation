@@ -413,15 +413,11 @@ def _build_card(title: str, summary: str, doc_url: str, gaps: list, history_url:
 
 
 async def _send_card(open_id: str, card: dict):
-    """用 notify app 发卡片. 返回 (ok, error_msg)."""
+    """用 notify app 发卡片. 返回 (ok, error_msg).
+    Phase 1: 改走 feishu.send_card_message 统一标题格式 (SEO·P2 — SEO 周报)."""
     from app import feishu
-    body = {
-        "receive_id": open_id,
-        "msg_type": "interactive",
-        "content": json.dumps(card, ensure_ascii=False),
-    }
     try:
-        await feishu.api("POST", "/im/v1/messages?receive_id_type=open_id", body, which="notify")
+        await feishu.send_card_message("open_id", open_id, card, biz="SEO", level="P2")
         return True, ""
     except Exception as e:
         msg = f"{type(e).__name__}: {str(e)[:300]}"

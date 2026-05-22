@@ -73,7 +73,8 @@ async def run():
 
     # 5. 飞书私聊 Frankie
     if created or failed:
-        lines = [f"📣 KOL 关键词开发自动派工 ({today_str})", ""]
+        # Phase 1: 统一标题格式 (KOL·P2), 去掉手拼 📣 前缀
+        lines = [feishu.format_title_str("KOL", "P2", "KOL 关键词开发自动派工", today_str), ""]
         if created:
             lines.append(f"✅ 已建 {len(created)} 条 YT 爬虫任务, 陈翔宇电脑 daemon 5min 内拾起执行:")
             lines.append("")
