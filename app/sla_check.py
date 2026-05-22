@@ -32,6 +32,23 @@ SLA_DAYS_NO_CONTENT = 30         # 层 3: 30 天无内容产出软标
 SLA_DAYS_LOW_ROI = 60            # 层 4: 60 天累计订单<3 软标
 LOW_ROI_ORDER_THRESHOLD = 3
 
+# 层 1c (2026-05-22 B): 已发货 → 已签收 自动推进 (按物流渠道时效假定送达)
+#   背景: KOL 很少主动回"收到", 否则 L2(+7d 催稿)/L4(+60d) 永远卡在"已签收"前不触发.
+#   规则: 发货时间 + 渠道时效天数 ≤ now → 自动标已签收 (签收时间 = 假定送达时刻).
+#   Amazon MCF (TBA/TBC 运单 或 物流商含 Amazon/AMZN) = 7 天送达
+#     → 之后 L2 在 签收时间+7d 催稿 (= 发货后 14d), 即 Frankie 定的"Amazon MCF 默认 L2+7d".
+#   非 Amazon (国际/其他承运商) 暂用保守默认 14 天送达, 待补全各渠道时效表.
+AMAZON_MCF_TRANSIT_DAYS = 7
+DEFAULT_TRANSIT_DAYS = 14
+
+
+def _carrier_transit_days(carrier: str, tracking: str) -> int:
+    c = (carrier or "").lower()
+    t = (tracking or "").upper()
+    if "amazon" in c or "amzn" in c or t.startswith("TBA") or t.startswith("TBC"):
+        return AMAZON_MCF_TRANSIT_DAYS
+    return DEFAULT_TRANSIT_DAYS
+
 
 async def _is_already_escalated(rec: dict) -> bool:
     """2026-05-17 A3: 改用专用字段 SLA已升级 (checkbox), 防审批意见字段 500 字截断丢 token.
@@ -553,11 +570,50 @@ async def _layer4_low_roi_60d(now_ms: int) -> dict:
             "skipped": skipped, "not_yet": not_yet}
 
 
+# ===== 层 1c: 已发货 + 渠道时效 → 自动推进已签收 (2026-05-22 B) =====
+async def _layer1c_auto_sign_by_carrier(now_ms: int) -> dict:
+    """KOL 很少主动回"收到" → 已签收 永远不被 write → L2/L4 dead.
+    按物流渠道假定送达时效, 发货时间 + 渠道天数 ≤ now 即自动标已签收.
+    纯状态推进, 不发邮件/卡片 (下游 L2 才会生成催稿草稿, 仍走 reviewer)."""
+    items = await feishu.search_records(config.T_DRAFT, [
+        {"field_name": "寄样阶段", "operator": "is", "value": ["已发货"]},
+    ])
+    advanced = 0
+    not_yet = 0
+    skipped = 0
+    for rec in items:
+        f = rec["fields"]
+        rid = rec["record_id"]
+        if int(f.get("签收时间") or 0):       # 已有签收时间, 别覆盖
+            skipped += 1
+            continue
+        ship_ms = int(f.get("发货时间") or 0)
+        if not ship_ms:                        # 没发货时间无法推算
+            skipped += 1
+            continue
+        days = _carrier_transit_days(ext(f.get("物流商")), ext(f.get("运单号")))
+        signed_ms = ship_ms + days * 86400 * 1000
+        if signed_ms > now_ms:                 # 还没到假定送达
+            not_yet += 1
+            continue
+        try:
+            await feishu.update_record(config.T_DRAFT, rid, {
+                "寄样阶段": "已签收", "签收时间": signed_ms,
+            })
+            advanced += 1
+            print(f"[sla_check L1c] auto-sign rid={rid} carrier_days={days} signed_at={signed_ms}")
+        except Exception as e:
+            print(f"[sla_check L1c] update fail rid={rid}: {e}")
+    return {"layer": "1c", "checked": len(items), "advanced": advanced,
+            "not_yet": not_yet, "skipped": skipped}
+
+
 async def run() -> dict:
     """4 层 SLA 全跑一遍 (n8n cron 每日 09:30 BJ 调用)"""
     now_ms = int(time.time() * 1000)
     results = {}
     for layer_fn in (_layer1_review_overdue, _layer1b_tracking_followup_overdue,
+                      _layer1c_auto_sign_by_carrier,
                       _layer2_content_reminder, _layer3_no_content_30d, _layer4_low_roi_60d):
         try:
             r = await layer_fn(now_ms)

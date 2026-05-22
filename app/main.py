@@ -5,7 +5,7 @@ import asyncio
 import time
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
@@ -311,6 +311,20 @@ async def run_sla_check(authorization: str = Header(default="")):
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/sla/check", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/ship-recon/run")
+async def run_ship_recon(authorization: str = Header(default="")):
+    """寄样状态对账 (2026-05-22 C): 用 Zoho 发件箱 ground truth 核对 bitable 寄样阶段,
+    自动回填"发了但卡待发货"的草稿. 纯状态字段写, 不发邮件. 建议日 cron."""
+    _check_auth(authorization)
+    try:
+        result = await ship_recon.run()
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/ship-recon/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 

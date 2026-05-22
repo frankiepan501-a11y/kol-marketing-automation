@@ -196,7 +196,11 @@ async def send_one(rec: dict) -> dict:
         "邮件草稿状态": "已发送",
     }
     # ship_confirm 寄样邮件: 发出后推进寄样阶段 待发货 → 已发货, 写发货时间
-    if ext(f.get("寄样订单号")) and tracking_no:
+    # 2026-05-22 (A): 不再要求运单号 — 运单号在第 2 封 tracking_followup 才填,
+    # 旧条件 (寄样订单号 AND tracking_no) 让第 1 封 ship_confirm 永远卡"待发货"
+    # (实证 5 个 KOL 卡死, 见 memory kol-ship-recon-2026-05-22).
+    # 只要有寄样订单号(=ship_confirm 已批准发出)就推进; 只从 待发货/空 推进, 不覆盖已签收.
+    if ext(f.get("寄样订单号")) and ext(f.get("寄样阶段")) in ("", "待发货"):
         update_payload["寄样阶段"] = "已发货"
         update_payload["发货时间"] = now_ms
     await feishu.update_record(config.T_DRAFT, rid, update_payload)
