@@ -20,7 +20,8 @@ MAX_RETRIES = 2                # 重生上限
 
 
 async def route_draft(record_id: str, ship_confirm_meta: dict = None,
-                       force_review_intent: str = None) -> dict:
+                       force_review_intent: str = None,
+                       force_review_reason: str = None) -> dict:
     """
     主入口: 给定草稿 record_id → 评审 + 路由 → 返回结果摘要
 
@@ -80,6 +81,14 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
                      "affiliate_upsell": "affiliate-negotiation"}[force_review_intent]
         if intent_kw not in hits:
             hits = list(hits) + [intent_kw]
+
+    # 2026-05-25: late-stage KOL 强制人审 — 防 reply_drafter stage-blind 给已寄样/已谈条款/已上稿
+    # 的 KOL 自动发早期话术(如"要不要样品/你需要什么"). 周会 Metalfear4(已签收+直播)/PlayTopia
+    # (已谈$100) 收到重复开发信事故. 详见 memory kol-stage-blind-reply-fix-2026-05-25.
+    if force_review_reason:
+        committed = True
+        if "late-stage-relationship" not in hits:
+            hits = list(hits) + ["late-stage-relationship"]
 
     reasons_text = " | ".join(f"{k}:{v}" for k, v in reasons.items())[:500]
     if judge["reason"]:

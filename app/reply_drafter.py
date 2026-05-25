@@ -504,6 +504,36 @@ async def _gen_clarify_draft(contact_name: str, original_subject: str,
         }
 
 
+async def _is_late_stage_contact(cf: dict, link_field: str, contact_rid: str):
+    """判断 KOL/媒体人是否已过"早期兴趣"阶段 (已寄样/已谈条款/已上稿/已合作).
+    2026-05-25 stage-blind 修复: late-stage KOL 的「感兴趣」自动回复(早期话术如"要不要样品/
+    你需要什么")是阶段错位 → 强制人审不自动发. 周会 Metalfear4(已签收+直播)/PlayTopia(已谈$100)事故.
+    Returns (is_late: bool, reason: str)."""
+    if ext(cf.get("上次寄样订单号")):
+        return True, "已寄样(上次寄样订单号非空)"
+    try:
+        if int(cf.get("寄样次数") or 0) >= 1:
+            return True, "已寄样(寄样次数≥1)"
+    except (ValueError, TypeError):
+        pass
+    if cf.get("上稿日期"):
+        return True, "已上稿"
+    if ext(cf.get("合作状态")) in ("已合作-免费", "已合作-免费(多次)", "已合作-付费"):
+        return True, "已合作"
+    # 已发过 affiliate_quote 草稿 = 已进入条款谈判 (如 PlayTopia 已谈 $100, 主表无寄样信号)
+    try:
+        prior = await feishu.search_records(config.T_DRAFT, [
+            {"field_name": link_field, "operator": "contains", "value": [contact_rid]},
+            {"field_name": "邮件草稿来源", "operator": "is", "value": ["affiliate_quote"]},
+            {"field_name": "邮件草稿状态", "operator": "is", "value": ["已发送"]},
+        ])
+        if prior:
+            return True, "已谈条款(affiliate_quote 已发送)"
+    except Exception:
+        pass
+    return False, ""
+
+
 async def draft_reply(
     contact_record: dict,
     contact_type: str,             # KOL / editor
@@ -784,11 +814,25 @@ async def draft_reply(
             force_label = "affiliate_upsell"
         elif intent_type in ("不明意图", "质疑/澄清", "要报价"):
             force_label = intent_type
+        # 2026-05-25 stage-blind 修复: late-stage KOL 的「感兴趣」早期话术强制人审 (不自动发)
+        force_reason = None
+        if intent_type == "感兴趣":
+            is_late, late_why = await _is_late_stage_contact(cf, link_field, contact_record["record_id"])
+            if is_late:
+                force_reason = late_why
+                try:
+                    await feishu.update_record(config.T_DRAFT, rid, {
+                        "审批意见": (f"[阶段错位拦截] 该 KOL {late_why}, 系统按「感兴趣」生成了早期话术 "
+                                     f"(sub={sub}), 已强制人审防重复开发信. 请人工换成阶段合适的回复再发。")[:500],
+                    })
+                except Exception:
+                    pass
         result = await draft_router.route_draft(
             rid,
             ship_confirm_meta={"address": extracted_address, "country": country_code,
                                  "product_name": product_name} if sub == "ship_confirm" else None,
             force_review_intent=force_label,
+            force_review_reason=force_reason,
         )
         print(f"[reply_drafter] router result: score={result['score']} path={result['path']}")
     except Exception as e:
