@@ -221,6 +221,25 @@ async def find_draft(contact_rid: str, contact_type: str):
     return pool[0], matched
 
 
+def _contact_stage_label(cf: dict) -> str:
+    """从 KOL/媒体人主表算"当前漏斗阶段"标签, 让运营卡片一眼看清节点 (2026-05-25 张佳烨周会反馈).
+    优先级: 已上稿 > 已寄样 > 已合作 > 洽谈中 > 待回复 > 未建联."""
+    if cf.get("上稿日期"):
+        return "🎬 已上稿"
+    try:
+        sample_ct = int(cf.get("寄样次数") or 0)
+    except (ValueError, TypeError):
+        sample_ct = 0
+    if ext(cf.get("上次寄样订单号")) or sample_ct >= 1:
+        return "📦 已寄样"
+    coop = ext(cf.get("合作状态")) or ""
+    return {
+        "已合作-免费": "🤝 已合作", "已合作-免费(多次)": "🤝 已合作(多次)", "已合作-付费": "🤝 已合作(付费)",
+        "洽谈中": "💬 洽谈中", "待回复": "✉️ 已发信待回复", "未建联": "🆕 未建联",
+        "不合适": "🚫 不合适", "黑名单": "⛔ 黑名单", "未产出": "📭 已寄样未产出",
+    }.get(coop, coop or "🆕 新建联")
+
+
 def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, subject: str):
     intent_type = intent.get("type", "?")
     emoji = INTENT_EMOJI.get(intent_type, "📬")
@@ -233,6 +252,7 @@ def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, 
             "title": {"tag": "plain_text", "content": f"{emoji} {'媒体人' if contact_type=='editor' else 'KOL'} 回复 — {intent_type}"}
         },
         "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**🧭 当前阶段**: {contact_info.get('stage') or '(未知)'}　|　**回复意图**: {intent_type}"}},
             {"tag": "div", "fields": [
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**姓名**: {contact_info['name']}"}},
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**来源**: {contact_info['source']}"}},
@@ -516,6 +536,7 @@ async def run():
                 "name": name, "source": source,
                 "country": ext(cf.get("国家原文")) or ext(cf.get("国家")),
                 "email": from_addr,
+                "stage": _contact_stage_label(cf),
             }
             card = build_card(ctype, contact_info, brand, intent, subject)
             await notify_all(card, draft_rid=draft["record_id"])
