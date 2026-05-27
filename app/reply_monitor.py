@@ -285,6 +285,19 @@ def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, 
     conf = intent.get("confidence", 0)
     base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}"
     target_table = config.T_EDITOR if contact_type == "editor" else config.T_KOL
+    # v4 ④a: 卡片显示 AI 判定的细分回复场景 (scenario_label + 中文名 + funnel_stage + 置信度)
+    scn = (intent.get("scenario_label") or "").strip()
+    _sm = stage_model.SCENARIO_MODEL.get(scn) or {}
+    scn_cn = _sm.get("name_cn", "")
+    scn_stage = _sm.get("funnel_stage", "")
+    try:
+        scn_conf = float(intent.get("scenario_confidence") or 0)
+    except (ValueError, TypeError):
+        scn_conf = 0.0
+    scn_line = (f"**🔬 AI回复场景**: {scn_cn} `{scn}`"
+                + (f" · {scn_stage}阶段" if scn_stage else "")
+                + (f" · 置信 {scn_conf:.0%}" if scn else "")
+                + ("　⚠️ 高风险已强制人审" if scn and stage_model.is_force_review(scn) else "")) if scn else ""
     return {
         "header": {
             "template": "green" if intent_type in ("感兴趣", "要报价") else "orange" if intent_type in ("不明意图", "质疑/澄清") else "red",
@@ -292,6 +305,7 @@ def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, 
         },
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**🧭 当前阶段**: {contact_info.get('stage') or '(未知)'}　|　**回复意图**: {intent_type}"}},
+        ] + ([{"tag": "div", "text": {"tag": "lark_md", "content": scn_line}}] if scn_line else []) + [
             {"tag": "div", "fields": [
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**姓名**: {contact_info['name']}"}},
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**来源**: {contact_info['source']}"}},
@@ -603,6 +617,7 @@ async def run():
                     original_body=email_body,
                     sender_alias=alias_for_brand,
                     related_draft_id=draft["record_id"],
+                    scenario_label=scenario_label,   # v4 ④b: 传细分场景标签, 高风险阶段强制人审
                 )
                 if reply_rid:
                     print(f"[reply_monitor] reply draft generated rid={reply_rid}")

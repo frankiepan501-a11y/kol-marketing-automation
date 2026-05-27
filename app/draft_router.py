@@ -10,7 +10,7 @@
   AI评分 < 5 且 重生≥2          → 邮件草稿状态=待审 / 审核路径=需人改 + 飞书通知
 """
 import time
-from . import config, feishu, reviewer
+from . import config, feishu, reviewer, stage_model
 from .feishu import ext
 
 
@@ -21,7 +21,8 @@ MAX_RETRIES = 2                # 重生上限
 
 async def route_draft(record_id: str, ship_confirm_meta: dict = None,
                        force_review_intent: str = None,
-                       force_review_reason: str = None) -> dict:
+                       force_review_reason: str = None,
+                       force_review_scenario: str = None) -> dict:
     """
     主入口: 给定草稿 record_id → 评审 + 路由 → 返回结果摘要
 
@@ -89,6 +90,16 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
         committed = True
         if "late-stage-relationship" not in hits:
             hits = list(hits) + ["late-stage-relationship"]
+
+    # v4 ④b (2026-05-28): scenario_label ∈ FORCE_REVIEW_LABELS(8 高风险阶段: 合同/谈判/
+    # 付款/收到视频/草稿需改/纠错/我方邮件损坏) → 强制人审. 纯加法(union 已有规则), 只增人审
+    # 绝不自动发; scenario_label 错判最多多送几条人审(这些阶段本就该多审), 漏判回落上面规则.
+    # 捕捉 6 粗意图(感兴趣等)漏掉的高风险回复阶段, 是 v4 防 stage-blind 误送的源头消费.
+    if force_review_scenario and stage_model.is_force_review(force_review_scenario):
+        committed = True
+        kw = f"scenario:{force_review_scenario}"
+        if kw not in hits:
+            hits = list(hits) + [kw]
 
     reasons_text = " | ".join(f"{k}:{v}" for k, v in reasons.items())[:500]
     if judge["reason"]:

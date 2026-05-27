@@ -544,6 +544,7 @@ async def draft_reply(
     original_body: str,
     sender_alias: str,
     related_draft_id: Optional[str] = None,
+    scenario_label: str = "",      # v4 ④: 细分场景标签 (reply_monitor 分类得), 命中 FORCE_REVIEW_LABELS 时强制人审
 ) -> Optional[str]:
     """
     生成 reply 草稿 → 写入「KOL·媒体人邮件草稿」 → 调 router 走自审
@@ -833,6 +834,7 @@ async def draft_reply(
                                  "product_name": product_name} if sub == "ship_confirm" else None,
             force_review_intent=force_label,
             force_review_reason=force_reason,
+            force_review_scenario=scenario_label,   # v4 ④b: 高风险场景标签强制人审 (加法)
         )
         print(f"[reply_drafter] router result: score={result['score']} path={result['path']}")
     except Exception as e:
