@@ -1,7 +1,15 @@
 """回复监听 - 迁移自本地 scripts/send_loop/reply_monitor.py"""
 import re, time, html as html_mod
-from . import config, feishu, zoho, deepseek, reply_drafter
+from . import config, feishu, zoho, deepseek, reply_drafter, stage_model
 from .feishu import ext, xrid
+
+
+# v4 步骤③ shadow: 入站回复 23 场景标签菜单 (由 stage_model SSOT 程序化派生, 不硬编码).
+# classify_intent 在原 6 粗意图之外**额外**输出 scenario_label (shadow, 不改 routing/status).
+_INBOUND_SCENARIO_MENU = "\n".join(
+    f"- {_lbl} ({stage_model.SCENARIO_MODEL[_lbl]['name_cn']}): {stage_model.SCENARIO_MODEL[_lbl]['trigger']}"
+    for _lbl in stage_model.INBOUND_REPLY_LABELS
+)
 
 
 # ===== OOO 自动回复检测 =====
@@ -125,6 +133,19 @@ Body (前 800 字):
 - 不感兴趣_其他: 兜底 (例: "thanks but no" 没说原因 / "not interested")
   → retry_days = 0
 
+【附加任务: 细分场景标签 scenario_label (shadow, 独立于上面 6 类意图, 不影响上面意图结论)】
+**独立**判断这封入站回信处于 KOL 合作漏斗的哪个具体环节(报价前→报价谈判→合同→寄样物流→brief拍摄→草稿→发布收口→异常),
+再从下面 23 个"入站回复场景标签"里选**最贴切的一个** scenario_label。此判断**不受上面 type 结论影响**(粗意图都是"感兴趣"的回信,可能落在 details_requested / ready_to_ship / video_submitted / live_link_received 等不同环节):
+{_INBOUND_SCENARIO_MENU}
+判别提示(易漏环节):
+- 对方说已发布/已直播/"here are the vods"/"just posted"/给了上稿或直播链接 → live_link_received (不要落 fallback)
+- 对方发来 draft/video/预览待我们审 → video_submitted
+- 对方给出**完整收货地址**(姓名/街道/邮编) → ready_to_ship;仅口头说"想试/发给我吧"但没给地址 → 仍是 interested_no_rate
+- 对方问 brief/deliverables/timeline/内容要求 → details_requested
+- 对方在纠错/打脸我们对他的描述 → objection_correction
+规则: scenario_label 只能填上面列出的英文标签之一;**优先选最具体的环节标签**,只有确实无法对应任何环节时才填
+"{stage_model.FALLBACK_LABEL}"。scenario_confidence 用 0.0-1.0 表示你对该 scenario_label 的把握。
+
 返回 JSON:
 {{
   "type":"感兴趣|要报价|委婉拒绝|退订|质疑/澄清|不明意图",
@@ -133,14 +154,17 @@ Body (前 800 字):
   "key_quote":"原文 1 句",
   "suggested_action":"下一步建议",
   "decline_reason":"不匹配_品类|不匹配_时机|不匹配_方式|不匹配_条件|不感兴趣_其他 (仅 type=委婉拒绝 填,否则空)",
-  "retry_days":0-180 整数 (不匹配_时机=30/60/90; 不匹配_条件=180; 其他都填 0)
+  "retry_days":0-180 整数 (不匹配_时机=30/60/90; 不匹配_条件=180; 其他都填 0),
+  "scenario_label":"上面 23 个英文标签之一, 或 {stage_model.FALLBACK_LABEL}",
+  "scenario_confidence":0.0-1.0
 }}"""
     try:
         return await deepseek.chat_json(prompt, max_tokens=500)
     except Exception as e:
         return {"type": "不明意图", "confidence": 0.0, "summary": f"API错误: {e}",
                 "key_quote": "", "suggested_action": "人工查看",
-                "decline_reason": "", "retry_days": 0}
+                "decline_reason": "", "retry_days": 0,
+                "scenario_label": stage_model.FALLBACK_LABEL, "scenario_confidence": 0.0}
 
 
 async def find_kol_by_email(email: str):
@@ -460,6 +484,16 @@ async def run():
                 "回复意图": intent_type,
                 "回复原文": (mid_prefix + (email_body or ""))[:500],
             }
+            # v4 步骤③ shadow: 写入细分场景标签 (纯新增观察字段, 不影响 6 意图 routing/status).
+            scenario_label = (intent.get("scenario_label") or "").strip()
+            if not stage_model.is_known_label(scenario_label):
+                scenario_label = stage_model.FALLBACK_LABEL
+            try:
+                scenario_conf = float(intent.get("scenario_confidence") or 0)
+            except (ValueError, TypeError):
+                scenario_conf = 0.0
+            draft_update["场景标签"] = scenario_label
+            draft_update["场景置信度"] = scenario_conf
             # P5.10 委婉拒绝原因分类 + 下次重发日期 (5 类含 不匹配_条件,V1.5 加)
             if intent_type == "委婉拒绝" and decline_reason in (
                 "不匹配_品类", "不匹配_时机", "不匹配_方式", "不匹配_条件", "不感兴趣_其他"):
