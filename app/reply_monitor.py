@@ -240,6 +240,21 @@ def _contact_stage_label(cf: dict) -> str:
     }.get(coop, coop or "🆕 新建联")
 
 
+def _stage_action_hint(stage: str, ai_action: str) -> str:
+    """late-stage 时 AI suggested_action (只看本封回信, stage-blind) 会给错动作
+    (如对已寄样 KOL 说"安排发货"). 用确定性阶段提示覆盖, AI 建议降级"仅参考".
+    2026-05-25 张佳烨周会: Metalfear4 已寄样+定脚本却被建议"安排发货"."""
+    hints = {
+        "已寄样": "样品已寄/在途 → 核对运单号是否已发给 KOL + 推进到货确认 / brief；勿重复「安排发货」。",
+        "已上稿": "KOL 已上稿 → 做 ROI/数据跟踪 + 二次合作邀约；勿发早期话术。",
+        "已合作": "老合作伙伴 → 按维护/复购处理；勿发开发信 / 早期寄样话术。",
+    }
+    hit = next((v for k, v in hints.items() if k in stage), None)
+    if hit:
+        return f"**➡️ 建议行动**\n⚠️ **按阶段处理**: {hit}\n_(AI 原建议可能没考虑阶段, 仅参考: {ai_action[:120]})_"
+    return f"**➡️ 建议行动**\n{ai_action}"
+
+
 def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, subject: str):
     intent_type = intent.get("type", "?")
     emoji = INTENT_EMOJI.get(intent_type, "📬")
@@ -264,7 +279,7 @@ def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, 
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**📝 意图总结**\n{intent.get('summary','')}"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**💬 原话**\n> {intent.get('key_quote','')[:200]}"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**➡️ 建议行动**\n{intent.get('suggested_action','')}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": _stage_action_hint(contact_info.get('stage','') , intent.get('suggested_action',''))}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**原主题**: {subject}"}},
             {"tag": "action", "actions": [
