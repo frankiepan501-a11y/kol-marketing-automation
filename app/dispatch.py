@@ -43,13 +43,14 @@ def _fans_range_for_price(price: float) -> tuple:
 
 
 async def fetch_main_push_products() -> list:
-    """读产品库主推 + 派单就绪 4 项全勾"""
+    """读产品库主推 + 派单就绪 5 项全勾 (2026-05-26 加「展示链接OK」防戴夫死链事故重演)"""
     items = await feishu.search_records(config.T_PRODUCT, [
         {"field_name": "上架状态", "operator": "is", "value": ["主推"]},
         {"field_name": "派单-库存OK", "operator": "is", "value": ["true"]},
         {"field_name": "派单-素材OK", "operator": "is", "value": ["true"]},
         {"field_name": "派单-文案OK", "operator": "is", "value": ["true"]},
         {"field_name": "派单-价格OK", "operator": "is", "value": ["true"]},
+        {"field_name": "派单-展示链接OK", "operator": "is", "value": ["true"]},
     ])
     return items
 
