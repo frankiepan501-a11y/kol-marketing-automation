@@ -103,6 +103,17 @@ def ext(f):
     return f or ""
 
 
+def ext_url(f):
+    """URL 字段取真实链接(link 优先), 不取显示文本(text). 2026-05-27 戴夫事故根因:
+    ext() 对 URL 字段先取 text → 运营/我把 text 填成中文标签 → 标签被当链接 + UTM 发出去成死链.
+    专门读 URL 字段(官网链接等)用此函数, 不能用 ext()."""
+    if isinstance(f, dict):
+        return f.get("link") or f.get("text") or ""
+    if isinstance(f, list) and f and isinstance(f[0], dict):
+        return f[0].get("link") or f[0].get("text") or ""
+    return ext(f)
+
+
 import re as _re
 # RFC 5322-lite, 实际飞书/Zoho 都用这种简化校验
 _EMAIL_RE = _re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+')

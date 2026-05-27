@@ -583,7 +583,7 @@ async def draft_reply(
                     if m: p_clean = p_clean[m.end():].strip() or p_raw
                     product_name = p_clean or product_name
                     print(f"[WARN] 产品 {prod_rid} 缺少「产品英文名」字段, 降级用中文名: {product_name}")
-                product_link_raw = ext(pf.get("官网链接")) or ""
+                product_link_raw = feishu.ext_url(pf.get("官网链接")) or ""   # ext_url 取 link 不取 text
                 # P5.11: 拉「报价(USD)」字段作为独立站售价 (affiliate_quote 模板用)
                 try:
                     product_price = float(pf.get("报价(USD)") or 0)

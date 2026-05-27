@@ -344,7 +344,7 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
     p_s1 = ext(pf.get("卖点1"))
     p_s2 = ext(pf.get("卖点2"))
     p_s3 = ext(pf.get("卖点3"))
-    p_url_raw = ext(pf.get("官网链接"))
+    p_url_raw = feishu.ext_url(pf.get("官网链接"))   # ext_url 取 link 不取 text(防中文标签被当链接)
     p_price = pf.get("报价(USD)", 0)
     p_audience = ext(pf.get("目标人群"))
     p_media = ext(pf.get("媒体报道"))
@@ -618,7 +618,7 @@ async def enrich_task(task_record: dict) -> dict:
 
     # 2026-05-26 Bug B (戴夫派单事故): 产品无「官网链接」→ cold 会带死链 href="" (邮件铁律禁死链)
     # → 跳过整任务 + 告警, 零外发. 请先在产品库填官网链接再重跑.
-    if not ext(product["fields"].get("官网链接")):
+    if not feishu.ext_url(product["fields"].get("官网链接")):
         p_disp = ext(product["fields"].get("产品英文名")) or ext(product["fields"].get("产品名"))
         await feishu.update_record(config.T_TASK_KOL, task_rid, {
             "任务状态": "8-已取消",
