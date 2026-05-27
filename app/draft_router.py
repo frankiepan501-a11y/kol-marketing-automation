@@ -101,6 +101,20 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
         if kw not in hits:
             hits = list(hits) + [kw]
 
+    # v4 ⑤ sop_gap 探测器 (2026-05-28): route_draft 完整消费 SSOT「是否人审」列 —
+    # 除 ④ 的 强制人审(FORCE_REVIEW_LABELS) 外, 再接 低置信人审(LOW_CONF_REVIEW_LABELS,
+    # 含 unclassified_fallback). 这样只有「否」的场景能自动通过, 其余全转人审 (纯加法 fail-safe).
+    # - unclassified_fallback = playbook 没覆盖的回复 → 记 SOP 缺口 (kw=sop-gap:unmatched), 强制人审
+    #   (老师框架: 无模板匹配→记gap+best-effort草稿+人审; best-effort 草稿 reply_drafter 已生成).
+    # - 其它低置信(usage/brief/delay/too_expensive)= 分类不确定 → 也转人审 (kw=low-conf-review).
+    # 缺口可筛: 草稿表 命中关键词 contains "sop-gap" / 场景标签="unclassified_fallback".
+    if force_review_scenario and force_review_scenario in stage_model.LOW_CONF_REVIEW_LABELS:
+        committed = True
+        kw = ("sop-gap:unmatched" if force_review_scenario == stage_model.FALLBACK_LABEL
+              else f"low-conf-review:{force_review_scenario}")
+        if kw not in hits:
+            hits = list(hits) + [kw]
+
     reasons_text = " | ".join(f"{k}:{v}" for k, v in reasons.items())[:500]
     if judge["reason"]:
         reasons_text += f" | 承诺判断:{judge['verdict']}-{judge['reason']}"

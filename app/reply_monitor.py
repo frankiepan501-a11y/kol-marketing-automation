@@ -294,10 +294,20 @@ def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, 
         scn_conf = float(intent.get("scenario_confidence") or 0)
     except (ValueError, TypeError):
         scn_conf = 0.0
+    if not scn:
+        _flag = ""
+    elif stage_model.is_force_review(scn):
+        _flag = "　⚠️ 高风险已强制人审"
+    elif scn == stage_model.FALLBACK_LABEL:
+        _flag = "　⚠️ SOP缺口·已转人工 (playbook 未覆盖, 可补场景)"
+    elif scn in stage_model.LOW_CONF_REVIEW_LABELS:
+        _flag = "　⚠️ 低置信·已转人工"
+    else:
+        _flag = ""
     scn_line = (f"**🔬 AI回复场景**: {scn_cn} `{scn}`"
                 + (f" · {scn_stage}阶段" if scn_stage else "")
                 + (f" · 置信 {scn_conf:.0%}" if scn else "")
-                + ("　⚠️ 高风险已强制人审" if scn and stage_model.is_force_review(scn) else "")) if scn else ""
+                + _flag) if scn else ""
     return {
         "header": {
             "template": "green" if intent_type in ("感兴趣", "要报价") else "orange" if intent_type in ("不明意图", "质疑/澄清") else "red",
