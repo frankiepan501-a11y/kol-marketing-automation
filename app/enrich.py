@@ -616,6 +616,25 @@ async def enrich_task(task_record: dict) -> dict:
         })
         return {"task": task_name, "error": f"读产品失败: {e}", "task_rid": task_rid}
 
+    # 2026-05-26 Bug B (戴夫派单事故): 产品无「官网链接」→ cold 会带死链 href="" (邮件铁律禁死链)
+    # → 跳过整任务 + 告警, 零外发. 请先在产品库填官网链接再重跑.
+    if not ext(product["fields"].get("官网链接")):
+        p_disp = ext(product["fields"].get("产品英文名")) or ext(product["fields"].get("产品名"))
+        await feishu.update_record(config.T_TASK_KOL, task_rid, {
+            "任务状态": "8-已取消",
+            "备注": "产品缺「官网链接」→ cold 会带死链, 已跳过派单(零外发). 填官网链接后重跑.",
+        })
+        try:
+            await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, {
+                "header": {"template": "red", "title": {"tag": "plain_text",
+                    "content": "🚨 KOL 派单跳过 — 产品缺官网链接(防死链)"}},
+                "elements": [{"tag": "div", "text": {"tag": "lark_md",
+                    "content": f"**任务**: {task_name}\n**产品**: {p_disp}\n**原因**: 产品库「官网链接」为空 → cold 邮件会带死链, 已跳过整批派单(零外发). 请先填官网链接再重跑。"}}],
+            }, biz="KOL")
+        except Exception:
+            pass
+        return {"task": task_name, "error": "产品缺官网链接,跳过防死链", "task_rid": task_rid}
+
     # 读映射规则
     p_cat = ext(product["fields"].get("品类"))
     p_hosts = list(_parse_multiselect(product["fields"].get("适配主机")))
