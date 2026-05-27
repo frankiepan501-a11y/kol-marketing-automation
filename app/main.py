@@ -5,7 +5,7 @@ import asyncio
 import time
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
@@ -311,6 +311,20 @@ async def run_sla_check(authorization: str = Header(default="")):
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/sla/check", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/draft-cleanup/run")
+async def run_draft_cleanup(authorization: str = Header(default=""), days: int = 30):
+    """草稿归档清理 (2026-05-27): 删 N 天前的「已否决/发送失败」草稿, 硬保护其他状态.
+    dedup 跳过这俩状态→删了不影响防重/ROI. 建议周 cron."""
+    _check_auth(authorization)
+    try:
+        result = await draft_cleanup.run(days=days)
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/draft-cleanup/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 
