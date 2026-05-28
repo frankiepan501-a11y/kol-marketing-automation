@@ -46,19 +46,21 @@ async def _product_brief(prod_rid: str):
         prod = await feishu.get_record(config.T_PRODUCT, prod_rid)
         pf = prod["fields"]
         name = ext(pf.get("产品英文名")) or name
-        # Talking Points 优先, 没填降级 拍摄角度建议 / 卖点1-3
+        # ⚠️ 海外营销永远用英文 (Scott Stein 中英混杂事故铁律): 只用英文字段 Talking Points/拍摄角度建议,
+        # **绝不降级用中文「卖点1/2/3」**(那是内部 SKU 卖点, 是中文, 会让英文暖信中英混杂)。
         tp = ext(pf.get("Talking Points")).strip()
         ang = ext(pf.get("拍摄角度建议")).strip()
         if tp:
             points += [l.strip() for l in re.split(r"[\n;；]", tp) if l.strip()]
-        else:
-            points += [ext(pf.get(f"卖点{i}")).strip() for i in (1, 2, 3) if ext(pf.get(f"卖点{i}")).strip()]
         if ang:
             points += [f"(angle) {l.strip()}" for l in re.split(r"[\n;；]", ang) if l.strip()]
         link = ext_url(pf.get("官网链接")) or ""
     except Exception as e:
         print(f"[warm_recap] 读产品 {prod_rid} 失败: {e}")
-    bullets = "\n".join(f"• {p}" for p in points[:5]) if points else "• Show it in your setup / first impressions"
+    # 英文字段没填 → 通用英文默认 (不注入中文); 运营/产品库补 Talking Points 后未来暖信更丰富
+    bullets = "\n".join(f"• {p}" for p in points[:5]) if points else (
+        "• Show it in your setup / share your honest first impressions\n"
+        "• Feel free to highlight whatever feature stands out most to you")
     return name, bullets, link
 
 
