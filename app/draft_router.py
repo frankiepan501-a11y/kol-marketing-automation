@@ -215,6 +215,16 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
                 ]},
             ],
         }
+        # warm_recap 暖信: 卡片顶部加自解释操作说明 (运营无需猜, 直接照做)
+        if source == "warm_recap":
+            card["elements"].insert(0, {"tag": "div", "text": {"tag": "lark_md", "content": (
+                "📦 **这是寄样后「确认收到 + 轻 brief」暖信**(KOL 已签收样品)— **不是催稿**。\n"
+                "**你只需 2 步**:\n"
+                "1️⃣ 打开下方草稿,填 **「折扣比例」**(数字,如 `15`)+ **「折扣码」**(可留空,系统按 KOL 名自动生成如 `THAO15`)\n"
+                "2️⃣ 把「邮件草稿状态」改 **「通过」** → 系统自动建 Shopify 折扣码 + 替换正文 + 发出\n"
+                "⚠️ **不要手动改正文里的 `[DISCOUNT_CODE]`/`[DISCOUNT_PCT]`**(系统会自动替换;改了会被拦截)\n"
+                "🔗 链接已是**独立站(带折扣码追踪)**,**不要加亚马逊链接**")}})
+            card["elements"].insert(1, {"tag": "hr"})
         # 2026-05-17 A9: 改用 feishu.resolve_notify_targets helper (统一决策)
         role = "needs_rewrite" if path == "需人改" else "reviewer"
         targets = await feishu.resolve_notify_targets(role)
