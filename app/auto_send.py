@@ -279,6 +279,8 @@ async def send_one(rec: dict) -> dict:
     # 跟进摘要前缀 (区分 cold/followup/reply/tracking_followup)
     if source == "tracking_followup":
         prefix = "[运单号追加]"
+    elif source == "warm_recap":
+        prefix = "[寄样暖信]"
     elif source == "reply":
         prefix = "[回复发出]"
     elif source == "followup":
