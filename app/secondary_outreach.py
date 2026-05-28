@@ -135,7 +135,7 @@ async def _eligible_kols():
             if not email or "@" not in email or email.startswith("待补"):
                 continue
             verify = ext(f.get("邮箱验真状态"))
-            if verify == "风险":
+            if verify in ("风险", "无效"):   # 无效=退信处理器标的硬退死地址, 不再二次接触
                 continue
             last_secondary = f.get("上次二次接触时间") or 0
             days = (now_ms - last_secondary) / 86400000 if last_secondary else 9999

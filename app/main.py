@@ -5,7 +5,7 @@ import asyncio
 import time
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
@@ -76,6 +76,20 @@ async def run_reply_monitor(authorization: str = Header(default="")):
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/reply-monitor/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/bounce-monitor/run")
+async def run_bounce_monitor(authorization: str = Header(default=""), dry_run: bool = False):
+    """扫 partner@ 收件箱 mailer-daemon 硬退信 → 标联系人「邮箱验真状态=无效」+ 停发 (v4 email_bounced).
+    ?dry_run=true: 只报会标哪些联系人, 不真写/不通知 (首跑核对匹配正确性)."""
+    _check_auth(authorization)
+    try:
+        result = await bounce_monitor.run(dry_run=dry_run)
+        return {"ok": True, "dry_run": dry_run, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/bounce-monitor/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 

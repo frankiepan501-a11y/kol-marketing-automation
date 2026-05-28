@@ -144,6 +144,25 @@ async def send_one(rec: dict) -> dict:
         except Exception:
             pass
 
+    # v4 email_bounced 闸: 关联联系人「邮箱验真状态=无效」(bounce_monitor 标的硬退死地址) → 停发.
+    # 唯一发送 chokepoint, 覆盖 cold/followup/reply/tracking 所有来源; 可逆(运营改回状态即恢复).
+    _link_rid = xrid(f.get("关联媒体人")) or xrid(f.get("关联KOL"))
+    _link_tbl = config.T_EDITOR if xrid(f.get("关联媒体人")) else config.T_KOL
+    if _link_rid:
+        try:
+            _c = await feishu.get_record(_link_tbl, _link_rid)
+            if ext(_c["fields"].get("邮箱验真状态")) == "无效":
+                await feishu.update_record(config.T_DRAFT, rid, {
+                    "发送状态": "失败",
+                    "发送错误": "联系人邮箱验真状态=无效(硬退信), 已停发",
+                    "邮件草稿状态": "已否决",
+                    "审批意见": ("[退信停发] 该联系人邮箱已被退信处理器标「无效」(硬退). "
+                                 "如误判, 在主表把「邮箱验真状态」改回有效/未验后此草稿可重新发。")[:500],
+                })
+                return {"rid": rid, "ok": False, "error": "contact email 无效 (bounced), skipped"}
+        except Exception as e:
+            print(f"[auto_send] 邮箱验真状态 gate check fail (放行): {e}")
+
     # ship_confirm 寄样邮件: 自动用「运单号/物流商」字段值替换正文占位符
     # 张佳烨在草稿表填这两个字段(2 秒动作),无需进正文改文本
     tracking_no = ext(f.get("运单号"))
