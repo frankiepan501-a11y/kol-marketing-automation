@@ -5,7 +5,7 @@ import asyncio
 import time
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
@@ -90,6 +90,21 @@ async def run_bounce_monitor(authorization: str = Header(default=""), dry_run: b
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/bounce-monitor/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/talking-points/run")
+async def run_talking_points(authorization: str = Header(default=""),
+                             product_rid: str = "", overwrite: bool = False):
+    """AI 生成 brief talking points + 拍摄角度(从产品卖点)→ 写产品库 → 通知运营审。
+    ?product_rid=单个产品; 不传则扫上架状态=主推 缺 Talking Points 的产品。?overwrite=true 覆盖已有。"""
+    _check_auth(authorization)
+    try:
+        if product_rid:
+            return {"ok2": True, **(await talking_points.generate_for_product(product_rid, overwrite=overwrite, notify=True))}
+        return {"ok": True, **(await talking_points.run(overwrite=overwrite))}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
         return {"ok": False, "error": str(e), "trace": tr}
 
 
