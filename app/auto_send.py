@@ -33,6 +33,7 @@ def _brand_from_alias(alias: str) -> str:
 PLACEHOLDER_KEYWORDS = [
     "待填", "[TBD", "[CARRIER", "[TRACKING#", "[ETA",
     "[ADDRESS", "[PRICE", "[QUANTITY", "[xxx", "[XXX",
+    "[DISCOUNT_CODE", "[DISCOUNT_PCT",   # warm_recap 暖信折扣占位符: 运营没填折扣比例则不发
 ]
 
 
@@ -175,6 +176,44 @@ async def send_one(rec: dict) -> dict:
         body_html = body_html.replace("[CARRIER 待填运营修改]", carrier)
         body_html = body_html.replace("[CARRIER待填运营修改]", carrier)
         body_html = body_html.replace("[CARRIER 待填]", carrier)
+
+    # warm_recap 暖信 (P3): 发送前用运营在草稿填的「折扣比例」(+可选「折扣码」) 建 Shopify 折扣码 +
+    # 替换正文 [DISCOUNT_CODE]/[DISCOUNT_PCT] 占位符 (灵活按 KOL/产品, 非硬编码)。
+    # 折扣比例未填 → 占位符仍在 → 下方 has_unfilled_placeholder 拦截改"待修改"。
+    source_field = ext(f.get("邮件草稿来源"))
+    if source_field == "warm_recap" or "[DISCOUNT_CODE]" in body_html:
+        try:
+            _pct_raw = f.get("折扣比例")
+            _pct = (float(_pct_raw) / 100.0) if _pct_raw not in (None, "") else 0
+        except (ValueError, TypeError):
+            _pct = 0
+        if _pct and _pct > 0:
+            from . import shopify_discount
+            _is_ed = bool(xrid(f.get("关联媒体人")))
+            _crid = xrid(f.get("关联媒体人")) or xrid(f.get("关联KOL"))
+            _handle = ""
+            if _crid:
+                try:
+                    _mrec = await feishu.get_record(config.T_EDITOR if _is_ed else config.T_KOL, _crid)
+                    _handle = ext(_mrec["fields"].get("媒体人姓名") if _is_ed else _mrec["fields"].get("账号名"))
+                except Exception:
+                    pass
+            _rc = await shopify_discount.resolve_send_code(brand, _handle or "kol", ext(f.get("折扣码")), _pct)
+            if _rc.get("ok") and _rc.get("code"):
+                _code = _rc["code"]
+                body_html = body_html.replace("[DISCOUNT_CODE]", _code).replace("[DISCOUNT_PCT]", str(int(round(_pct * 100))))
+                try:
+                    await feishu.update_record(config.T_DRAFT, rid, {"折扣码": _code})
+                    if _crid:
+                        await feishu.update_record(config.T_EDITOR if _is_ed else config.T_KOL, _crid, {"折扣码": _code})
+                except Exception as e:
+                    print(f"[auto_send] 回写折扣码失败 {rid}: {e}")
+            else:
+                await feishu.update_record(config.T_DRAFT, rid, {
+                    "邮件草稿状态": "待修改", "审核路径": "需人改",
+                    "审批意见": f"[暖信折扣码生成失败] {str(_rc.get('error'))[:280]}, 请检查 Shopify 折扣码后重试",
+                })
+                return {"rid": rid, "ok": False, "error": f"discount create failed: {_rc.get('error')}"}
 
     # 发送前 body 长度 sanity check (V1 最小防御, 防 feishu.ext() multi-segment bug 类再触发)
     # 5/8 ctatechdesk 事故根因: 草稿表 body 是 multi-segment array, ext() 只拿 [0].text 几字符

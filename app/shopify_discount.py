@@ -87,6 +87,28 @@ async def create_discount(brand: str, handle: str, pct: float = None, title: str
     return {"ok": False, "code": code, "gid": None, "error": "code collision after 3 tries"}
 
 
+async def create_discount_with_code(brand: str, code: str, pct: float, title: str = None) -> dict:
+    """用**指定**折扣码建码(运营自定义码). 已存在(taken)视为可用复用. Returns {ok, code, reused, error}."""
+    r = await _create_once(brand, code, pct, title or f"KOL {code}")
+    if r["gid"]:
+        return {"ok": True, "code": code, "reused": False, "error": None}
+    msgs = " ".join((e.get("code", "") + e.get("message", "")) for e in r["errors"]).lower()
+    if "taken" in msgs or "exist" in msgs:
+        return {"ok": True, "code": code, "reused": True, "error": None}  # 已存在=可用
+    return {"ok": False, "code": code, "reused": False, "error": r["errors"]}
+
+
+async def resolve_send_code(brand: str, handle: str, desired_code: str, pct: float) -> dict:
+    """发暖信前确定最终折扣码: 运营填了 desired_code→用它(taken 复用); 没填→按 handle+pct 自动生成.
+    Returns {ok, code, error}. pct 为小数 (0.15)."""
+    dc = (desired_code or "").strip().upper()
+    if dc:
+        r = await create_discount_with_code(brand, re.sub(r"[^A-Za-z0-9]", "", dc) or dc, pct)
+        return {"ok": r["ok"], "code": r.get("code"), "error": r.get("error")}
+    r = await create_discount(brand, handle, pct)
+    return {"ok": r["ok"], "code": r.get("code"), "error": r.get("error")}
+
+
 async def delete_discount(brand: str, gid: str) -> dict:
     res = (await _gql(brand, _DELETE, {"id": gid}))["discountCodeDelete"]
     return {"deleted": res.get("deletedCodeDiscountId"), "errors": res.get("userErrors")}
