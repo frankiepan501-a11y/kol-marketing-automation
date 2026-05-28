@@ -5,7 +5,7 @@ import asyncio
 import time
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
@@ -90,6 +90,17 @@ async def run_bounce_monitor(authorization: str = Header(default=""), dry_run: b
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/bounce-monitor/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/kol-discount/selftest")
+async def run_kol_discount_selftest(authorization: str = Header(default=""), brand: str = "FUNLAB"):
+    """P2 云端 smoke: 建一次性 Shopify 测试折扣码 → 删除. 验证 SHOPIFY_* env + 鉴权 + GraphQL 通."""
+    _check_auth(authorization)
+    try:
+        return {"ok": True, **(await shopify_discount.selftest(brand))}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
         return {"ok": False, "error": str(e), "trace": tr}
 
 
