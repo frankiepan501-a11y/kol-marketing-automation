@@ -177,8 +177,10 @@ async def send_one(rec: dict) -> dict:
         body_html = body_html.replace("[CARRIER待填运营修改]", carrier)
         body_html = body_html.replace("[CARRIER 待填]", carrier)
 
-    # warm_recap 暖信 (P3): 硬门 — 必须 ①「折扣比例」已填 ②正文占位符未被手改, 系统才能插真实 Shopify 码。
-    # 防运营手改正文(如把 [DISCOUNT_CODE] 改成 "{KOL名}")+折扣比例空 → 发出半成品暖信(341万粉 Thao 风险)。
+    # warm_recap 暖信 (P3, UpPromote 转向): 硬门 — 必须 ①「折扣比例」已填 ②正文占位符未被手改
+    # ③「折扣码」(运营在飞书卡片粘的 UpPromote 券码) 非空。
+    # 不再自动建 Shopify 码 — 券码 = UpPromote 真相源 (带佣金追踪), 运营粘进草稿「折扣码」字段。
+    # 防发出半成品暖信(341万粉 Thao 风险): 任一硬门不过 → 改"待修改"拒发。
     source_field = ext(f.get("邮件草稿来源"))
     if source_field == "warm_recap":
         try:
@@ -189,41 +191,32 @@ async def send_one(rec: dict) -> dict:
         if _pct <= 0:
             await feishu.update_record(config.T_DRAFT, rid, {
                 "邮件草稿状态": "待修改", "审核路径": "需人改",
-                "审批意见": "[暖信待填] 请先在草稿填「折扣比例」(数字, 如 15) 再点通过; 「折扣码」可留空(系统按 KOL 名自动生成)。",
+                "审批意见": "[暖信待填] 请在飞书卡片填「折扣%」(数字, 如 10) + 粘 UpPromote 券码后再提交。",
             })
             return {"rid": rid, "ok": False, "error": "warm_recap: 折扣比例未填"}
         if "[DISCOUNT_CODE]" not in body_html or "[DISCOUNT_PCT]" not in body_html:
             await feishu.update_record(config.T_DRAFT, rid, {
                 "邮件草稿状态": "待修改", "审核路径": "需人改",
-                "审批意见": "[暖信占位符被改] 请勿手动改正文里的 [DISCOUNT_CODE]/[DISCOUNT_PCT] —— 系统会按你填的折扣比例/折扣码自动替换。请恢复这两个占位符(或重新生成暖信)再点通过。",
+                "审批意见": "[暖信占位符被改] 请勿手动改正文里的 [DISCOUNT_CODE]/[DISCOUNT_PCT] —— 系统会用你粘的 UpPromote 券码 + 折扣% 自动替换。请恢复这两个占位符(或重新生成暖信)再走卡片提交。",
             })
             return {"rid": rid, "ok": False, "error": "warm_recap: 占位符被手改, 拒发"}
-        from . import shopify_discount
-        _is_ed = bool(xrid(f.get("关联媒体人")))
-        _crid = xrid(f.get("关联媒体人")) or xrid(f.get("关联KOL"))
-        _handle = ""
-        if _crid:
-            try:
-                _mrec = await feishu.get_record(config.T_EDITOR if _is_ed else config.T_KOL, _crid)
-                _handle = ext(_mrec["fields"].get("媒体人姓名") if _is_ed else _mrec["fields"].get("账号名"))
-            except Exception:
-                pass
-        _rc = await shopify_discount.resolve_send_code(brand, _handle or "kol", ext(f.get("折扣码")), _pct)
-        if _rc.get("ok") and _rc.get("code"):
-            _code = _rc["code"]
-            body_html = body_html.replace("[DISCOUNT_CODE]", _code).replace("[DISCOUNT_PCT]", str(int(round(_pct * 100))))
-            try:
-                await feishu.update_record(config.T_DRAFT, rid, {"折扣码": _code})
-                if _crid:
-                    await feishu.update_record(config.T_EDITOR if _is_ed else config.T_KOL, _crid, {"折扣码": _code})
-            except Exception as e:
-                print(f"[auto_send] 回写折扣码失败 {rid}: {e}")
-        else:
+        _code = (ext(f.get("折扣码")) or "").strip()
+        if not _code:
             await feishu.update_record(config.T_DRAFT, rid, {
                 "邮件草稿状态": "待修改", "审核路径": "需人改",
-                "审批意见": f"[暖信折扣码生成失败] {str(_rc.get('error'))[:280]}, 请检查 Shopify 折扣码后重试",
+                "审批意见": "[暖信待填券码] 请在飞书卡片粘 UpPromote 券码再提交 —— 「折扣码」不能为空(它是 UpPromote 佣金追踪真相源)。",
             })
-            return {"rid": rid, "ok": False, "error": f"discount create failed: {_rc.get('error')}"}
+            return {"rid": rid, "ok": False, "error": "warm_recap: 折扣码(UpPromote 券码)未填"}
+        # 用运营粘的 UpPromote 券码替换占位符 (不再调 Shopify 自建码)
+        body_html = body_html.replace("[DISCOUNT_CODE]", _code).replace("[DISCOUNT_PCT]", str(int(round(_pct * 100))))
+        # 回写券码到 KOL/编辑主表缓存 (供 sales_attribution 折扣码→KOL 归因)
+        _is_ed = bool(xrid(f.get("关联媒体人")))
+        _crid = xrid(f.get("关联媒体人")) or xrid(f.get("关联KOL"))
+        if _crid:
+            try:
+                await feishu.update_record(config.T_EDITOR if _is_ed else config.T_KOL, _crid, {"折扣码": _code})
+            except Exception as e:
+                print(f"[auto_send] 回写券码到主表失败 {rid}: {e}")
 
     # 发送前 body 长度 sanity check (V1 最小防御, 防 feishu.ext() multi-segment bug 类再触发)
     # 5/8 ctatechdesk 事故根因: 草稿表 body 是 multi-segment array, ext() 只拿 [0].text 几字符

@@ -22,7 +22,8 @@ MAX_RETRIES = 2                # 重生上限
 async def route_draft(record_id: str, ship_confirm_meta: dict = None,
                        force_review_intent: str = None,
                        force_review_reason: str = None,
-                       force_review_scenario: str = None) -> dict:
+                       force_review_scenario: str = None,
+                       skip_notify: bool = False) -> dict:
     """
     主入口: 给定草稿 record_id → 评审 + 路由 → 返回结果摘要
 
@@ -33,6 +34,9 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
             因 reviewer 给低风险模板(如 _gen_clarify_draft)评高分会自动通过 + 自动发,
             导致 KOL 被反复 spam (Ashtvn 案例: 9 封"是否需要更多 info"邮件死循环).
             存在则强制 committed=True 让草稿停"待审", 防止 _gen_clarify_draft 输出被自动发.
+        skip_notify: True = 跑完评审 + 写回状态, 但不发旧聪哥1号待审卡.
+            warm_recap 暖信用此跳过旧卡, 改由 warm_recap 自己发聪哥3号 form 卡(粘 UpPromote 券码),
+            避免运营收到双卡(旧 1 号卡 + 新 3 号卡).
     """
     # 1. 读草稿
     rec = await feishu.get_record(config.T_DRAFT, record_id)
@@ -154,7 +158,7 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
     await feishu.update_record(config.T_DRAFT, record_id, update_fields)
 
     # 5. 触发后续动作 (异步, 不阻塞主路由)
-    if action == "notify_human":
+    if action == "notify_human" and not skip_notify:
         await _notify_human_review(record_id, rec, score, committed, summary, reasons_text, path,
                                     ship_confirm_meta=ship_confirm_meta)
     elif action == "retry":

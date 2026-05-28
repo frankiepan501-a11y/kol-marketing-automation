@@ -25,6 +25,11 @@ FEISHU_BITABLE_APP_SECRET = env("FEISHU_BITABLE_APP_SECRET", required=True)
 # 飞书 App 1号 (通知 - open_id 归属此 App)
 FEISHU_NOTIFY_APP_ID = env("FEISHU_NOTIFY_APP_ID", required=True)
 FEISHU_NOTIFY_APP_SECRET = env("FEISHU_NOTIFY_APP_SECRET", required=True)
+# 飞书 App 3号 (n8n 事件中心 - 发交互卡 + 收 card.action 回调; 回调只回发卡 app)
+# 用于 warm_recap 暖信卡: 运营粘 UpPromote 券码 → 提交回 n8n event-hub YjTXaoWAcy89xZpT.
+# ⚠️ repo 公开, secret 只能走 env, 不硬编码默认值.
+FEISHU_APP3_ID = env("FEISHU_APP3_ID", required=True)
+FEISHU_APP3_SECRET = env("FEISHU_APP3_SECRET", required=True)
 
 FEISHU_APP_TOKEN = env("FEISHU_APP_TOKEN", required=True)  # Bitable app token
 

@@ -130,8 +130,8 @@ async def build_for_ship_draft(ship_draft: dict) -> dict:
         "重生次数": 0,
         "收件邮箱": email,
         "UTM 链接": link,
-        "审批意见": ("[暖信待填折扣] 请在本草稿填「折扣比例」(如 15) + 「折扣码」(可留空→按 KOL 名自动生成), "
-                     "再点通过。正文 [DISCOUNT_CODE]/[DISCOUNT_PCT] 会在发送前自动替换为真实 Shopify 码。")[:500],
+        "审批意见": ("[暖信待发] 运营在飞书交互卡粘 UpPromote 券码 + 填折扣% → 提交即自动替换正文并发出。"
+                     "无需打开本草稿改正文; [DISCOUNT_CODE]/[DISCOUNT_PCT] 由系统替换。")[:500],
     }
     if prod_rid:
         fields["关联产品"] = [prod_rid]
@@ -140,12 +140,83 @@ async def build_for_ship_draft(ship_draft: dict) -> dict:
         fields["关联任务"] = [task_rid]
 
     rid = await feishu.create_record(config.T_DRAFT, fields)
-    # 强制人审 (复用 force_review_reason; 运营要填折扣)
+    # 强制人审, 但 skip_notify=True 不发旧聪哥1号卡 — 改由下面发聪哥3号 form 卡(粘 UpPromote 券码)
     try:
-        await draft_router.route_draft(rid, force_review_reason="warm_recap 待运营填折扣比例+折扣码")
+        await draft_router.route_draft(rid, force_review_reason="warm_recap 待运营粘 UpPromote 券码",
+                                       skip_notify=True)
     except Exception as e:
         print(f"[warm_recap] route_draft fail rid={rid}: {e}")
+    # 发聪哥3号交互卡给 reviewer (按职务实时查在职名单 → union_id), 运营粘券码+填% → 提交回 n8n
+    try:
+        await _notify_warm_recap_card(rid, name or first, product_name, subj)
+    except Exception as e:
+        print(f"[warm_recap] send card fail rid={rid}: {e}")
     return {"ok": True, "rid": rid, "contact": name, "product": product_name}
+
+
+def _build_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, subject: str) -> dict:
+    """聪哥3号 form 卡: 运营粘 UpPromote 券码 + 填折扣% → 提交回 n8n event-hub.
+    button.value 带 {action:warm_recap_send, app_token, table_id, record_id} → n8n 按 record_id 写草稿.
+    form_value {code, pct} → n8n 写 折扣码/折扣比例 + 状态=通过.
+    """
+    base_val = {
+        "action": "warm_recap_send",
+        "app_token": config.FEISHU_APP_TOKEN,
+        "table_id": config.T_DRAFT,
+        "record_id": draft_rid,
+        "kol": kol_name,
+    }
+    return {
+        "config": {"wide_screen_mode": True, "update_multi": True},
+        "header": {
+            "template": "turquoise",
+            "title": {"tag": "plain_text", "content": f"🎁 寄样暖信待发 · {kol_name}"},
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": (
+                f"**{kol_name}** 已签收 **{product_name}** 样品 — 这是寄样后「确认收到 + 轻 brief」暖信"
+                "(**不是催稿**)。")}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": (
+                "**你只需 2 步**:\n"
+                "1️⃣ 在 **UpPromote** 给该 KOL 建联盟券 → 复制券码\n"
+                "2️⃣ 下面**粘券码 + 填折扣%**(首批一般 `10`)→ 点「确认发送」\n"
+                "系统会把券码 + % 替换进暖信正文并发出, 你**全程不用打开草稿改正文**。")}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**主题**: {subject[:80]}"}},
+            {"tag": "hr"},
+            {"tag": "form", "name": f"wr_{draft_rid}", "elements": [
+                {"tag": "input", "name": "code", "label_position": "left",
+                 "label": {"tag": "plain_text", "content": "UpPromote 券码:"},
+                 "placeholder": {"tag": "plain_text", "content": "粘贴 UpPromote 券码, 如 THAO10"}},
+                {"tag": "input", "name": "pct", "label_position": "left",
+                 "label": {"tag": "plain_text", "content": "折扣 %:"},
+                 "placeholder": {"tag": "plain_text", "content": "填数字, 如 10"}},
+                {"tag": "button", "action_type": "form_submit", "name": "submit",
+                 "text": {"tag": "plain_text", "content": "✅ 确认发送暖信"}, "type": "primary",
+                 "value": base_val},
+            ]},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": (
+                "提交后约 10min 内 auto-send cron 发出。链接已是独立站(带券码追踪), 勿加亚马逊。")}]},
+        ],
+    }
+
+
+async def _notify_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, subject: str) -> int:
+    """发暖信卡给 reviewer (独立站运营专员, 按职务实时查→turnover-safe). open_id→union_id→聪哥3号发."""
+    card = _build_warm_recap_card(draft_rid, kol_name, product_name, subject)
+    targets = await feishu.resolve_notify_targets("reviewer")  # [(name, open_id), ...] 聪哥1号 namespace
+    sent = 0
+    for name, oid in targets:
+        uid = await feishu.open_id_to_union_id(oid)
+        if not uid:
+            print(f"[warm_recap] {name} open_id→union_id 失败, skip")
+            continue
+        try:
+            await feishu.send_card_via_app3("union_id", uid, card)
+            sent += 1
+        except Exception as e:
+            print(f"[warm_recap] send card to {name} fail: {e}")
+    print(f"[warm_recap] card sent to {sent}/{len(targets)} reviewers, draft={draft_rid}")
+    return sent
 
 
 async def run() -> dict:

@@ -9,6 +9,8 @@ _tokens = {}  # {"bitable": (token, expiry_ts), "notify": ...}
 async def _refresh_token(which: str):
     if which == "bitable":
         aid, sec = config.FEISHU_BITABLE_APP_ID, config.FEISHU_BITABLE_APP_SECRET
+    elif which == "app3":
+        aid, sec = config.FEISHU_APP3_ID, config.FEISHU_APP3_SECRET
     else:
         aid, sec = config.FEISHU_NOTIFY_APP_ID, config.FEISHU_NOTIFY_APP_SECRET
     async with httpx.AsyncClient() as cli:
@@ -262,6 +264,47 @@ async def send_card_message(receive_type: str, receive_id: str, card: dict,
         "content": json.dumps(card, ensure_ascii=False),
     }
     resp = await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="notify")
+    return (resp.get("data") or {}).get("message_id") or ""
+
+
+# ===== 聪哥3号 交互卡 (warm_recap 暖信卡: 运营粘 UpPromote 券码) =====
+# 卡片必须用聪哥3号(app3)发: card.action.trigger 回调只回到发卡 app, 且 n8n event-hub
+# YjTXaoWAcy89xZpT 订阅的是 3 号. open_id 各 App 不互通, 故用 union_id 收件.
+_union_cache = {}  # open_id(聪哥1号 namespace) -> union_id(跨 app 稳定)
+
+
+async def open_id_to_union_id(open_id: str) -> str:
+    """聪哥1号 contact API 把 open_id 换成 union_id (跨 app 稳定, 供聪哥3号发卡用).
+    1h 进程缓存; 查不到返回空字符串 (调用方应跳过该 target).
+    """
+    if not open_id:
+        return ""
+    cached = _union_cache.get(open_id)
+    if cached:
+        return cached
+    try:
+        r = await api("GET", f"/contact/v3/users/{open_id}?user_id_type=open_id", which="notify")
+        uid = (((r.get("data") or {}).get("user") or {}).get("union_id")) or ""
+        if uid:
+            _union_cache[open_id] = uid
+        return uid
+    except Exception as e:
+        print(f"[feishu.open_id_to_union_id] {open_id} fail: {e}")
+        return ""
+
+
+async def send_card_via_app3(receive_type: str, receive_id: str, card: dict) -> str:
+    """用聪哥3号发交互卡 (form 卡, 回调走 n8n event-hub). receive_type 通常 union_id.
+    返回 message_id (失败抛异常, 调用方 catch).
+    不套 _format_card_title — warm_recap 卡自带 header, 不需要 KOL 业务前缀.
+    """
+    import json
+    body = {
+        "receive_id": receive_id,
+        "msg_type": "interactive",
+        "content": json.dumps(card, ensure_ascii=False),
+    }
+    resp = await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="app3")
     return (resp.get("data") or {}).get("message_id") or ""
 
 
