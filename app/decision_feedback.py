@@ -75,12 +75,14 @@ def _days_since(ms: Optional[int]) -> int:
 
 
 async def run():
-    """每日 cron: 扫所有「已合作」KOL/媒体人, 按规则升降级."""
+    """每日 cron: 扫「已合作」KOL, 按 GMV 规则升降级."""
     started = time.time()
     summary = {"matched": 0, "upgraded_to_recurring": 0, "upgraded_to_paid": 0,
                "downgraded_to_unfit": 0, "no_change": 0, "details": [], "errors": []}
 
-    for table_id, label in [(config.T_KOL, "KOL"), (config.T_EDITOR, "Editor")]:
+    # 只扫 KOL: GMV 分档升降级是 KOL/affiliate 机制; 编辑/媒体人=earned media
+    # (无折扣码/GMV≈0, 单选用「已合作」非分档) 不适配 → 不扫编辑表 (2026-05-30 taxonomy 收口).
+    for table_id, label in [(config.T_KOL, "KOL")]:
         # 拉所有「已合作-免费」 / 「已合作-免费(多次)」 / 「已合作-付费」
         for status in ("已合作-免费", "已合作-免费(多次)", "已合作-付费"):
             try:
