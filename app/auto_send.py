@@ -294,9 +294,11 @@ async def send_one(rec: dict) -> dict:
         prefix = "[冷开发信]"
 
     # P4 软关怀 nudge 复用 source=followup, 但目标是已签收(深漏斗)KOL — 不能把 合作状态 倒回
-    # "待回复"/"建联中". 用 命中关键词 含 soft-nudge 识别, 跳过下面的状态重置 (其余 followup 不变).
+    # "待回复"/"建联中". 用「邮件草稿ID」nudge- 前缀识别 → 跳过下面的状态重置 (其余 followup 不变).
+    # ⚠️ 不能用「命中关键词」识别: route_draft 评审后会用 reviewer hits **覆盖**命中关键词
+    # (实测被覆盖成 "sample, late-stage-relationship"), 而「邮件草稿ID」route_draft 不动 = 稳定标记.
     kw_hit = ext(f.get("命中关键词")) or ""
-    _is_soft_nudge = "soft-nudge" in kw_hit
+    _is_soft_nudge = ext(f.get("邮件草稿ID")).startswith("nudge-")
 
     if obj_type == "媒体人":
         editor_rid = xrid(f.get("关联媒体人"))

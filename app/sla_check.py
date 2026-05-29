@@ -618,8 +618,9 @@ async def _layer_soft_nudge(now_ms: int) -> dict:
       - 位置: 在暖信(P3)之后, 不替代暖信; 计时基准 = **暖信发出时间** (gate: 暖信必须已发).
       - 语气: TEMPLATE_SOFT_NUDGE 软关怀, 不问"发了没"; L2 的 TEMPLATE_CONTENT_REMINDER 还在催.
       - 闸门: 主表「上稿日期」空(没上稿才发) + 暖信已发出(brief 送达才 nudge, 防过早 nudge).
-    生成草稿 source=followup(不新建单选选项避免清空风险) + 命中关键词 soft-nudge
-    (auto_send 据此跳过 合作状态 倒退). 去重: ship 草稿「审批意见」打 [NUDGE-SENT].
+    生成草稿 source=followup(不新建单选选项避免清空风险), 身份标记 = 邮件草稿ID `nudge-` 前缀
+    (auto_send 据此跳过 合作状态 倒退; 不能用命中关键词标记 — route_draft 评审后会覆盖它).
+    去重: ship 草稿「审批意见」打 [NUDGE-SENT].
     """
     cutoff_ms = now_ms - SLA_DAYS_SOFT_NUDGE * 86400 * 1000
 
@@ -690,12 +691,13 @@ async def _layer_soft_nudge(now_ms: int) -> dict:
             skipped += 1
             continue
 
-        product_name = "the product"
+        # 模板含 "the {product_name}" → 默认用 "product"(读作 "the product"), 不用 "the product"(会 "the the product")
+        product_name = "product"
         prod_rid = xrid(f.get("关联产品"))
         if prod_rid:
             try:
                 prod = await feishu.get_record(config.T_PRODUCT, prod_rid)
-                product_name = ext(prod["fields"].get("产品英文名")) or ext(prod["fields"].get("产品名")) or "the product"
+                product_name = ext(prod["fields"].get("产品英文名")) or ext(prod["fields"].get("产品名")) or "product"
             except Exception:
                 pass
 
