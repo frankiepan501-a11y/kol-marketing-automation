@@ -43,7 +43,8 @@ async def api(method: str, path: str, body=None, which: str = "bitable"):
     实战 5/21 15:30 触发 1 次 endpoint 告警, 下次 cron 15min 后自然恢复.
     加 in-call retry 避免 cron 周期等待, 同时减少 endpoint 告警噪音.
 
-    重试范围: HTTP 500/502/503/504 (服务端瞬态). 不重试 4xx (auth/permission/业务错误).
+    重试范围: HTTP 500/502/503/504 (服务端瞬态) + 飞书 code 1254607 "Data not ready"
+    (数据未就绪, Bitable 异步索引瞬态, 实战 5/29 auto-send 撞 1 次自愈). 不重试其他 4xx (auth/permission/业务错误).
     """
     import asyncio
     tok = await token(which)
@@ -60,6 +61,16 @@ async def api(method: str, path: str, body=None, which: str = "bitable"):
                     print(f"[feishu.api] {method} {path[:80]} → {r.status_code} retry {attempt+1}/{len(retry_delays)} in {retry_delays[attempt]}s")
                     await asyncio.sleep(retry_delays[attempt])
                     continue
+                # 飞书 1254607 "Data not ready"(数据未就绪, 异步索引瞬态) → 同 5xx 重试
+                if r.status_code >= 400 and attempt < len(retry_delays):
+                    try:
+                        _fcode = r.json().get("code")
+                    except Exception:
+                        _fcode = None
+                    if _fcode == 1254607:
+                        print(f"[feishu.api] {method} {path[:80]} → 飞书1254607 数据未就绪 retry {attempt+1}/{len(retry_delays)} in {retry_delays[attempt]}s")
+                        await asyncio.sleep(retry_delays[attempt])
+                        continue
                 if r.status_code >= 400:
                     raise Exception(f"{method} {path} → {r.status_code}: {r.text[:300]}")
                 return r.json()
