@@ -550,6 +550,29 @@ async def _is_late_stage_contact(cf: dict, link_field: str, contact_rid: str):
             return True, "已谈条款(affiliate_quote 已发送)"
     except Exception:
         pass
+    # 2026-05-29 (TG_Geek/Gameknight3227 事故): 上面 5 个信号全读「主表」字段, 但主表的寄样次数/
+    # 上次寄样订单号/上稿日期/合作状态 常没回写 (TG_Geek 已寄样+已发布 review, 主表却全空+合作状态
+    # =洽谈中) → guard 全 blind → 早期"想要样品吗"话术被自动外发. 单封回复的 scenario 又可能=None
+    # (5/29 那封), 连 v4 scenario 强制人审也兜不住. 补: 查该 contact **草稿历史**, 任一草稿命中
+    # 已过早期阶段的信号 = late-stage (不依赖主表回写 / 不依赖当封 scenario)。
+    #   信号: 草稿 寄样阶段∈已发货/在途/已签收/已产出, 或 历史 场景标签 funnel∈寄样物流/brief拍摄/草稿/发布收口。
+    try:
+        from . import stage_model
+        LATE_FUNNELS = {"寄样物流", "brief拍摄", "草稿", "发布收口"}
+        LATE_SHIP = {"已发货", "在途", "已签收", "已产出"}
+        hist = await feishu.search_records(config.T_DRAFT, [
+            {"field_name": link_field, "operator": "contains", "value": [contact_rid]},
+        ], field_names=["场景标签", "寄样阶段"])
+        for d in hist:
+            df = d["fields"]
+            ship = ext(df.get("寄样阶段"))
+            if ship in LATE_SHIP:
+                return True, f"已寄样(历史草稿寄样阶段={ship})"
+            scn = ext(df.get("场景标签"))
+            if scn and stage_model.funnel_stage_of(scn) in LATE_FUNNELS:
+                return True, f"已过早期(历史草稿场景={scn}/{stage_model.funnel_stage_of(scn)}阶段)"
+    except Exception as e:
+        print(f"[reply_drafter] late-stage draft-history check fail (放行): {e}")
     return False, ""
 
 
