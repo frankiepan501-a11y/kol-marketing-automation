@@ -552,6 +552,14 @@ async def run():
             # (Phase2 上稿检查 n8n 工作流 hgM7unABBW7hr5dw 抓取式补充, 覆盖不主动给链接的达人 — 后续可加)
             if scenario_label == "live_link_received" and not cf.get("上稿日期"):
                 master_update["上稿日期"] = now_ms
+                # 上稿 = 合作成 → KOL 进入「已合作-免费」(decision_feedback 升降级 +
+                # secondary_outreach 二次维护 的起点; 之前无任何代码写此状态 → 两下游恒空跑,
+                # 这是 ROI→反哺链的上游断链). 仅 KOL: 编辑表单选无「已合作-免费」选项(用「已合作");
+                # 不降级已在更高档(多次/付费), 不动黑名单(退订者勿再 engage); 覆盖意图给的「洽谈中」(上稿>洽谈).
+                if ctype != "editor":
+                    _cur_coop = ext(cf.get("合作状态"))
+                    if _cur_coop not in ("已合作-免费", "已合作-免费(多次)", "已合作-付费", "黑名单"):
+                        master_update["合作状态"] = "已合作-免费"
 
             target_table = config.T_EDITOR if ctype == "editor" else config.T_KOL
             if master_update:
