@@ -546,6 +546,13 @@ async def run():
                 else:
                     fu_feedback_extra += " [重发: 永久不]"
 
+            # 2026-05-29 数据 hygiene: live_link_received(达人主动发回已发布上稿链接) → 回写主表「上稿日期」.
+            # 之前**无任何代码写 上稿日期** → 恒空 → 看板/ROI(decision_feedback)/late-stage 守护对"已发布"全盲
+            # (TG_Geek 已发布 review 主表仍空). 只在空时写(幂等), now 近似发布日(达人分享链接时点).
+            # (Phase2 上稿检查 n8n 工作流 hgM7unABBW7hr5dw 抓取式补充, 覆盖不主动给链接的达人 — 后续可加)
+            if scenario_label == "live_link_received" and not cf.get("上稿日期"):
+                master_update["上稿日期"] = now_ms
+
             target_table = config.T_EDITOR if ctype == "editor" else config.T_KOL
             if master_update:
                 await feishu.update_record(target_table, contact["record_id"], master_update)

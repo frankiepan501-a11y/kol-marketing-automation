@@ -773,6 +773,11 @@ async def draft_reply(
         fields["关联产品"] = [related_prod_rid]
     if related_task_rid:
         fields["关联任务"] = [related_task_rid]
+    # 2026-05-29: 把入站分类得到的 场景标签 也落到这封回复草稿上 (之前只写在被回复的原草稿,
+    # 导致回复草稿 场景标签=None, 审计时看不出它是对哪个阶段的回应 — TG_Geek 排查时的红鲱鱼).
+    # reply_monitor 已把空 scenario 归一成 unclassified_fallback, 这里恒为有效 label。
+    if scenario_label:
+        fields["场景标签"] = scenario_label
 
     # ship_confirm 寄样订单字段 (12 字段,V1 寄样链路)
     if sub == "ship_confirm" and extracted_address:

@@ -264,6 +264,28 @@ async def send_one(rec: dict) -> dict:
     if ext(f.get("寄样订单号")) and ext(f.get("寄样阶段")) in ("", "待发货"):
         update_payload["寄样阶段"] = "已发货"
         update_payload["发货时间"] = now_ms
+        # 2026-05-29 数据 hygiene: 寄样确认发出即把"已寄样"真值回写主表. 幂等(次数 max≥1 / 订单号·日期仅空时写),
+        # 与 tracking_followup 第2封/reply_drafter 创建时回写不冲突. 否则主表 寄样次数/上次寄样订单号 恒空
+        # → 看板/评分/late-stage 守护对"已寄样"全盲(TG_Geek 主表全空根因之一).
+        try:
+            _crid = xrid(f.get("关联媒体人")) or xrid(f.get("关联KOL"))
+            _ctbl = config.T_EDITOR if xrid(f.get("关联媒体人")) else config.T_KOL
+            if _crid:
+                _cf = (await feishu.get_record(_ctbl, _crid))["fields"]
+                _m = {}
+                try:
+                    if int(_cf.get("寄样次数") or 0) < 1:
+                        _m["寄样次数"] = 1
+                except (ValueError, TypeError):
+                    _m["寄样次数"] = 1
+                if not ext(_cf.get("上次寄样订单号")):
+                    _m["上次寄样订单号"] = ext(f.get("寄样订单号"))
+                if not _cf.get("上次寄样日期"):
+                    _m["上次寄样日期"] = now_ms
+                if _m:
+                    await feishu.update_record(_ctbl, _crid, _m)
+        except Exception as e:
+            print(f"[auto_send] 寄样主表回写失败 rid={rid}: {e}")
     await feishu.update_record(config.T_DRAFT, rid, update_payload)
 
     # 2026-05-17 A5: 发送成功 → 标"已审"群卡片 (防多人审同张卡 race)
