@@ -223,7 +223,7 @@ SCENARIO_MODEL = {
     },
     "live_link_received": {
         "seq": 34, "funnel_stage": "发布收口", "driver": "入站回复",
-        "review": "否", "template_id": "T34_LIVE_LINK_RECEIVED",
+        "review": "强制人审", "template_id": "T34_LIVE_LINK_RECEIVED",
         "name_cn": "达人主动发回上稿链接",
         "trigger": "KOL 发 'here's my video: [link]' / 主动给上稿URL",
     },
