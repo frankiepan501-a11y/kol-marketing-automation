@@ -248,8 +248,31 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
                 prod_name = ext(_ppf.get("产品名")) or ext(_ppf.get("产品英文名")) or ""
             except Exception as _e:
                 print(f"[draft_router] 产品名解析失败: {_e}")
+        # 2026-05-29 Frankie: 拉联系人主表 → 卡片显示 KOL 名/平台/粉丝/阶段 (运营一眼看清是谁/什么阶段)
+        contact_info = {}
+        try:
+            _is_ed = bool(feishu.xrid(f.get("关联媒体人")))
+            _crid = feishu.xrid(f.get("关联媒体人")) if _is_ed else feishu.xrid(f.get("关联KOL"))
+            if _crid:
+                from . import reply_monitor  # 惰性 import 防循环; _contact_stage_label 纯函数
+                _ccf = (await feishu.get_record(config.T_EDITOR if _is_ed else config.T_KOL, _crid))["fields"]
+                if _is_ed:
+                    contact_info = {"name": ext(_ccf.get("媒体人姓名")) or "?",
+                                    "platform": ext(_ccf.get("主要媒体")) or ext(_ccf.get("所属媒体")) or "",
+                                    "fans": "", "stage": reply_monitor._contact_stage_label(_ccf)}
+                else:
+                    try:
+                        _fans = f"{int(_ccf.get('粉丝数') or 0):,}"
+                    except (ValueError, TypeError):
+                        _fans = str(_ccf.get("粉丝数") or "")
+                    contact_info = {"name": ext(_ccf.get("账号名")) or "?",
+                                    "platform": ext(_ccf.get("主平台")) or "",
+                                    "fans": _fans, "stage": reply_monitor._contact_stage_label(_ccf)}
+        except Exception as _e:
+            print(f"[draft_router] 联系人信息解析失败: {_e}")
         action_card = _build_review_action_card(record_id, rec, score, summary, reasons_text,
-                                                path, source, contact_type, prod_name, brand2, base_url)
+                                                path, source, contact_type, prod_name, brand2, base_url,
+                                                contact_info=contact_info)
 
     # 群通知 + 个人通知, 统计成败回写草稿表「卡片发送状态/错误/时间」(2026-05-16)
     # 2026-05-17 A5: 保存群 msg_id 用于结束态 update card 标"已审"
@@ -373,9 +396,11 @@ def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str
 
 def _build_review_action_card(record_id: str, rec: dict, score: int, summary: str,
                               reasons_text: str, path: str, source: str, contact_type: str,
-                              product_name: str, brand: str, base_url: str) -> dict:
+                              product_name: str, brand: str, base_url: str,
+                              contact_info: dict = None) -> dict:
     """cold/reply 待审互动卡 (聪哥3号发负责人私聊): 全正文 + 信息 + 通过/否决/重生/去表格 按钮.
     运营卡片上直接审核, 无需跳表格. 按钮 value 走 n8n event-hub Draft Action 分支落状态.
+    contact_info (2026-05-29 Frankie): {name, platform, fans, stage} — 卡片一眼看清 KOL 是谁/什么阶段.
     """
     f = rec["fields"]
     subject = ext(f.get("邮件主题"))
@@ -387,11 +412,17 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
     hit_kw = ext(f.get("命中关键词"))
     body_show = body if len(body) <= 1800 else body[:1800] + "\n…(正文过长已截断, 点「去表格改」看全文)"
     val = {"app_token": config.FEISHU_APP_TOKEN, "table_id": config.T_DRAFT, "record_id": record_id}
+    ci = contact_info or {}
+    who_label = "媒体人" if contact_type == "媒体人" else "KOL"
     elements = [
         {"tag": "div", "fields": [
-            {"is_short": True, "text": {"tag": "lark_md", "content": f"**收件人**: {email or '?'}"}},
-            {"is_short": True, "text": {"tag": "lark_md", "content": f"**品牌**: {brand}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**{who_label}**: {ci.get('name') or '?'}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**阶段**: {ci.get('stage') or '?'}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**平台**: {ci.get('platform') or '?'}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**粉丝**: {ci.get('fans') or '—'}"}},
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**产品**: {product_name or '?'}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**品牌**: {brand}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**收件人**: {email or '?'}"}},
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**AI评分**: {score}/10"}},
         ]},
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**评分总评**: {summary}"}},
