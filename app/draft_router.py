@@ -197,6 +197,10 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
         # 寄样: 主审 (独立站运营专员) + CC (Frankie + 吴晓丹)
         main_targets, cc_targets = await _ship_confirm_targets()
         targets = main_targets + cc_targets
+        # 寄样填运单号 form 卡 (负责人卡上填 运单号+物流商 即发, 无需跳表格); 群仍收 SOP 信息卡
+        action_card = _build_ship_tracking_card(record_id, ext(f.get("收件邮箱")) or contact_type,
+                                                ship_confirm_meta.get("product_name", "") or "the sample",
+                                                subject, "寄样确认")
     else:
         template_color = "orange" if path == "待人审" else "red"
         title_emoji = "📝" if path == "待人审" else "⚠️"
@@ -423,6 +427,38 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
             "title": {"tag": "plain_text", "content": f"📝 待你审核 ({path}) — {source} / {contact_type}"},
         },
         "elements": elements,
+    }
+
+
+def _build_ship_tracking_card(record_id: str, contact_name: str, product_name: str,
+                              subject: str, stage_label: str) -> dict:
+    """寄样确认/运单号 表单卡 (聪哥3号发负责人, 卡上填即发, 无需跳表格).
+    填 运单号 + 物流商 → 提交 → event-hub Draft Action(draft_tracking) 置字段+通过 →
+    auto_send 用「运单号/物流商」字段自动替换正文 [TRACKING#]/[CARRIER] + 占位符闸门兜底(空不发).
+    """
+    base_val = {"action": "draft_tracking", "app_token": config.FEISHU_APP_TOKEN,
+                "table_id": config.T_DRAFT, "record_id": record_id}
+    return {
+        "config": {"wide_screen_mode": True, "update_multi": True},
+        "header": {"template": "red", "title": {"tag": "plain_text", "content": f"📦 {stage_label} — 填运单号发样 ({contact_name})"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**对象**: {contact_name}　**产品**: {product_name}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**原主题**: {subject}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "📋 查 FBA/海外仓/国内仓库存 → 建 MCF/海外仓/国内订单 → 拿到运单号 → 下面填 → 提交即发"}},
+            {"tag": "hr"},
+            {"tag": "form", "name": f"ship_{record_id}", "elements": [
+                {"tag": "input", "name": "tracking_no", "label_position": "left",
+                 "label": {"tag": "plain_text", "content": "运单号:"},
+                 "placeholder": {"tag": "plain_text", "content": "如 1Z999AA10123456784"}},
+                {"tag": "input", "name": "carrier", "label_position": "left",
+                 "label": {"tag": "plain_text", "content": "物流商:"},
+                 "placeholder": {"tag": "plain_text", "content": "如 USPS Ground / DHL Express / FedEx"}},
+                {"tag": "button", "action_type": "form_submit", "name": "submit",
+                 "text": {"tag": "plain_text", "content": "✅ 确认发送 (自动替换正文运单号/物流商)"}, "type": "primary",
+                 "value": base_val},
+            ]},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "⚠️ 运单号/物流商 留空不会发(占位符闸门拦截); 不用进表格改正文, 系统自动替换"}},
+        ],
     }
 
 

@@ -434,6 +434,17 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
     new_rid = await feishu.create_record(config.T_DRAFT, fields)
     print(f"[auto_send] created tracking_followup draft rid={new_rid} (schedule +24h)")
 
+    # 运单号 form 卡: 发负责人(独立站运营专员)私聊 → 卡上填 运单号+物流商 即发, 无需进表格
+    try:
+        from .draft_router import _build_ship_tracking_card
+        track_card = _build_ship_tracking_card(new_rid, contact_name, product_name, subj, "运单号追加")
+        for _nm, _oid in await feishu.resolve_notify_targets("reviewer"):
+            uid = await feishu.open_id_to_union_id(_oid)
+            if uid:
+                await feishu.send_card_via_app3("union_id", uid, track_card)
+    except Exception as e:
+        print(f"[auto_send] tracking_followup 运单号卡发送失败: {e}")
+
 
 # ===== 3. 主入口 =====
 async def run() -> dict:
