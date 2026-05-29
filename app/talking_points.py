@@ -96,27 +96,44 @@ Return JSON: {{"talking_points":["...","..."],"shooting_angles":["...","..."]}}"
     if notify:
         try:
             base = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_PRODUCT}"
+            # 2026-05-29 Frankie: 信息卡 → 聪哥3号交互卡, 卡上 ✅采纳/🔁重生 一键完成(走 event-hub
+            # Is TP Action? 分支), 改文案才点去表格。value.action=tp_adopt/tp_regen + record_id=产品 rid。
+            val = {"app_token": config.FEISHU_APP_TOKEN, "table_id": config.T_PRODUCT,
+                   "record_id": prod_rid, "product": name}
             card = {
+                "config": {"wide_screen_mode": True, "update_multi": True},
                 "header": {"template": "blue", "title": {"tag": "plain_text",
-                           "content": f"🧠 AI 已草拟 brief 要点 — 请审核采纳 ({name})"}},
+                           "content": f"🧠 AI 草拟 brief 要点 — 卡上采纳/重生 ({name})"}},
                 "elements": [
                     {"tag": "div", "text": {"tag": "lark_md", "content":
-                        f"AI 根据产品卖点为 **{name}** 草拟了寄样暖信用的 brief 要点(已写入产品库,**采纳就留着,要改直接在产品库改**):"}},
+                        f"AI 为 **{name}** 草拟了寄样暖信用的 brief 要点(已写入产品库)。"
+                        "满意点 **✅采纳**;不满意点 **🔁重新生成**;要逐条改文案点 **📝去表格改**。"}},
                     {"tag": "div", "text": {"tag": "lark_md", "content":
                         "**Talking Points**\n" + "\n".join(f"• {t}" for t in tp)}},
                     {"tag": "div", "text": {"tag": "lark_md", "content":
                         "**拍摄角度建议**\n" + "\n".join(f"• {a}" for a in ang)}},
-                    {"tag": "div", "text": {"tag": "lark_md", "content":
-                        "_这些会自动用进该产品的所有寄样暖信 brief 段(全英文)。_"}},
-                    {"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text",
-                        "content": "打开产品库核对/修改"}, "url": base, "type": "primary"}]},
+                    {"tag": "hr"},
+                    {"tag": "action", "actions": [
+                        {"tag": "button", "text": {"tag": "plain_text", "content": "✅ 采纳"},
+                         "type": "primary", "value": dict(val, action="tp_adopt")},
+                        {"tag": "button", "text": {"tag": "plain_text", "content": "🔁 重新生成"},
+                         "type": "default", "value": dict(val, action="tp_regen")},
+                        {"tag": "button", "text": {"tag": "plain_text", "content": "📝 去表格改"},
+                         "type": "default", "url": base},
+                    ]},
+                    {"tag": "note", "elements": [{"tag": "plain_text",
+                        "content": "这些会自动用进该产品所有寄样暖信 brief 段(全英文)。"}]},
                 ],
             }
-            for _, oid in await feishu.resolve_notify_targets("reviewer"):
+            for nm, oid in await feishu.resolve_notify_targets("reviewer"):
                 try:
-                    await feishu.send_card_message("open_id", oid, card)
-                except Exception:
-                    pass
+                    uid = await feishu.open_id_to_union_id(oid)
+                    if uid:
+                        await feishu.send_card_via_app3("union_id", uid, card)
+                    else:
+                        await feishu.send_card_message("open_id", oid, card)  # 降级旧卡(按钮回调走不到,但能看+去表格)
+                except Exception as e:
+                    print(f"[talking_points] notify {nm} fail: {e}")
         except Exception as e:
             print(f"[talking_points] notify fail: {e}")
     return {"ok": True, "rid": prod_rid, "product": name, "talking_points": tp, "shooting_angles": ang,
