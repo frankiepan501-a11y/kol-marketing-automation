@@ -190,6 +190,7 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
     contact_type = ext(f.get("对象类型")) or "KOL"
     source = ext(f.get("邮件草稿来源")) or "cold"
     base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_DRAFT}"
+    action_card = None  # 非寄样 cold/reply 待审 → 互动审核卡 (聪哥3号发负责人私聊, 卡上直接审)
 
     if ship_confirm_meta:
         card = _build_ship_confirm_card(record_id, rec, score, summary, ship_confirm_meta, base_url)
@@ -232,6 +233,19 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
         # 2026-05-17 A9: 改用 feishu.resolve_notify_targets helper (统一决策)
         role = "needs_rewrite" if path == "需人改" else "reviewer"
         targets = await feishu.resolve_notify_targets(role)
+        # 2026-05-29: cold/reply 互动审核卡 (负责人卡上直接 通过/否决/重生, 无需跳表格)
+        sender_alias2 = ext(f.get("发送邮箱")) or ""
+        brand2 = "POWKONG" if "powkong" in sender_alias2.lower() else "FUNLAB"
+        prod_name = ""
+        _prid = feishu.xrid(f.get("关联产品"))
+        if _prid:
+            try:
+                _ppf = (await feishu.get_record(config.T_PRODUCT, _prid))["fields"]
+                prod_name = ext(_ppf.get("产品名")) or ext(_ppf.get("产品英文名")) or ""
+            except Exception as _e:
+                print(f"[draft_router] 产品名解析失败: {_e}")
+        action_card = _build_review_action_card(record_id, rec, score, summary, reasons_text,
+                                                path, source, contact_type, prod_name, brand2, base_url)
 
     # 群通知 + 个人通知, 统计成败回写草稿表「卡片发送状态/错误/时间」(2026-05-16)
     # 2026-05-17 A5: 保存群 msg_id 用于结束态 update card 标"已审"
@@ -248,7 +262,15 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
         print(f"[draft_router] notify chat fail: {e}")
     for name, oid in targets:
         try:
-            await feishu.send_card_message("open_id", oid, card)
+            if action_card is not None:
+                # 互动审核卡走聪哥3号(回调到 event-hub) → 负责人 union_id 私聊, 卡上直接审
+                uid = await feishu.open_id_to_union_id(oid)
+                if uid:
+                    await feishu.send_card_via_app3("union_id", uid, action_card)
+                else:
+                    await feishu.send_card_message("open_id", oid, card)  # 拿不到 union_id 降级旧卡
+            else:
+                await feishu.send_card_message("open_id", oid, card)
             success += 1
         except Exception as e:
             fail += 1
@@ -342,6 +364,65 @@ def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str
                  "url": f"{base_url}", "type": "primary"},
             ]},
         ],
+    }
+
+
+def _build_review_action_card(record_id: str, rec: dict, score: int, summary: str,
+                              reasons_text: str, path: str, source: str, contact_type: str,
+                              product_name: str, brand: str, base_url: str) -> dict:
+    """cold/reply 待审互动卡 (聪哥3号发负责人私聊): 全正文 + 信息 + 通过/否决/重生/去表格 按钮.
+    运营卡片上直接审核, 无需跳表格. 按钮 value 走 n8n event-hub Draft Action 分支落状态.
+    """
+    f = rec["fields"]
+    subject = ext(f.get("邮件主题"))
+    body = ext(f.get("邮件正文"))
+    email = ext(f.get("收件邮箱"))
+    highlight = ext(f.get("匹配亮点"))
+    gap = ext(f.get("匹配不足"))
+    angle = ext(f.get("建议切入点"))
+    hit_kw = ext(f.get("命中关键词"))
+    body_show = body if len(body) <= 1800 else body[:1800] + "\n…(正文过长已截断, 点「去表格改」看全文)"
+    val = {"app_token": config.FEISHU_APP_TOKEN, "table_id": config.T_DRAFT, "record_id": record_id}
+    elements = [
+        {"tag": "div", "fields": [
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**收件人**: {email or '?'}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**品牌**: {brand}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**产品**: {product_name or '?'}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**AI评分**: {score}/10"}},
+        ]},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**评分总评**: {summary}"}},
+    ]
+    bits = []
+    if highlight:
+        bits.append(f"✅ 亮点: {highlight}")
+    if gap:
+        bits.append(f"⚠️ 不足: {gap}")
+    if angle:
+        bits.append(f"🎯 切入: {angle}")
+    if bits:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(bits)[:600]}})
+    if hit_kw:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**命中关键词**: {hit_kw[:150]}"}})
+    elements += [
+        {"tag": "hr"},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**📧 主题**\n{subject}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**✉️ 正文**\n{body_show}"}},
+        {"tag": "hr"},
+        {"tag": "div", "text": {"tag": "lark_md", "content": "👇 **卡片上直接审核**(无需跳表格); 需大改正文才点「去表格改」"}},
+        {"tag": "action", "actions": [
+            {"tag": "button", "text": {"tag": "plain_text", "content": "✅ 通过"}, "type": "primary", "value": dict(val, action="draft_approve")},
+            {"tag": "button", "text": {"tag": "plain_text", "content": "❌ 否决"}, "type": "danger", "value": dict(val, action="draft_reject")},
+            {"tag": "button", "text": {"tag": "plain_text", "content": "🔁 退回重生"}, "type": "default", "value": dict(val, action="draft_regen")},
+            {"tag": "button", "text": {"tag": "plain_text", "content": "📝 去表格改正文"}, "type": "default", "url": base_url},
+        ]},
+    ]
+    return {
+        "config": {"wide_screen_mode": True, "update_multi": True},
+        "header": {
+            "template": "orange" if path == "待人审" else "red",
+            "title": {"tag": "plain_text", "content": f"📝 待你审核 ({path}) — {source} / {contact_type}"},
+        },
+        "elements": elements,
     }
 
 
