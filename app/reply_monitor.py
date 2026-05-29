@@ -204,7 +204,7 @@ async def _get_sent_drafts():
     items = await feishu.search_records(
         config.T_DRAFT,
         [{"field_name": "邮件草稿状态", "operator": "is", "value": ["已发送"]}],
-        field_names=["关联KOL", "关联媒体人", "邮件草稿来源", "是否回复",
+        field_names=["关联KOL", "关联媒体人", "关联产品", "邮件草稿来源", "是否回复",
                      "回复原文", "发送时间", "邮件主题"],
     )
     _sent_drafts_cache["items"] = items
@@ -279,7 +279,7 @@ def _stage_action_hint(stage: str, ai_action: str) -> str:
     return f"**➡️ 建议行动**\n{ai_action}"
 
 
-def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, subject: str):
+def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, subject: str, product: str = ""):
     intent_type = intent.get("type", "?")
     emoji = INTENT_EMOJI.get(intent_type, "📬")
     conf = intent.get("confidence", 0)
@@ -321,6 +321,7 @@ def build_card(contact_type: str, contact_info: dict, brand: str, intent: dict, 
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**来源**: {contact_info['source']}"}},
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**国家**: {contact_info['country']}"}},
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**品牌**: {brand}"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**产品**: {product or '?'}"}},
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**置信度**: {conf:.0%}"}},
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**邮箱**: {contact_info['email']}"}},
             ]},
@@ -611,7 +612,16 @@ async def run():
                 "email": from_addr,
                 "stage": _contact_stage_label(cf),
             }
-            card = build_card(ctype, contact_info, brand, intent, subject)
+            # 产品名 (多产品并跑时辨识该卡对应哪个产品的任务) — 从草稿「关联产品」解析
+            product_name = ""
+            _prod_rid = xrid(draft["fields"].get("关联产品"))
+            if _prod_rid:
+                try:
+                    _pf = (await feishu.get_record(config.T_PRODUCT, _prod_rid))["fields"]
+                    product_name = ext(_pf.get("产品名")) or ext(_pf.get("产品英文名")) or ""
+                except Exception as _e:
+                    print(f"[reply_monitor] 产品名解析失败 rid={_prod_rid}: {_e}")
+            card = build_card(ctype, contact_info, brand, intent, subject, product_name)
             await notify_all(card, draft_rid=draft["record_id"])
 
             # === 自动生成回复草稿 (走 reviewer 自审通道) ===
