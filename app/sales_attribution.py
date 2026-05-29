@@ -87,7 +87,7 @@ async def fetch_orders(brand: str, days: int = 90) -> list:
            f"?status=any&financial_status=paid&created_at_min={since_iso}&limit=250"
            f"&fields=id,name,order_number,created_at,total_price,currency,"
            f"landing_site,landing_site_ref,referring_site,note_attributes,"
-           f"customer_journey_summary,source_name")
+           f"discount_codes,customer_journey_summary,source_name")
     async with httpx.AsyncClient(timeout=60.0) as cli:
         while url:
             r = await cli.get(url, headers={"X-Shopify-Access-Token": tok})
@@ -132,80 +132,103 @@ def extract_utm_content(order: dict) -> tuple:
     return (None, None)
 
 
-# === 4. 按 utm_content 聚合 ===
-def aggregate_orders(orders: list, brand: str) -> dict:
-    """{utm_content: {orders, gmv_usd, last_order_at_ms, last_order_id}}"""
-    agg = {}
-    for o in orders:
-        utm_content, utm_source = extract_utm_content(o)
-        if not utm_content or utm_source != "kol":
-            continue  # 只统计 utm_source=kol 来源
-        if not utm_content.startswith("kol_"):
-            continue
+# === 4. 建 KOL 归因映射 (折扣码 + UTM ID → KOL/编辑记录) ===
+def _norm_code(s: str) -> str:
+    return (s or "").strip().upper()
 
-        try:
-            price = float(o.get("total_price") or 0)
-        except (ValueError, TypeError):
-            price = 0
-        # Funlab USD 直接, Powkong 货币 currency 字段也是 USD
-        gmv = price
 
-        created = o.get("created_at", "")
+async def build_kol_maps() -> dict:
+    """一次性读 KOL + 编辑主表, 建两张内存映射:
+      code: {折扣码大写: (table, rid, name)}   ← 折扣码归因 (顾客主动用码=强信号)
+      utm:  {utm_id小写: (table, rid, name)}    ← UTM 归因 (cold 信链接)
+    撞码/撞 utm 先到先得 (setdefault), dup_codes 记冲突数供观测.
+    """
+    maps = {"code": {}, "utm": {}, "dup_codes": 0}
+    for table, name_field in [(config.T_KOL, "账号名"), (config.T_EDITOR, "媒体人姓名")]:
         try:
-            ts_ms = int(time.mktime(time.strptime(created[:19], "%Y-%m-%dT%H:%M:%S")) * 1000)
+            items = await feishu.search_records(
+                table, [], field_names=["折扣码", "UTM ID", name_field])
         except Exception:
-            ts_ms = 0
+            items = await feishu.fetch_all_records(table)
+        for it in items:
+            f = it.get("fields", {})
+            rid = it.get("record_id")
+            nm = ext(f.get(name_field))
+            code = _norm_code(ext(f.get("折扣码")))
+            if code:
+                if code in maps["code"]:
+                    maps["dup_codes"] += 1
+                else:
+                    maps["code"][code] = (table, rid, nm)
+            utmid = ext(f.get("UTM ID")).strip().lower()
+            if utmid:
+                maps["utm"].setdefault(utmid, (table, rid, nm))
+    return maps
 
-        a = agg.setdefault(utm_content, {
+
+def _order_ts_ms(order: dict) -> int:
+    created = order.get("created_at", "")
+    try:
+        return int(time.mktime(time.strptime(created[:19], "%Y-%m-%dT%H:%M:%S")) * 1000)
+    except Exception:
+        return 0
+
+
+def _order_price(order: dict) -> float:
+    try:
+        return float(order.get("total_price") or 0)  # 折后实付 = 真实营收
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def match_order(order: dict, maps: dict) -> tuple:
+    """把一单归因到唯一 KOL. 折扣码优先 (顾客主动用码), utm 回退.
+    返回 (kol_tuple, via) 或 (None, None). kol_tuple = (table, rid, name)."""
+    # 折扣码归因
+    for c in (order.get("discount_codes") or []):
+        code = _norm_code(c.get("code"))
+        if code and code in maps["code"]:
+            return maps["code"][code], "code"
+    # UTM 归因 (回退)
+    utm_content, utm_source = extract_utm_content(order)
+    if (utm_content and utm_source == "kol" and utm_content.startswith("kol_")
+            and utm_content in maps["utm"]):
+        return maps["utm"][utm_content], "utm"
+    return None, None
+
+
+# === 5. 按 KOL 记录聚合 (折扣码 + utm 并集, 每单只算一次) ===
+def attribute_into(agg: dict, orders: list, brand: str, maps: dict, perbrand: dict):
+    """归因 orders 并累加进 agg (key = 'table::rid'). perbrand: {code,utm} via 计数."""
+    for o in orders:
+        kol, via = match_order(o, maps)
+        if not kol:
+            continue
+        table, rid, name = kol
+        key = f"{table}::{rid}"
+        a = agg.setdefault(key, {
+            "table": table, "rid": rid, "name": name,
             "orders": 0, "gmv_usd": 0.0, "last_order_at_ms": 0,
-            "last_order_id": "", "brands": set(),
+            "last_order_id": "", "via": set(), "brands": set(),
         })
         a["orders"] += 1
-        a["gmv_usd"] += gmv
+        a["gmv_usd"] += _order_price(o)
+        a["via"].add(via)
         a["brands"].add(brand)
+        ts_ms = _order_ts_ms(o)
         if ts_ms > a["last_order_at_ms"]:
             a["last_order_at_ms"] = ts_ms
             a["last_order_id"] = str(o.get("name") or o.get("id") or "")
-    return agg
+        perbrand[via] = perbrand.get(via, 0) + 1
 
 
-# === 5. 写回飞书 KOL 主表 ===
-async def write_attribution_to_kol(agg: dict) -> dict:
-    """根据 utm_content 找到 KOL 主表对应记录, 写累计订单/GMV.
-    idempotent: 直接 PUT 当前累计值 (不是 +=)"""
-    stats = {"matched": 0, "no_kol_found": 0, "write_err": 0, "details": []}
-    for utm_content, a in agg.items():
-        # 在 KOL 主表搜 UTM ID = utm_content
+# === 6. 写回飞书 (按 record_id 直写, 无需 search) ===
+async def write_attribution(agg: dict) -> dict:
+    """idempotent: 直接 PUT 当前累计值 (不是 +=)."""
+    stats = {"matched": 0, "write_err": 0, "details": []}
+    for a in agg.values():
         try:
-            items = await feishu.search_records(config.T_KOL, [
-                {"field_name": "UTM ID", "operator": "is", "value": [utm_content]}
-            ])
-        except Exception as e:
-            stats["write_err"] += 1
-            stats["details"].append({"utm": utm_content, "err": f"search: {str(e)[:80]}"})
-            continue
-
-        if not items:
-            # 也试 编辑表 (媒体人也可能有 utm)
-            try:
-                items = await feishu.search_records(config.T_EDITOR, [
-                    {"field_name": "UTM ID", "operator": "is", "value": [utm_content]}
-                ])
-                target_table = config.T_EDITOR
-            except Exception:
-                items = []
-                target_table = config.T_KOL
-            if not items:
-                stats["no_kol_found"] += 1
-                stats["details"].append({"utm": utm_content, "status": "no_kol_found",
-                                          "orders": a["orders"], "gmv": round(a["gmv_usd"], 2)})
-                continue
-        else:
-            target_table = config.T_KOL
-
-        rid = items[0]["record_id"]
-        try:
-            await feishu.update_record(target_table, rid, {
+            await feishu.update_record(a["table"], a["rid"], {
                 "累计订单数": a["orders"],
                 "累计GMV": round(a["gmv_usd"], 2),
                 "上次订单日期": a["last_order_at_ms"],
@@ -213,21 +236,29 @@ async def write_attribution_to_kol(agg: dict) -> dict:
             })
             stats["matched"] += 1
             stats["details"].append({
-                "utm": utm_content, "rid": rid, "orders": a["orders"],
-                "gmv": round(a["gmv_usd"], 2),
+                "name": a["name"], "rid": a["rid"], "orders": a["orders"],
+                "gmv": round(a["gmv_usd"], 2), "via": sorted(a["via"]),
             })
         except Exception as e:
             stats["write_err"] += 1
-            stats["details"].append({"utm": utm_content, "err": f"update: {str(e)[:80]}"})
-
+            stats["details"].append({"rid": a["rid"], "err": f"update: {str(e)[:80]}"})
     return stats
 
 
-# === 6. 主流程 ===
+# === 7. 主流程 ===
 async def run():
-    """每日 cron 调: 双店拉单 + 聚合 + 写飞书"""
+    """每日 cron 调: 建映射 + 双店拉单 + 折扣码/utm 并集归因 + 写飞书"""
     started_at = time.time()
     summary = {"started_at": int(started_at), "brands": {}}
+
+    # 先建归因映射 (折扣码 + utm)
+    try:
+        maps = await build_kol_maps()
+    except Exception as e:
+        return {"ok": False, "error": f"build_kol_maps: {str(e)[:200]}"}
+    summary["codes_indexed"] = len(maps["code"])
+    summary["utm_ids_indexed"] = len(maps["utm"])
+    summary["dup_codes_ignored"] = maps["dup_codes"]
 
     # 双店并行拉单
     try:
@@ -246,34 +277,22 @@ async def run():
         summary["brands"]["POWKONG"] = {"error": str(powkong_orders)[:200]}
         powkong_orders = []
 
-    summary["brands"]["FUNLAB"] = summary["brands"].get("FUNLAB", {})
-    summary["brands"]["FUNLAB"]["orders_total"] = len(funlab_orders)
-    summary["brands"]["POWKONG"] = summary["brands"].get("POWKONG", {})
-    summary["brands"]["POWKONG"]["orders_total"] = len(powkong_orders)
+    summary["brands"].setdefault("FUNLAB", {})["orders_total"] = len(funlab_orders)
+    summary["brands"].setdefault("POWKONG", {})["orders_total"] = len(powkong_orders)
 
-    # 聚合 (双店合并到一个 utm_content map, 因为同一 KOL 的 UTM ID 跨品牌共用)
-    agg_funlab = aggregate_orders(funlab_orders, "FUNLAB")
-    agg_powkong = aggregate_orders(powkong_orders, "POWKONG")
+    # 归因聚合 (key=table::rid, 跨店合并, 每单只算一次)
     agg = {}
-    for src in (agg_funlab, agg_powkong):
-        for utm, a in src.items():
-            if utm not in agg:
-                agg[utm] = a
-            else:
-                # 同 KOL 双品牌都有订单 → 合并
-                agg[utm]["orders"] += a["orders"]
-                agg[utm]["gmv_usd"] += a["gmv_usd"]
-                agg[utm]["brands"] |= a["brands"]
-                if a["last_order_at_ms"] > agg[utm]["last_order_at_ms"]:
-                    agg[utm]["last_order_at_ms"] = a["last_order_at_ms"]
-                    agg[utm]["last_order_id"] = a["last_order_id"]
+    for orders, brand in [(funlab_orders, "FUNLAB"), (powkong_orders, "POWKONG")]:
+        perbrand = {}
+        attribute_into(agg, orders, brand, maps, perbrand)
+        summary["brands"][brand]["attributed_by_code"] = perbrand.get("code", 0)
+        summary["brands"][brand]["attributed_by_utm"] = perbrand.get("utm", 0)
 
-    summary["utm_kols_found"] = len(agg)
-    summary["brands"]["FUNLAB"]["utm_orders"] = sum(a["orders"] for a in agg_funlab.values())
-    summary["brands"]["POWKONG"]["utm_orders"] = sum(a["orders"] for a in agg_powkong.values())
+    summary["kols_matched"] = len(agg)
+    summary["attributed_total"] = sum(a["orders"] for a in agg.values())
 
     # 写回飞书
-    write_stats = await write_attribution_to_kol(agg)
+    write_stats = await write_attribution(agg)
     summary["write"] = write_stats
     summary["elapsed_s"] = round(time.time() - started_at, 1)
     summary["lookback_days"] = ATTRIBUTION_LOOKBACK_DAYS
