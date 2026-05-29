@@ -130,6 +130,25 @@ TEMPLATE_CONTENT_REMINDER = (
     "Best,\n{signature}"
 )
 
+# P4 软关怀 nudge (寄样后 brief 重设计): 暖信(P3)发出 +N 天仍无上稿 → 一封"轻关怀"邮件.
+# 与已下线的 L2 催稿(TEMPLATE_CONTENT_REMINDER, 含"friendly nudge/first impressions")的关键区别:
+# 这封**不问"发了没"**, 不暗示交付义务; 主动提供帮助 + 反复强调"no rush / no pressure / 不是
+# 现在也完全 OK", 是关系维护不是催稿. 无任何占位符 (auto_send 占位符闸门直接通过).
+TEMPLATE_SOFT_NUDGE = (
+    "Hi {first_name},\n\n"
+    "Just checking in — hope you've been enjoying the {product_name}! "
+    "No rush at all on anything; we know great content takes time and we'd "
+    "never want to add any pressure.\n\n"
+    "Mostly just wanted to make sure everything's working well for you, and to "
+    "see if there's anything we can help with — extra product details, a fresh "
+    "code for your audience, or answering any questions you might have.\n\n"
+    "If you've already shared something we'd love a link so we can cheer you on "
+    "and repost it. And if now isn't the right time, totally understood — "
+    "whenever works for you works for us.\n\n"
+    "Always here if you need anything.\n\n"
+    "Best,\n{signature}"
+)
+
 # 第 2 封追加运单号 (auto_send 在第 1 封发出后自动建草稿, 待运营填运单号)
 # 2026-05-20 P1-D 止血: 去掉 [ETA 待填] 占位符 — 运营手填 ETA 时复制粘贴错位置,
 # 5/15 thunderstashgaming/Thao 千万粉 KOL 收到 "arrive in the next 2026-05-15 20:00:00".

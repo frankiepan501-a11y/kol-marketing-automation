@@ -293,11 +293,16 @@ async def send_one(rec: dict) -> dict:
     else:
         prefix = "[冷开发信]"
 
+    # P4 软关怀 nudge 复用 source=followup, 但目标是已签收(深漏斗)KOL — 不能把 合作状态 倒回
+    # "待回复"/"建联中". 用 命中关键词 含 soft-nudge 识别, 跳过下面的状态重置 (其余 followup 不变).
+    kw_hit = ext(f.get("命中关键词")) or ""
+    _is_soft_nudge = "soft-nudge" in kw_hit
+
     if obj_type == "媒体人":
         editor_rid = xrid(f.get("关联媒体人"))
         if editor_rid:
             # 状态变更只在 cold/followup 类型 (reply 已被 reply_monitor 改成洽谈中,不能覆盖)
-            if source in ("", "cold", "followup", None):
+            if source in ("", "cold", "followup", None) and not _is_soft_nudge:
                 try:
                     await feishu.update_record(config.T_EDITOR, editor_rid, {"合作状态": "建联中"})
                 except Exception as e:
@@ -315,7 +320,7 @@ async def send_one(rec: dict) -> dict:
     else:
         kol_rid = xrid(f.get("关联KOL"))
         if kol_rid:
-            if source in ("", "cold", "followup", None):
+            if source in ("", "cold", "followup", None) and not _is_soft_nudge:
                 try:
                     await feishu.update_record(config.T_KOL, kol_rid, {"合作状态": "待回复"})
                 except Exception as e:
@@ -332,8 +337,7 @@ async def send_one(rec: dict) -> dict:
                 print(f"[auto_send] kol follow: {e}")
 
     # ship_confirm 第一封发出后, 自动建第 2 条 tracking_followup 草稿
-    # 判断: 草稿来源=reply + 命中关键词含 ship-sample (ship_confirm 标志)
-    kw_hit = ext(f.get("命中关键词")) or ""
+    # 判断: 草稿来源=reply + 命中关键词含 ship-sample (ship_confirm 标志)  (kw_hit 上面已读)
     if source == "reply" and "ship-sample" in kw_hit:
         try:
             await _create_tracking_followup_draft(rec, sender_alias, signature)
