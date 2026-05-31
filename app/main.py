@@ -267,6 +267,20 @@ async def run_card_resend(authorization: str = Header(default=""),
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
+@app.post("/card/audit-overdue/run")
+async def run_card_audit(authorization: str = Header(default=""),
+                          days: float = 1.0, dry_run: bool = False, max_list: int = 10):
+    """每日 09:30 BJ cron: 扫 >N 天未处理待办草稿汇总, 发提醒卡给 reviewer + Frankie.
+    ?dry_run=true 看会汇总几张不真发; ?days=N 调阈值(默认 1=24h); ?max_list=N 卡里列前 N 张(默认 10)."""
+    _check_auth(authorization)
+    from . import card_audit
+    try:
+        return await card_audit.run(days=days, dry_run=dry_run, max_list=max_list)
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
 @app.get("/card/resend-from-button")
 async def resend_from_button(draft_rid: str = "", secret: str = ""):
     """飞书 bitable 按钮"打开链接"触发: 拉草稿「关联运营」每人重发卡.
