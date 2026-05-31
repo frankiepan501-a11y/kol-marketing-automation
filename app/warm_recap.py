@@ -103,6 +103,23 @@ async def build_for_ship_draft(ship_draft: dict) -> dict:
 
     prod_rid = xrid(sf.get("关联产品"))
     product_name, brief_points, link_raw = await _product_brief(prod_rid)
+
+    # G-A/G-B (2026-05-31): per-KOL 定制 brief(框架推荐+5 hooks+TikTok SEO). 现场生(暖信量小/天),
+    # per-(KOL×产品) 精确。命中则暖信正文 brief 段用 per-KOL 软要点; 失败降级 per-product(上面已拼)。
+    # 仅 KOL(媒体人=PR 非 TikTok 创作者, 不适用)。
+    per_kol_brief_md = ""
+    if not is_editor and prod_rid:
+        try:
+            from . import talking_points
+            kb = await talking_points.generate_for_kol(prod_rid, contact_rid)
+            if kb.get("ok"):
+                per_kol_brief_md = kb.get("brief_md") or ""
+                eb = kb.get("email_bullets") or []
+                if eb:
+                    brief_points = "\n".join(f"• {b}" for b in eb[:5])
+        except Exception as e:
+            print(f"[warm_recap] per-KOL brief 生成失败 (降级 per-product): {e}")
+
     link = utm.make_utm_link(link_raw, brand, product_name, name) if link_raw else ""
     link_line = f" at {link}" if link else ""
 
@@ -135,6 +152,8 @@ async def build_for_ship_draft(ship_draft: dict) -> dict:
     }
     if prod_rid:
         fields["关联产品"] = [prod_rid]
+    if per_kol_brief_md:
+        fields["Per-KOL Brief"] = per_kol_brief_md[:4000]
     task_rid = xrid(sf.get("关联任务"))
     if task_rid:
         fields["关联任务"] = [task_rid]
@@ -148,16 +167,18 @@ async def build_for_ship_draft(ship_draft: dict) -> dict:
         print(f"[warm_recap] route_draft fail rid={rid}: {e}")
     # 发聪哥3号交互卡给 reviewer (按职务实时查在职名单 → union_id), 运营粘券码+填% → 提交回 n8n
     try:
-        await _notify_warm_recap_card(rid, name or first, product_name, subj)
+        await _notify_warm_recap_card(rid, name or first, product_name, subj, per_kol_brief_md)
     except Exception as e:
         print(f"[warm_recap] send card fail rid={rid}: {e}")
     return {"ok": True, "rid": rid, "contact": name, "product": product_name}
 
 
-def _build_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, subject: str) -> dict:
+def _build_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, subject: str,
+                           brief_md: str = "") -> dict:
     """聪哥3号 form 卡: 运营粘 UpPromote 券码 + 填折扣% → 提交回 n8n event-hub.
     button.value 带 {action:warm_recap_send, app_token, table_id, record_id} → n8n 按 record_id 写草稿.
     form_value {code, pct} → n8n 写 折扣码/折扣比例 + 状态=通过.
+    brief_md: per-KOL 定制 brief(框架+5 hooks+TikTok SEO), 有则卡上多展示一段供运营看/转给 KOL.
     """
     base_val = {
         "action": "warm_recap_send",
@@ -166,43 +187,49 @@ def _build_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, sub
         "record_id": draft_rid,
         "kol": kol_name,
     }
+    elements = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": (
+            f"**{kol_name}** 已签收 **{product_name}** 样品 — 这是寄样后「确认收到 + 轻 brief」暖信"
+            "(**不是催稿**)。")}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": (
+            "**你只需 2 步**:\n"
+            "1️⃣ 在 **UpPromote** 给该 KOL 建联盟券 → 复制券码\n"
+            "2️⃣ 下面**粘券码 + 填折扣%**(首批一般 `10`)→ 点「确认发送」\n"
+            "系统会把券码 + % 替换进暖信正文并发出, 你**全程不用打开草稿改正文**。")}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**主题**: {subject[:80]}"}},
+    ]
+    # per-KOL 定制 brief (AI 推荐框架 + 5 hook 句式 + TikTok SEO) — 运营可看/可转给 KOL 参考
+    if brief_md:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
+            "**🎬 给这位 KOL 的定制 brief**(可转给达人参考)\n" + brief_md[:1500]}})
+    elements += [
+        {"tag": "hr"},
+        {"tag": "form", "name": f"wr_{draft_rid}", "elements": [
+            {"tag": "input", "name": "code", "label_position": "left",
+             "label": {"tag": "plain_text", "content": "UpPromote 券码:"},
+             "placeholder": {"tag": "plain_text", "content": "粘贴 UpPromote 券码, 如 THAO10"}},
+            {"tag": "input", "name": "pct", "label_position": "left",
+             "label": {"tag": "plain_text", "content": "折扣 %:"},
+             "placeholder": {"tag": "plain_text", "content": "填数字, 如 10"}},
+            {"tag": "button", "action_type": "form_submit", "name": "submit",
+             "text": {"tag": "plain_text", "content": "✅ 确认发送暖信"}, "type": "primary",
+             "value": base_val},
+        ]},
+        {"tag": "note", "elements": [{"tag": "plain_text", "content": (
+            "提交后约 10min 内 auto-send cron 发出。链接已是独立站(带券码追踪), 勿加亚马逊。")}]},
+    ]
     return {
         "config": {"wide_screen_mode": True, "update_multi": True},
-        "header": {
-            "template": "turquoise",
-            "title": {"tag": "plain_text", "content": f"🎁 寄样暖信待发 · {kol_name}"},
-        },
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": (
-                f"**{kol_name}** 已签收 **{product_name}** 样品 — 这是寄样后「确认收到 + 轻 brief」暖信"
-                "(**不是催稿**)。")}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": (
-                "**你只需 2 步**:\n"
-                "1️⃣ 在 **UpPromote** 给该 KOL 建联盟券 → 复制券码\n"
-                "2️⃣ 下面**粘券码 + 填折扣%**(首批一般 `10`)→ 点「确认发送」\n"
-                "系统会把券码 + % 替换进暖信正文并发出, 你**全程不用打开草稿改正文**。")}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**主题**: {subject[:80]}"}},
-            {"tag": "hr"},
-            {"tag": "form", "name": f"wr_{draft_rid}", "elements": [
-                {"tag": "input", "name": "code", "label_position": "left",
-                 "label": {"tag": "plain_text", "content": "UpPromote 券码:"},
-                 "placeholder": {"tag": "plain_text", "content": "粘贴 UpPromote 券码, 如 THAO10"}},
-                {"tag": "input", "name": "pct", "label_position": "left",
-                 "label": {"tag": "plain_text", "content": "折扣 %:"},
-                 "placeholder": {"tag": "plain_text", "content": "填数字, 如 10"}},
-                {"tag": "button", "action_type": "form_submit", "name": "submit",
-                 "text": {"tag": "plain_text", "content": "✅ 确认发送暖信"}, "type": "primary",
-                 "value": base_val},
-            ]},
-            {"tag": "note", "elements": [{"tag": "plain_text", "content": (
-                "提交后约 10min 内 auto-send cron 发出。链接已是独立站(带券码追踪), 勿加亚马逊。")}]},
-        ],
+        "header": {"template": "turquoise",
+                   "title": {"tag": "plain_text", "content": f"🎁 寄样暖信待发 · {kol_name}"}},
+        "elements": elements,
     }
 
 
-async def _notify_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, subject: str) -> int:
+async def _notify_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, subject: str,
+                                  brief_md: str = "") -> int:
     """发暖信卡给 reviewer (独立站运营专员, 按职务实时查→turnover-safe). open_id→union_id→聪哥3号发."""
-    card = _build_warm_recap_card(draft_rid, kol_name, product_name, subject)
+    card = _build_warm_recap_card(draft_rid, kol_name, product_name, subject, brief_md)
     targets = await feishu.resolve_notify_targets("reviewer")  # [(name, open_id), ...] 聪哥1号 namespace
     sent = 0
     for name, oid in targets:

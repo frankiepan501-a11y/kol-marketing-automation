@@ -11,6 +11,11 @@ import json, re, httpx
 from . import config, feishu, deepseek, sales_attribution
 from .feishu import ext, ext_url
 
+# 框架结构库 (短视频素材库, 聪哥2号是协作者 → 同 bitable token 可跨 app 读). app_token 非 secret(CLAUDE.md 明文).
+# G-A/G-B (2026-05-31): per-KOL brief 的 AI 推荐框架从这 12 个「停病药信买」变体里选。
+FRAMEWORK_APP_TOKEN = "PpZIbSIuxaPa5wsNGDZcZm9Wn7t"
+FRAMEWORK_TABLE_ID = "tbluWVngE93DKCdH"
+
 
 def _brand_from_link(link: str) -> str:
     l = (link or "").lower()
@@ -51,7 +56,12 @@ async def _fetch_shopify_body(link: str) -> str:
     return txt[:2000]
 
 
-async def generate_for_product(prod_rid: str, overwrite: bool = False, notify: bool = True) -> dict:
+async def generate_for_product(prod_rid: str, overwrite: bool = False, notify: bool = True,
+                               kol_rid: str = None) -> dict:
+    # G-A/G-B (2026-05-31): 带 kol_rid → per-KOL 定制 brief(框架推荐+5 hooks+TikTok SEO),
+    # 返回 dict 给 warm_recap 消费, **不写产品库/不发产品级卡**(那是 per-product 路径, 会被下个 KOL 覆盖)。
+    if kol_rid:
+        return await generate_for_kol(prod_rid, kol_rid)
     prod = await feishu.get_record(config.T_PRODUCT, prod_rid)
     pf = prod["fields"]
     name = ext(pf.get("产品英文名")) or ext(pf.get("产品名")) or "the product"
@@ -158,3 +168,146 @@ async def run(overwrite: bool = False) -> dict:
             generated += 1
         results.append(r)
     return {"主推产品": len(items), "生成": generated, "results": results[:20]}
+
+
+# ===== G-A / G-B: per-KOL 定制 brief (framework 推荐 + 5 hook 句式 + TikTok SEO) =====
+# 老师方法论 (reference_video_brief_tool_dingtalk): brief 应 per-KOL 定制(KOL 风格×产品×框架交叉),
+# 不是 per-product 全员共用; AI 推荐框架 + 5 种 hook 句式(POV/疑问/否定/内心独白/测试型)。
+# 输出不写产品库(会被下个 KOL 覆盖)→ 由 warm_recap 存到草稿「Per-KOL Brief」+ 暖信卡展示。
+
+async def _fetch_frameworks() -> list:
+    """拉框架结构库 12 个「停病药信买」框架 (跨 app, 聪哥2号 token). 拉不到返回 [] 降级(不阻断)."""
+    try:
+        path = f"/bitable/v1/apps/{FRAMEWORK_APP_TOKEN}/tables/{FRAMEWORK_TABLE_ID}/records?page_size=50"
+        r = await feishu.api("GET", path)
+        items = (r.get("data") or {}).get("items") or []
+    except Exception as e:
+        print(f"[talking_points] 框架库拉取失败: {e}")
+        return []
+    out = []
+    for it in items:
+        f = it.get("fields") or {}
+        nm = ext(f.get("框架名称")).strip()
+        formula = ext(f.get("短视频底层结构公式‼️")).strip()
+        if not nm and not formula:
+            continue
+        out.append({"name": nm or formula, "formula": formula,
+                    "scene": ext(f.get("适用场景")).strip()[:160]})
+    return out
+
+
+def format_kol_brief_md(product: str, kol: str, frameworks: list, hooks: list,
+                        kw: str, kw_reason: str, caption: str, hashtags: list) -> str:
+    """把 per-KOL brief 各部分拼成人类可读文本 (存草稿「Per-KOL Brief」字段 + 暖信卡展示)."""
+    lines = [f"🎬 Per-KOL Brief — {kol} × {product}"]
+    if frameworks:
+        lines.append("\n▶ 推荐视频框架:")
+        lines += [f"  • {fw.get('name','')} — {fw.get('why','')}" for fw in frameworks]
+    if hooks:
+        lines.append("\n▶ 5 种 Hook 候选 (字幕/口播开头):")
+        lines += [f"  • [{h.get('type','')}] {h.get('text','')}" for h in hooks]
+    if kw:
+        lines.append("\n▶ TikTok 核心关键词: " + kw + (f" — {kw_reason}" if kw_reason else ""))
+    if caption:
+        lines.append("▶ Caption: " + caption)
+    if hashtags:
+        lines.append("▶ Hashtags: " + " ".join(hashtags))
+    return "\n".join(lines)
+
+
+async def generate_for_kol(prod_rid: str, kol_rid: str) -> dict:
+    """per-KOL 定制 brief. 返回 dict (含 email_bullets 给暖信正文 + brief_md 给字段/卡片).
+    失败/缺记录 → {"ok": False, ...}, 调用方(warm_recap) 降级 per-product。不写任何表。"""
+    if not prod_rid or not kol_rid:
+        return {"ok": False, "skip": "缺 prod_rid 或 kol_rid"}
+    try:
+        prod = await feishu.get_record(config.T_PRODUCT, prod_rid)
+        kol = await feishu.get_record(config.T_KOL, kol_rid)
+    except Exception as e:
+        return {"ok": False, "skip": f"读记录失败: {e}"}
+    pf = prod["fields"]
+    kf = kol["fields"]
+    name = ext(pf.get("产品英文名")) or ext(pf.get("产品名")) or "the product"
+    cat = ext(pf.get("品类"))
+    desc = ext(pf.get("产品简述"))
+    selling = [ext(pf.get(f"卖点{i}")) for i in (1, 2, 3) if ext(pf.get(f"卖点{i}"))]
+    tp_existing = ext(pf.get("Talking Points")).strip()
+
+    # KOL 画像 (内容风格是多选 → ext 只取首个, 这里手动 join 全部)
+    kol_name = ext(kf.get("账号名")) or "the creator"
+    platform = ext(kf.get("主平台"))
+    fans = int(kf.get("粉丝数", 0) or 0)
+    styles_v = kf.get("内容风格")
+    styles = ", ".join(str(s) for s in styles_v) if isinstance(styles_v, list) else ext(styles_v)
+    ip_pref = ext(kf.get("IP喜好"))
+    pub_kw = ext(kf.get("上稿匹配关键词"))
+    country = ext(kf.get("国家"))
+    lang = ext(kf.get("语言")) or "en"
+
+    page_text = await _fetch_shopify_body(ext_url(pf.get("官网链接")) or "")
+    frameworks = await _fetch_frameworks()
+    fw_block = "\n".join(
+        f'- {fw["name"]} | formula: {fw["formula"]} | when to use: {fw["scene"]}'
+        for fw in frameworks) or "(framework library unavailable — propose your own structure)"
+    page_block = (f'\nSeller product page copy (mine for features the selling points missed; '
+                  f'reframe as benefit, do NOT dump specs): {page_text}\n') if page_text else ''
+
+    prompt = f"""You are a creator-marketing strategist briefing ONE specific KOL on how to post about a product to THEIR audience. Tailor everything to this creator's style + platform + audience.
+
+CREATOR:
+- Handle: {kol_name}
+- Main platform: {platform or "unknown"} | followers: {fans:,} | country: {country or "?"} | language: {lang}
+- Content style: {styles or "unknown"}
+- IP / niche interests: {ip_pref or "n/a"}
+- Past content keywords: {pub_kw or "n/a"}
+
+PRODUCT: {name} ({cat})
+Selling points (Chinese — translate + reframe into audience benefit): {' / '.join(selling) if selling else 'n/a'}
+{f'Existing generic talking points: {tp_existing}' if tp_existing else ''}{f'Description: {desc}' if desc else ''}{page_block}
+
+VIDEO FRAMEWORK LIBRARY (pick the best fit for THIS creator + product, by exact name):
+{fw_block}
+
+Produce a per-KOL brief. Return JSON ONLY:
+{{
+  "recommended_frameworks": [{{"name": "<exact framework name from library>", "why": "<=18 words why it fits THIS creator+product"}}],
+  "hooks": [
+    {{"type": "POV", "text": "pov: ... (2nd-person immersive caption hook)"}},
+    {{"type": "疑问", "text": "a curiosity question hook"}},
+    {{"type": "否定", "text": "a contrarian don't/stop hook"}},
+    {{"type": "内心独白", "text": "an honest inner-voice hook"}},
+    {{"type": "测试型", "text": "a test/challenge hook"}}
+  ],
+  "tiktok_keyword": "<1 core TikTok search keyword the post should target>",
+  "tiktok_keyword_reason": "<=16 words why this keyword fits creator's audience",
+  "caption": "<1 ready-to-post English caption, <=200 chars, includes the keyword naturally>",
+  "hashtags": ["#niche", "#product", "..."],
+  "email_bullets": ["...", "..."]
+}}
+Rules:
+- recommended_frameworks: 1-3, best first, name MUST be copied verbatim from the library above.
+- hooks: EXACTLY these 5 types in this order, each a ready-to-use English caption hook tailored to creator+product.
+- hashtags: 5-8, lowercase, mix niche + product + reach.
+- email_bullets: 3-4 SHORT casual soft suggestions for a gifting email (optional-sounding, NOT a rigid script).
+- English only. Match {platform or "the platform"} + {styles or "their"} style. No brand-logo/on-screen-text instructions. Guardrail brief, not a script."""
+
+    try:
+        out = await deepseek.chat_json(prompt, max_tokens=900, temperature=0.4)
+    except Exception as e:
+        return {"ok": False, "skip": f"DeepSeek 失败: {e}"}
+    rf = [x for x in (out.get("recommended_frameworks") or []) if isinstance(x, dict) and x.get("name")][:3]
+    hooks = [x for x in (out.get("hooks") or []) if isinstance(x, dict) and str(x.get("text") or "").strip()][:5]
+    kw = str(out.get("tiktok_keyword") or "").strip()
+    kw_reason = str(out.get("tiktok_keyword_reason") or "").strip()
+    caption = str(out.get("caption") or "").strip()
+    hashtags = [str(h).strip() for h in (out.get("hashtags") or []) if str(h).strip()][:8]
+    email_bullets = [str(b).strip() for b in (out.get("email_bullets") or []) if str(b).strip()][:4]
+    if not hooks and not rf:
+        return {"ok": False, "skip": "AI 未产出 brief", "raw": out}
+    brief_md = format_kol_brief_md(name, kol_name, rf, hooks, kw, kw_reason, caption, hashtags)
+    return {"ok": True, "product": name, "kol": kol_name,
+            "recommended_frameworks": rf, "hooks": hooks,
+            "tiktok_keyword": kw, "tiktok_keyword_reason": kw_reason,
+            "caption": caption, "hashtags": hashtags,
+            "email_bullets": email_bullets, "brief_md": brief_md,
+            "shopify_page_chars": len(page_text), "frameworks_count": len(frameworks)}

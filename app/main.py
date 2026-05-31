@@ -95,11 +95,14 @@ async def run_bounce_monitor(authorization: str = Header(default=""), dry_run: b
 
 @app.post("/talking-points/run")
 async def run_talking_points(authorization: str = Header(default=""),
-                             product_rid: str = "", overwrite: bool = False):
+                             product_rid: str = "", kol_rid: str = "", overwrite: bool = False):
     """AI 生成 brief talking points + 拍摄角度(从产品卖点)→ 写产品库 → 通知运营审。
-    ?product_rid=单个产品; 不传则扫上架状态=主推 缺 Talking Points 的产品。?overwrite=true 覆盖已有。"""
+    ?product_rid=单个产品; 不传则扫上架状态=主推 缺 Talking Points 的产品。?overwrite=true 覆盖已有。
+    ?product_rid=&kol_rid= 同时给 → 只读返回 per-KOL 定制 brief(框架+5 hooks+TikTok SEO, 不写表, 供验证)。"""
     _check_auth(authorization)
     try:
+        if product_rid and kol_rid:
+            return {"ok2": True, **(await talking_points.generate_for_kol(product_rid, kol_rid))}
         if product_rid:
             return {"ok2": True, **(await talking_points.generate_for_product(product_rid, overwrite=overwrite, notify=True))}
         return {"ok": True, **(await talking_points.run(overwrite=overwrite))}
