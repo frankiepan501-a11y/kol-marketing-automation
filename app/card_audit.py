@@ -2,16 +2,19 @@
 """每日卡片审计 cron — 扫 >24h 未处理的 KOL 卡片汇总提醒.
 
 为何要: 看板视图能查待办, 但运营不一定主动开看板. 每天 09:30 BJ 一张汇总卡
-推到 reviewer 私聊, 列前 10 张 + 跳看板按钮, 兜底防漏处理.
+推到 reviewer 私聊, 列前 10 张, 每行附「📨 重发」链接(点了原卡到运营私聊底部).
 
 逻辑:
 - 扫草稿表「邮件草稿状态」∈{待审, 待修改} AND「生成时间」> 24h 前
-- 按「关联运营」字段不精确分发(给每个在职 reviewer 都发汇总, 因老草稿没此字段)
+- 每张草稿额外解析: KOL名/平台/粉丝/当前阶段(reply_monitor._contact_stage_label) + 产品
+- 给每个在职 reviewer 都发汇总(老草稿没「关联运营」字段, 不能精准分组)
+- 每行末尾 [📨 重发] 链接 → /card/resend-from-button → 卡片回运营私聊底部
 - 抄送 Frankie 一张总数汇总卡
 
 支持 ?dry_run=true 看会汇总几张, ?days=N 调阈值(默认 1=24h).
 不发邮件; 仅 IM 卡片提醒.
 """
+import os
 import time
 from . import config, feishu
 from .feishu import ext
@@ -45,8 +48,8 @@ async def run(days: float = 1.0, dry_run: bool = False, max_list: int = 10) -> d
                 except (ValueError, TypeError): gen_ms = 0
             if not gen_ms or gen_ms >= cutoff_ms:
                 continue
-            # 解析 KOL/媒体人名 (SingleLink 字段 text 不稳定, 用 xrid+fetch 稳健)
-            kol_name = ""
+            # 解析 KOL/媒体人 + 平台 + 粉丝 + 当前阶段 (复用 reply_monitor._contact_stage_label)
+            kol_name, platform, fans, stage = "", "", "", ""
             crid = feishu.xrid(f.get("关联KOL"))
             is_editor = False
             if not crid:
@@ -56,14 +59,40 @@ async def run(days: float = 1.0, dry_run: bool = False, max_list: int = 10) -> d
                 try:
                     cf = (await feishu.get_record(
                         config.T_EDITOR if is_editor else config.T_KOL, crid))["fields"]
-                    kol_name = ext(cf.get("媒体人姓名" if is_editor else "账号名")) or ""
+                    from . import reply_monitor  # 惰性 import 防循环
+                    stage = reply_monitor._contact_stage_label(cf) or ""
+                    if is_editor:
+                        kol_name = ext(cf.get("媒体人姓名")) or ""
+                        platform = ext(cf.get("主要媒体")) or ext(cf.get("所属媒体")) or ""
+                    else:
+                        kol_name = ext(cf.get("账号名")) or ""
+                        platform = ext(cf.get("主平台")) or ""
+                        try:
+                            fans = f"{int(cf.get('粉丝数') or 0):,}"
+                        except (ValueError, TypeError):
+                            fans = str(cf.get("粉丝数") or "")
                 except Exception:
                     pass
+
+            # 解析产品名
+            prod_name = ""
+            prid = feishu.xrid(f.get("关联产品"))
+            if prid:
+                try:
+                    pf = (await feishu.get_record(config.T_PRODUCT, prid))["fields"]
+                    prod_name = ext(pf.get("产品英文名")) or ext(pf.get("产品名")) or ""
+                except Exception:
+                    pass
+
             overdue.append({
                 "rid": it["record_id"],
                 "source": ext(f.get("邮件草稿来源")) or "",
                 "subject": ext(f.get("邮件主题")) or "",
                 "kol_name": (kol_name or "?")[:30],
+                "platform": platform[:20],
+                "fans": fans,
+                "stage": stage,
+                "product": prod_name[:40],
                 "status": status,
                 "days_overdue": int((started * 1000 - gen_ms) / 86400000),
             })
@@ -117,9 +146,40 @@ async def run(days: float = 1.0, dry_run: bool = False, max_list: int = 10) -> d
     return summary
 
 
+def _format_overdue_line(idx: int, o: dict, secret: str) -> str:
+    """每行渲染: KOL名/阶段/平台/粉丝 + 产品 + 类型/等X天/状态 + [📨 重发] 链接"""
+    head_parts = [f"**{o['kol_name']}**"]
+    if o.get("stage"):
+        head_parts.append(o["stage"])
+    if o.get("platform"):
+        plat = o["platform"]
+        if o.get("fans"):
+            plat += f" {o['fans']}"
+        head_parts.append(plat)
+    head = " · ".join(head_parts)
+
+    body_parts = []
+    if o.get("product"):
+        body_parts.append(f"🎁 {o['product']}")
+    body_parts.append(f"{o['source']} · 等 {o['days_overdue']}d · {o['status']}")
+    body = " · ".join(body_parts)
+
+    sub = (o["subject"] or "")
+    if len(sub) > 60:
+        sub = sub[:60] + "..."
+
+    resend_url = (f"https://kol-auto.zeabur.app/card/resend-from-button"
+                  f"?draft_rid={o['rid']}&secret={secret}")
+    return (f"{idx}. {head}\n"
+            f"   {body}\n"
+            f"   _{sub}_\n"
+            f"   [📨 重发卡片到运营私聊]({resend_url})")
+
+
 def _build_audit_card(reviewer_name: str, overdue: list, max_list: int = 10) -> dict:
     base_url = (f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}"
                 f"?table={config.T_DRAFT}")
+    secret = os.environ.get("RESEND_BUTTON_SECRET", "")
     n = len(overdue)
     elements = [
         {"tag": "div", "text": {"tag": "lark_md", "content": (
@@ -132,14 +192,7 @@ def _build_audit_card(reviewer_name: str, overdue: list, max_list: int = 10) -> 
         elements.append({"tag": "div", "text": {"tag": "lark_md",
             "content": "🎉 没有待办！干净。"}})
     else:
-        lines = []
-        for i, o in enumerate(overdue[:max_list], 1):
-            sub = (o["subject"] or "")[:50]
-            if len(o["subject"]) > 50:
-                sub += "..."
-            lines.append(
-                f"{i}. **{o['kol_name']}** · {o['source']} · 等 {o['days_overdue']}d · {o['status']}\n   _{sub}_"
-            )
+        lines = [_format_overdue_line(i, o, secret) for i, o in enumerate(overdue[:max_list], 1)]
         elements.append({"tag": "div", "text": {"tag": "lark_md",
             "content": "\n\n".join(lines)}})
         if n > max_list:
