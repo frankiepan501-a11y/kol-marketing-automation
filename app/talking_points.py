@@ -127,13 +127,16 @@ async def generate_for_product(prod_rid: str, overwrite: bool = False, notify: b
     if ext(pf.get("Talking Points")).strip() and not overwrite:
         return {"ok": False, "rid": prod_rid, "skip": "Talking Points 已有 (overwrite=false)"}
 
-    # 拉 Shopify 产品页正文补充卖点 (录不全的特性如磁吸充电从这里来; 拉不到则降级只用卖点)
+    # 产品信息源 (肥→瘦): 亚马逊 listing(标题+五点, 最肥) → Shopify body_html(常稀疏). 都 fail-safe 降级。
+    amz_text = await _fetch_amazon_listing(ext_url(pf.get("亚马逊链接")) or "")
     page_text = await _fetch_shopify_body(ext_url(pf.get("官网链接")) or "")
-
-    page_block = (f'\nFull product page copy (seller\'s own description — MINE it for concrete features/'
-                  f'benefits the audience cares about that the selling points above may have MISSED, '
-                  f'e.g. magnetic charging, cooling fan, multi-device support; still reframe into '
-                  f'benefit/emotion, do NOT dump specs): {page_text}\n') if page_text else ''
+    page_block = ""
+    if amz_text:
+        page_block += (f'\nAmazon listing (RICHEST source — real title + bullet points; MINE it for concrete '
+                       f'features/benefits the selling points MISSED, reframe as benefit/emotion, do NOT '
+                       f'dump specs):\n{amz_text}\n')
+    if page_text:
+        page_block += (f'\nStore product page copy (supplement): {page_text}\n')
 
     prompt = f"""You are a creator-marketing copywriter. Write brief "talking points" + shooting angles that a KOL can use when posting about this product to THEIR audience.
 
@@ -201,7 +204,7 @@ Return JSON: {{"talking_points":["...","..."],"shooting_angles":["...","..."]}}"
         except Exception as e:
             print(f"[talking_points] notify fail: {e}")
     return {"ok": True, "rid": prod_rid, "product": name, "talking_points": tp, "shooting_angles": ang,
-            "shopify_page_chars": len(page_text)}
+            "amazon_chars": len(amz_text), "shopify_page_chars": len(page_text)}
 
 
 async def run(overwrite: bool = False) -> dict:
