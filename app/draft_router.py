@@ -193,14 +193,25 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
     action_card = None  # 非寄样 cold/reply 待审 → 互动审核卡 (聪哥3号发负责人私聊, 卡上直接审)
 
     if ship_confirm_meta:
-        card = _build_ship_confirm_card(record_id, rec, score, summary, ship_confirm_meta, base_url)
+        # 解析联系人信息 (2026-05-31 统一字段: contact_info + brand + email)
+        _is_ed = bool(feishu.xrid(f.get("关联媒体人")))
+        _crid = feishu.xrid(f.get("关联媒体人")) if _is_ed else feishu.xrid(f.get("关联KOL"))
+        _ctype = "媒体人" if _is_ed else "KOL"
+        _ci = await feishu.resolve_contact_info(_crid, _ctype) if _crid else {}
+        _sender = ext(f.get("发送邮箱")) or ""
+        _brand = "POWKONG" if "powkong" in _sender.lower() else "FUNLAB"
+        _email = ext(f.get("收件邮箱")) or ""
+        card = _build_ship_confirm_card(record_id, rec, score, summary, ship_confirm_meta, base_url,
+                                        contact_info=_ci, brand=_brand)
         # 寄样: 主审 (独立站运营专员) + CC (Frankie + 吴晓丹)
         main_targets, cc_targets = await _ship_confirm_targets()
         targets = main_targets + cc_targets
         # 寄样填运单号 form 卡 (负责人卡上填 运单号+物流商 即发, 无需跳表格); 群仍收 SOP 信息卡
-        action_card = _build_ship_tracking_card(record_id, ext(f.get("收件邮箱")) or contact_type,
-                                                ship_confirm_meta.get("product_name", "") or "the sample",
-                                                subject, "寄样确认")
+        action_card = _build_ship_tracking_card(
+            record_id, _email or contact_type,
+            ship_confirm_meta.get("product_name", "") or "the sample",
+            subject, "寄样确认",
+            contact_info=_ci, brand=_brand, email=_email, contact_type=_ctype)
     else:
         template_color = "orange" if path == "待人审" else "red"
         title_emoji = "📝" if path == "待人审" else "⚠️"
@@ -315,10 +326,13 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
 
 # ===== ship_confirm 卡片 (V2: SOP 清单, 不查领星 API) =====
 def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str,
-                              meta: dict, base_url: str, escalation: bool = False) -> dict:
+                              meta: dict, base_url: str, escalation: bool = False,
+                              contact_info: dict = None, brand: str = "") -> dict:
     """SHIP_CONFIRM 高优先级卡片
     Args:
         escalation: True = 24h 超时升级版 (标题加 🚨, 颜色加深, 强调超时)
+        contact_info: 由 _notify_human_review 用 feishu.resolve_contact_info 解析后传入
+        brand: POWKONG / FUNLAB
     """
     f = rec["fields"]
     contact_type = ext(f.get("对象类型")) or "KOL"
@@ -326,6 +340,7 @@ def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str
     address = (meta.get("address") or "").strip()
     country = (meta.get("country") or "").strip().upper()
     product_name = (meta.get("product_name") or "").strip()
+    email = ext(f.get("收件邮箱")) or ""
 
     # SLA 24h
     import time as _t
@@ -377,12 +392,13 @@ def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str
             "title": {"tag": "plain_text", "content": title},
         },
         "elements": [
+            feishu.build_contact_info_block(
+                contact_info=contact_info, product_name=product_name, brand=brand,
+                email=email, contact_type=contact_type),
             {"tag": "div", "text": {"tag": "lark_md",
                 "content": f"**{emoji_lead} 对方主动给了寄送地址 + 想收 {product_name}**"}},
-            {"tag": "hr"},
             {"tag": "div", "fields": [
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**国家**: {country or '?'}"}},
-                {"is_short": True, "text": {"tag": "lark_md", "content": f"**产品**: {product_name}"}},
                 {"is_short": False, "text": {"tag": "lark_md",
                     "content": f"**📦 收件地址 (AI 提取自对方邮件)**\n```\n{address[:400]}\n```"}},
             ]},
@@ -469,10 +485,13 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
 
 
 def _build_ship_tracking_card(record_id: str, contact_name: str, product_name: str,
-                              subject: str, stage_label: str) -> dict:
+                              subject: str, stage_label: str,
+                              contact_info: dict = None, brand: str = "",
+                              email: str = "", contact_type: str = "KOL") -> dict:
     """寄样确认/运单号 表单卡 (聪哥3号发负责人, 卡上填即发, 无需跳表格).
     填 运单号 + 物流商 → 提交 → event-hub Draft Action(draft_tracking) 置字段+通过 →
     auto_send 用「运单号/物流商」字段自动替换正文 [TRACKING#]/[CARRIER] + 占位符闸门兜底(空不发).
+    contact_info/brand/email/contact_type: 由调用方解析后传入 (2026-05-31 统一字段标准).
     """
     base_val = {"action": "draft_tracking", "app_token": config.FEISHU_APP_TOKEN,
                 "table_id": config.T_DRAFT, "record_id": record_id}
@@ -480,7 +499,9 @@ def _build_ship_tracking_card(record_id: str, contact_name: str, product_name: s
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"template": "red", "title": {"tag": "plain_text", "content": f"📦 {stage_label} — 填运单号发样 ({contact_name})"}},
         "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**对象**: {contact_name}　**产品**: {product_name}"}},
+            feishu.build_contact_info_block(
+                contact_info=contact_info, product_name=product_name, brand=brand,
+                email=email, contact_type=contact_type),
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**原主题**: {subject}"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": "📋 查 FBA/海外仓/国内仓库存 → 建 MCF/海外仓/国内订单 → 拿到运单号 → 下面填 → 提交即发"}},
             {"tag": "hr"},

@@ -84,6 +84,10 @@ async def run(days: float = 1.0, dry_run: bool = False, max_list: int = 10) -> d
                 except Exception:
                     pass
 
+            # 品牌 + 收件邮箱 (2026-05-31 统一字段补充)
+            sender = ext(f.get("发送邮箱")) or ""
+            brand = "POWKONG" if "powkong" in sender.lower() else "FUNLAB"
+            email = ext(f.get("收件邮箱")) or ""
             overdue.append({
                 "rid": it["record_id"],
                 "source": ext(f.get("邮件草稿来源")) or "",
@@ -93,6 +97,8 @@ async def run(days: float = 1.0, dry_run: bool = False, max_list: int = 10) -> d
                 "fans": fans,
                 "stage": stage,
                 "product": prod_name[:40],
+                "brand": brand,
+                "email": email[:50],
                 "status": status,
                 "days_overdue": int((started * 1000 - gen_ms) / 86400000),
             })
@@ -147,7 +153,8 @@ async def run(days: float = 1.0, dry_run: bool = False, max_list: int = 10) -> d
 
 
 def _format_overdue_line(idx: int, o: dict, secret: str) -> str:
-    """每行渲染: KOL名/阶段/平台/粉丝 + 产品 + 类型/等X天/状态 + [📨 重发] 链接"""
+    """每行渲染(2026-05-31 标签明显化): KOL名/阶段/平台/粉丝 + 产品/品牌/收件 + 类型/等X天/状态 + [📨 重发]"""
+    # 行 1: KOL 名 + 阶段 + 平台 粉丝
     head_parts = [f"**{o['kol_name']}**"]
     if o.get("stage"):
         head_parts.append(o["stage"])
@@ -158,11 +165,16 @@ def _format_overdue_line(idx: int, o: dict, secret: str) -> str:
         head_parts.append(plat)
     head = " · ".join(head_parts)
 
-    body_parts = []
+    # 行 2: 产品 + 品牌 (标签明显化, Frankie 反馈)
+    line2_parts = []
     if o.get("product"):
-        body_parts.append(f"🎁 {o['product']}")
-    body_parts.append(f"{o['source']} · 等 {o['days_overdue']}d · {o['status']}")
-    body = " · ".join(body_parts)
+        line2_parts.append(f"**产品**: {o['product']}")
+    if o.get("brand"):
+        line2_parts.append(f"**品牌**: {o['brand']}")
+    line2 = " · ".join(line2_parts)
+
+    # 行 3: 收件人 + 任务类型 + 等待天数 + 状态
+    line3 = f"**收件**: {o.get('email') or '?'} · {o['source']} · 等 {o['days_overdue']}d · {o['status']}"
 
     sub = (o["subject"] or "")
     if len(sub) > 60:
@@ -170,10 +182,13 @@ def _format_overdue_line(idx: int, o: dict, secret: str) -> str:
 
     resend_url = (f"https://kol-auto.zeabur.app/card/resend-from-button"
                   f"?draft_rid={o['rid']}&secret={secret}")
-    return (f"{idx}. {head}\n"
-            f"   {body}\n"
-            f"   _{sub}_\n"
-            f"   [📨 重发卡片到运营私聊]({resend_url})")
+    lines = [f"{idx}. {head}"]
+    if line2:
+        lines.append(f"   {line2}")
+    lines.append(f"   {line3}")
+    lines.append(f"   _{sub}_")
+    lines.append(f"   [📨 重发卡片到运营私聊]({resend_url})")
+    return "\n".join(lines)
 
 
 def _build_audit_card(reviewer_name: str, overdue: list, max_list: int = 10) -> dict:

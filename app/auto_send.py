@@ -465,7 +465,17 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
     # 运单号 form 卡: 发负责人(独立站运营专员)私聊 → 卡上填 运单号+物流商 即发, 无需进表格
     try:
         from .draft_router import _build_ship_tracking_card
-        track_card = _build_ship_tracking_card(new_rid, contact_name, product_name, subj, "运单号追加")
+        # 2026-05-31 统一字段: 解析 contact_info + brand + email 传给 builder
+        _is_ed = bool(feishu.xrid(pf.get("关联媒体人")))
+        _crid = feishu.xrid(pf.get("关联媒体人")) if _is_ed else feishu.xrid(pf.get("关联KOL"))
+        _ctype = "媒体人" if _is_ed else "KOL"
+        _ci = await feishu.resolve_contact_info(_crid, _ctype) if _crid else {}
+        _sender = ext(pf.get("发送邮箱")) or ""
+        _brand = "POWKONG" if "powkong" in _sender.lower() else "FUNLAB"
+        _email = ext(pf.get("收件邮箱")) or ""
+        track_card = _build_ship_tracking_card(
+            new_rid, contact_name, product_name, subj, "运单号追加",
+            contact_info=_ci, brand=_brand, email=_email, contact_type=_ctype)
         _unions = []  # 看板「关联运营」 + /card/resend 撤老卡用
         _mids = {}
         for _nm, _oid in await feishu.resolve_notify_targets("reviewer"):

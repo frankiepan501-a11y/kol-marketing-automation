@@ -167,18 +167,22 @@ async def build_for_ship_draft(ship_draft: dict) -> dict:
         print(f"[warm_recap] route_draft fail rid={rid}: {e}")
     # 发聪哥3号交互卡给 reviewer (按职务实时查在职名单 → union_id), 运营粘券码+填% → 提交回 n8n
     try:
-        await _notify_warm_recap_card(rid, name or first, product_name, subj, per_kol_brief_md)
+        await _notify_warm_recap_card(rid, name or first, product_name, subj, per_kol_brief_md,
+                                       contact_rid=contact_rid, is_editor=is_editor,
+                                       brand=brand, email=email)
     except Exception as e:
         print(f"[warm_recap] send card fail rid={rid}: {e}")
     return {"ok": True, "rid": rid, "contact": name, "product": product_name}
 
 
 def _build_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, subject: str,
-                           brief_md: str = "") -> dict:
+                           brief_md: str = "", contact_info: dict = None,
+                           brand: str = "", email: str = "") -> dict:
     """聪哥3号 form 卡: 运营粘 UpPromote 券码 + 填折扣% → 提交回 n8n event-hub.
     button.value 带 {action:warm_recap_send, app_token, table_id, record_id} → n8n 按 record_id 写草稿.
     form_value {code, pct} → n8n 写 折扣码/折扣比例 + 状态=通过.
     brief_md: per-KOL 定制 brief(框架+5 hooks+TikTok SEO), 有则卡上多展示一段供运营看/转给 KOL.
+    contact_info/brand/email: 调用方用 feishu.resolve_contact_info 解析后传 (2026-05-31 统一字段).
     """
     base_val = {
         "action": "warm_recap_send",
@@ -188,6 +192,9 @@ def _build_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, sub
         "kol": kol_name,
     }
     elements = [
+        feishu.build_contact_info_block(
+            contact_info=contact_info, product_name=product_name, brand=brand,
+            email=email, contact_type="KOL"),
         {"tag": "div", "text": {"tag": "lark_md", "content": (
             f"**{kol_name}** 已签收 **{product_name}** 样品 — 这是寄样后「确认收到 + 轻 brief」暖信"
             "(**不是催稿**)。")}},
@@ -227,9 +234,15 @@ def _build_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, sub
 
 
 async def _notify_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, subject: str,
-                                  brief_md: str = "") -> int:
-    """发暖信卡给 reviewer (独立站运营专员, 按职务实时查→turnover-safe). open_id→union_id→聪哥3号发."""
-    card = _build_warm_recap_card(draft_rid, kol_name, product_name, subject, brief_md)
+                                  brief_md: str = "", contact_rid: str = "",
+                                  is_editor: bool = False, brand: str = "",
+                                  email: str = "") -> int:
+    """发暖信卡给 reviewer (独立站运营专员, 按职务实时查→turnover-safe). open_id→union_id→聪哥3号发.
+    contact_rid/is_editor/brand/email: 调用方传入用于统一信息块 (2026-05-31 字段标准)."""
+    ctype = "媒体人" if is_editor else "KOL"
+    ci = await feishu.resolve_contact_info(contact_rid, ctype) if contact_rid else {}
+    card = _build_warm_recap_card(draft_rid, kol_name, product_name, subject, brief_md,
+                                   contact_info=ci, brand=brand, email=email)
     targets = await feishu.resolve_notify_targets("reviewer")  # [(name, open_id), ...] 聪哥1号 namespace
     sent = 0
     _unions = []  # 看板「关联运营」 + /card/resend 撤老卡用

@@ -477,6 +477,67 @@ async def write_card_recipients_msgids(draft_rid: str,
         print(f"[feishu.write_card_recipients_msgids] put fail rid={draft_rid}: {e}")
 
 
+# ===== KOL/媒体人通用信息块 (2026-05-31 统一标准: 所有操作类卡顶部都用此 block) =====
+# 字段标准: KOL名/媒体人姓名 + 阶段(_contact_stage_label) + 平台 + 粉丝 + 产品 + 品牌 + 收件邮箱
+# 各卡按用途取舍: 操作类全字段 / SLA/退信告警类 compact=True 省产品/品牌/邮箱
+
+async def resolve_contact_info(contact_rid: str, contact_type: str = "KOL") -> dict:
+    """拉 KOL/媒体人主表 → {name, stage, platform, fans}.
+    contact_type: "KOL" 或 "媒体人". fail-safe: 失败返 {}(调用方显示 '?')."""
+    if not contact_rid:
+        return {}
+    from . import config, reply_monitor  # 惰性 import 防循环
+    try:
+        t = config.T_EDITOR if contact_type == "媒体人" else config.T_KOL
+        cf = (await get_record(t, contact_rid)).get("fields", {})
+        out = {"stage": reply_monitor._contact_stage_label(cf) or ""}
+        if contact_type == "媒体人":
+            out["name"] = ext(cf.get("媒体人姓名")) or "?"
+            out["platform"] = ext(cf.get("主要媒体")) or ext(cf.get("所属媒体")) or ""
+            out["fans"] = ""
+        else:
+            out["name"] = ext(cf.get("账号名")) or "?"
+            out["platform"] = ext(cf.get("主平台")) or ""
+            try:
+                out["fans"] = f"{int(cf.get('粉丝数') or 0):,}"
+            except (ValueError, TypeError):
+                out["fans"] = str(cf.get("粉丝数") or "")
+        return out
+    except Exception as e:
+        print(f"[resolve_contact_info] {contact_rid} fail: {e}")
+        return {}
+
+
+def build_contact_info_block(contact_info: dict = None,
+                              product_name: str = "",
+                              brand: str = "",
+                              email: str = "",
+                              contact_type: str = "KOL",
+                              include_email: bool = True,
+                              compact: bool = False) -> dict:
+    """统一 KOL/媒体人信息字段块 (返 div.fields element).
+    contact_info: {name, stage, platform, fans} — 由 resolve_contact_info 解析.
+    compact=True: 仅 4 字段(name/stage/platform/fans) — SLA 提醒/退信告警用.
+    include_email=False: 不显示收件邮箱(SLA 用).
+    调用方插到卡 elements 头部."""
+    ci = contact_info or {}
+    who = "媒体人" if contact_type == "媒体人" else "KOL"
+    fields = [
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**{who}**: {ci.get('name') or '?'}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**阶段**: {ci.get('stage') or '?'}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**平台**: {ci.get('platform') or '?'}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**粉丝**: {ci.get('fans') or '—'}"}},
+    ]
+    if not compact:
+        if product_name:
+            fields.append({"is_short": True, "text": {"tag": "lark_md", "content": f"**产品**: {product_name}"}})
+        if brand:
+            fields.append({"is_short": True, "text": {"tag": "lark_md", "content": f"**品牌**: {brand}"}})
+        if include_email and email:
+            fields.append({"is_short": True, "text": {"tag": "lark_md", "content": f"**收件**: {email}"}})
+    return {"tag": "div", "fields": fields}
+
+
 # ===== 按职务实时查在职员工 (聪哥1号 contact:contact:readonly) =====
 # 遵守 feishu-people-as-source-of-truth 铁律: 不硬编码 open_id, 按职务实时查飞书人事
 # 缓存 1h: 避免每次发卡片都拉一遍部门列表 (大约 7-10 个部门 + 每部门 1 次 user list)

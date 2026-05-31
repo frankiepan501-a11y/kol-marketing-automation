@@ -222,11 +222,18 @@ async def _layer1b_tracking_followup_overdue(now_ms: int) -> dict:
         age_hours = int((now_ms - gen_time) / 3600 / 1000) if gen_time else 24
         subject = ext(f.get("邮件主题"))[:100]
 
+        # 2026-05-31 统一字段: 加 KOL 信息块 (compact 模式)
+        _is_ed = bool(feishu.xrid(f.get("关联媒体人")))
+        _crid = feishu.xrid(f.get("关联媒体人")) if _is_ed else feishu.xrid(f.get("关联KOL"))
+        _ctype = "媒体人" if _is_ed else "KOL"
+        _ci = await feishu.resolve_contact_info(_crid, _ctype) if _crid else {}
+
         card = {
             "header": {"template": "orange",
                 "title": {"tag": "plain_text",
                     "content": f"📦 [兜底提醒] 第 2 封运单号待填 {age_hours}h"}},
             "elements": [
+                feishu.build_contact_info_block(contact_info=_ci, contact_type=_ctype, compact=True),
                 {"tag": "div", "text": {"tag": "lark_md",
                     "content": f"**KOL 已收到第 1 封寄样确认邮件**, 系统已建好第 2 条 tracking_followup "
                                f"跟进草稿, 等运营回填运单号 — 已等 **{age_hours} 小时**.\n\n"
@@ -436,16 +443,25 @@ async def _layer3_no_content_30d(now_ms: int) -> dict:
         except Exception as e:
             print(f"[sla_check L3] master 合作状态 fail (option 可能未建): {e}")
 
-        # 飞书卡片告警
+        # 飞书卡片告警 (2026-05-31 统一字段: 加 KOL 信息块 compact)
         try:
+            from . import reply_monitor
             base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={target_table}"
+            _ctype_uni = "媒体人" if contact_type == "editor" else "KOL"
+            _ci = {
+                "name": contact_name,
+                "stage": reply_monitor._contact_stage_label(cf) or "",
+                "platform": (ext(cf.get("主要媒体")) or ext(cf.get("所属媒体"))) if contact_type == "editor" else ext(cf.get("主平台")),
+                "fans": "" if contact_type == "editor" else (
+                    f"{int(cf.get('粉丝数') or 0):,}" if cf.get('粉丝数') else ""),
+            }
             card = {
                 "header": {"template": "orange",
                            "title": {"tag": "plain_text", "content": f"📭 寄样 30 天无内容产出 — {contact_name}"}},
                 "elements": [
+                    feishu.build_contact_info_block(contact_info=_ci, contact_type=_ctype_uni, compact=True),
                     {"tag": "div", "text": {"tag": "lark_md",
-                        "content": (f"**对象**: {contact_name} ({contact_type})\n"
-                                    f"**寄样订单**: {ext(f.get('寄样订单号'))}\n"
+                        "content": (f"**寄样订单**: {ext(f.get('寄样订单号'))}\n"
                                     f"**签收/发货**: {time.strftime('%Y-%m-%d', time.localtime(ref_time/1000))}\n"
                                     f"**Phase2 daemon 状态**: 未扫到上稿\n\n"
                                     f"已自动打软标「未产出」, 下次寄样降优先级。"
@@ -531,13 +547,23 @@ async def _layer4_low_roi_60d(now_ms: int) -> dict:
         # 不动主表「维护标签」(单选,会覆盖运营人工标记) — 改飞书卡片让运营自决
         try:
             base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={target_table}"
+            # 2026-05-31 统一字段: 加 KOL 信息块 compact
+            from . import reply_monitor
+            _ctype_uni = "媒体人" if contact_type == "editor" else "KOL"
+            _ci = {
+                "name": contact_name,
+                "stage": reply_monitor._contact_stage_label(cf) or "",
+                "platform": (ext(cf.get("主要媒体")) or ext(cf.get("所属媒体"))) if contact_type == "editor" else ext(cf.get("主平台")),
+                "fans": "" if contact_type == "editor" else (
+                    f"{int(cf.get('粉丝数') or 0):,}" if cf.get('粉丝数') else ""),
+            }
             card = {
                 "header": {"template": "yellow",
                            "title": {"tag": "plain_text", "content": f"📉 寄样 60 天累计订单<3 — {contact_name}"}},
                 "elements": [
+                    feishu.build_contact_info_block(contact_info=_ci, contact_type=_ctype_uni, compact=True),
                     {"tag": "div", "text": {"tag": "lark_md",
-                        "content": (f"**对象**: {contact_name} ({contact_type})\n"
-                                    f"**寄样订单**: {ext(f.get('寄样订单号'))}\n"
+                        "content": (f"**寄样订单**: {ext(f.get('寄样订单号'))}\n"
                                     f"**累计订单数**: {order_count} (阈值<{LOW_ROI_ORDER_THRESHOLD})\n"
                                     f"**签收时间**: {time.strftime('%Y-%m-%d', time.localtime(signed_at/1000))}\n\n"
                                     f"已自动在草稿打「低ROI60d标记」。\n"

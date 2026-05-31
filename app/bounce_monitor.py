@@ -87,14 +87,18 @@ def extract_dead_addresses(body: str, exclude: set) -> list:
     return out
 
 
-def _build_card(contact_type: str, name: str, dead_email: str, brand: str, reason: str) -> dict:
+def _build_card(contact_type: str, name: str, dead_email: str, brand: str, reason: str,
+                contact_info: dict = None) -> dict:
+    """退信告警卡 (2026-05-31 加 contact_info compact 帮判断 false positive)."""
     base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}"
     t = config.T_EDITOR if contact_type == "editor" else config.T_KOL
+    _ctype_uni = "媒体人" if contact_type == "editor" else "KOL"
     return {
         "header": {"template": "red",
                    "title": {"tag": "plain_text",
-                             "content": f"📭 退信 — {'媒体人' if contact_type=='editor' else 'KOL'} 邮箱已标无效"}},
+                             "content": f"📭 退信 — {_ctype_uni} 邮箱已标无效"}},
         "elements": [
+            feishu.build_contact_info_block(contact_info=contact_info, contact_type=_ctype_uni, compact=True),
             {"tag": "div", "text": {"tag": "lark_md",
                 "content": (f"**{name}** 的邮箱 `{dead_email}` 硬退信, 已标「邮箱验真状态=无效」并停止再发。\n"
                             f"**品牌**: {brand}　|　**退信类型**: 硬退 (永久)\n"
@@ -178,9 +182,11 @@ async def run(dry_run: bool = False) -> dict:
                     })
                 except Exception as e:
                     print(f"[bounce_monitor] 跟进记录 fail: {e}")
-                # 飞书通知 (群)
+                # 飞书通知 (群) — 2026-05-31 加 contact_info compact 帮判断 false positive
                 try:
-                    card = _build_card(ctype, name, dead, brand, hit)
+                    _ci = await feishu.resolve_contact_info(
+                        contact["record_id"], "媒体人" if ctype == "editor" else "KOL")
+                    card = _build_card(ctype, name, dead, brand, hit, contact_info=_ci)
                     await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
                 except Exception as e:
                     print(f"[bounce_monitor] notify fail: {e}")
