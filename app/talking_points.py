@@ -56,6 +56,60 @@ async def _fetch_shopify_body(link: str) -> str:
     return txt[:2000]
 
 
+def _amz_clean(s: str) -> str:
+    s = re.sub(r"<[^>]+>", " ", s)
+    for a, b in (("&nbsp;", " "), ("&amp;", "&"), ("&#39;", "'"), ("&quot;", '"'),
+                 ("&rsquo;", "'"), ("&ldquo;", '"'), ("&rdquo;", '"')):
+        s = s.replace(a, b)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+async def _fetch_amazon_listing(link: str) -> str:
+    """从亚马逊 listing 页拉 标题 + 五点描述(feature-bullets) → 纯文本. 比 Shopify body_html 肥得多
+    (2026-05-31 Frankie: 一个信息完整的产品页就能挖全, 替代人工填 Talking Points + 稀疏 Shopify)。
+    抓不到/被反爬挡/非亚马逊链接 → 返回 '' (fail-safe 降级, 不阻断)。描述区是 A+ 图片取不到, 标题+五点已够。
+    ⚠️ 生产在 Zeabur 云端(数据中心 IP), 低频(暖信个位数/天)单页 GET 通常可过; 被挡自动降级。"""
+    url = (link or "").strip()
+    if "amazon." not in url.lower():
+        return ""
+    m = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url, re.I)
+    if m:
+        url = f"https://www.amazon.com/dp/{m.group(1)}"
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cli:
+            r = await cli.get(url, headers=headers)
+            h = r.text
+    except Exception as e:
+        print(f"[talking_points] 亚马逊页拉取失败 ({url}): {e}")
+        return ""
+    low = h.lower()
+    if len(h) < 50000 or "robot check" in low or "api-services-support@amazon" in low or "validatecaptcha" in low:
+        print(f"[talking_points] 亚马逊页疑似被反爬挡 (len={len(h)}) → 降级")
+        return ""
+    parts = []
+    t = re.search(r'id="productTitle"[^>]*>(.*?)</span>', h, re.S)
+    if t:
+        parts.append("Title: " + _amz_clean(t.group(1))[:300])
+    i = h.find('id="feature-bullets"')
+    if i >= 0:
+        ul = re.search(r"<ul[^>]*>(.*?)</ul>", h[i:i + 8000], re.S)
+        if ul:
+            bullets = []
+            for b in re.findall(r'<span class="a-list-item">(.*?)</span>', ul.group(1), re.S):
+                c = _amz_clean(b)
+                if c and len(c) > 8 and "protection plan" not in c.lower():
+                    bullets.append(c[:240])
+            if bullets:
+                parts.append("Bullet points:\n" + "\n".join(f"- {b}" for b in bullets[:6]))
+    return "\n".join(parts)[:2500]
+
+
 async def generate_for_product(prod_rid: str, overwrite: bool = False, notify: bool = True,
                                kol_rid: str = None) -> dict:
     # G-A/G-B (2026-05-31): 带 kol_rid → per-KOL 定制 brief(框架推荐+5 hooks+TikTok SEO),
@@ -265,13 +319,20 @@ async def generate_for_kol(prod_rid: str, kol_rid: str) -> dict:
     lang = ext(kf.get("语言")) or "en"
 
     hint = _format_hint(platform)  # 主平台默认长/短倾向 (AI 可按风格上调)
+    # 产品信息源 (肥→瘦): 亚马逊 listing(标题+五点, 最肥) → Shopify body_html(常稀疏). 都 fail-safe 降级。
+    amz_text = await _fetch_amazon_listing(ext_url(pf.get("亚马逊链接")) or "")
     page_text = await _fetch_shopify_body(ext_url(pf.get("官网链接")) or "")
     frameworks = await _fetch_frameworks()
     fw_block = "\n".join(
         f'- {fw["name"]} | formula: {fw["formula"]} | when to use: {fw["scene"]}'
         for fw in frameworks) or "(framework library unavailable — propose your own structure)"
-    page_block = (f'\nSeller product page copy (mine for features the selling points missed; '
-                  f'reframe as benefit, do NOT dump specs): {page_text}\n') if page_text else ''
+    page_block = ""
+    if amz_text:
+        page_block += (f'\nAmazon listing (RICHEST source — real title + bullet points; MINE it for the '
+                       f'concrete features/benefits the short selling points missed, reframe as audience '
+                       f'benefit, do NOT dump specs):\n{amz_text}\n')
+    if page_text:
+        page_block += f'\nStore product page copy (supplement): {page_text}\n'
 
     prompt = f"""You are a creator-marketing strategist briefing ONE specific KOL on how to post about a product to THEIR audience. Tailor everything to this creator's platform + content format + style + audience.
 
@@ -338,4 +399,5 @@ Rules:
             "seo_keyword": seo_keyword, "seo_note": seo_note,
             "title_or_caption": title_or_caption, "tags": tags, "cta": cta,
             "email_bullets": email_bullets, "brief_md": brief_md,
-            "shopify_page_chars": len(page_text), "frameworks_count": len(frameworks)}
+            "amazon_chars": len(amz_text), "shopify_page_chars": len(page_text),
+            "frameworks_count": len(frameworks)}
