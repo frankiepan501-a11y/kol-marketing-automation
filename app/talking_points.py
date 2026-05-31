@@ -196,22 +196,40 @@ async def _fetch_frameworks() -> list:
     return out
 
 
-def format_kol_brief_md(product: str, kol: str, frameworks: list, hooks: list,
-                        kw: str, kw_reason: str, caption: str, hashtags: list) -> str:
-    """把 per-KOL brief 各部分拼成人类可读文本 (存草稿「Per-KOL Brief」字段 + 暖信卡展示)."""
-    lines = [f"🎬 Per-KOL Brief — {kol} × {product}"]
+# 主平台 → 默认内容形式倾向 (AI 可按风格/近期标题上调; YouTube 默认长视频但可 Shorts)
+_SHORT_PLATFORMS = {"TikTok", "Instagram", "Facebook"}
+_LONG_PLATFORMS = {"YouTube", "Twitch"}
+
+
+def _format_hint(platform: str) -> str:
+    if platform in _LONG_PLATFORMS:
+        return "long"
+    return "short"  # TikTok/IG/FB/X/其他 默认短视频
+
+
+def format_kol_brief_md(product: str, kol: str, platform: str, content_format: str,
+                        frameworks: list, hooks: list, seo_keyword: str, seo_note: str,
+                        title_or_caption: str, tags: list) -> str:
+    """把 per-KOL brief 各部分拼成人类可读文本 (存草稿「Per-KOL Brief」+ 暖信卡展示). 平台无关 + 长/短自适应."""
+    is_long = (content_format == "long")
+    fmt_label = "长视频" if is_long else "短视频"
+    plat = platform or "?"
+    lines = [f"🎬 Per-KOL Brief — {kol} × {product}  ({plat} · {fmt_label})"]
     if frameworks:
         lines.append("\n▶ 推荐视频框架:")
         lines += [f"  • {fw.get('name','')} — {fw.get('why','')}" for fw in frameworks]
     if hooks:
-        lines.append("\n▶ 5 种 Hook 候选 (字幕/口播开头):")
+        hook_label = "开头 30 秒留人钩子" if is_long else "5 种 Hook 候选 (字幕/口播开头)"
+        lines.append(f"\n▶ {hook_label}:")
         lines += [f"  • [{h.get('type','')}] {h.get('text','')}" for h in hooks]
-    if kw:
-        lines.append("\n▶ TikTok 核心关键词: " + kw + (f" — {kw_reason}" if kw_reason else ""))
-    if caption:
-        lines.append("▶ Caption: " + caption)
-    if hashtags:
-        lines.append("▶ Hashtags: " + " ".join(hashtags))
+    if seo_keyword:
+        lines.append(f"\n▶ {plat} 核心关键词: " + seo_keyword + (f" — {seo_note}" if seo_note else ""))
+    if title_or_caption:
+        tc_label = "视频标题建议" if is_long else "Caption"
+        lines.append(f"▶ {tc_label}: " + title_or_caption)
+    if tags:
+        tag_label = "标签 (Tags)" if is_long else "Hashtags"
+        lines.append(f"▶ {tag_label}: " + " ".join(tags))
     return "\n".join(lines)
 
 
@@ -244,6 +262,7 @@ async def generate_for_kol(prod_rid: str, kol_rid: str) -> dict:
     country = ext(kf.get("国家"))
     lang = ext(kf.get("语言")) or "en"
 
+    hint = _format_hint(platform)  # 主平台默认长/短倾向 (AI 可按风格上调)
     page_text = await _fetch_shopify_body(ext_url(pf.get("官网链接")) or "")
     frameworks = await _fetch_frameworks()
     fw_block = "\n".join(
@@ -252,7 +271,7 @@ async def generate_for_kol(prod_rid: str, kol_rid: str) -> dict:
     page_block = (f'\nSeller product page copy (mine for features the selling points missed; '
                   f'reframe as benefit, do NOT dump specs): {page_text}\n') if page_text else ''
 
-    prompt = f"""You are a creator-marketing strategist briefing ONE specific KOL on how to post about a product to THEIR audience. Tailor everything to this creator's style + platform + audience.
+    prompt = f"""You are a creator-marketing strategist briefing ONE specific KOL on how to post about a product to THEIR audience. Tailor everything to this creator's platform + content format + style + audience.
 
 CREATOR:
 - Handle: {kol_name}
@@ -260,54 +279,58 @@ CREATOR:
 - Content style: {styles or "unknown"}
 - IP / niche interests: {ip_pref or "n/a"}
 - Past content keywords: {pub_kw or "n/a"}
+- Likely content format for {platform or "this platform"}: **{hint}** (default — but YOU decide: YouTube can be Shorts, IG can be long-form, gaming channels skew long reviews).
 
 PRODUCT: {name} ({cat})
 Selling points (Chinese — translate + reframe into audience benefit): {' / '.join(selling) if selling else 'n/a'}
 {f'Existing generic talking points: {tp_existing}' if tp_existing else ''}{f'Description: {desc}' if desc else ''}{page_block}
 
-VIDEO FRAMEWORK LIBRARY (pick the best fit for THIS creator + product, by exact name):
+VIDEO FRAMEWORK LIBRARY (pick the best fit, by exact name; the 停病药信买 logic works for both short & long, long just expands each beat):
 {fw_block}
 
-Produce a per-KOL brief. Return JSON ONLY:
+FIRST decide content_format: "short" (TikTok/Reels/Shorts, <60s, caption-hook driven) or "long" (YouTube reviews/unboxings, multi-minute, spoken intro). Then produce a brief MATCHING that format & platform.
+
+Return JSON ONLY:
 {{
-  "recommended_frameworks": [{{"name": "<exact framework name from library>", "why": "<=18 words why it fits THIS creator+product"}}],
-  "hooks": [
-    {{"type": "POV", "text": "pov: ... (2nd-person immersive caption hook)"}},
-    {{"type": "疑问", "text": "a curiosity question hook"}},
-    {{"type": "否定", "text": "a contrarian don't/stop hook"}},
-    {{"type": "内心独白", "text": "an honest inner-voice hook"}},
-    {{"type": "测试型", "text": "a test/challenge hook"}}
-  ],
-  "tiktok_keyword": "<1 core TikTok search keyword the post should target>",
-  "tiktok_keyword_reason": "<=16 words why this keyword fits creator's audience",
-  "caption": "<1 ready-to-post English caption, <=200 chars, includes the keyword naturally>",
-  "hashtags": ["#niche", "#product", "..."],
+  "content_format": "short" or "long",
+  "recommended_frameworks": [{{"name": "<exact framework name from library>", "why": "<=18 words why it fits THIS creator+product+format"}}],
+  "hooks": [{{"type": "...", "text": "..."}}],
+  "seo_keyword": "<1 core SEARCH keyword for THIS platform>",
+  "seo_note": "<=18 words why + WHERE to place it on {platform or "this platform"} (YouTube=title/tags; TikTok/IG/FB=caption/hashtags)",
+  "title_or_caption": "<short: a ready post caption <=200 chars / long: a click-worthy video TITLE>",
+  "tags": ["..."],
   "email_bullets": ["...", "..."]
 }}
 Rules:
-- recommended_frameworks: 1-3, best first, name MUST be copied verbatim from the library above.
-- hooks: EXACTLY these 5 types in this order, each a ready-to-use English caption hook tailored to creator+product.
-- hashtags: 5-8, lowercase, mix niche + product + reach.
+- recommended_frameworks: 1-3, best first, name MUST be copied verbatim from the library.
+- hooks: if content_format=="short" → EXACTLY 5 caption hooks, types in order POV / 疑问 / 否定 / 内心独白 / 测试型. If "long" → 2-3 first-30-seconds spoken retention hooks (type can be "开场钩子").
+- seo_keyword: a real search term people use on {platform or "the platform"} (NOT hardcoded to TikTok).
+- tags: 5-8 — hashtags (lowercase) for short platforms, or YouTube tags for long.
 - email_bullets: 3-4 SHORT casual soft suggestions for a gifting email (optional-sounding, NOT a rigid script).
-- English only. Match {platform or "the platform"} + {styles or "their"} style. No brand-logo/on-screen-text instructions. Guardrail brief, not a script."""
+- English only. Platform-native to {platform or "the platform"} + {styles or "their"} style. No brand-logo/on-screen-text instructions. Guardrail brief, not a script."""
 
     try:
         out = await deepseek.chat_json(prompt, max_tokens=900, temperature=0.4)
     except Exception as e:
         return {"ok": False, "skip": f"DeepSeek 失败: {e}"}
+    cf = str(out.get("content_format") or hint).strip().lower()
+    if cf not in ("short", "long"):
+        cf = hint
+    max_hooks = 5 if cf == "short" else 3
     rf = [x for x in (out.get("recommended_frameworks") or []) if isinstance(x, dict) and x.get("name")][:3]
-    hooks = [x for x in (out.get("hooks") or []) if isinstance(x, dict) and str(x.get("text") or "").strip()][:5]
-    kw = str(out.get("tiktok_keyword") or "").strip()
-    kw_reason = str(out.get("tiktok_keyword_reason") or "").strip()
-    caption = str(out.get("caption") or "").strip()
-    hashtags = [str(h).strip() for h in (out.get("hashtags") or []) if str(h).strip()][:8]
+    hooks = [x for x in (out.get("hooks") or []) if isinstance(x, dict) and str(x.get("text") or "").strip()][:max_hooks]
+    seo_keyword = str(out.get("seo_keyword") or "").strip()
+    seo_note = str(out.get("seo_note") or "").strip()
+    title_or_caption = str(out.get("title_or_caption") or "").strip()
+    tags = [str(h).strip() for h in (out.get("tags") or []) if str(h).strip()][:8]
     email_bullets = [str(b).strip() for b in (out.get("email_bullets") or []) if str(b).strip()][:4]
     if not hooks and not rf:
         return {"ok": False, "skip": "AI 未产出 brief", "raw": out}
-    brief_md = format_kol_brief_md(name, kol_name, rf, hooks, kw, kw_reason, caption, hashtags)
-    return {"ok": True, "product": name, "kol": kol_name,
+    brief_md = format_kol_brief_md(name, kol_name, platform, cf, rf, hooks,
+                                   seo_keyword, seo_note, title_or_caption, tags)
+    return {"ok": True, "product": name, "kol": kol_name, "platform": platform, "content_format": cf,
             "recommended_frameworks": rf, "hooks": hooks,
-            "tiktok_keyword": kw, "tiktok_keyword_reason": kw_reason,
-            "caption": caption, "hashtags": hashtags,
+            "seo_keyword": seo_keyword, "seo_note": seo_note,
+            "title_or_caption": title_or_caption, "tags": tags,
             "email_bullets": email_bullets, "brief_md": brief_md,
             "shopify_page_chars": len(page_text), "frameworks_count": len(frameworks)}
