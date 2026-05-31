@@ -209,7 +209,7 @@ def _format_hint(platform: str) -> str:
 
 def format_kol_brief_md(product: str, kol: str, platform: str, content_format: str,
                         frameworks: list, hooks: list, seo_keyword: str, seo_note: str,
-                        title_or_caption: str, tags: list) -> str:
+                        title_or_caption: str, tags: list, cta: str = "") -> str:
     """把 per-KOL brief 各部分拼成人类可读文本 (存草稿「Per-KOL Brief」+ 暖信卡展示). 平台无关 + 长/短自适应."""
     is_long = (content_format == "long")
     fmt_label = "长视频" if is_long else "短视频"
@@ -230,6 +230,8 @@ def format_kol_brief_md(product: str, kol: str, platform: str, content_format: s
     if tags:
         tag_label = "标签 (Tags)" if is_long else "Hashtags"
         lines.append(f"▶ {tag_label}: " + " ".join(tags))
+    if cta:
+        lines.append("\n▶ 购买引导 (CTA — 让种草粉丝知道去哪买): " + cta)
     return "\n".join(lines)
 
 
@@ -299,6 +301,7 @@ Return JSON ONLY:
   "seo_note": "<=18 words why + WHERE to place it on {platform or "this platform"} (YouTube=title/tags; TikTok/IG/FB=caption/hashtags)",
   "title_or_caption": "<short: a ready post caption <=200 chars / long: a click-worthy video TITLE>",
   "tags": ["..."],
+  "cta": "<purchase guidance: WHERE to place the buy link(s)+discount code we email, and how to prompt fans to buy on {platform or "this platform"}>",
   "email_bullets": ["...", "..."]
 }}
 Rules:
@@ -306,6 +309,7 @@ Rules:
 - hooks: if content_format=="short" → EXACTLY 5 caption hooks, types in order POV / 疑问 / 否定 / 内心独白 / 测试型. If "long" → 2-3 first-30-seconds spoken retention hooks (type can be "开场钩子").
 - seo_keyword: a real search term people use on {platform or "the platform"} (NOT hardcoded to TikTok).
 - tags: 5-8 — hashtags (lowercase) for short platforms, or YouTube tags for long.
+- cta: tell the creator WHERE to place the purchase link(s) + discount code WE WILL EMAIL THEM, and how to prompt fans, so a seeded viewer instantly knows where & how to buy. CHANNEL-AGNOSTIC — we may send a store link (with the creator's discount code), an Amazon link, or a local-store link; the creator uses whichever fit(s) their audience's region. Platform reality: YouTube → put link(s) in the description + pin a comment with the code + say it out loud; TikTok / IG / Shorts → in-video links don't work, so put link(s) in bio and say/show the discount code on screen. Do NOT invent specific URLs or codes (those come in our email). <=45 words.
 - email_bullets: 3-4 SHORT casual soft suggestions for a gifting email (optional-sounding, NOT a rigid script).
 - English only. Platform-native to {platform or "the platform"} + {styles or "their"} style. No brand-logo/on-screen-text instructions. Guardrail brief, not a script."""
 
@@ -323,14 +327,15 @@ Rules:
     seo_note = str(out.get("seo_note") or "").strip()
     title_or_caption = str(out.get("title_or_caption") or "").strip()
     tags = [str(h).strip() for h in (out.get("tags") or []) if str(h).strip()][:8]
+    cta = str(out.get("cta") or "").strip()
     email_bullets = [str(b).strip() for b in (out.get("email_bullets") or []) if str(b).strip()][:4]
     if not hooks and not rf:
         return {"ok": False, "skip": "AI 未产出 brief", "raw": out}
     brief_md = format_kol_brief_md(name, kol_name, platform, cf, rf, hooks,
-                                   seo_keyword, seo_note, title_or_caption, tags)
+                                   seo_keyword, seo_note, title_or_caption, tags, cta)
     return {"ok": True, "product": name, "kol": kol_name, "platform": platform, "content_format": cf,
             "recommended_frameworks": rf, "hooks": hooks,
             "seo_keyword": seo_keyword, "seo_note": seo_note,
-            "title_or_caption": title_or_caption, "tags": tags,
+            "title_or_caption": title_or_caption, "tags": tags, "cta": cta,
             "email_bullets": email_bullets, "brief_md": brief_md,
             "shopify_page_chars": len(page_text), "frameworks_count": len(frameworks)}
