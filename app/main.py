@@ -281,6 +281,20 @@ async def run_card_audit(authorization: str = Header(default=""),
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
+@app.post("/upload-register/scan")
+async def run_upload_register(authorization: str = Header(default=""), dry_run: bool = False):
+    """上稿登记卡: 扫已寄样+上稿日期空+未近期发卡的 KOL → 发 form 卡给运营登记上稿链接.
+    补「上稿日期」数据 hygiene 缺口 (解锁 ROI/decision_feedback)。纯写主表不发邮件。
+    ?dry_run=true 只列候选不发卡。"""
+    _check_auth(authorization)
+    from . import upload_register
+    try:
+        return {"ok": True, **(await upload_register.run(dry_run=dry_run))}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
 @app.get("/card/resend-from-button")
 async def resend_from_button(draft_rid: str = "", secret: str = ""):
     """飞书 bitable 按钮"打开链接"触发: 拉草稿「关联运营」每人重发卡.
