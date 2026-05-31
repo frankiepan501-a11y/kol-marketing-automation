@@ -232,16 +232,23 @@ async def _notify_warm_recap_card(draft_rid: str, kol_name: str, product_name: s
     card = _build_warm_recap_card(draft_rid, kol_name, product_name, subject, brief_md)
     targets = await feishu.resolve_notify_targets("reviewer")  # [(name, open_id), ...] 聪哥1号 namespace
     sent = 0
+    _unions = []  # 看板「关联运营」 + /card/resend 撤老卡用
+    _mids = {}
     for name, oid in targets:
         uid = await feishu.open_id_to_union_id(oid)
         if not uid:
             print(f"[warm_recap] {name} open_id→union_id 失败, skip")
             continue
         try:
-            await feishu.send_card_via_app3("union_id", uid, card)
+            msg_id = await feishu.send_card_via_app3("union_id", uid, card)
             sent += 1
+            if msg_id:
+                _unions.append(uid)
+                _mids[uid] = msg_id
         except Exception as e:
             print(f"[warm_recap] send card to {name} fail: {e}")
+    if _unions or _mids:
+        await feishu.write_card_recipients_msgids(draft_rid, _unions, _mids)
     print(f"[warm_recap] card sent to {sent}/{len(targets)} reviewers, draft={draft_rid}")
     return sent
 

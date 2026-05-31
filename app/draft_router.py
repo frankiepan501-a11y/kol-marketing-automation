@@ -287,13 +287,18 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
         fail += 1
         errors.append(f"群: {str(e)[:80]}")
         print(f"[draft_router] notify chat fail: {e}")
+    _unions = []  # 收到聪哥3号互动卡的运营 union_id(写「关联运营」, 看板分组用)
+    _mids = {}    # {union_id: msg_id}(写「卡片个人消息IDs」, /card/resend 撤老卡用)
     for name, oid in targets:
         try:
             if action_card is not None:
                 # 互动审核卡走聪哥3号(回调到 event-hub) → 负责人 union_id 私聊, 卡上直接审
                 uid = await feishu.open_id_to_union_id(oid)
                 if uid:
-                    await feishu.send_card_via_app3("union_id", uid, action_card)
+                    msg_id = await feishu.send_card_via_app3("union_id", uid, action_card)
+                    if msg_id:
+                        _unions.append(uid)
+                        _mids[uid] = msg_id
                 else:
                     await feishu.send_card_message("open_id", oid, card)  # 拿不到 union_id 降级旧卡
             else:
@@ -303,6 +308,8 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
             fail += 1
             errors.append(f"{name}: {str(e)[:80]}")
             print(f"[draft_router] notify {name} fail: {e}")
+    if _unions or _mids:
+        await feishu.write_card_recipients_msgids(record_id, _unions, _mids)
     await feishu.mark_card_receipt(record_id, success, fail, errors, group_msg_id=group_msg_id)
 
 

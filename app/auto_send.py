@@ -466,10 +466,17 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
     try:
         from .draft_router import _build_ship_tracking_card
         track_card = _build_ship_tracking_card(new_rid, contact_name, product_name, subj, "运单号追加")
+        _unions = []  # 看板「关联运营」 + /card/resend 撤老卡用
+        _mids = {}
         for _nm, _oid in await feishu.resolve_notify_targets("reviewer"):
             uid = await feishu.open_id_to_union_id(_oid)
             if uid:
-                await feishu.send_card_via_app3("union_id", uid, track_card)
+                msg_id = await feishu.send_card_via_app3("union_id", uid, track_card)
+                if msg_id:
+                    _unions.append(uid)
+                    _mids[uid] = msg_id
+        if _unions or _mids:
+            await feishu.write_card_recipients_msgids(new_rid, _unions, _mids)
     except Exception as e:
         print(f"[auto_send] tracking_followup 运单号卡发送失败: {e}")
 

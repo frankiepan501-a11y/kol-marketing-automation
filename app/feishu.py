@@ -421,6 +421,62 @@ async def mark_card_receipt(draft_rid: str, success_count: int, fail_count: int,
         print(f"[feishu.mark_card_receipt] rid={draft_rid} fail: {e}")
 
 
+async def write_card_recipients_msgids(draft_rid: str,
+                                        recipients_union_ids: list,
+                                        msgids: dict,
+                                        table_id: str = None):
+    """卡片下发后, 把通知到的运营 + 各自私聊卡 message_id 写回草稿表.
+    供"卡片任务看板"按运营人分组(关联运营) + "重发卡片"端点按 union_id 撤老卡(卡片个人消息IDs).
+
+    Args:
+        draft_rid: 草稿记录 id
+        recipients_union_ids: 真正收到聪哥3号互动卡的运营 union_id 列表, 写「关联运营」User 字段
+        msgids: {union_id: msg_id, ...}, merge 进「卡片个人消息IDs」JSON 文本字段
+        table_id: 默认 config.T_DRAFT
+
+    幂等: msgids merge 不清老的; 「关联运营」每次发卡覆盖(当时快照).
+    fail-safe: 任何子步骤失败 print 不 raise, 不影响主流程.
+    """
+    import json as _json
+    from . import config
+    table_id = table_id or config.T_DRAFT
+    if not draft_rid:
+        return
+    fields = {}
+    if recipients_union_ids:
+        fields["关联运营"] = [{"id": uid} for uid in recipients_union_ids if uid]
+    if msgids:
+        try:
+            rec = await get_record(table_id, draft_rid)
+            cur = ext(rec.get("fields", {}).get("卡片个人消息IDs")) or ""
+            try:
+                mp = _json.loads(cur) if cur else {}
+                if not isinstance(mp, dict):
+                    mp = {}
+            except Exception:
+                mp = {}
+            for k, v in msgids.items():
+                if k and v:
+                    mp[k] = v
+            fields["卡片个人消息IDs"] = _json.dumps(mp, ensure_ascii=False)
+        except Exception as e:
+            print(f"[feishu.write_card_recipients_msgids] read fail rid={draft_rid}: {e}")
+            try:
+                fields["卡片个人消息IDs"] = _json.dumps(
+                    {k: v for k, v in msgids.items() if k and v}, ensure_ascii=False)
+            except Exception:
+                pass
+    if not fields:
+        return
+    try:
+        # user_id_type=union_id 让飞书按 union_id 解析 User 字段(跨 app namespace 通用)
+        path = (f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}"
+                f"/records/{draft_rid}?user_id_type=union_id")
+        await api("PUT", path, {"fields": fields})
+    except Exception as e:
+        print(f"[feishu.write_card_recipients_msgids] put fail rid={draft_rid}: {e}")
+
+
 # ===== 按职务实时查在职员工 (聪哥1号 contact:contact:readonly) =====
 # 遵守 feishu-people-as-source-of-truth 铁律: 不硬编码 open_id, 按职务实时查飞书人事
 # 缓存 1h: 避免每次发卡片都拉一遍部门列表 (大约 7-10 个部门 + 每部门 1 次 user list)
