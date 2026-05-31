@@ -281,6 +281,19 @@ async def run_card_audit(authorization: str = Header(default=""),
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
+@app.post("/manual-send-recon/run")
+async def run_manual_send_recon(authorization: str = Header(default=""), dry_run: bool = False):
+    """手动发送补登记: 扫 Zoho 发件箱, 对池内'发过但无草稿'联系人补建已发送草稿+建联中+跟进记录.
+    解决手动发→无草稿→reply_monitor 跳过回复的盲区(Scott Stein 根因)。?dry_run=true 只列不写。纯读 Zoho 写 bitable 不发邮件。"""
+    _check_auth(authorization)
+    from . import manual_send_recon
+    try:
+        return {"ok": True, **(await manual_send_recon.run(dry_run=dry_run))}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
 @app.post("/completion-report/run")
 async def run_completion_report(authorization: str = Header(default=""), dry_run: bool = False):
     """KOL 任务完成情况周报: 漏斗转化 + 5 类终态分布 + 卡点清单 → 飞书运营群 + Frankie 私聊.

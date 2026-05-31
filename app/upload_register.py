@@ -16,6 +16,9 @@ from .feishu import ext
 
 CARD_RESEND_DAYS = 14
 PER_RUN_CAP = 8                # 每类型每轮最多 N 张
+# 🟢 后备门槛: 寄样后 N 天仍无上稿/报道才发卡。主路径是 reply_monitor 自动捕获(live_link_received)+暖信+软关怀(暖信后+12d);
+# 只有 KOL/编辑久不回上稿(过了自动捕获+nudge 窗口)才提醒运营去查其账号。21d = soft_nudge(+12d) 之后 + 缓冲, 早于 寄样未产出 终态(+60d)。
+SHIP_GRACE_DAYS = 21
 
 # 两类对象规格 (KOL=带货上稿 / 媒体人=earned media 报道)
 SPECS = {
@@ -26,7 +29,7 @@ SPECS = {
         "reg_label": "上稿", "header": "🎬 上稿登记 — 这位达人发布了吗?",
         "input_label": "上稿链接:",
         "placeholder": "https://youtube.com/watch?v=... / tiktok.com/... / instagram.com/...",
-        "desc": "如果你看到 TA 已发布内容(视频/帖/直播回放)，把链接粘下面提交 → 记上稿日期+链接, 并标「已合作-免费」(解锁 ROI 追踪)。",
+        "desc": "寄样已 21 天+，系统没收到 TA 主动回的上稿链接(暖信/软关怀也发过了)。麻烦去 TA 的账号查一下是否已发布(视频/帖/直播回放)：有就把链接粘下面提交(记上稿日期+链接+「已合作-免费」解锁 ROI);确实没发就忽略。",
         "btn": "✅ 登记上稿 (写上稿日期+链接+已合作)",
     },
     "媒体人": {
@@ -36,7 +39,7 @@ SPECS = {
         "reg_label": "报道", "header": "📰 报道登记 — 这位媒体人发表了吗?",
         "input_label": "报道链接:",
         "placeholder": "https://ign.com/... / theverge.com/... / 媒体文章 URL",
-        "desc": "如果你看到 TA 发表了关于我们产品的报道/评测，把链接粘下面提交 → 记报道发表日期+链接, 并标「已合作」(earned media 不带折扣码/GMV)。",
+        "desc": "寄 review unit 已 21 天+，系统没收到 TA 主动回的报道链接。麻烦去 TA 的媒体/作者页查一下是否发表了关于我们产品的报道/评测：有就把链接粘下面提交(记报道发表日期+链接+「已合作」);确实没发就忽略。",
         "btn": "✅ 登记报道 (写报道发表日期+链接+已合作)",
     },
 }
@@ -78,13 +81,21 @@ def _build_card(spec: dict, rid: str, contact_info: dict, email: str,
 
 async def _scan(spec: dict, now_ms: int) -> list:
     cutoff = now_ms - CARD_RESEND_DAYS * 86400 * 1000
+    grace_cut = now_ms - SHIP_GRACE_DAYS * 86400 * 1000
     items = await feishu.search_records(
         spec["table"], [{"field_name": "上次寄样订单号", "operator": "isNotEmpty", "value": []}])
     cands = []
     for r in items:
         f = r["fields"]
         if f.get(spec["date_field"]):
-            continue  # 已有成功事件
+            continue  # 已有成功事件(自动捕获已拿到, 无需提醒)
+        # 后备门槛: 寄样满 SHIP_GRACE_DAYS 才发卡 — 给 自动捕获(live_link_received)+暖信+软关怀 先行的窗口
+        sd = f.get("上次寄样日期")
+        try:
+            if not sd or int(sd) > grace_cut:
+                continue  # 没寄样日期 或 寄样不足 21 天 → 还在自动捕获窗口, 不打扰运营
+        except (ValueError, TypeError):
+            continue
         last_card = f.get(spec["dedup_field"])
         try:
             if last_card and int(last_card) > cutoff:

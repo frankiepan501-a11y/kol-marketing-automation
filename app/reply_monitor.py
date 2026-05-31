@@ -550,15 +550,22 @@ async def run():
             # 之前**无任何代码写 上稿日期** → 恒空 → 看板/ROI(decision_feedback)/late-stage 守护对"已发布"全盲
             # (TG_Geek 已发布 review 主表仍空). 只在空时写(幂等), now 近似发布日(达人分享链接时点).
             # (Phase2 上稿检查 n8n 工作流 hgM7unABBW7hr5dw 抓取式补充, 覆盖不主动给链接的达人 — 后续可加)
-            # 上稿回写仅 KOL: 编辑表无「上稿日期」字段(写会报字段不存在), 也无「已合作-免费」单选选项(用「已合作").
-            if ctype != "editor" and scenario_label == "live_link_received" and not cf.get("上稿日期"):
-                master_update["上稿日期"] = now_ms
-                # 上稿 = 合作成 → KOL 进入「已合作-免费」(decision_feedback 升降级 +
-                # secondary_outreach 二次维护 的起点; 之前无任何代码写此状态 → 两下游恒空跑, 这是 ROI→反哺链的上游断链).
-                # 不降级已在更高档(多次/付费), 不动黑名单(退订者勿再 engage); 覆盖意图给的「洽谈中」(上稿>洽谈).
+            # 🟢 自动捕获上稿/报道的**主路径**: KOL/编辑主动邮件回发布链接 → 分类器判 live_link_received
+            # → 自动写成功事件字段(幂等)。上稿登记卡(upload_register)只是 KOL/编辑久不回时的**后备**, 非主路径。
+            # KOL: 上稿日期 + 合作状态=已合作-免费 ; 编辑(媒体人 earned media): 报道发表日期 + 合作状态=已合作.
+            if scenario_label == "live_link_received":
                 _cur_coop = ext(cf.get("合作状态"))
-                if _cur_coop not in ("已合作-免费", "已合作-免费(多次)", "已合作-付费", "黑名单"):
-                    master_update["合作状态"] = "已合作-免费"
+                if ctype == "editor":
+                    if not cf.get("报道发表日期"):   # 2026-06-01 编辑端补齐(字段 fldx9TmPSF 已加)
+                        master_update["报道发表日期"] = now_ms
+                        if _cur_coop not in ("已合作", "黑名单"):
+                            master_update["合作状态"] = "已合作"
+                elif not cf.get("上稿日期"):
+                    master_update["上稿日期"] = now_ms
+                    # 上稿=合作成 → KOL 进「已合作-免费」(decision_feedback/secondary_outreach 起点).
+                    # 不降级更高档(多次/付费), 不动黑名单, 覆盖洽谈中(上稿>洽谈).
+                    if _cur_coop not in ("已合作-免费", "已合作-免费(多次)", "已合作-付费", "黑名单"):
+                        master_update["合作状态"] = "已合作-免费"
 
             target_table = config.T_EDITOR if ctype == "editor" else config.T_KOL
             if master_update:
