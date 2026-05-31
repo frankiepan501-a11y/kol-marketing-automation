@@ -2,9 +2,11 @@
 部署在 Zeabur, 由 n8n cron / webhook 触发
 """
 import asyncio
+import os
 import time
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
@@ -263,6 +265,57 @@ async def run_card_resend(authorization: str = Header(default=""),
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
+@app.get("/card/resend-from-button")
+async def resend_from_button(draft_rid: str = "", secret: str = ""):
+    """飞书 bitable 按钮"打开链接"触发: 拉草稿「关联运营」每人重发卡.
+    无 Bearer auth(浏览器 GET 不便带 header), 用 query secret 校验.
+    返回小 HTML 自动 close 2.5s, 运营回飞书私聊看新卡."""
+    expected_secret = os.environ.get("RESEND_BUTTON_SECRET", "")
+    if not draft_rid or not secret or not expected_secret or secret != expected_secret:
+        return HTMLResponse("<h3>❌ 参数错误或未授权</h3>", status_code=400)
+    from . import card_resend, feishu
+    try:
+        # user_id_type=union_id 让 User 字段 id 返 union_id (跟 write 侧一致)
+        path = (f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{config.T_DRAFT}"
+                f"/records/{draft_rid}?user_id_type=union_id")
+        r = await feishu.api("GET", path)
+        f = (r.get("data") or {}).get("record", {}).get("fields", {})
+        union_ids = []
+        lr = f.get("关联运营")
+        if isinstance(lr, list):
+            for u in lr:
+                if isinstance(u, dict):
+                    uid = u.get("id") or ""
+                    if uid:
+                        union_ids.append(uid)
+        if not union_ids:
+            return HTMLResponse(
+                "<h3>⚠️ 此草稿无关联运营(可能是 retrofit 前的老草稿)</h3>"
+                "<p>解决: 等下一张新发的卡, 或人工去草稿表打开。</p>",
+                status_code=200)
+        ok_count = 0
+        details = []
+        for uid in union_ids:
+            res = await card_resend.run(draft_rid=draft_rid, operator_union_id=uid)
+            if res.get("ok"):
+                ok_count += 1
+            details.append(f"{uid[:12]}: {res.get('msg') or 'ok'}")
+        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>重发</title></head>
+<body style="font:16px/1.6 system-ui,sans-serif;padding:40px;text-align:center;color:#333;">
+<div style="font-size:48px;">✅</div>
+<h2>已重发卡片 {ok_count}/{len(union_ids)} 位运营</h2>
+<p>请回飞书私聊底部查看新卡</p>
+<p style="color:#999;font-size:12px;">{"<br>".join(details)}</p>
+<script>setTimeout(()=>window.close(),2500);</script>
+</body></html>"""
+        return HTMLResponse(html)
+    except Exception as e:
+        import traceback
+        return HTMLResponse(
+            f"<h3>❌ 错误</h3><pre>{str(e)[:200]}</pre>",
+            status_code=500)
 
 
 @app.post("/decision-feedback/run")
