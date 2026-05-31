@@ -45,15 +45,20 @@ async def run(days: float = 1.0, dry_run: bool = False, max_list: int = 10) -> d
                 except (ValueError, TypeError): gen_ms = 0
             if not gen_ms or gen_ms >= cutoff_ms:
                 continue
+            # 解析 KOL/媒体人名 (SingleLink 字段 text 不稳定, 用 xrid+fetch 稳健)
             kol_name = ""
-            for rel_field in ("关联KOL", "关联媒体人"):
-                rels = f.get(rel_field)
-                if isinstance(rels, list) and rels:
-                    first = rels[0]
-                    if isinstance(first, dict):
-                        kol_name = first.get("text") or first.get("name") or ""
-                        if kol_name:
-                            break
+            crid = feishu.xrid(f.get("关联KOL"))
+            is_editor = False
+            if not crid:
+                crid = feishu.xrid(f.get("关联媒体人"))
+                is_editor = bool(crid)
+            if crid:
+                try:
+                    cf = (await feishu.get_record(
+                        config.T_EDITOR if is_editor else config.T_KOL, crid))["fields"]
+                    kol_name = ext(cf.get("媒体人姓名" if is_editor else "账号名")) or ""
+                except Exception:
+                    pass
             overdue.append({
                 "rid": it["record_id"],
                 "source": ext(f.get("邮件草稿来源")) or "",
