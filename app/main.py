@@ -281,6 +281,19 @@ async def run_card_audit(authorization: str = Header(default=""),
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
+@app.post("/completion-report/run")
+async def run_completion_report(authorization: str = Header(default=""), dry_run: bool = False):
+    """KOL 任务完成情况周报: 漏斗转化 + 5 类终态分布 + 卡点清单 → 飞书运营群 + Frankie 私聊.
+    终态: 成功=已上稿/无回应=末次发信+14d/寄样未产出=签收+60d。纯读不发邮件不写主表。?dry_run=true 只算不发卡。"""
+    _check_auth(authorization)
+    from . import completion_report
+    try:
+        return {"ok": True, **(await completion_report.run(dry_run=dry_run))}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
 @app.post("/upload-register/scan")
 async def run_upload_register(authorization: str = Header(default=""), dry_run: bool = False):
     """上稿登记卡: 扫已寄样+上稿日期空+未近期发卡的 KOL → 发 form 卡给运营登记上稿链接.
