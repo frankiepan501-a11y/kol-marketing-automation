@@ -247,6 +247,24 @@ async def run_sales_attribution(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
+@app.post("/card/resend")
+async def run_card_resend(authorization: str = Header(default=""),
+                          draft_rid: str = "", operator_open_id: str = "",
+                          operator_union_id: str = "", dry_run: bool = False):
+    """卡片任务看板"📨 回到飞书操作"按钮触发: 撤老卡 + 重发卡到运营私聊底部.
+    飞书 applink 不支持跳特定消息(实测+官方文档确认), 改走重发路径."""
+    _check_auth(authorization)
+    from . import card_resend
+    try:
+        return await card_resend.run(draft_rid=draft_rid,
+                                      operator_open_id=operator_open_id,
+                                      operator_union_id=operator_union_id,
+                                      dry_run=dry_run)
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
 @app.post("/decision-feedback/run")
 async def run_decision_feedback(authorization: str = Header(default="")):
     """Phase 3.2 决策反哺: 据 GMV/订单/上稿 自动升降级 KOL 合作状态"""
