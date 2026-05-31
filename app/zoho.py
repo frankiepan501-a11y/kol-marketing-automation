@@ -352,8 +352,38 @@ async def _send_now(brand: str, to_addr: str, subject: str, html_body: str) -> s
         return d["data"].get("messageId")
 
 
-# ===== 主入口 — 签名不变, 调用方零改动 =====
-async def send_email(brand: str, to_addr: str, subject: str, body: str):
+# ===== 线程化回复 (action:reply) =====
+# POST /messages/{被回复邮件 messageId} + action:"reply" → Zoho 自动加 In-Reply-To/References
+# header, 落进同一 thread. 实测 (C:/tmp/zoho_reply_thread_test.py): M2 threadId==M1. 解决 KOL
+# 换主题脱离原 thread 的碎片化 + 上下文丢失 (重复开发信帮凶). 只在草稿带「回复目标MsgID」时走此路径,
+# cold 首封 / followup (无入站 msgId) 仍走 _send_now 新邮件.
+async def _send_reply(brand: str, orig_msg_id: str, to_addr: str,
+                      subject: str, html_body: str) -> str:
+    cfg = config.BRAND_CONFIG[brand]
+    tok = await access(brand)
+    async with httpx.AsyncClient(timeout=45.0) as cli:
+        r = await cli.post(
+            f"https://mail.zoho.com/api/accounts/{cfg['account_id']}/messages/{orig_msg_id}",
+            json={
+                "fromAddress": cfg["alias_from"],
+                "toAddress": to_addr,
+                "action": "reply",
+                "subject": subject,
+                "content": html_body,
+                "mailFormat": "html",
+            },
+            headers={"Authorization": f"Zoho-oauthtoken {tok}"},
+        )
+        r.raise_for_status()
+        d = r.json()
+        if d.get("status", {}).get("code") != 200:
+            raise Exception(f"Send reply fail: {d}")
+        return d["data"].get("messageId")
+
+
+# ===== 主入口 — 签名向后兼容 (新增可选 reply_to_msg_id, 默认 None = 行为不变) =====
+async def send_email(brand: str, to_addr: str, subject: str, body: str,
+                     reply_to_msg_id: str = None):
     """发送邮件 — V2: layer-1 短 body 拒发 + layer-2 draft 沙盒验证 + layer-3 30s sent 抽检.
 
     DRY-RUN: 如果 env `EMAIL_DRY_RUN_TO` 有值, 自动把 to 改成此邮箱,
@@ -368,6 +398,9 @@ async def send_email(brand: str, to_addr: str, subject: str, body: str):
     if dry_run_to:
         to_addr = dry_run_to
         subject = f"[DRY-RUN→{real_to}] {subject}"
+        # dry-run 改 to 后 action:reply 串入真实 KOL thread 语义错乱 (memory 已识别隐患④),
+        # 且测试目的是验内容渲染非线程. 强制降级新邮件, 保证 dry-run 纯净.
+        reply_to_msg_id = None
         html_body = (
             f"<div style=\"background:#fff3cd;padding:8px;border:1px solid #ffc107;margin-bottom:12px\">"
             f"<strong>⚠️ DRY-RUN MODE</strong> — 这封邮件本来要发给 <code>{real_to}</code>, "
@@ -398,7 +431,16 @@ async def send_email(brand: str, to_addr: str, subject: str, body: str):
     # 验证通过 — 删 draft 后真发
     await delete_draft(brand, drafts_fid, draft_id)
 
-    msg_id = await _send_now(brand, to_addr, subject, html_body)
+    # 带 reply_to_msg_id → 走 action:reply 串入原 thread; 否则新邮件. 沙盒验证/dry-run 已对二者一致.
+    if reply_to_msg_id:
+        try:
+            msg_id = await _send_reply(brand, reply_to_msg_id, to_addr, subject, html_body)
+        except Exception as e:
+            # reply 端点失败 (orig msgId 失效/跨账户等) → 降级新邮件, 保证邮件仍发出 (线程化是增强非必需)
+            print(f"[zoho.send_email] _send_reply fail, 降级 _send_now: orig={reply_to_msg_id} err={str(e)[:160]}")
+            msg_id = await _send_now(brand, to_addr, subject, html_body)
+    else:
+        msg_id = await _send_now(brand, to_addr, subject, html_body)
 
     # === Layer-3: 30s 后台抽检 sent folder (非阻塞) ===
     expected_text_len = len(_strip_html(html_body))

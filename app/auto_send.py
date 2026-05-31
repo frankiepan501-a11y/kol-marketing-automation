@@ -240,8 +240,12 @@ async def send_one(rec: dict) -> dict:
         })
         return {"rid": rid, "ok": False, "error": f"unfilled placeholder: {ph_kw}"}
 
+    # 邮件线程化: 草稿带「回复目标MsgID」(reply/affiliate_quote/tracking_followup 等延续对话) →
+    # 走 action:reply 串入原 thread; cold/followup 无此值 → 新邮件. dry-run 时 zoho 内部强制降级新邮件.
+    reply_to_msg_id = ext(f.get("回复目标MsgID")) or None
     try:
-        msg_id = await zoho.send_email(brand, to_email, subject, body_html)
+        msg_id = await zoho.send_email(brand, to_email, subject, body_html,
+                                       reply_to_msg_id=reply_to_msg_id)
     except Exception as e:
         err = str(e)[:500]
         await feishu.update_record(config.T_DRAFT, rid, {
@@ -458,6 +462,10 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
     parent_task_rid = xrid(pf.get("关联任务"))
     if parent_task_rid:
         fields["关联任务"] = [parent_task_rid]
+    # 邮件线程化: 第 2 封运单号追加继承父草稿的「回复目标MsgID」, 与 ship_confirm 第 1 封串同一 thread.
+    parent_thread_mid = ext(pf.get("回复目标MsgID"))
+    if parent_thread_mid:
+        fields["回复目标MsgID"] = parent_thread_mid
 
     new_rid = await feishu.create_record(config.T_DRAFT, fields)
     print(f"[auto_send] created tracking_followup draft rid={new_rid} (schedule +24h)")

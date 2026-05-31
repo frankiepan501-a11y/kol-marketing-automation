@@ -587,6 +587,7 @@ async def draft_reply(
     sender_alias: str,
     related_draft_id: Optional[str] = None,
     scenario_label: str = "",      # v4 ④: 细分场景标签 (reply_monitor 分类得), 命中 FORCE_REVIEW_LABELS 时强制人审
+    related_inbound_msg_id: str = "",  # 邮件线程化: 被回复的 KOL 入站 messageId, 落「回复目标MsgID」→ auto_send 走 action:reply
 ) -> Optional[str]:
     """
     生成 reply 草稿 → 写入「KOL·媒体人邮件草稿」 → 调 router 走自审
@@ -778,6 +779,9 @@ async def draft_reply(
     # reply_monitor 已把空 scenario 归一成 unclassified_fallback, 这里恒为有效 label。
     if scenario_label:
         fields["场景标签"] = scenario_label
+    # 邮件线程化: 存被回复的 KOL 入站 messageId → auto_send 据此走 action:reply 串入原 thread.
+    if related_inbound_msg_id:
+        fields["回复目标MsgID"] = related_inbound_msg_id
 
     # ship_confirm 寄样订单字段 (12 字段,V1 寄样链路)
     if sub == "ship_confirm" and extracted_address:

@@ -652,6 +652,9 @@ async def run():
                     sender_alias=alias_for_brand,
                     related_draft_id=draft["record_id"],
                     scenario_label=scenario_label,   # v4 ④b: 传细分场景标签, 高风险阶段强制人审
+                    # 邮件线程化: 传被回复的入站邮件 messageId (仅真 messageId, 不要 summary fallback)
+                    # → 回复草稿落「回复目标MsgID」→ auto_send 走 action:reply 串入原 thread.
+                    related_inbound_msg_id=(msg.get("messageId") or ""),
                 )
                 if reply_rid:
                     print(f"[reply_monitor] reply draft generated rid={reply_rid}")
