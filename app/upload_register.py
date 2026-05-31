@@ -57,11 +57,10 @@ async def run(dry_run: bool = False) -> dict:
     cutoff = now_ms - CARD_RESEND_DAYS * 86400 * 1000
 
     # 已寄样代理: 上次寄样订单号非空 (auto_send/reply_drafter ship_confirm 都写此字段)
+    # 不传 field_names: T_KOL 无「发送邮箱」等 T_DRAFT 字段, 传不存在字段会让 search 报错返空.
     items = await feishu.search_records(
         config.T_KOL,
         [{"field_name": "上次寄样订单号", "operator": "isNotEmpty", "value": []}],
-        field_names=["账号名", "合作状态", "上稿日期", "上次寄样订单号", "上次寄样日期",
-                     "上稿登记卡发送时间", "发送邮箱", "邮箱", "主平台", "粉丝数"],
     )
 
     # 候选: 上稿日期空 + (上稿登记卡发送时间空 OR >14d 前)
@@ -118,8 +117,8 @@ async def run(dry_run: bool = False) -> dict:
             ci = await feishu.resolve_contact_info(rid, "KOL")
         except Exception:
             ci = {}
-        sender = ext(f.get("发送邮箱")) or ""
-        brand = "POWKONG" if "powkong" in sender.lower() else "FUNLAB"
+        # KOL 主表无「发送邮箱」字段 (品牌随任务变非 KOL 固有) → brand 留空, info block 不显示品牌行
+        brand = ""
         email = (feishu.clean_email(ext(f.get("邮箱")))[0] if ext(f.get("邮箱")) else "") or ""
         sample_order = ext(f.get("上次寄样订单号"))
         sd = f.get("上次寄样日期")
