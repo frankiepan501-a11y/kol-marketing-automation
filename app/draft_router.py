@@ -503,6 +503,7 @@ def _build_ship_tracking_card(record_id: str, contact_name: str, product_name: s
                 contact_info=contact_info, product_name=product_name, brand=brand,
                 email=email, contact_type=contact_type),
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**原主题**: {subject}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "ℹ️ **这是寄样确认后的第 2 步(给达人发运单号)，不是重复卡片** — 第 1 步是「确认地址发货」，这步是补发实际运单号。请勿当重复否决。"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": "📋 查 FBA/海外仓/国内仓库存 → 建 MCF/海外仓/国内订单 → 拿到运单号 → 下面填 → 提交即发"}},
             {"tag": "hr"},
             {"tag": "form", "name": f"ship_{record_id}", "elements": [

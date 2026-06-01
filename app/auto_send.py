@@ -380,6 +380,20 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
     24h 后建议发送, 等运营从 Amazon 拿到运单号填占位符再点通过
     """
     from . import reply_drafter
+    parent_rid = parent_rec["record_id"]
+    # 幂等守卫 (2026-06-01): 防同一 ship_confirm 被 auto_send 重复处理→建多条 tracking_followup→重复运单号卡/邮件.
+    # 标记 = 邮件草稿ID 前缀 track-{parent8}-。已存在则跳过(不重复建草稿/不重复发卡)。
+    _p8 = parent_rid[-8:]
+    try:
+        _exist = await feishu.search_records(config.T_DRAFT, [
+            {"field_name": "邮件草稿来源", "operator": "is", "value": ["tracking_followup"]},
+            {"field_name": "邮件草稿ID", "operator": "contains", "value": [f"track-{_p8}-"]},
+        ])
+        if _exist:
+            print(f"[auto_send] tracking_followup 已存在(parent={parent_rid}), 跳过重复创建 (幂等守卫)")
+            return
+    except Exception as _e:
+        print(f"[auto_send] tracking_followup 幂等查重失败(继续创建): {_e}")
     pf = parent_rec["fields"]
     obj_type = ext(pf.get("对象类型"))
     parent_subject = ext(pf.get("邮件主题"))
