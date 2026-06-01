@@ -366,7 +366,10 @@ async def send_one(rec: dict) -> dict:
 
     # ship_confirm 第一封发出后, 自动建第 2 条 tracking_followup 草稿
     # 判断: 草稿来源=reply + 命中关键词含 ship-sample (ship_confirm 标志)  (kw_hit 上面已读)
-    if source == "reply" and "ship-sample" in kw_hit:
+    # 🚨 2026-06-01 修双重索取运单号 (Nintendo Games 事故): ship_confirm 卡已收运单号并发进确认邮件了
+    #   (tracking_no 非空 = ship_confirm 邮件已含运单号), 第2步 tracking_followup 再问一次=纯冗余/运营觉得重复.
+    #   只在 ship_confirm 发出时**没有**运单号(确认邮件只说"在路上", 运单号待补)才建第2步追发. tracking_no 上面已读(line~169).
+    if source == "reply" and "ship-sample" in kw_hit and not tracking_no:
         try:
             await _create_tracking_followup_draft(rec, sender_alias, signature)
         except Exception as e:
