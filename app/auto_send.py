@@ -364,16 +364,10 @@ async def send_one(rec: dict) -> dict:
             except Exception as e:
                 print(f"[auto_send] kol follow: {e}")
 
-    # ship_confirm 第一封发出后, 自动建第 2 条 tracking_followup 草稿
-    # 判断: 草稿来源=reply + 命中关键词含 ship-sample (ship_confirm 标志)  (kw_hit 上面已读)
-    # 🚨 2026-06-01 修双重索取运单号 (Nintendo Games 事故): ship_confirm 卡已收运单号并发进确认邮件了
-    #   (tracking_no 非空 = ship_confirm 邮件已含运单号), 第2步 tracking_followup 再问一次=纯冗余/运营觉得重复.
-    #   只在 ship_confirm 发出时**没有**运单号(确认邮件只说"在路上", 运单号待补)才建第2步追发. tracking_no 上面已读(line~169).
-    if source == "reply" and "ship-sample" in kw_hit and not tracking_no:
-        try:
-            await _create_tracking_followup_draft(rec, sender_alias, signature)
-        except Exception as e:
-            print(f"[auto_send] create tracking_followup fail: {e}")
+    # 🚨 2026-06-01 Frankie 拍板「1 步制」(Nintendo Games 重复事故): ship_confirm 卡已收运单号+物流商并发进确认
+    #   邮件 = 一步到位。**不再自动建第 2 条 tracking_followup**(原 2 步制让运营填一次运单号又被第2张卡问一次=重复混淆)。
+    #   `_create_tracking_followup_draft` 保留为 dead code(不调用), 历史 tracking_followup 草稿照常处理, 不再新建。
+    #   若日后要回 2 步制(ship_confirm 不带运单号"只说在路上"+ 单独运单号卡), 去 TEMPLATE_SHIP_CONFIRM 运单号占位符再恢复此处。
 
     return {"rid": rid, "ok": True, "msg_id": msg_id, "to": to_email, "brand": brand}
 

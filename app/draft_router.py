@@ -503,10 +503,7 @@ def _build_ship_tracking_card(record_id: str, contact_name: str, product_name: s
                 contact_info=contact_info, product_name=product_name, brand=brand,
                 email=email, contact_type=contact_type),
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**原主题**: {subject}"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": (
-                "ℹ️ **第 2 步 / 共 2 步 · 补发运单号** — 这是寄样确认后给达人发**实际运单号**的跟进卡，**不是重复卡片**(第 1 步「寄样确认」已发过\"样品在路上\")。请勿当重复否决。"
-                if "运单" in stage_label else
-                "ℹ️ **第 1 步 / 共 2 步 · 寄样确认** — 确认收件地址无误，填运单号(若已有)后发出寄样确认邮件(告诉达人样品已寄出)。**稍后系统会再来一张「运单号追加」卡**补发实际运单号，那张不是重复。")}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "ℹ️ **寄样确认 (一步到位)** — 确认收件地址无误，下面填运单号+物流商提交，系统自动把运单号填进确认邮件并发给达人。**只有这一张卡，没有后续重复卡片。**"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": "📋 查 FBA/海外仓/国内仓库存 → 建 MCF/海外仓/国内订单 → 拿到运单号 → 下面填 → 提交即发"}},
             {"tag": "hr"},
             {"tag": "form", "name": f"ship_{record_id}", "elements": [
