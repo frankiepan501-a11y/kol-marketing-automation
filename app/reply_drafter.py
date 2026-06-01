@@ -588,6 +588,7 @@ async def draft_reply(
     related_draft_id: Optional[str] = None,
     scenario_label: str = "",      # v4 ④: 细分场景标签 (reply_monitor 分类得), 命中 FORCE_REVIEW_LABELS 时强制人审
     related_inbound_msg_id: str = "",  # 邮件线程化: 被回复的 KOL 入站 messageId, 落「回复目标MsgID」→ auto_send 走 action:reply
+    manual_alias_review: bool = False,  # 2026-06-01: 回复发往 marketing@/frankie@(非partner@主别名)=手动高触达关系→强制人审
 ) -> Optional[str]:
     """
     生成 reply 草稿 → 写入「KOL·媒体人邮件草稿」 → 调 router 走自审
@@ -879,6 +880,9 @@ async def draft_reply(
                     })
                 except Exception:
                     pass
+        # 2026-06-01: marketing@/frankie@ 回复(手动高触达关系)→强制人审, 不自动发. 保留已有 force_reason.
+        if manual_alias_review and not force_reason:
+            force_reason = "manual-alias:回复发往 marketing@/frankie@(人工高触达关系)→强制人审"
         result = await draft_router.route_draft(
             rid,
             ship_confirm_meta={"address": extracted_address, "country": country_code,

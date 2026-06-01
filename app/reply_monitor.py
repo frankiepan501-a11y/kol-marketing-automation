@@ -379,15 +379,29 @@ async def run():
     # 跨轮必新 → dedup 恒准, 与 cron 间隔/TTL 解耦。轮内 A4 性能收益不变。
     _sent_drafts_cache["items"] = None
     _sent_drafts_cache["timestamp"] = 0
-    for brand in ("POWKONG", "FUNLAB"):
-        alias = config.BRAND_CONFIG[brand]["alias_from"]
-        try:
-            msgs = await zoho.search_inbox(brand, f"to:{alias}", limit=30)
-        except Exception as e:
-            results.append({"brand": brand, "error": str(e)[:200]})
-            continue
+    # 2026-06-01 alias 盲区修: 收集我方所有监控别名(跨 brand), 用于"自跳"(防处理自己外发).
+    OUR_ALIASES = set()
+    for _b in ("POWKONG", "FUNLAB"):
+        OUR_ALIASES.add(config.BRAND_CONFIG[_b]["alias_from"].lower())
+        for _a in config.REPLY_EXTRA_ALIASES.get(_b, []):
+            OUR_ALIASES.add(_a.lower())
 
-        # Plan A v2 (2026-05-19): 每个发件人本轮只处理「最新一封」。
+    for brand in ("POWKONG", "FUNLAB"):
+        primary_alias = config.BRAND_CONFIG[brand]["alias_from"]
+        # 2026-06-01: 除 partner@ 主别名外, 加监控 marketing@/frankie@ 手动外联收件箱
+        # (审计实证 marketing@ 回复 0% 捕获; marketing@ 低流量 limit=30 覆盖 44-100 天足够).
+        monitor_aliases = [primary_alias] + config.REPLY_EXTRA_ALIASES.get(brand, [])
+        msgs_tagged = []   # [(msg, via_alias)]
+        for _al in monitor_aliases:
+            try:
+                _ms = await zoho.search_inbox(brand, f"to:{_al}", limit=30)
+            except Exception as e:
+                results.append({"brand": brand, "alias": _al, "error": str(e)[:200]})
+                continue
+            for _m in _ms:
+                msgs_tagged.append((_m, _al))
+
+        # Plan A v2 (2026-05-19): 每个发件人本轮只处理「最新一封」(跨别名合并)。
         # 根因: 多邮件 KOL (如 PlayTopia 费率拉锯 6+ 封都在 30 封窗口内) 会被
         # 逐封生成草稿; 叠加 _get_sent_drafts 5min cache 让 [MID:] dedup 写入
         # 在同轮/相邻轮不可见 + 行尾 `回复原文` 单字段被覆盖只留最后一个 [MID:]
@@ -395,17 +409,20 @@ async def run():
         # (给地址 / 新问题), 旧封由 thread 承载, 无需逐封自动回。一轮一发件人一封
         # → 彻底消除 burst; 跨轮同一封由 [MID:] dedup 拦 (此时单字段不再被竞争覆盖)。
         _newest = {}
-        for _m in sorted(msgs, key=lambda x: x.get("receivedTime") or 0, reverse=True):
+        for _m, _al in sorted(msgs_tagged, key=lambda x: x[0].get("receivedTime") or 0, reverse=True):
             _fa = parse_email(_m.get("fromAddress") or _m.get("sender") or "")
             if not _fa or _fa in _newest:
                 continue
-            _newest[_fa] = _m
+            _newest[_fa] = (_m, _al)
         msgs = list(_newest.values())
 
-        for msg in msgs:
+        for msg, via_alias in msgs:
             from_addr = parse_email(msg.get("fromAddress") or msg.get("sender") or "")
-            if not from_addr or alias.lower() in from_addr.lower():
+            # 自跳: from 是我方任意监控别名 → 跳过 (防处理自己外发)
+            if not from_addr or from_addr.lower() in OUR_ALIASES:
                 continue
+            # 非主 partner@ 别名(marketing@/frankie@)的回复 = 手动高触达人工关系 → 强制人审, 不自动发
+            manual_alias_review = via_alias.lower() != primary_alias.lower()
             subject = msg.get("subject", "")
             msg_id = msg.get("messageId") or msg.get("summary")
             folder_id = msg.get("folderId")
@@ -662,6 +679,7 @@ async def run():
                     # 邮件线程化: 传被回复的入站邮件 messageId (仅真 messageId, 不要 summary fallback)
                     # → 回复草稿落「回复目标MsgID」→ auto_send 走 action:reply 串入原 thread.
                     related_inbound_msg_id=(msg.get("messageId") or ""),
+                    manual_alias_review=manual_alias_review,  # 2026-06-01: marketing@/frankie@ 回复→强制人审
                 )
                 if reply_rid:
                     print(f"[reply_monitor] reply draft generated rid={reply_rid}")

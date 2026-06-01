@@ -59,6 +59,17 @@ ZOHO_POWKONG_ALIAS = env("ZOHO_POWKONG_ALIAS", "partner@powkong.com")
 
 ZOHO_REGION = env("ZOHO_REGION", ".com")  # .com / .com.cn / .eu
 
+# 2026-06-01 修 reply_monitor alias 盲区 (审计实证: 手动从 marketing@/frankie@ 外联的回复
+# 0% 捕获 — reply_monitor 之前只搜 to:partner@; 27 KOL 受害含 NEED 4 NINTENDO 收货却零追踪).
+# 除 partner@ 主别名外, 额外监控这些手动外联收件箱. 非 partner@ 别名的回复=人工高触达关系→强制人审.
+# env 覆盖: POWKONG_REPLY_ALIASES / FUNLAB_REPLY_ALIASES (逗号分隔).
+REPLY_EXTRA_ALIASES = {
+    "POWKONG": [a.strip() for a in env("POWKONG_REPLY_ALIASES",
+        "marketing@powkong.com,frankie@powkong.com").split(",") if a.strip()],
+    "FUNLAB": [a.strip() for a in env("FUNLAB_REPLY_ALIASES",
+        "marketing@fireflyfunlab.com").split(",") if a.strip()],
+}
+
 # DeepSeek
 DEEPSEEK_API_KEY = env("DEEPSEEK_API_KEY", required=True)
 
