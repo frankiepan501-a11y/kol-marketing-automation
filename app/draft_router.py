@@ -466,12 +466,21 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**📧 主题**\n{subject}"}},
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**✉️ 正文**\n{body_show}"}},
         {"tag": "hr"},
-        {"tag": "div", "text": {"tag": "lark_md", "content": "👇 **卡片上直接审核**(无需跳表格); 需大改正文才点「去表格改」"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": "👇 **卡片上直接审核**(无需跳表格)"}},
         {"tag": "action", "actions": [
             {"tag": "button", "text": {"tag": "plain_text", "content": "✅ 通过"}, "type": "primary", "value": dict(val, action="draft_approve")},
             {"tag": "button", "text": {"tag": "plain_text", "content": "❌ 否决"}, "type": "danger", "value": dict(val, action="draft_reject")},
-            {"tag": "button", "text": {"tag": "plain_text", "content": "🔁 退回重生"}, "type": "default", "value": dict(val, action="draft_regen")},
             {"tag": "button", "text": {"tag": "plain_text", "content": "📝 去表格改正文"}, "type": "default", "url": base_url},
+        ]},
+        # 2026-06-02 退回重生方案A: form 卡, 运营可选填「重生方向」→ 真重生一版(3信号:上一版+方向+阶段), 不再只标状态卡住.
+        {"tag": "div", "text": {"tag": "lark_md", "content": "🔁 **想重新生成一版?** 下面可选填重生方向(留空也行, 系统按上一版问题+当前阶段改), 再点退回重生:"}},
+        {"tag": "form", "name": f"regen_{record_id}", "elements": [
+            {"tag": "input", "name": "regen_feedback", "label_position": "top", "required": False,
+             "label": {"tag": "plain_text", "content": "重生方向(可选):"},
+             "placeholder": {"tag": "plain_text", "content": "如: 太硬广多聊他频道 / 阶段不对他已收过样品 / 语气像朋友DM"}},
+            {"tag": "button", "action_type": "form_submit", "name": "regen",
+             "text": {"tag": "plain_text", "content": "🔁 退回重生(真重新生成)"}, "type": "default",
+             "value": dict(val, action="draft_regen")},
         ]},
     ]
     return {

@@ -5,9 +5,9 @@ import asyncio
 import os
 import time
 import traceback as _tb
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
@@ -110,6 +110,33 @@ async def run_talking_points(authorization: str = Header(default=""),
         return {"ok": True, **(await talking_points.run(overwrite=overwrite))}
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/draft/regen")
+async def run_draft_regen(record_id: str = Query(...), feedback: str = Query(""),
+                          authorization: str = Header(default="")):
+    """退回重生 方案A: 给指定草稿真重生一版(3信号: 上一版+评分理由 / 运营方向feedback / 当前阶段),
+    旧草稿置已否决, 新草稿强制人审重新走卡。n8n 卡片「退回重生」按钮调此端点。"""
+    _check_auth(authorization)
+    try:
+        result = await draft_regen.regen_draft(record_id, feedback=feedback or "")
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/draft/regen-scan/run")
+async def run_draft_regen_scan(authorization: str = Header(default="")):
+    """cron 兜底: 扫 邮件草稿状态=退回重生 的草稿 → 重生 (修自动路径 + 漏网手动)。"""
+    _check_auth(authorization)
+    try:
+        result = await draft_regen.regen_scan()
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/draft/regen-scan/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 
