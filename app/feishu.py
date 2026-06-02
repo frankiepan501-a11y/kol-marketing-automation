@@ -127,6 +127,13 @@ def ext_url(f):
     return ext(f)
 
 
+def product_url(fields):
+    """产品对外链接: 「官网链接」优先, 缺则降级「亚马逊链接」.
+    2026-06-02: 运营改用填亚马逊链接(信息更丰富), 官网链接可空 → 防死链 gate 据此放宽.
+    两者都是 URL 字段, ext_url 取的 link 必为完整 URL → 不会死链 (亚马逊即使 text 显示 ASIN, link 仍是 https://www.amazon.com/dp/...)."""
+    return ext_url(fields.get("官网链接")) or ext_url(fields.get("亚马逊链接"))
+
+
 import re as _re
 # RFC 5322-lite, 实际飞书/Zoho 都用这种简化校验
 _EMAIL_RE = _re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+')

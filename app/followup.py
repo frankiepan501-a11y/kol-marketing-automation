@@ -51,7 +51,7 @@ async def generate_followup(round_num: int, first_draft: dict, kol: dict, produc
 
     # Phase 1 ROI: 给 product_url 注 UTM (与第 1 封 cold email 同 utm_content)
     from . import utm as _utm
-    p_url_raw = feishu.ext_url(pf.get("官网链接")) or ""   # ext_url 取 link 不取 text
+    p_url_raw = feishu.product_url(pf)   # 官网链接优先, 缺则降级亚马逊链接(防死链)
     kol_handle = ext(kf.get("账号名"))
     p_url_utm = _utm.make_utm_link(p_url_raw, brand, p_name, kol_handle)
 

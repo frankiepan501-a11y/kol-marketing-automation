@@ -11,7 +11,7 @@ GRIN gift-first 节奏 Day3-5 黄金窗口 + brief recap 合一, **低压力不�
 import time
 import re
 from . import config, feishu, draft_router, utm
-from .feishu import ext, xrid, ext_url
+from .feishu import ext, xrid, ext_url, product_url
 
 WARM_RECAP_SOURCE = "warm_recap"
 
@@ -54,7 +54,7 @@ async def _product_brief(prod_rid: str):
             points += [l.strip() for l in re.split(r"[\n;；]", tp) if l.strip()]
         if ang:
             points += [f"(angle) {l.strip()}" for l in re.split(r"[\n;；]", ang) if l.strip()]
-        link = ext_url(pf.get("官网链接")) or ""
+        link = product_url(pf)   # 官网链接优先, 缺则降级亚马逊链接(防死链)
     except Exception as e:
         print(f"[warm_recap] 读产品 {prod_rid} 失败: {e}")
     # 英文字段没填 → 通用英文默认 (不注入中文); 运营/产品库补 Talking Points 后未来暖信更丰富

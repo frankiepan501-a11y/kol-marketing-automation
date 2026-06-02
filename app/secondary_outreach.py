@@ -61,7 +61,7 @@ async def _gen_warm_followup(contact_name: str, prev_brand: str, new_product: di
     p_brand = ext(pf.get("品牌"))
     p_s1 = ext(pf.get("卖点1"))
     p_s2 = ext(pf.get("卖点2"))
-    p_url_raw = feishu.ext_url(pf.get("官网链接")) or ""   # ext_url 取 link 不取 text
+    p_url_raw = feishu.product_url(pf)   # 官网链接优先, 缺则降级亚马逊链接(防死链)
 
     # UTM (区分: 加 _2nd 后缀避开和首次 cold campaign 撞车)
     p_url = _utm.make_utm_link(p_url_raw, brand, p_en + " 2nd", contact_name) if p_url_raw else ""

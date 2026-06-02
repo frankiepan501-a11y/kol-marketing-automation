@@ -332,7 +332,7 @@ async def gen_pr_draft(editor_record: dict, product: dict, brand: str,
     p_s1 = ext(pf.get("卖点1"))
     p_s2 = ext(pf.get("卖点2"))
     p_s3 = ext(pf.get("卖点3"))
-    p_url_raw = feishu.ext_url(pf.get("官网链接"))   # ext_url 取 link 不取 text
+    p_url_raw = feishu.product_url(pf)   # 官网链接优先, 缺则降级亚马逊链接(都是 URL 字段, 防死链)
     p_price = pf.get("报价(USD)", 0)
     p_audience = ext(pf.get("目标人群"))
     p_media_endorse_raw = ext(pf.get("媒体报道"))

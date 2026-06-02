@@ -44,6 +44,11 @@ T_PRODUCT = env("T_PRODUCT", required=True)
 T_TASK_KOL = env("T_TASK_KOL", required=True)
 T_TASK_EDITOR = env("T_TASK_EDITOR", required=True)
 
+# SKU 产品库 (采购治理源, 独立 wiki) — 产品英文名引用拼接用 (2026-06-02).
+# 非 secret, 给默认值避免漏配; 聪哥2号(bitable app)已是该库协作者.
+SKU_LIB_APP_TOKEN = env("SKU_LIB_APP_TOKEN", "MvtZb6OE9aJFaisO913cWSErnFe")
+SKU_LIB_TABLE_ID = env("SKU_LIB_TABLE_ID", "tblwJ3BRkIuHDuSK")
+
 # Zoho (per brand)
 ZOHO_FUNLAB_CLIENT_ID = env("ZOHO_FUNLAB_CLIENT_ID", required=True)
 ZOHO_FUNLAB_CLIENT_SECRET = env("ZOHO_FUNLAB_CLIENT_SECRET", required=True)
