@@ -59,6 +59,21 @@ TEMPLATE_SHIP_CONFIRM = (
     "Best,\n{signature}"
 )
 
+# 2026-06-02 Fix B: 旧回复唤醒轻预热. recon 把 KOL 几个月前给过地址的旧回复翻出来 → 不直接"got the
+# address, shipping!"(唐突, mrbrian 反馈), 改先确认现在是否仍感兴趣, 再寄. 不含运单号占位符(非寄样卡),
+# 不预填寄样字段; 强制人审, 运营可改成寄样或继续预热.
+TEMPLATE_STALE_REWARM = (
+    "Hi {first_name},\n\n"
+    "Circling back on the {product_name} — it's been a little while since we "
+    "last connected, so I wanted to check in before sending anything over.\n\n"
+    "Are you still keen to give it a try? If so, just reply to confirm and I'll "
+    "get it shipped out to you right away (feel free to re-share your current "
+    "address so we send to the right place).\n\n"
+    "No pressure at all if the timing isn't right anymore — just let me know "
+    "either way.\n\n"
+    "Best,\n{signature}"
+)
+
 TEMPLATE_NEED_ADDRESS = (
     "Hi {first_name},\n\n"
     "Awesome — happy to send a {product_name} sample your way!\n\n"
@@ -589,6 +604,7 @@ async def draft_reply(
     scenario_label: str = "",      # v4 ④: 细分场景标签 (reply_monitor 分类得), 命中 FORCE_REVIEW_LABELS 时强制人审
     related_inbound_msg_id: str = "",  # 邮件线程化: 被回复的 KOL 入站 messageId, 落「回复目标MsgID」→ auto_send 走 action:reply
     manual_alias_review: bool = False,  # 2026-06-01: 回复发往 marketing@/frankie@(非partner@主别名)=手动高触达关系→强制人审
+    stale_reply_days: int = 0,          # 2026-06-02 Fix B: 该回复 receivedTime 距今天数(0=新/未知); ≥config.STALE_REPLY_DAYS=久未互动旧回复唤醒
 ) -> Optional[str]:
     """
     生成 reply 草稿 → 写入「KOL·媒体人邮件草稿」 → 调 router 走自审
@@ -682,6 +698,15 @@ async def draft_reply(
                 print(f"[reply_drafter] short_only 降级 need_address (主平台={kol_main_platform}, 非 YouTube 无 upsell 路径)")
                 sub = "need_address"
 
+        # 2026-06-02 Fix B: 旧回复唤醒守卫. recon 翻出的久未互动旧回复(receivedTime≥STALE_REPLY_DAYS)
+        # 即便给了地址也不直接 ship_confirm("got the address, shipping!"=唐突, mrbrian 反馈),
+        # 降级 stale_rewarm(先确认现在是否还感兴趣)→ 下方强制人审 + 不预填寄样字段 + 不发寄样卡。
+        if (config.STALE_REPLY_DAYS and stale_reply_days >= config.STALE_REPLY_DAYS
+                and sub == "ship_confirm"):
+            print(f"[reply_drafter] 旧回复 {stale_reply_days}d (≥{config.STALE_REPLY_DAYS}) → ship_confirm 降级 stale_rewarm (久未互动先预热)")
+            sub = "stale_rewarm"
+            extracted_address = ""   # 不走寄样字段/不预填主表
+
         subj = "Re: " + original_subject[:150]
         if sub == "ship_confirm":
             body = TEMPLATE_SHIP_CONFIRM.format(
@@ -690,6 +715,11 @@ async def draft_reply(
             )
         elif sub == "affiliate_upsell":
             body = TEMPLATE_AFFILIATE_UPSELL.format(
+                first_name=first, signature=sig_full,
+                product_name=product_name,
+            )
+        elif sub == "stale_rewarm":
+            body = TEMPLATE_STALE_REWARM.format(
                 first_name=first, signature=sig_full,
                 product_name=product_name,
             )
@@ -880,6 +910,18 @@ async def draft_reply(
         # 2026-06-01: marketing@/frankie@ 回复(手动高触达关系)→强制人审, 不自动发. 保留已有 force_reason.
         if manual_alias_review and not force_reason:
             force_reason = "manual-alias:回复发往 marketing@/frankie@(人工高触达关系)→强制人审"
+        # 2026-06-02 Fix B: 旧回复唤醒 → 任何意图都强制人审(防自动回复被 recon 翻出的久未互动旧邮件) + 标注先预热.
+        _is_stale = bool(config.STALE_REPLY_DAYS and stale_reply_days >= config.STALE_REPLY_DAYS)
+        if _is_stale:
+            if not force_reason:
+                force_reason = f"stale-reply:{stale_reply_days}天前旧回复(久未互动)→强制人审, 建议先轻预热确认意向再推进"
+            try:
+                _note = (f"[久未互动旧回复] 该回复实际是 {stale_reply_days} 天前发来的(被搜查/补登记翻出, 非近期主动)。"
+                         + ("已把寄样卡降级为轻预热(先确认还感不感兴趣再寄), 别直接寄样。"
+                            if sub == "stale_rewarm" else "推进/寄样前建议先发轻预热确认 KOL 现在仍有意向。"))
+                await feishu.update_record(config.T_DRAFT, rid, {"审批意见": _note[:500]})
+            except Exception:
+                pass
         result = await draft_router.route_draft(
             rid,
             ship_confirm_meta={"address": extracted_address, "country": country_code,

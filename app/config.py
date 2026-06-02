@@ -49,6 +49,14 @@ T_TASK_EDITOR = env("T_TASK_EDITOR", required=True)
 SKU_LIB_APP_TOKEN = env("SKU_LIB_APP_TOKEN", "MvtZb6OE9aJFaisO913cWSErnFe")
 SKU_LIB_TABLE_ID = env("SKU_LIB_TABLE_ID", "tblwJ3BRkIuHDuSK")
 
+# 2026-06-02 Fix B: 旧回复唤醒守卫. reply_monitor 处理的入站回复若 receivedTime(KOL 真发信时间,
+# 非处理时间)距今 ≥ 此天数 = 被 recon 翻出的"久未互动旧回复" → reply_drafter 不自动生成 ship_confirm
+# (改轻预热 stale_rewarm) + 强制人审, 防唐突寄样(mrbrian 反馈). 设 0 关闭.
+try:
+    STALE_REPLY_DAYS = int(env("STALE_REPLY_DAYS", "30") or 0)
+except (ValueError, TypeError):
+    STALE_REPLY_DAYS = 30
+
 # Zoho (per brand)
 ZOHO_FUNLAB_CLIENT_ID = env("ZOHO_FUNLAB_CLIENT_ID", required=True)
 ZOHO_FUNLAB_CLIENT_SECRET = env("ZOHO_FUNLAB_CLIENT_SECRET", required=True)

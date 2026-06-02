@@ -805,6 +805,10 @@ async def run():
             # === 自动生成回复草稿 (走 reviewer 自审通道) ===
             try:
                 alias_for_brand = config.BRAND_CONFIG[brand]["alias_from"]
+                # 2026-06-02 Fix B: 用 receivedTime(KOL 真发信时间, 非处理时间 now_ms)算回复年龄.
+                # recon 翻出的久未互动旧回复 → 传 stale_reply_days → reply_drafter 降级 ship_confirm + 强制人审.
+                _recv_ms = int(msg.get("receivedTime") or 0)
+                _stale_days = int((now_ms - _recv_ms) / 86400000) if _recv_ms else 0
                 reply_rid = await reply_drafter.draft_reply(
                     contact_record=contact,
                     contact_type=ctype,
@@ -820,6 +824,7 @@ async def run():
                     # → 回复草稿落「回复目标MsgID」→ auto_send 走 action:reply 串入原 thread.
                     related_inbound_msg_id=(msg.get("messageId") or ""),
                     manual_alias_review=manual_alias_review,  # 2026-06-01: marketing@/frankie@ 回复→强制人审
+                    stale_reply_days=_stale_days,  # 2026-06-02 Fix B: 旧回复唤醒守卫
                 )
                 if reply_rid:
                     print(f"[reply_monitor] reply draft generated rid={reply_rid}")
