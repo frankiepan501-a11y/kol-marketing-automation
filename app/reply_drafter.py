@@ -804,25 +804,22 @@ async def draft_reply(
     rid = await feishu.create_record(config.T_DRAFT, fields)
     print(f"[reply_drafter] created draft rid={rid} intent={intent_type} sub={sub}")
 
-    # ship_confirm 主表回填 (默认地址 / 默认电话 / 寄样次数+1 / 上次寄样日期 / 上次寄样订单号)
+    # ship_confirm 主表回填 — **只缓存默认收件地址/电话**, 不在草稿创建时标"已寄样"。
+    # 2026-06-02 修: 原来在此处就回填 寄样次数+1/上次寄样日期/上次寄样订单号 = **运营确认前预标已寄样**。
+    # 若运营在寄样卡上否决(决定不寄, 如 mrbrian 被翻出的久未互动旧回复), 主表却仍显示已寄样 →
+    # 污染 寄样次数 / 上次寄样订单号 / 下游 upload_register·completion 漏斗·_already_shipped 守门。
+    # 正解: 寄样次数/订单号/日期 改由 auto_send 在 ship_confirm **真发出时**回填(auto_send 已有此逻辑,
+    # gate 依赖的 草稿「寄样订单号」仍在上面写, 不受影响) → 否决的卡不再误标主表。
     if sub == "ship_confirm" and extracted_address:
         try:
             target_table = config.T_EDITOR if contact_type == "editor" else config.T_KOL
-            cur_count = cf.get("寄样次数") or 0
-            try: cur_count = int(cur_count)
-            except (ValueError, TypeError): cur_count = 0
-            backfill_payload = {
-                "默认收件地址": extracted_address[:500],
-                "寄样次数": cur_count + 1,
-                "上次寄样日期": now_ms,
-                "上次寄样订单号": fields["寄样订单号"],
-            }
+            backfill_payload = {"默认收件地址": extracted_address[:500]}
             if recipient_phone:
                 backfill_payload["默认收件电话"] = recipient_phone
             await feishu.update_record(target_table, contact_record["record_id"], backfill_payload)
-            print(f"[reply_drafter] ship_order created {fields['寄样订单号']} for {contact_name}")
+            print(f"[reply_drafter] ship_confirm draft {fields['寄样订单号']} created for {contact_name} (主表寄样字段待 auto_send 真发出时回填)")
         except Exception as e:
-            print(f"[reply_drafter] backfill master ship fields fail: {e}")
+            print(f"[reply_drafter] backfill default address fail: {e}")
 
     # Phase 1 ROI: 第一次写 UTM ID 到联系人主表 (idempotent)
     if utm_id_value:
