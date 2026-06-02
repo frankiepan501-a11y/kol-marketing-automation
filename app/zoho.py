@@ -467,6 +467,38 @@ async def search_inbox(brand: str, search_key: str, limit: int = 30):
         return r.json().get("data") or []
 
 
+# 2026-06-01 方案B: 扫整个账户收件箱(所有非 sent/draft/spam/trash 文件夹), 不按 to:别名过滤.
+# 根治多内部外联别名(partner/marketing/frankie/sibyl.guo/goya.li...)的回复被漏接 —
+# reply_monitor 由 find_contact 池门控过滤非 KOL 邮件, 任意我方地址收到的 KOL 回复都能捕获.
+_SKIP_FOLDERS = {"sent", "sent items", "已发送", "drafts", "outbox", "templates", "spam", "trash", "草稿", "垃圾"}
+
+
+async def list_inbox(brand: str, per_folder: int = 60):
+    """返回账户收件类文件夹最近 per_folder 封消息 (含 fromAddress/toAddress/messageId/subject/folderId/summary/receivedTime)."""
+    cfg = config.BRAND_CONFIG[brand]
+    tok = await access(brand)
+    aid = cfg["account_id"]
+    out = []
+    async with httpx.AsyncClient(timeout=45.0) as cli:
+        fr = await cli.get(f"https://mail.zoho.com/api/accounts/{aid}/folders",
+                           headers={"Authorization": f"Zoho-oauthtoken {tok}"})
+        fr.raise_for_status()
+        for f in (fr.json().get("data") or []):
+            fname = (f.get("folderName") or "").lower()
+            ftype = (f.get("folderType") or "").lower()
+            if ftype == "sent" or fname in _SKIP_FOLDERS:
+                continue
+            try:
+                r = await cli.get(
+                    f"https://mail.zoho.com/api/accounts/{aid}/messages/view?folderId={f['folderId']}&limit={per_folder}&start=1",
+                    headers={"Authorization": f"Zoho-oauthtoken {tok}"})
+                r.raise_for_status()
+                out += (r.json().get("data") or [])
+            except Exception:
+                continue
+    return out
+
+
 async def test_send(brand: str, to_addr: str, subject: str = "[Test] Zoho OAuth check",
                      body: str = "<p>Test email — please ignore. This message exists only to verify Zoho OAuth + send pipeline. Padding to satisfy V2 layer-1 length floor.</p>"):
     return await send_email(brand, to_addr, subject, body)
