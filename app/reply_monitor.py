@@ -65,6 +65,27 @@ def check_received(body: str) -> tuple:
     m = RECEIVED_RE.search((body or "")[:800])
     return (bool(m), m.group(0) if m else "")
 
+
+# ===== "尚未收到" 否定上下文检测 (2026-06-02 manual_ship_recon 防误判) =====
+# check_received 严 regex 已挡掉报价/兴趣类(probe 实测), 但仍可能命中"haven't received it yet"
+# 这类**否定**句 → 必须抑制(否则把"还没收到"误当"已收到"). 命中任一否定 pattern 即抑制本封 received 推进.
+RECEIVED_NEG_PATTERNS = [
+    r"\b(have'?n'?t|has'?n'?t|had'?n'?t|did'?n'?t|do'?n'?t|does'?n'?t|won'?t|can'?t|not|never|no)\s+(yet\s+)?(received|receive|got|gotten|get|getting|arrived|arrive)\b",
+    r"\b(received|got|arrived)\b[^.!?\n]{0,15}\b(yet|not)\b",            # "received ... yet/not"
+    r"\bnot\s+(yet\s+)?(here|arrived|received|in)\b",
+    r"\bstill\s+(haven'?t|hasn'?t|waiting|no|not)\b",
+    r"\bwaiting\s+(for|on)\b",
+    r"\bwhen\s+(will|should|can|do)\s+(i|it|we|you)\b.{0,18}(receive|arrive|get|ship|expect|send)",
+    r"没\s*(收到|到货|拿到)", r"还没", r"未\s*(收到|到货)", r"沒\s*(收到|到貨)",
+]
+RECEIVED_NEG_RE = re.compile("|".join(RECEIVED_NEG_PATTERNS), re.IGNORECASE)
+
+
+def check_received_negation(body: str) -> tuple:
+    """检测"尚未收到/还在等"类否定上下文 → (bool, 命中片段). 命中则不应把本封当作"已收到"."""
+    m = RECEIVED_NEG_RE.search((body or "")[:800])
+    return (bool(m), m.group(0) if m else "")
+
 POSITIVE = {"感兴趣", "要报价"}
 INTENT_TO_STATUS_KOL = {
     "感兴趣": "洽谈中", "要报价": "洽谈中",
@@ -243,6 +264,102 @@ async def find_draft(contact_rid: str, contact_type: str):
     pool = unreplied if unreplied else matched
     pool.sort(key=lambda r: r["fields"].get("发送时间") or 0, reverse=True)
     return pool[0], matched
+
+
+async def _manual_ship_recon(contact: dict, ctype: str, draft: dict, brand: str,
+                             from_addr: str, received_frag: str) -> dict:
+    """手动寄样补登记 (2026-06-02 待办2 常态机制).
+
+    场景: 运营**手动寄样**(系统从没建 ship_confirm 草稿) → KOL 回信"已收到" →
+    本函数补建一条合成「已签收」寄样草稿 + 回填主表寄样字段, 让该 KOL 进入
+    warm_recap / nudge / 上稿登记 / 终态全链 (= 与系统寄样同等待遇)。
+
+    调用前提 (调用方已门控): intent∈{感兴趣,要报价} + check_received 命中严 regex +
+    无 received 否定上下文 + 该 contact **完全无任何寄样草稿**(待发货/已发货/已签收都没有)。
+
+    本函数再加 3 道上下文门控防误判 (probe 实测 received 严 regex 已 0 误判, 这里再保险):
+      1. 合作状态 ∉ {未建联, 黑名单, 不合适, 空}  (无寄样关系上下文 → "收到"多指收到邮件)
+      2. 主表「上稿日期」必须空                    (已上稿无需"确认收到+brief"暖信, 防 rogersbase 类倒退)
+      3. 关联草稿必须有「关联产品」                 (无产品→warm_recap 只能发通用暖信, 不如不发)
+
+    合成草稿镜像 warm_recap.build_for_ship_draft 所需字段; 主表回填镜像 auto_send 寄样发出回写。
+    Returns {ok, rid|skip, ...}。纯写 bitable + 跟进, 不发任何邮件/卡 (warm_recap cron 才发, 仍走人审卡)。
+    """
+    cf = contact["fields"]
+    coop = ext(cf.get("合作状态")) or ""
+    if coop in ("未建联", "黑名单", "不合适", ""):
+        return {"ok": False, "skip": f"coop={coop or '空'} 不符寄样上下文"}
+    if cf.get("上稿日期"):
+        return {"ok": False, "skip": "主表已有上稿日期, 无需补暖信"}
+    prod_rid = xrid(draft["fields"].get("关联产品"))
+    if not prod_rid:
+        return {"ok": False, "skip": "关联草稿无产品, 跳过(防通用暖信)"}
+
+    is_editor = (ctype == "editor")
+    link_field = "关联媒体人" if is_editor else "关联KOL"
+    contact_rid = contact["record_id"]
+    obj_type = "媒体人" if is_editor else "KOL"
+    alias = config.BRAND_CONFIG[brand]["alias_from"]
+    now_ms = int(time.time() * 1000)
+    subj = ext(draft["fields"].get("邮件主题")) or "your sample"
+
+    # 1) 合成「已签收」寄样草稿 (warm_recap.run 扫 寄样阶段=已签收 → 自动接手)
+    ship_fields = {
+        "邮件草稿ID": f"manualship-{contact_rid[-8:]}-{int(time.time())}",
+        link_field: [contact_rid],
+        "关联产品": [prod_rid],
+        "对象类型": obj_type,
+        "寄样阶段": "已签收",
+        "签收时间": now_ms,
+        "发货时间": now_ms,
+        "寄样订单号": "MANUAL-RECON",        # sentinel: 手动寄样无真实运单号
+        "发送邮箱": alias,
+        "收件邮箱": from_addr,
+        "邮件主题": f"[手动寄样补登记] {subj}"[:200],
+        "邮件草稿来源": "ship_confirm",       # 让下游(sla/warm_recap)按寄样草稿处理
+        "邮件草稿状态": "已发送",             # 终态, 不再被 auto_send 当待发处理
+        "生成时间": now_ms,
+    }
+    task_rid = xrid(draft["fields"].get("关联任务"))
+    if task_rid:
+        ship_fields["关联任务"] = [task_rid]
+    ship_rid = await feishu.create_record(config.T_DRAFT, ship_fields)
+
+    # 2) 回填主表寄样字段 (镜像 auto_send 寄样发出回写; 幂等仅空时写)
+    master_tbl = config.T_EDITOR if is_editor else config.T_KOL
+    m = {}
+    try:
+        if int(cf.get("寄样次数") or 0) < 1:
+            m["寄样次数"] = 1
+    except (ValueError, TypeError):
+        m["寄样次数"] = 1
+    if not ext(cf.get("上次寄样订单号")):
+        m["上次寄样订单号"] = "MANUAL-RECON"
+    if not cf.get("上次寄样日期"):
+        m["上次寄样日期"] = now_ms
+    if m:
+        try:
+            await feishu.update_record(master_tbl, contact_rid, m)
+        except Exception as e:
+            print(f"[reply_monitor manual-ship] 主表回填失败 {contact_rid}: {e}")
+
+    # 3) 跟进记录
+    fu_tbl = config.T_EDITOR_FU if is_editor else config.T_KOL_FU
+    fu = {
+        "跟进摘要": f"[手动寄样补登记] {from_addr} 回信已收到",
+        "跟进日期": now_ms,
+        "跟进方式": "邮件",
+        "跟进内容": (f"KOL/媒体人回信表达已收到样品(命中: {received_frag!r}), 但系统无寄样草稿"
+                     f"=运营手动寄样未登记 → 自动补建已签收登记(草稿 {ship_rid}, 寄样订单号=MANUAL-RECON)"
+                     f", 进入 warm_recap/nudge/上稿登记全链。"),
+        link_field: [contact_rid],
+    }
+    try:
+        await feishu.create_record(fu_tbl, fu)
+    except Exception as e:
+        print(f"[reply_monitor manual-ship] 跟进记录失败 {contact_rid}: {e}")
+
+    return {"ok": True, "rid": ship_rid, "contact": contact_rid, "coop_before": coop}
 
 
 def _contact_stage_label(cf: dict) -> str:
@@ -596,15 +713,24 @@ async def run():
             ship_advanced_rid = None
             if intent_type in ("感兴趣", "要报价"):
                 hit_received, received_frag = check_received(email_body)
+                # 2026-06-02: received 严 regex 命中但有"尚未收到/还在等"否定上下文 → 抑制 (防误推进)
                 if hit_received:
-                    # 找该 contact 当前"寄样阶段=已发货"且"签收时间"为空的草稿
+                    neg_hit, neg_frag = check_received_negation(email_body)
+                    if neg_hit:
+                        print(f"[reply_monitor] received 命中但有否定上下文({neg_frag!r}), 跳过寄样推进 {from_addr}")
+                        hit_received = False
+                if hit_received:
                     link_field = "关联媒体人" if ctype == "editor" else "关联KOL"
                     try:
+                        # 查该 contact 所有寄样草稿(待发货/已发货/已签收) — 既用于推进, 也用于判定"是否手动寄样(全无草稿)"
                         ship_drafts = await feishu.search_records(config.T_DRAFT, [
                             {"field_name": link_field, "operator": "contains", "value": [contact["record_id"]]},
-                            {"field_name": "寄样阶段", "operator": "is", "value": ["已发货"]},
+                            {"field_name": "寄样阶段", "operator": "is", "value": ["待发货", "已发货", "已签收"]},
                         ])
+                        # case 1: 有 已发货 草稿 → 推进 已签收 (原 P0-C)
                         for sd in ship_drafts:
+                            if ext(sd['fields'].get('寄样阶段')) != "已发货":
+                                continue
                             if sd['fields'].get('签收时间'):
                                 continue  # 已签收过, 跳过
                             try:
@@ -617,8 +743,20 @@ async def run():
                                 break  # 一个 contact 推进 1 个草稿就够
                             except Exception as e:
                                 print(f"[reply_monitor P0-C] 推进失败 {sd['record_id']}: {e}")
+                        # case 2: 完全无任何寄样草稿 → 手动寄样补登记 (待办2 常态机制)
+                        # 天然去重: 补建后下轮 ship_drafts 非空 → 不再进本分支。
+                        if not ship_drafts and not ship_advanced_rid:
+                            try:
+                                recon = await _manual_ship_recon(contact, ctype, draft, brand, from_addr, received_frag)
+                                if recon.get("ok"):
+                                    ship_advanced_rid = recon["rid"]
+                                    print(f"[reply_monitor manual-ship] 补建已签收登记 {recon['rid']} ({contact.get('record_id')}) hit={received_frag!r}")
+                                else:
+                                    print(f"[reply_monitor manual-ship] 跳过 {contact.get('record_id')}: {recon.get('skip')}")
+                            except Exception as e:
+                                print(f"[reply_monitor manual-ship] 补登记失败 {contact.get('record_id')}: {e}")
                     except Exception as e:
-                        print(f"[reply_monitor P0-C] 查 ship_confirm 草稿失败: {e}")
+                        print(f"[reply_monitor P0-C] 查/补寄样草稿失败: {e}")
 
             if ctype == "editor":
                 await feishu.create_record(config.T_EDITOR_FU, {
