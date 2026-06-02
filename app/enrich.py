@@ -26,6 +26,29 @@ LANG_DISPLAY = {
     "pt": "Portuguese", "ja": "Japanese", "it": "Italian", "nl": "Dutch", "sv": "Swedish",
 }
 
+# 产品链接 CTA 标签(按链接类型 × 语言). 缺语言回落 en.
+LINK_LABELS = {
+    "amazon": {"en": "See it on Amazon →", "de": "Auf Amazon ansehen →", "fr": "Voir sur Amazon →",
+               "es": "Verlo en Amazon →", "pt": "Ver na Amazon →", "ja": "Amazonで見る →",
+               "it": "Vedi su Amazon →", "nl": "Bekijk op Amazon →", "sv": "Se det på Amazon →"},
+    "site": {"en": "See it on our site →", "de": "Auf unserer Website →", "fr": "Voir sur notre site →",
+             "es": "Ver en nuestro sitio →", "pt": "Ver no nosso site →", "ja": "公式サイトで見る →",
+             "it": "Vedi sul nostro sito →", "nl": "Bekijk op onze site →", "sv": "Se det på vår sajt →"},
+}
+
+
+def _build_links_block(pf, brand, p_name, kol_name, lang, _utm):
+    """构建邮件产品链接段落: 任务栏填了几条(亚马逊/独立站)就生成几行 <p>👉<a>...</a></p>,
+    每条独立 UTM + 按语言本地化标签. 都没填 → 返回空串(防死链 gate 已在上游拦)。"""
+    paras = []
+    for kind, raw in feishu.product_links(pf):
+        url = _utm.make_utm_link(raw, brand, p_name, kol_name)
+        if not url:
+            continue
+        label = LINK_LABELS.get(kind, {}).get(lang) or LINK_LABELS.get(kind, {}).get("en", "See it →")
+        paras.append(f'<p>👉 <a href="{url}">{label}</a></p>')
+    return "\n".join(paras)
+
 # V1.5 直控筛选: 任务台「筛选-语言」中文 options → KOL/媒体人主表「语言」字段 ISO 代码
 # 双向兼容: 中文 options(运营友好) + ISO 代码(老数据/媒体人端原任务台 ISO options)
 LANG_CN_TO_ISO = {
@@ -357,6 +380,9 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
     lang = COUNTRY_TO_LANG.get(kol_country, "en")
     lang_display = LANG_DISPLAY.get(lang, "English")
 
+    # 产品链接段落 (2026-06-02): 任务栏填了几个就放几个 (亚马逊 + 独立站). 每条独立 UTM.
+    links_block = _build_links_block(pf, brand, p_name, kol_name, lang, _utm)
+
     # 从 breakdown 抽出亮点(高分维度)
     high_dims = sorted(breakdown.items(), key=lambda x: x[1]["score"], reverse=True)[:3]
     angle_hints = " / ".join(f"{k}:{v['reason']}" for k, v in high_dims)
@@ -384,10 +410,8 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
     ✓ 用 "Your retro-gaming corner has serious vibes" (基于风格标签的概括)
     ✓ 模糊但真实 > 具体但编造 — 宁可泛泛而谈,也不要假装看过
   ✓ 中段强调"为什么契合他"(参考下方匹配亮点)
-  ✓ 1 行产品链接 (独立段落): <p>👉 <a href="{p_url}">{{See it in action →}}</a></p>
-     - en: "See it in action →"  / de: "Sieh es live →"  / fr: "À voir en action →"
-     - es: "Míralo en acción →"  / pt: "Veja em ação →"   / ja: "実物を見る →"
-     - it: "Guardalo in azione →" / nl: "Zie het in actie →"
+  ✓ 产品链接段落: 必须把下面【产品链接】里的每一行 <p>...</p> **原样逐字**放进正文(中段之后、CTA 之前),
+     有几行放几行, 禁止改 href / 禁止合并成一行 / 禁止翻译或改写 <a> 标签里的文字 / 禁止增删链接。
   ✓ CTA 开放式: "Would you be curious to try one? Happy to send it over, no strings attached."
   ✗ 严禁内部 SKU 代号 (YM24/PK02/FL-JC 等), 严禁 <img>, 严禁中文混杂
 
@@ -402,8 +426,11 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
 【产品】
 {p_name} ({p_brand} / {p_cat}) | 报价: ${p_price} USD
 卖点: {p_s1} | {p_s2} | {p_s3}
-官网: {p_url} | 目标人群: {p_audience}
+目标人群: {p_audience}
 媒体背书: {p_media or '(无)'}
+
+【产品链接】(原样逐字放进正文, 有几行放几行)
+{links_block}
 
 【匹配亮点】(系统已确认 {total:.0f} 分,基于以下维度)
 {angle_hints}
@@ -413,7 +440,7 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
 返回 JSON:
 {{
   "email_subject": "主题",
-  "email_body": "<p>开头</p><p>中段</p><p>CTA段</p><p>-- {signature}</p>",
+  "email_body": "<p>开头</p><p>中段</p>(此处放【产品链接】的每一行)<p>CTA段</p><p>-- {signature}</p>",
   "highlights": "1句话总结这位 KOL 与产品的契合点",
   "angle": "建议切入角度(英文,1句)"
 }}"""
@@ -449,13 +476,23 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
             ban_phrase_failed = True
             print(f"[ban-phrase] 重生异常: {e}, 标记需人审")
 
+    # 防御: 确保每条产品链接都在正文里 (DeepSeek 偶发漏/改链接). 缺则在署名前补回整段.
+    if links_block:
+        link_urls = re.findall(r'href="([^"]+)"', links_block)
+        body_norm = body.replace("&amp;", "&")
+        miss = [u for u in link_urls if u not in body_norm]
+        if miss:
+            print(f"[links] DeepSeek 漏链接 {len(miss)}/{len(link_urls)} → 补回 links_block")
+            sig_m = re.search(r'<p>\s*--\s', body)
+            body = (body[:sig_m.start()] + links_block + body[sig_m.start():]) if sig_m else (body + links_block)
+
     return {
         "subject": r.get("email_subject", ""),
         "body": body,
         "highlights": r.get("highlights", ""),
         "angle": r.get("angle", ""),
         "ban_phrase_failed": ban_phrase_failed,
-        "utm_url": p_url,            # Phase 1: 实发产品链接 (含 UTM)
+        "utm_url": p_url,            # Phase 1: 实发产品链接 (含 UTM, 官网优先做 ROI 归因)
         "utm_id": utm_id_value,      # Phase 1: KOL UTM ID (= utm_content)
     }
 

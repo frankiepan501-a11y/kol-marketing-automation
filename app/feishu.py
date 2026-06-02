@@ -128,10 +128,22 @@ def ext_url(f):
 
 
 def product_url(fields):
-    """产品对外链接: 「官网链接」优先, 缺则降级「亚马逊链接」.
+    """产品主对外链接(单条, 用于 UTM 字段/ROI 归因): 「官网链接」优先, 缺则降级「亚马逊链接」.
     2026-06-02: 运营改用填亚马逊链接(信息更丰富), 官网链接可空 → 防死链 gate 据此放宽.
     两者都是 URL 字段, ext_url 取的 link 必为完整 URL → 不会死链 (亚马逊即使 text 显示 ASIN, link 仍是 https://www.amazon.com/dp/...)."""
     return ext_url(fields.get("官网链接")) or ext_url(fields.get("亚马逊链接"))
+
+
+def product_links(fields):
+    """产品对外链接列表(多条, 用于邮件正文同时展示): 任务栏填了几个就返回几个.
+    2026-06-02 Frankie: 亚马逊 + 独立站两条都填则邮件里都放, 只填一条就放一条.
+    Returns ordered [(kind, url_raw), ...]; kind ∈ {'amazon','site'}; 都空则 []."""
+    out = []
+    amz = ext_url(fields.get("亚马逊链接"))
+    site = ext_url(fields.get("官网链接"))
+    if amz: out.append(("amazon", amz))
+    if site: out.append(("site", site))
+    return out
 
 
 import re as _re
