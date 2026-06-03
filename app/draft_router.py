@@ -262,13 +262,60 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
     else:
         template_color = "orange" if path == "待人审" else "red"
         title_emoji = "📝" if path == "待人审" else "⚠️"
+        # 2026-06-03: 联系人/产品信息提前算 → 群信息卡 + 操作卡共用 (修卡片合并后群卡字段回退,
+        # 群卡之前只剩评分/主题/理由, 缺 KOL名/阶段/平台/粉丝/产品/品牌/收件人/国家 — 佳烨反馈信息不全)
+        sender_alias2 = ext(f.get("发送邮箱")) or ""
+        brand2 = "POWKONG" if "powkong" in sender_alias2.lower() else "FUNLAB"
+        email2 = ext(f.get("收件邮箱")) or ""
+        prod_name = ""
+        _prid = feishu.xrid(f.get("关联产品"))
+        if _prid:
+            try:
+                _ppf = (await feishu.get_record(config.T_PRODUCT, _prid))["fields"]
+                prod_name = ext(_ppf.get("产品名")) or ext(_ppf.get("产品英文名")) or ""
+            except Exception as _e:
+                print(f"[draft_router] 产品名解析失败: {_e}")
+        contact_info = {}
+        country2 = ""
+        try:
+            _is_ed = bool(feishu.xrid(f.get("关联媒体人")))
+            _crid = feishu.xrid(f.get("关联媒体人")) if _is_ed else feishu.xrid(f.get("关联KOL"))
+            if _crid:
+                from . import reply_monitor  # 惰性 import 防循环; _contact_stage_label 纯函数
+                _ccf = (await feishu.get_record(config.T_EDITOR if _is_ed else config.T_KOL, _crid))["fields"]
+                country2 = ext(_ccf.get("国家原文")) or ext(_ccf.get("国家")) or ""
+                if _is_ed:
+                    contact_info = {"name": ext(_ccf.get("媒体人姓名")) or "?",
+                                    "platform": ext(_ccf.get("主要媒体")) or ext(_ccf.get("所属媒体")) or "",
+                                    "fans": "", "stage": reply_monitor._contact_stage_label(_ccf)}
+                else:
+                    try:
+                        _fans = f"{int(_ccf.get('粉丝数') or 0):,}"
+                    except (ValueError, TypeError):
+                        _fans = str(_ccf.get("粉丝数") or "")
+                    contact_info = {"name": ext(_ccf.get("账号名")) or "?",
+                                    "platform": ext(_ccf.get("主平台")) or "",
+                                    "fans": _fans, "stage": reply_monitor._contact_stage_label(_ccf)}
+        except Exception as _e:
+            print(f"[draft_router] 联系人信息解析失败: {_e}")
+        _ci2 = contact_info or {}
+        who2 = "媒体人" if contact_type == "媒体人" else "KOL"
         card = {
             "header": {
                 "template": template_color,
                 "title": {"tag": "plain_text", "content": f"{title_emoji} 草稿待审 ({path}) — {source} / {contact_type}"},
             },
             "elements": [
+                # 2026-06-03: 群信息卡补全 KOL 身份块 (对齐操作卡 + 老知会卡, 修合并后字段回退)
+                {"tag": "div", "text": {"tag": "lark_md", "content": f"**🧭 当前阶段**: {_ci2.get('stage') or '?'}"}},
                 {"tag": "div", "fields": [
+                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**{who2}**: {_ci2.get('name') or '?'}"}},
+                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**平台**: {_ci2.get('platform') or '?'}"}},
+                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**粉丝**: {_ci2.get('fans') or '—'}"}},
+                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**国家**: {country2 or '?'}"}},
+                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**产品**: {prod_name or '?'}"}},
+                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**品牌**: {brand2}"}},
+                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**收件人**: {email2 or '?'}"}},
                     {"is_short": True, "text": {"tag": "lark_md", "content": f"**AI 评分**: {score}/10"}},
                     {"is_short": True, "text": {"tag": "lark_md", "content": f"**承诺**: {'⚠️ 是' if committed else '否'}"}},
                 ]},
@@ -298,38 +345,7 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
         role = "needs_rewrite" if path == "需人改" else "reviewer"
         targets = await feishu.resolve_notify_targets(role)
         # 2026-05-29: cold/reply 互动审核卡 (负责人卡上直接 通过/否决/重生, 无需跳表格)
-        sender_alias2 = ext(f.get("发送邮箱")) or ""
-        brand2 = "POWKONG" if "powkong" in sender_alias2.lower() else "FUNLAB"
-        prod_name = ""
-        _prid = feishu.xrid(f.get("关联产品"))
-        if _prid:
-            try:
-                _ppf = (await feishu.get_record(config.T_PRODUCT, _prid))["fields"]
-                prod_name = ext(_ppf.get("产品名")) or ext(_ppf.get("产品英文名")) or ""
-            except Exception as _e:
-                print(f"[draft_router] 产品名解析失败: {_e}")
-        # 2026-05-29 Frankie: 拉联系人主表 → 卡片显示 KOL 名/平台/粉丝/阶段 (运营一眼看清是谁/什么阶段)
-        contact_info = {}
-        try:
-            _is_ed = bool(feishu.xrid(f.get("关联媒体人")))
-            _crid = feishu.xrid(f.get("关联媒体人")) if _is_ed else feishu.xrid(f.get("关联KOL"))
-            if _crid:
-                from . import reply_monitor  # 惰性 import 防循环; _contact_stage_label 纯函数
-                _ccf = (await feishu.get_record(config.T_EDITOR if _is_ed else config.T_KOL, _crid))["fields"]
-                if _is_ed:
-                    contact_info = {"name": ext(_ccf.get("媒体人姓名")) or "?",
-                                    "platform": ext(_ccf.get("主要媒体")) or ext(_ccf.get("所属媒体")) or "",
-                                    "fans": "", "stage": reply_monitor._contact_stage_label(_ccf)}
-                else:
-                    try:
-                        _fans = f"{int(_ccf.get('粉丝数') or 0):,}"
-                    except (ValueError, TypeError):
-                        _fans = str(_ccf.get("粉丝数") or "")
-                    contact_info = {"name": ext(_ccf.get("账号名")) or "?",
-                                    "platform": ext(_ccf.get("主平台")) or "",
-                                    "fans": _fans, "stage": reply_monitor._contact_stage_label(_ccf)}
-        except Exception as _e:
-            print(f"[draft_router] 联系人信息解析失败: {_e}")
+        # (联系人/产品/品牌/收件人 已在上方提前算, 群信息卡 + 操作卡共用)
         action_card = _build_review_action_card(record_id, rec, score, summary, reasons_text,
                                                 path, source, contact_type, prod_name, brand2, base_url,
                                                 contact_info=contact_info, inbound_reply=inbound_reply)
