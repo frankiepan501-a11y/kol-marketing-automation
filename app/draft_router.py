@@ -19,10 +19,26 @@ SCORE_RETRY_THRESHOLD = 5      # < 此分退回重生
 MAX_RETRIES = 2                # 重生上限
 
 
+def _inbound_reply_elements(inbound_reply: dict) -> list:
+    """渲染「KOL 这封回复说了什么」段 (2026-06-03 卡片合并: 并入原 reply_monitor 独立知会卡的内容).
+    inbound_reply = reply_monitor.classify_intent 结果 dict(type/summary/key_quote/suggested_action)."""
+    if not inbound_reply:
+        return []
+    it = (inbound_reply.get("type") or "").strip()
+    summ = (inbound_reply.get("summary") or "").strip()
+    quote = (inbound_reply.get("key_quote") or "").strip()
+    head = "**📥 KOL 这封回复**" + (f": {it}" if it else "")
+    els = [{"tag": "div", "text": {"tag": "lark_md", "content": (head + (f" — {summ}" if summ else ""))[:300]}}]
+    if quote:
+        els.append({"tag": "div", "text": {"tag": "lark_md", "content": f"> {quote[:200]}"}})
+    return els
+
+
 async def route_draft(record_id: str, ship_confirm_meta: dict = None,
                        force_review_intent: str = None,
                        force_review_reason: str = None,
                        force_review_scenario: str = None,
+                       inbound_reply: dict = None,
                        skip_notify: bool = False) -> dict:
     """
     主入口: 给定草稿 record_id → 评审 + 路由 → 返回结果摘要
@@ -160,12 +176,19 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
     # 5. 触发后续动作 (异步, 不阻塞主路由)
     if action == "notify_human" and not skip_notify:
         await _notify_human_review(record_id, rec, score, committed, summary, reasons_text, path,
-                                    ship_confirm_meta=ship_confirm_meta)
+                                    ship_confirm_meta=ship_confirm_meta, inbound_reply=inbound_reply)
     elif action == "retry":
         # 重生在调用方处理 (因为重生需要原始任务上下文)
         # router 只标状态,由 cron 或 generator 自身扫描重生标记触发重生
         pass
     # auto_send: 由 send_approved cron 扫 自动通过 状态自动发,无需此处触发
+    # 2026-06-03 卡片合并: reply 类自动通过(无 reviewer 卡) → 发一行群知会, 防退订/拒绝等
+    # 被原 reply_monitor 知会卡覆盖、现删卡后变静默 (只对入站回复=inbound_reply 非空, 不影响 cold).
+    if action == "auto_send" and inbound_reply and not skip_notify:
+        try:
+            await _notify_auto_reply(rec, score, inbound_reply)
+        except Exception as e:
+            print(f"[draft_router] auto-reply 群知会失败: {e}")
 
     return {
         "record_id": record_id,
@@ -179,9 +202,33 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
     }
 
 
+async def _notify_auto_reply(rec: dict, score: int, inbound_reply: dict):
+    """2026-06-03 卡片合并: reply 自动通过(无 reviewer 卡)时发一行群知会, 替代原 reply_monitor 知会卡.
+    只对入站回复(inbound_reply 非空)发 → 群保留"X 回复了/退订了"可见性, 但不臃肿(无按钮无详情堆)."""
+    f = rec["fields"]
+    it = (inbound_reply.get("type") or "").strip() or "回复"
+    summ = (inbound_reply.get("summary") or "").strip()
+    email = ext(f.get("收件邮箱")) or "?"
+    src = ext(f.get("邮件草稿来源")) or "reply"
+    base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_DRAFT}"
+    card = {
+        "header": {"template": "green", "title": {"tag": "plain_text", "content": f"✅ KOL 回复已自动处理 — {it}"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content":
+                f"**{email}** 回复「{it}」, AI 评分 {score}/10 已自动通过, 系统将自动回复。"
+                + (f"\n{summ[:160]}" if summ else "")}},
+            {"tag": "action", "actions": [
+                {"tag": "button", "text": {"tag": "plain_text", "content": "打开草稿"},
+                 "url": base_url, "type": "default"},
+            ]},
+        ],
+    }
+    await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+
+
 async def _notify_human_review(record_id: str, rec: dict, score: int,
                                committed: bool, summary: str, reasons_text: str, path: str,
-                               ship_confirm_meta: dict = None):
+                               ship_confirm_meta: dict = None, inbound_reply: dict = None):
     """飞书 IM 通知运营审核
     ship_confirm_meta 存在 → 渲染寄样高优先级卡片 (含仓库发货建议 + SLA)
     """
@@ -226,6 +273,8 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
                     {"is_short": True, "text": {"tag": "lark_md", "content": f"**承诺**: {'⚠️ 是' if committed else '否'}"}},
                 ]},
                 {"tag": "div", "text": {"tag": "lark_md", "content": f"**主题**: {subject[:100]}"}},
+                # 2026-06-03 卡片合并: 群信息卡也带"KOL 这封回复说了什么"(原独立知会卡内容)
+                *_inbound_reply_elements(inbound_reply),
                 {"tag": "div", "text": {"tag": "lark_md", "content": f"**评分总评**: {summary}"}},
                 {"tag": "hr"},
                 {"tag": "div", "text": {"tag": "lark_md", "content": f"**审核理由 (5 项)**\n{reasons_text[:300]}"}},
@@ -283,7 +332,7 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
             print(f"[draft_router] 联系人信息解析失败: {_e}")
         action_card = _build_review_action_card(record_id, rec, score, summary, reasons_text,
                                                 path, source, contact_type, prod_name, brand2, base_url,
-                                                contact_info=contact_info)
+                                                contact_info=contact_info, inbound_reply=inbound_reply)
 
     # 群通知 + 个人通知, 统计成败回写草稿表「卡片发送状态/错误/时间」(2026-05-16)
     # 2026-05-17 A5: 保存群 msg_id 用于结束态 update card 标"已审"
@@ -420,7 +469,7 @@ def _build_ship_confirm_card(record_id: str, rec: dict, score: int, summary: str
 def _build_review_action_card(record_id: str, rec: dict, score: int, summary: str,
                               reasons_text: str, path: str, source: str, contact_type: str,
                               product_name: str, brand: str, base_url: str,
-                              contact_info: dict = None) -> dict:
+                              contact_info: dict = None, inbound_reply: dict = None) -> dict:
     """cold/reply 待审互动卡 (聪哥3号发负责人私聊): 全正文 + 信息 + 通过/否决/重生/去表格 按钮.
     运营卡片上直接审核, 无需跳表格. 按钮 value 走 n8n event-hub Draft Action 分支落状态.
     contact_info (2026-05-29 Frankie): {name, platform, fans, stage} — 卡片一眼看清 KOL 是谁/什么阶段.
@@ -448,6 +497,10 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**收件人**: {email or '?'}"}},
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**AI评分**: {score}/10"}},
         ]},
+    ]
+    # 2026-06-03 卡片合并: 审核卡内置"KOL 这封回复说了什么"(原独立知会卡内容) → reviewer 一张卡看全+操作
+    elements += _inbound_reply_elements(inbound_reply)
+    elements += [
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**评分总评**: {summary}"}},
     ]
     bits = []

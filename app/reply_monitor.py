@@ -799,8 +799,11 @@ async def run():
                     product_name = ext(_pf.get("产品名")) or ext(_pf.get("产品英文名")) or ""
                 except Exception as _e:
                     print(f"[reply_monitor] 产品名解析失败 rid={_prod_rid}: {_e}")
-            card = build_card(ctype, contact_info, brand, intent, subject, product_name)
-            await notify_all(card, draft_rid=draft["record_id"])
+            # 2026-06-03 卡片合并: 不再发独立"KOL 回复"知会卡(聪哥1号→群+NOTIFY_USERS 全员).
+            # 该卡与 draft_router 审核卡(已含 KOL名/阶段/产品/评分)信息重复, 让飞书臃肿(佳烨反馈)。
+            # 入站回复内容(意图/原话/建议)改为透传 inbound_intent → reply_drafter → route_draft,
+            # 渲染进审核卡(待人审)或自动通过群知会(auto_send), reviewer 一张卡看全+操作, 群只剩一张。
+            # contact_info 仍算(供下游卡复用阶段标签等); build_card/notify_all 保留为 dead code 不再调用。
 
             # === 自动生成回复草稿 (走 reviewer 自审通道) ===
             try:
@@ -825,6 +828,7 @@ async def run():
                     related_inbound_msg_id=(msg.get("messageId") or ""),
                     manual_alias_review=manual_alias_review,  # 2026-06-01: marketing@/frankie@ 回复→强制人审
                     stale_reply_days=_stale_days,  # 2026-06-02 Fix B: 旧回复唤醒守卫
+                    inbound_intent=intent,  # 2026-06-03 卡片合并: 入站回复内容渲染进审核卡(替代独立知会卡)
                 )
                 if reply_rid:
                     print(f"[reply_monitor] reply draft generated rid={reply_rid}")

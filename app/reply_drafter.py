@@ -605,6 +605,7 @@ async def draft_reply(
     related_inbound_msg_id: str = "",  # 邮件线程化: 被回复的 KOL 入站 messageId, 落「回复目标MsgID」→ auto_send 走 action:reply
     manual_alias_review: bool = False,  # 2026-06-01: 回复发往 marketing@/frankie@(非partner@主别名)=手动高触达关系→强制人审
     stale_reply_days: int = 0,          # 2026-06-02 Fix B: 该回复 receivedTime 距今天数(0=新/未知); ≥config.STALE_REPLY_DAYS=久未互动旧回复唤醒
+    inbound_intent: dict = None,        # 2026-06-03 卡片合并: reply_monitor 的入站分类 dict(type/summary/key_quote/suggested_action) → 透传给 route_draft 渲染进审核卡(替代原独立知会卡)
 ) -> Optional[str]:
     """
     生成 reply 草稿 → 写入「KOL·媒体人邮件草稿」 → 调 router 走自审
@@ -929,6 +930,7 @@ async def draft_reply(
             force_review_intent=force_label,
             force_review_reason=force_reason,
             force_review_scenario=scenario_label,   # v4 ④b: 高风险场景标签强制人审 (加法)
+            inbound_reply=inbound_intent,           # 2026-06-03 卡片合并: 入站回复内容渲染进审核卡
         )
         print(f"[reply_drafter] router result: score={result['score']} path={result['path']}")
     except Exception as e:
