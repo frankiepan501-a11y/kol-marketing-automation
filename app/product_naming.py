@@ -22,10 +22,12 @@ ext = feishu.ext
 async def _lookup_sku_lib(erp_or_model: str):
     """用「老库ERP SKU」反查 SKU 产品库. 该字段实际可能存 ERP SKU 或 品牌型号
     (如戴夫填的是 FF05A-04 = 品牌型号), 故两个字段都试.
-    Returns (series_en, model_en); 查不到/字段空 → (None, None)."""
+    Returns (series_en, model_en, ip_status);
+      - 查不到 → (None, None, None)
+      - 找到但 IP合规状态 字段空 → ip_status = '' (用于 default-deny 区分 infra-fail)."""
     erp_or_model = (erp_or_model or "").strip()
     if not erp_or_model:
-        return None, None
+        return None, None, None
     path = (f"/bitable/v1/apps/{config.SKU_LIB_APP_TOKEN}"
             f"/tables/{config.SKU_LIB_TABLE_ID}/records/search")
     body = {
@@ -33,18 +35,20 @@ async def _lookup_sku_lib(erp_or_model: str):
             {"field_name": "ERP SKU", "operator": "is", "value": [erp_or_model]},
             {"field_name": "品牌型号", "operator": "is", "value": [erp_or_model]},
         ]},
-        "field_names": ["系列英文名", "型号英文名", "ERP SKU", "品牌型号"],
+        "field_names": ["系列英文名", "型号英文名", "ERP SKU", "品牌型号", "IP合规状态"],
     }
     try:
         data = await feishu.api("POST", path, body, which="bitable")
     except Exception as e:
         print(f"[product_naming] SKU 库反查失败 ({erp_or_model}): {str(e)[:120]}")
-        return None, None
+        return None, None, None
     items = (data.get("data") or {}).get("items") or []
     if not items:
-        return None, None
+        return None, None, None
     f = items[0]["fields"]
-    return ext(f.get("系列英文名")).strip(), ext(f.get("型号英文名")).strip()
+    raw = f.get("IP合规状态")           # 单选: search 返回字符串; 兜底兼容 list
+    ip_status = raw.strip() if isinstance(raw, str) else (ext(raw).strip() if raw else "")
+    return ext(f.get("系列英文名")).strip(), ext(f.get("型号英文名")).strip(), ip_status
 
 
 def _compose(brand: str, series_en: str, model_en: str, main_kw: str) -> str:
@@ -70,7 +74,7 @@ async def resolve_product_en(pf: dict) -> tuple:
         erp = ext(pf.get("老库ERP SKU")).strip()
         if not erp:
             return existing, "manual_fallback", "缺「老库ERP SKU」→ 无法自动拼英文名, 当轮用现有手填名。请补老库ERP SKU。"
-        series_en, model_en = await _lookup_sku_lib(erp)
+        series_en, model_en, _ = await _lookup_sku_lib(erp)
         if not series_en:
             return existing, "manual_fallback", f"老库ERP SKU「{erp}」在 SKU 库查不到/系列英文为空 → 用现有手填名。请核对 SKU 或补 SKU 库系列英文。"
         name = _compose(brand, series_en, model_en, main_kw)
@@ -107,3 +111,35 @@ async def resolve_and_backfill(product: dict) -> dict:
         except Exception as e:
             print(f"[product_naming] 回填产品英文名失败: {str(e)[:120]}")
     return {"name": name, "source": source, "warn": warn, "backfilled": backfilled}
+
+
+# ===== IP 合规闸 (2026-06-03 Frankie) — 防 AI 以 FUNLAB 名义派单侵权品 =====
+# 真相源: FUNLAB SKU 产品库「IP合规状态」单选字段。
+#   合规-无IP / 合规-已授权 → 放行; 风险-限非Funlab / 禁售-高风险 / 空(待审) → 拦截(default-deny)。
+# 原则: 手柄抽象纹路=合规, 直接角色实体造型(摇杆帽精灵球/太空人Among Us/星之卡比)=风险。
+# 风险品可走非 Funlab 渠道/其他品牌名在部分地区卖, 但不挂 FUNLAB → 不进 KOL 派单。
+_IP_COMPLIANT = {"合规-无IP", "合规-已授权"}
+
+
+async def ip_compliance_gate(pf: dict) -> tuple:
+    """派单前调。返回 (allowed: bool, status: str, reason: str)。
+    - 明确合规 → (True, status, "")
+    - 风险/禁售/空(待审) → (False, status, reason)  [default-deny]
+    - POWKONG(SKU库无此字段) / 缺老库ERP SKU / 查不到(infra/数据缺口)
+        → (True, "", reason)  放行+待核, 不因基建/数据缺口 halt 派单(与命名铁律一致)。
+    """
+    brand = ext(pf.get("品牌")).strip()
+    if brand != "FUNLAB":
+        return True, "", ""                      # POWKONG 暂无 IP合规字段, 不 gate
+    erp = ext(pf.get("老库ERP SKU")).strip()
+    if not erp:
+        return True, "", "缺「老库ERP SKU」无法核 IP 合规 → 放行+待补"
+    try:
+        _, _, status = await _lookup_sku_lib(erp)
+    except Exception as e:
+        return True, "", f"IP 合规查询异常({erp}): {str(e)[:80]} → 放行+待核"
+    if status is None:                            # SKU 库查不到该记录
+        return True, "", f"SKU库查不到「{erp}」→ 放行+待核 IP"
+    if status in _IP_COMPLIANT:
+        return True, status, ""
+    return False, status, f"IP合规状态={status or '空(待审)'} → 禁止以 FUNLAB 名义派单(风险品可走非 Funlab 渠道)"

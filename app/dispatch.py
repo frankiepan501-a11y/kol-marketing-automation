@@ -10,7 +10,7 @@
 """
 import time
 from datetime import datetime
-from . import config, feishu
+from . import config, feishu, product_naming
 from .feishu import ext
 from .scoring import _parse_multiselect
 
@@ -170,6 +170,32 @@ async def create_editor_task(product: dict, mapping: dict) -> dict:
     }
 
 
+async def _alert_ip_blocked(blocked: list):
+    """IP 合规拦截告警 → 通知群 + Frankie。blocked = [(产品名, IP状态), ...]"""
+    lines = "\n".join(f"- {name} · {status or '空(待审)'}" for name, status in blocked[:20])
+    card = {
+        "header": {"template": "orange",
+                   "title": {"tag": "plain_text", "content": f"IP 合规拦截 {len(blocked)} 个产品未派单"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md",
+                "content": ("以下 FUNLAB 主推产品「IP合规状态」非合规, 已**跳过派单**"
+                            "(可走非 Funlab 渠道, 不挂 FUNLAB):\n" + lines)}},
+            {"tag": "div", "text": {"tag": "lark_md",
+                "content": "如属误判 → 去 FUNLAB 产品库改「IP合规状态」为 合规-无IP / 合规-已授权 即恢复派单。"}},
+        ],
+    }
+    try:
+        await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card, biz="KOL", level="P1")
+        for name, oid in config.NOTIFY_USERS:
+            if name.startswith("潘"):     # 只发 Frankie
+                try:
+                    await feishu.send_card_message("open_id", oid, card, biz="KOL", level="P1")
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[dispatch] IP 拦截告警发送失败: {e}")
+
+
 async def run() -> dict:
     """主入口:读主推产品 → 按品牌分配额度 → 建任务"""
     products = await fetch_main_push_products()
@@ -193,12 +219,20 @@ async def run() -> dict:
             brand_limit[b] = max(brand_limit.get(b, 0), int(lim))
 
     results = []
+    ip_blocked = []   # IP 合规拦截清单 → 循环后统一告警
     for brand, prods in by_brand.items():
         daily_limit = brand_limit.get(brand, DEFAULT_BRAND_LIMIT)
         per_product = max(10, daily_limit // max(1, len(prods)))
 
         for product in prods:
             pf = product["fields"]
+            # IP 合规闸 (2026-06-03): FUNLAB 非合规品禁止以 FUNLAB 名义派单
+            allowed, ip_status, ip_reason = await product_naming.ip_compliance_gate(pf)
+            if not allowed:
+                pn = ext(pf.get("产品名"))
+                results.append({"skipped": pn, "reason": f"IP合规拦截: {ip_reason}", "ip_blocked": True})
+                ip_blocked.append((pn, ip_status))
+                continue
             p_cat = ext(pf.get("品类"))
             p_hosts = list(_parse_multiselect(pf.get("适配主机")))
             mapping = await fetch_mapping_for_product(p_cat, p_hosts)
@@ -238,12 +272,17 @@ async def run() -> dict:
                             "product": ext(pf.get("产品名")),
                         })
 
+    if ip_blocked:
+        await _alert_ip_blocked(ip_blocked)
+
     n_kol = sum(1 for r in results if r.get("task_rid") and r.get("type") != "editor")
     n_editor = sum(1 for r in results if r.get("type") == "editor")
     return {
         "dispatched": n_kol + n_editor,  # backward compat
         "dispatched_kol": n_kol,
         "dispatched_editor": n_editor,
+        "ip_blocked": len(ip_blocked),
+        "ip_blocked_products": [n for n, _ in ip_blocked][:20],
         "skipped": sum(1 for r in results if r.get("skipped") or r.get("skipped_editor")),
         "errors": sum(1 for r in results if r.get("error")),
         "by_brand": {b: len(ps) for b, ps in by_brand.items()},
