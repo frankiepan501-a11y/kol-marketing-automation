@@ -18,6 +18,10 @@ from .scoring import _parse_multiselect
 T_MAPPING = "tblA63dLsAYTwjT8"
 DEFAULT_BRAND_LIMIT = 80  # 兜底:产品库未填"品牌每日上限"时
 
+# IP 合规闸开关. 2026-06-03 Frankie 先停用"产品级一刀切"闸(待改为 KOL 级限制).
+# True = 恢复产品级拦截(非合规品整个跳过派单)。
+IP_GATE_ENABLED = False
+
 CATEGORY_PLATFORMS = {
     # 品类 → 推荐筛选平台(为空=不限,enrich 会全平台候选)
     "手柄": ["YouTube", "Instagram", "TikTok"],
@@ -226,13 +230,14 @@ async def run() -> dict:
 
         for product in prods:
             pf = product["fields"]
-            # IP 合规闸 (2026-06-03): FUNLAB 非合规品禁止以 FUNLAB 名义派单
-            allowed, ip_status, ip_reason = await product_naming.ip_compliance_gate(pf)
-            if not allowed:
-                pn = ext(pf.get("产品名"))
-                results.append({"skipped": pn, "reason": f"IP合规拦截: {ip_reason}", "ip_blocked": True})
-                ip_blocked.append((pn, ip_status))
-                continue
+            # IP 合规闸 (产品级一刀切) — 2026-06-03 Frankie 先停用(IP_GATE_ENABLED=False), 待改 KOL 级限制
+            if IP_GATE_ENABLED:
+                allowed, ip_status, ip_reason = await product_naming.ip_compliance_gate(pf)
+                if not allowed:
+                    pn = ext(pf.get("产品名"))
+                    results.append({"skipped": pn, "reason": f"IP合规拦截: {ip_reason}", "ip_blocked": True})
+                    ip_blocked.append((pn, ip_status))
+                    continue
             p_cat = ext(pf.get("品类"))
             p_hosts = list(_parse_multiselect(pf.get("适配主机")))
             mapping = await fetch_mapping_for_product(p_cat, p_hosts)
