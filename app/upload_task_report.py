@@ -75,16 +75,19 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
     kol_by_id = {r["record_id"]: r["fields"] for r in kol_recs}
     kol_fields = [r["fields"] for r in kol_recs]
 
-    # draft: 产品rid -> set(kol_rid) 全部 / 已发信
-    prod_kols, prod_sent_kols = {}, {}
+    # draft: 产品rid -> set(kol_rid) 全部 / 已发信 / 已回复 (全去重独立 KOL)
+    prod_kols, prod_sent_kols, prod_reply_kols = {}, {}, {}
     for d in drafts:
         f = d["fields"]
         pids = _xids(f.get("关联产品")); kids = _xids(f.get("关联KOL"))
         sent = ext(f.get("发送状态")) in ("已发送", "成功", "已发")
+        replied = bool(f.get("是否回复"))   # 权威回复信号(同 completion_report)
         for p in pids:
             prod_kols.setdefault(p, set()).update(kids)
             if sent:
                 prod_sent_kols.setdefault(p, set()).update(kids)
+            if replied:
+                prod_reply_kols.setdefault(p, set()).update(kids)
 
     # 任务按 目标产品 聚合
     from collections import defaultdict
@@ -117,16 +120,18 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
         prid = g["prid"]
         if not g["pname"] or not prid:
             continue
-        kol_ids = prod_kols.get(prid, set())
-        sent_ids = prod_sent_kols.get(prid, set())
+        # ── 全去重独立 KOL 口径 ──
+        kol_set = prod_kols.get(prid, set())
+        sent_u = len(prod_sent_kols.get(prid, set()))            # 已发信 unique
+        reply_u = len(kol_set & prod_reply_kols.get(prid, set()))  # 已回复 unique
         shipped = posted = cooperated = 0
         posters = []
         gmv_sum = orders_sum = 0.0
-        for kid in kol_ids:
+        for kid in kol_set:
             kf = kol_by_id.get(kid)
             if not kf:
                 continue
-            if kf.get("上次寄样日期") or ext(kf.get("上次寄样订单号")):
+            if ext(kf.get("上次寄样订单号")) or _i(kf.get("寄样次数")) >= 1:
                 shipped += 1
             if ext(kf.get("合作状态")).startswith("已合作"):
                 cooperated += 1
@@ -135,21 +140,19 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
                 posters.append(kf)
                 gmv_sum += _f(kf.get("累计GMV")); orders_sum += _i(kf.get("累计订单数"))
         pool = _adapt_pool(kol_fields, g["styles"], g["platforms"])
-        passed = g["pass"] or 1
-        send_deg = min(g["sent"] / passed, 1.0)
-        coverage = (len(sent_ids) / pool) if pool else 0.0
-        reply_rate = (g["reply"] / g["sent"]) if g["sent"] else 0.0
-        post_rate = (posted / shipped) if shipped else 0.0
-        r_send = min(g["sent"] / passed, 1) if passed else 0
-        r_reply = min(g["reply"] / g["sent"], 1) if g["sent"] else 0
-        r_ship = min(shipped / g["sent"], 1) if g["sent"] else 0
-        r_post = min(posted / g["sent"], 1) if g["sent"] else 0
-        prog = (0.10 * (1 if g["cand"] else 0) + 0.25 * r_send + 0.15 * r_reply + 0.25 * r_ship + 0.25 * r_post) * 100
+        coverage = (sent_u / pool) if pool else 0.0              # 覆盖率 = 已发信unique / 适配池
+        reply_rate = (reply_u / sent_u) if sent_u else 0.0       # 回复率 = 回复unique / 发信unique
+        post_rate = (posted / shipped) if shipped else 0.0       # 上稿率 = 上稿 / 寄样
+        exec_rate = min(g["sent"] / (g["pass"] or 1), 1.0)       # 派单执行率(累计已发/过阈, 留档参考)
+        # 加权进度 (全去重)
+        r_cov = min(coverage, 1)
+        r_reply = min(reply_u / sent_u, 1) if sent_u else 0
+        r_ship = min(shipped / sent_u, 1) if sent_u else 0
+        r_post = min(posted / sent_u, 1) if sent_u else 0
+        prog = (0.10 * (1 if pool else 0) + 0.25 * r_cov + 0.15 * r_reply + 0.25 * r_ship + 0.25 * r_post) * 100
         nolink = sum(1 for kf in posters if not ext(kf.get("上稿链接")))
         flags = []
-        if send_deg < 0.5:
-            flags.append("发信没发完")
-        if reply_rate < 0.03 and g["sent"] >= 20:
+        if reply_rate < 0.03 and sent_u >= 20:
             flags.append("回复率<3%")
         if shipped > 0 and posted == 0:
             flags.append("寄样后断层")
@@ -168,13 +171,13 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
             top_lines.append(f"{ext(kf.get('账号名'))}({ext(kf.get('主平台'))},{fans:.0f}万){roi} {link}")
         rows.append({
             "pname": g["pname"], "tasks": g["tasks"], "cand": g["cand"], "pass": g["pass"],
-            "sent": g["sent"], "reply": g["reply"], "shipped": shipped, "posted": posted,
-            "cooperated": cooperated, "pool": pool, "send_deg": send_deg, "coverage": coverage,
+            "sent_u": sent_u, "reply_u": reply_u, "shipped": shipped, "posted": posted,
+            "cooperated": cooperated, "pool": pool, "exec_rate": exec_rate, "coverage": coverage,
             "reply_rate": reply_rate, "post_rate": post_rate, "prog": prog, "flags": flags,
             "top_lines": top_lines, "ops": "、".join(sorted(g["ops"])) or "-",
             "gmv": gmv_sum, "orders": int(orders_sum),
         })
-    rows.sort(key=lambda r: -r["sent"])
+    rows.sort(key=lambda r: -r["sent_u"])
 
     # 写留档表
     written = 0
@@ -183,9 +186,9 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
             try:
                 await feishu.create_record(T_REPORT, {
                     "产品·周": f"{r['pname'][:28]} · {week}", "对象类型": "KOL", "统计周": week,
-                    "任务数": r["tasks"], "候选数": r["cand"], "过阈数": r["pass"], "发信数": r["sent"],
-                    "回复数": r["reply"], "寄样数": r["shipped"], "上稿数": r["posted"], "已合作数": r["cooperated"],
-                    "适配池": r["pool"], "发信度%": round(r["send_deg"] * 100), "覆盖率%": round(r["coverage"] * 100),
+                    "任务数": r["tasks"], "候选数": r["cand"], "过阈数": r["pass"], "发信数": r["sent_u"],
+                    "回复数": r["reply_u"], "寄样数": r["shipped"], "上稿数": r["posted"], "已合作数": r["cooperated"],
+                    "适配池": r["pool"], "发信度%": round(r["exec_rate"] * 100), "覆盖率%": round(r["coverage"] * 100),
                     "回复率%": round(r["reply_rate"] * 100), "上稿率%": round(r["post_rate"] * 100),
                     "进度%": round(r["prog"]), "卡点": " / ".join(r["flags"]) or "—",
                     "Top上稿KOL+链接": "\n".join(r["top_lines"]) or "—",
@@ -200,17 +203,16 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
     card = _build_card(rows, week)
     sent_n = await _notify(card, frankie_only=frankie_only) if notify else 0
     return {"dry_run": dry_run, "products": len(rows), "written": written, "notified": sent_n,
-            "rows": [{k: r[k] for k in ("pname", "sent", "posted", "coverage", "prog", "flags")} for r in rows]}
+            "rows": [{k: r[k] for k in ("pname", "sent_u", "reply_u", "shipped", "posted", "pool", "coverage", "prog", "flags")} for r in rows]}
 
 
 def _build_card(rows: list, week: str) -> dict:
     els = []
     for r in rows:
-        funnel = (f"候选 **{r['cand']}** → 过阈 **{r['pass']}** → 发信 **{r['sent']}** "
-                  f"→ 回复 **{r['reply']}**({r['reply_rate']*100:.0f}%) → 寄样 **{r['shipped']}** "
-                  f"→ 上稿 **{r['posted']}**({r['post_rate']*100:.0f}%)")
-        metrics = (f"发信度 {r['send_deg']*100:.0f}% ｜ 覆盖率 {r['coverage']*100:.0f}%(池{r['pool']}) "
-                   f"｜ 进度 **{r['prog']:.0f}%** ｜ 运营 {r['ops']}")
+        funnel = (f"适配池 **{r['pool']}** → 发信 **{r['sent_u']}**(覆盖{r['coverage']*100:.0f}%) "
+                  f"→ 回复 **{r['reply_u']}**({r['reply_rate']*100:.0f}%) → 寄样 **{r['shipped']}** "
+                  f"→ 上稿 **{r['posted']}**({r['post_rate']*100:.0f}%) → 已合作 **{r['cooperated']}**")
+        metrics = f"进度 **{r['prog']:.0f}%** ｜ 运营 {r['ops']}"
         content = f"**📦 {r['pname'][:30]}**（{r['tasks']}批派单）\n🔻 {funnel}\n📊 {metrics}"
         if r["flags"]:
             content += f"\n⚠️ 卡点: {' / '.join(r['flags'])}"
@@ -220,7 +222,7 @@ def _build_card(rows: list, week: str) -> dict:
         els.append({"tag": "hr"})
     els.append({"tag": "div", "text": {"tag": "lark_md", "content":
         f"📋 完整明细+可点链接+ROI: [上稿任务周报表](https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={T_REPORT})\n"
-        "_发信度=发信/过阈 ｜ 覆盖率=发信/适配池 ｜ 上稿率=上稿/寄样 ｜ 进度=加权 ｜ GMV待ROI收口_"}})
+        "_全为去重独立 KOL 口径 ｜ 覆盖率=发信/适配池 ｜ 回复率=回复/发信 ｜ 上稿率=上稿/寄样 ｜ 进度=加权 ｜ GMV待ROI收口_"}})
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "green", "title": {"tag": "plain_text", "content": f"🟡 [KOL·P2] 上稿×任务进度周报 · {week}"}},
