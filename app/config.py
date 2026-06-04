@@ -94,6 +94,19 @@ try:
 except (ValueError, TypeError):
     DEEPSEEK_BALANCE_ALERT_THRESHOLD = 10.0
 
+# 2026-06-04: 编辑(媒体人)邮箱域名退信率守卫. 编辑邮箱靠 {fi}{last}@域名 猜测, 特定大媒体域名
+# (engadget/vox/theverge/destructoid 实测 33-50% 退信)格式系统性错→个人邮箱根本猜不到。
+# 守卫: 发媒体人 cold 前算该域名历史无效率, 同域名「无效」数≥MIN 且 无效率≥RATE → 不发(猜测准是浪费),
+# 标'域名高退信-需人工找邮箱/PR inbox'。数据驱动自适应, 多数中小媒体(0%退信)不受影响。
+try:
+    EDITOR_DOMAIN_BOUNCE_MIN = int(env("EDITOR_DOMAIN_BOUNCE_MIN", "2") or 2)
+except (ValueError, TypeError):
+    EDITOR_DOMAIN_BOUNCE_MIN = 2
+try:
+    EDITOR_DOMAIN_BOUNCE_RATE = float(env("EDITOR_DOMAIN_BOUNCE_RATE", "0.3") or 0.3)
+except (ValueError, TypeError):
+    EDITOR_DOMAIN_BOUNCE_RATE = 0.3
+
 # 通知目标
 NOTIFY_CHAT_ID = env("NOTIFY_CHAT_ID", "oc_4ddd938ddb73201ed7354337eb2226ac")
 # 格式: "name1:open_id1,name2:open_id2,..."
