@@ -145,6 +145,7 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
         r_ship = min(shipped / g["sent"], 1) if g["sent"] else 0
         r_post = min(posted / g["sent"], 1) if g["sent"] else 0
         prog = (0.10 * (1 if g["cand"] else 0) + 0.25 * r_send + 0.15 * r_reply + 0.25 * r_ship + 0.25 * r_post) * 100
+        nolink = sum(1 for kf in posters if not ext(kf.get("上稿链接")))
         flags = []
         if send_deg < 0.5:
             flags.append("发信没发完")
@@ -154,6 +155,8 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
             flags.append("寄样后断层")
         if pool and coverage < 0.1:
             flags.append(f"覆盖率<10%(欠派单,池{pool})")
+        if nolink > 0:
+            flags.append(f"{nolink}个上稿缺链接")
         # Top 上稿 KOL
         posters.sort(key=lambda kf: (_f(kf.get("累计GMV")), _f(kf.get("粉丝数"))), reverse=True)
         top_lines = []
@@ -208,7 +211,7 @@ def _build_card(rows: list, week: str) -> dict:
                   f"→ 上稿 **{r['posted']}**({r['post_rate']*100:.0f}%)")
         metrics = (f"发信度 {r['send_deg']*100:.0f}% ｜ 覆盖率 {r['coverage']*100:.0f}%(池{r['pool']}) "
                    f"｜ 进度 **{r['prog']:.0f}%** ｜ 运营 {r['ops']}")
-        content = f"**📦 {r['pname'][:30]}**（{r['tasks']}任务）\n🔻 {funnel}\n📊 {metrics}"
+        content = f"**📦 {r['pname'][:30]}**（{r['tasks']}批派单）\n🔻 {funnel}\n📊 {metrics}"
         if r["flags"]:
             content += f"\n⚠️ 卡点: {' / '.join(r['flags'])}"
         if r["top_lines"]:
