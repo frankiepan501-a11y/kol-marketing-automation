@@ -55,6 +55,29 @@ def _mset(v):
     return set()
 
 
+# ── 本周建议动作规则 (Frankie 定阈值, 优先级从上到下取首个命中) ──
+# 操作指引 = 每个杠杆"在哪调"的真实位置(运营会照着做, 必须准):
+GUIDE_VOLUME = "产品库调高该品牌「品牌每日上限」(默认80,各主推产品平分)+保持「主推」；想集中给单品→暂时少勾同品牌其他主推"
+GUIDE_MATCH = "品类映射规则表 tblA63dLsAYTwjT8 改「KOL内容风格」让派给更对的人(即时生效)；开发信模板要改→找技术/Claude"
+GUIDE_SHIP = "非发信问题：确认暖信(warm_recap)已发+寄样后brief质量，必要时人工催稿"
+GUIDE_LINK = "收到上稿登记卡时粘链接，或去达人频道找补"
+
+
+def _advise(cov: float, rr: float, sent: int, ship: int, post: int, nolink: int):
+    """据漏斗信号给(本周建议动作, 在哪调操作指引). 阈值: 覆盖低<10%/高≥30%; 回复好≥20%/差<5%; 样本≥发信."""
+    if ship > 0 and post == 0:
+        return ("📦 寄样后断层——查寄样后 brief/暖信(非发信问题)", GUIDE_SHIP)
+    if cov < 0.10 and rr >= 0.20 and sent >= 10:
+        return ("🔥 转化好但严重欠量——加大派单(日上限/批量×2-3)", GUIDE_VOLUME)
+    if rr < 0.05 and sent >= 20:
+        return ("🔧 回复率过低——别加量，先改选品匹配/开发信模板", GUIDE_MATCH)
+    if cov < 0.10 and sent >= 10:
+        return ("📈 覆盖偏低，可适度加派单(先确认回复率够)", GUIDE_VOLUME)
+    if nolink > 0:
+        return (f"🔗 补 {nolink} 个上稿缺链接；其余维持主推", GUIDE_LINK)
+    return ("✅ 转化健康——维持主推，加量复制", GUIDE_VOLUME if rr >= 0.10 else GUIDE_MATCH)
+
+
 def _adapt_pool(kols: list, styles: set, platforms: set) -> int:
     """适配池: KOL 池中 内容风格∩任务筛选风格 ≠∅ (平台命中或该 KOL 无主战场)。"""
     if not styles:
@@ -159,6 +182,7 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
             flags.append(f"覆盖率<10%(欠派单,池{pool})")
         if nolink > 0:
             flags.append(f"{nolink}个上稿缺链接")
+        advice, where = _advise(coverage, reply_rate, sent_u, shipped, posted, nolink)
         # Top 上稿 KOL
         posters.sort(key=lambda kf: (_f(kf.get("累计GMV")), _f(kf.get("粉丝数"))), reverse=True)
         top_lines = []
@@ -175,6 +199,7 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
             "reply_rate": reply_rate, "post_rate": post_rate, "prog": prog, "flags": flags,
             "top_lines": top_lines, "ops": "、".join(sorted(g["ops"])) or "-",
             "gmv": gmv_sum, "orders": int(orders_sum),
+            "advice": advice, "where": where,
         })
     rows.sort(key=lambda r: -r["sent_u"])
 
@@ -190,6 +215,7 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
                     "适配池": r["pool"], "发信度%": round(r["exec_rate"] * 100), "覆盖率%": round(r["coverage"] * 100),
                     "回复率%": round(r["reply_rate"] * 100), "上稿率%": round(r["post_rate"] * 100),
                     "进度%": round(r["prog"]), "卡点": " / ".join(r["flags"]) or "—",
+                    "本周建议动作": r["advice"], "在哪调·操作指引": r["where"],
                     "Top上稿KOL+链接": "\n".join(r["top_lines"]) or "—",
                     "累计GMV": round(r["gmv"]), "累计订单数": r["orders"], "负责运营": r["ops"],
                     "生成时间": now_ms,
@@ -215,6 +241,7 @@ def _build_card(rows: list, week: str) -> dict:
         content = f"**📦 {r['pname'][:30]}**（{r['tasks']}批派单）\n🔻 {funnel}\n📊 {metrics}"
         if r["flags"]:
             content += f"\n⚠️ 卡点: {' / '.join(r['flags'])}"
+        content += f"\n🎯 **本周建议**: {r['advice']}\n　📍 在哪调: {r['where']}"
         if r["top_lines"]:
             content += "\n🎬 Top上稿: " + " ／ ".join(t.split(" ")[0] + " " + t.split(" ")[-1] for t in r["top_lines"][:3])
         els.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
