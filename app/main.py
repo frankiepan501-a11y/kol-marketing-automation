@@ -424,13 +424,14 @@ async def resend_from_button(draft_rid: str = "", secret: str = ""):
 
 
 @app.post("/upload-task-report/run")
-async def run_upload_task_report(authorization: str = Header(default=""), dry_run: bool = False, notify: bool = True):
+async def run_upload_task_report(authorization: str = Header(default=""), dry_run: bool = False,
+                                 notify: bool = True, frankie_only: bool = False):
     """KOL 上稿×任务进度 周报(按产品): 飞书卡片 digest + 写留档表.
-    ?dry_run=true 不写留档表; ?notify=false 不发飞书卡(首测用, 防刷群)."""
+    ?dry_run=true 不写留档表; ?notify=false 不发卡; ?frankie_only=true 卡只发 Frankie 不进群(审格式用)."""
     _check_auth(authorization)
     from . import upload_task_report
     try:
-        return await upload_task_report.run(dry_run=dry_run, notify=notify)
+        return await upload_task_report.run(dry_run=dry_run, notify=notify, frankie_only=frankie_only)
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1200:]}

@@ -68,7 +68,7 @@ def _adapt_pool(kols: list, styles: set, platforms: set) -> int:
     return n
 
 
-async def run(dry_run: bool = False, notify: bool = True) -> dict:
+async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = False) -> dict:
     tasks = await feishu.fetch_all_records(config.T_TASK_KOL)
     drafts = await feishu.fetch_all_records(config.T_DRAFT)
     kol_recs = await feishu.fetch_all_records(config.T_KOL)
@@ -195,7 +195,7 @@ async def run(dry_run: bool = False, notify: bool = True) -> dict:
 
     # 飞书卡片 digest
     card = _build_card(rows, week)
-    sent_n = await _notify(card) if notify else 0
+    sent_n = await _notify(card, frankie_only=frankie_only) if notify else 0
     return {"dry_run": dry_run, "products": len(rows), "written": written, "notified": sent_n,
             "rows": [{k: r[k] for k in ("pname", "sent", "posted", "coverage", "prog", "flags")} for r in rows]}
 
@@ -225,13 +225,14 @@ def _build_card(rows: list, week: str) -> dict:
     }
 
 
-async def _notify(card) -> int:
+async def _notify(card, frankie_only: bool = False) -> int:
     sent = 0
-    try:
-        await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
-        sent += 1
-    except Exception as e:
-        print(f"[upload_task_report] 群发送失败: {e}")
+    if not frankie_only:
+        try:
+            await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+            sent += 1
+        except Exception as e:
+            print(f"[upload_task_report] 群发送失败: {e}")
     for name, oid in config.NOTIFY_USERS:
         if "Frankie" not in name and "潘志聪" not in name:
             continue
