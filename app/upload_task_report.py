@@ -16,9 +16,21 @@
 """
 import time
 from . import config, feishu
-from .feishu import ext, xrid
+from .feishu import ext
 
 T_REPORT = config.T_UPLOAD_REPORT
+
+
+def _xids(v):
+    """link 字段提取全部 record_ids (feishu.xrid 只返回首个; 这里要全部)."""
+    out = []
+    if isinstance(v, list):
+        for u in v:
+            if isinstance(u, dict):
+                out += u.get("record_ids") or u.get("link_record_ids") or []
+    elif isinstance(v, dict):
+        out += v.get("record_ids") or v.get("link_record_ids") or []
+    return out
 
 
 def _i(v):
@@ -67,7 +79,7 @@ async def run(dry_run: bool = False, notify: bool = True) -> dict:
     prod_kols, prod_sent_kols = {}, {}
     for d in drafts:
         f = d["fields"]
-        pids = xrid(f.get("关联产品")) or []; kids = xrid(f.get("关联KOL")) or []
+        pids = _xids(f.get("关联产品")); kids = _xids(f.get("关联KOL"))
         sent = ext(f.get("发送状态")) in ("已发送", "成功", "已发")
         for p in pids:
             prod_kols.setdefault(p, set()).update(kids)
@@ -81,7 +93,7 @@ async def run(dry_run: bool = False, notify: bool = True) -> dict:
                                "pname": "", "prid": None})
     for tk in tasks:
         f = tk["fields"]
-        pids = xrid(f.get("目标产品")) or []
+        pids = _xids(f.get("目标产品"))
         prid = pids[0] if pids else None
         pname = ext(f.get("目标产品")) or ext(f.get("任务名"))
         if not prid and not pname:
