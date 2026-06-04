@@ -204,7 +204,18 @@ async def send_one(rec: dict) -> dict:
         try:
             _bad = await _editor_bad_domains()
             _dom = to_email.split("@", 1)[1]
+            # Snov 验为 valid 的邮箱(编辑「邮箱验真状态=有效」)放行 — 已确认可送达, 不受历史域名退信率拦
+            _snov_ok = False
             if _dom in _bad:
+                _link_ed_chk = xrid(f.get("关联媒体人"))
+                if _link_ed_chk:
+                    try:
+                        _ed_chk = await feishu.get_record(config.T_EDITOR, _link_ed_chk)
+                        if ext(_ed_chk["fields"].get("邮箱验真状态")) == "有效":
+                            _snov_ok = True
+                    except Exception:
+                        pass
+            if _dom in _bad and not _snov_ok:
                 await feishu.update_record(config.T_DRAFT, rid, {
                     "发送状态": "失败",
                     "发送错误": f"编辑邮箱域名 {_dom} 历史高退信(猜测格式系统性错), 停发",

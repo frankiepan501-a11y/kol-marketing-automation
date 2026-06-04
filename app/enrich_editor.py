@@ -9,7 +9,7 @@
 
 n8n cron 每 5 分钟扫 T_TASK_EDITOR 任务状态=2-待触发 + 触发=true 的任务."""
 import re, time, asyncio, random
-from . import config, feishu, deepseek, draft_router
+from . import config, feishu, deepseek, draft_router, snov
 from .feishu import ext, xrid
 from .scoring import score_editor, _parse_multiselect
 
@@ -477,6 +477,36 @@ async def score_and_draft_one(editor_record: dict, product: dict, brand: str,
     }
     if not out["passed"]:
         return out
+
+    # ── Snov 真邮箱解析 (2026-06-04, 治本替代 {fi}{last}@域名 猜测) ──
+    # valid → 用真邮箱(可能纠正) + 标编辑「邮箱验真状态=有效」让域名守卫放行
+    # unknown → 用找到的邮箱发(退信由 bounce_monitor 回标, 不增加人工)
+    # not_found/unavailable → 降级现状(猜测邮箱 + 域名守卫照常). 纯加法 fail-safe.
+    # 幂等省 credit: 编辑已知 有效/无效 → 跳过(无效本就被 auto_send gate 拦; 有效已解析过).
+    if config.SNOV_EDITOR_FINDER_ENABLED and "@" in (email or ""):
+        cur_verify = ext(e.get("邮箱验真状态"))
+        if cur_verify not in ("有效", "无效"):
+            domain = email.split("@", 1)[1]
+            try:
+                sv = await snov.find_email(name, domain)
+            except Exception as ex:
+                sv = {"status": "unavailable", "email": None, "raw": str(ex)[:80]}
+            st_, snov_email = sv.get("status"), sv.get("email")
+            out["snov_status"] = st_
+            if st_ == "valid" and snov_email:
+                out["email"] = snov_email
+                # 回填主表: 纠正邮箱 + 标有效(idempotent + 守卫放行 + 下游复用)
+                try:
+                    upd = {"邮箱验真状态": "有效"}
+                    if snov_email.lower() != email.lower():
+                        upd["邮箱"] = snov_email
+                    await feishu.update_record(config.T_EDITOR, editor_record["record_id"], upd)
+                except Exception as ex:
+                    print(f"[enrich-editor] Snov 回填失败 {name}: {ex}")
+            elif st_ == "unknown" and snov_email:
+                # 找到但未验证: 用找到的邮箱发(可能比猜测准), 不改主表 → 域名守卫照常治理
+                out["email"] = snov_email
+            # not_found / unavailable: 保持猜测邮箱不动
 
     draft = await gen_pr_draft(editor_record, product, brand, signature, breakdown, total)
     if "error" in draft or "skip" in draft:

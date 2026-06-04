@@ -107,6 +107,13 @@ try:
 except (ValueError, TypeError):
     EDITOR_DOMAIN_BOUNCE_RATE = 0.3
 
+# 2026-06-04: Snov.io Email Finder — 编辑(媒体人)真邮箱解析, 治本替代 {fi}{last}@域名 猜测.
+# enrich_editor 生成编辑 cold 草稿前调 finder 取真邮箱(valid 放行域名守卫; unknown 照发退信回标;
+# 找不到/不可用 → 降级现状). 凭证 repo 公开只走 env 不硬编. SNOV_EDITOR_FINDER_ENABLED=0 可关.
+SNOV_CLIENT_ID = env("SNOV_CLIENT_ID", required=True)
+SNOV_CLIENT_SECRET = env("SNOV_CLIENT_SECRET", required=True)
+SNOV_EDITOR_FINDER_ENABLED = (env("SNOV_EDITOR_FINDER_ENABLED", "1") or "1") != "0"
+
 # 通知目标
 NOTIFY_CHAT_ID = env("NOTIFY_CHAT_ID", "oc_4ddd938ddb73201ed7354337eb2226ac")
 # 格式: "name1:open_id1,name2:open_id2,..."
