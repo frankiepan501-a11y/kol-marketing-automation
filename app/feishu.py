@@ -43,25 +43,31 @@ async def api(method: str, path: str, body=None, which: str = "bitable"):
     实战 5/21 15:30 触发 1 次 endpoint 告警, 下次 cron 15min 后自然恢复.
     加 in-call retry 避免 cron 周期等待, 同时减少 endpoint 告警噪音.
 
-    重试范围: HTTP 500/502/503/504 (服务端瞬态) + 飞书 code 1254607 "Data not ready"
-    (数据未就绪, Bitable 异步索引瞬态, 实战 5/29 auto-send 撞 1 次自愈). 不重试其他 4xx (auth/permission/业务错误).
+    重试范围: HTTP 500/502/503/504 (服务端瞬态) + 网络层错误 → 重试 2 次 (5s+10s).
+    飞书 code 1254607 "Data not ready" (Bitable 异步索引瞬态, 幂等读) → 重试 3 次 (5s+10s+20s),
+    比 5xx 多 1 档: 5/29 + 6/4 各撞 1 次, 6/4 那次持续 >15s 撞穿原 2 档触发误报告警 → 单独拉长.
+    不重试其他 4xx (auth/permission/业务错误).
     """
     import asyncio
     tok = await token(which)
     url = f"https://open.feishu.cn/open-apis{path}"
     headers = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json; charset=utf-8"}
-    retry_delays = [5, 10]  # 2 次重试间隔 (s)
+    # 重试档位: 5xx/网络用前 2 档 (5s+10s); 飞书 1254607 用全部 3 档 (5s+10s+20s ≈35s 窗口).
+    # 2026-06-04: 1254607 是 Bitable 异步索引瞬态(幂等读), 偶发持续 >15s 撞穿 2 档 → 误报告警.
+    # 单独拉长 1254607 重试不动 5xx/网络逻辑 (后者多为非幂等写, 不宜盲目多试).
+    retry_delays = [5, 10, 20]
+    max_transient = 2  # 5xx / 网络瞬态的重试次数 (前 2 档)
     last_exc = None
-    for attempt in range(len(retry_delays) + 1):  # 0=首次, 1+2=2 次重试
+    for attempt in range(len(retry_delays) + 1):  # 0=首次, 1..3=最多 3 次重试
         try:
             async with httpx.AsyncClient(timeout=60.0) as cli:
                 r = await cli.request(method, url, json=body, headers=headers)
-                if 500 <= r.status_code < 600 and attempt < len(retry_delays):
+                if 500 <= r.status_code < 600 and attempt < max_transient:
                     # 5xx 重试
-                    print(f"[feishu.api] {method} {path[:80]} → {r.status_code} retry {attempt+1}/{len(retry_delays)} in {retry_delays[attempt]}s")
+                    print(f"[feishu.api] {method} {path[:80]} → {r.status_code} retry {attempt+1}/{max_transient} in {retry_delays[attempt]}s")
                     await asyncio.sleep(retry_delays[attempt])
                     continue
-                # 飞书 1254607 "Data not ready"(数据未就绪, 异步索引瞬态) → 同 5xx 重试
+                # 飞书 1254607 "Data not ready"(数据未就绪, 异步索引瞬态) → 比 5xx 多 1 档重试
                 if r.status_code >= 400 and attempt < len(retry_delays):
                     try:
                         _fcode = r.json().get("code")
@@ -75,10 +81,10 @@ async def api(method: str, path: str, body=None, which: str = "bitable"):
                     raise Exception(f"{method} {path} → {r.status_code}: {r.text[:300]}")
                 return r.json()
         except (httpx.TimeoutException, httpx.NetworkError) as e:
-            # 网络层瞬态错误也重试
+            # 网络层瞬态错误也重试 (同 5xx, 前 2 档)
             last_exc = e
-            if attempt < len(retry_delays):
-                print(f"[feishu.api] {method} {path[:80]} network err retry {attempt+1}/{len(retry_delays)} in {retry_delays[attempt]}s: {e}")
+            if attempt < max_transient:
+                print(f"[feishu.api] {method} {path[:80]} network err retry {attempt+1}/{max_transient} in {retry_delays[attempt]}s: {e}")
                 await asyncio.sleep(retry_delays[attempt])
                 continue
             raise
