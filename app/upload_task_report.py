@@ -144,12 +144,11 @@ async def run(dry_run: bool = False, notify: bool = True, frankie_only: bool = F
         reply_rate = (reply_u / sent_u) if sent_u else 0.0       # 回复率 = 回复unique / 发信unique
         post_rate = (posted / shipped) if shipped else 0.0       # 上稿率 = 上稿 / 寄样
         exec_rate = min(g["sent"] / (g["pass"] or 1), 1.0)       # 派单执行率(累计已发/过阈, 留档参考)
-        # 加权进度 (全去重)
-        r_cov = min(coverage, 1)
-        r_reply = min(reply_u / sent_u, 1) if sent_u else 0
-        r_ship = min(shipped / sent_u, 1) if sent_u else 0
-        r_post = min(posted / sent_u, 1) if sent_u else 0
-        prog = (0.10 * (1 if pool else 0) + 0.25 * r_cov + 0.15 * r_reply + 0.25 * r_ship + 0.25 * r_post) * 100
+        # 加权进度 = 纯转化深度(逐级转化, 不含覆盖率; 覆盖率单独看). Frankie 选 B 口径。
+        c_reply = min(reply_u / sent_u, 1) if sent_u else 0       # 回复/发信
+        c_ship = min(shipped / reply_u, 1) if reply_u else 0      # 寄样/回复
+        c_post = min(posted / shipped, 1) if shipped else 0       # 上稿/寄样
+        prog = (0.10 * (1 if sent_u else 0) + 0.25 * c_reply + 0.30 * c_ship + 0.35 * c_post) * 100
         nolink = sum(1 for kf in posters if not ext(kf.get("上稿链接")))
         flags = []
         if reply_rate < 0.03 and sent_u >= 20:
@@ -222,7 +221,7 @@ def _build_card(rows: list, week: str) -> dict:
         els.append({"tag": "hr"})
     els.append({"tag": "div", "text": {"tag": "lark_md", "content":
         f"📋 完整明细+可点链接+ROI: [上稿任务周报表](https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={T_REPORT})\n"
-        "_全为去重独立 KOL 口径 ｜ 覆盖率=发信/适配池 ｜ 回复率=回复/发信 ｜ 上稿率=上稿/寄样 ｜ 进度=加权 ｜ GMV待ROI收口_"}})
+        "_全为去重独立 KOL 口径 ｜ 覆盖率=发信/适配池(单独看) ｜ 进度=逐级转化深度(回复/发信×寄样/回复×上稿/寄样加权,不含覆盖) ｜ GMV待ROI收口_"}})
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "green", "title": {"tag": "plain_text", "content": f"🟡 [KOL·P2] 上稿×任务进度周报 · {week}"}},
