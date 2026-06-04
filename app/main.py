@@ -396,6 +396,17 @@ async def resend_from_button(draft_rid: str = "", secret: str = ""):
                     ok_count += 1
                 details.append(f"{name}: {res.get('msg') or 'ok'}")
             target_n = len(targets)
+        if ok_count == 0:
+            # 一张都没重发(通常=草稿已终态/已处理过) → 不自动关, 显式说明原因, 防"以为坏了"
+            html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>重发</title></head>
+<body style="font:16px/1.6 system-ui,sans-serif;padding:40px;text-align:center;color:#333;">
+<div style="font-size:48px;">ℹ️</div>
+<h2>这张卡无需重发</h2>
+<p>多半是该草稿已处理过(已发送/已否决/已通过)，看板上是旧行。</p>
+<p style="color:#999;font-size:13px;">原因: {"<br>".join(details) or "无可重发对象"}</p>
+<p style="color:#bbb;font-size:12px;">(此页不会自动关闭，看完手动关即可)</p>
+</body></html>"""
+            return HTMLResponse(html)
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>重发</title></head>
 <body style="font:16px/1.6 system-ui,sans-serif;padding:40px;text-align:center;color:#333;">
 <div style="font-size:48px;">✅</div>
