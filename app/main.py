@@ -423,6 +423,19 @@ async def resend_from_button(draft_rid: str = "", secret: str = ""):
             status_code=500)
 
 
+@app.post("/upload-task-report/run")
+async def run_upload_task_report(authorization: str = Header(default=""), dry_run: bool = False, notify: bool = True):
+    """KOL 上稿×任务进度 周报(按产品): 飞书卡片 digest + 写留档表.
+    ?dry_run=true 不写留档表; ?notify=false 不发飞书卡(首测用, 防刷群)."""
+    _check_auth(authorization)
+    from . import upload_task_report
+    try:
+        return await upload_task_report.run(dry_run=dry_run, notify=notify)
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1200:]}
+
+
 @app.post("/decision-feedback/run")
 async def run_decision_feedback(authorization: str = Header(default="")):
     """Phase 3.2 决策反哺: 据 GMV/订单/上稿 自动升降级 KOL 合作状态"""

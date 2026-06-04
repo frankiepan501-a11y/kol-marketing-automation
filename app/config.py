@@ -114,6 +114,9 @@ SNOV_CLIENT_ID = env("SNOV_CLIENT_ID", required=True)
 SNOV_CLIENT_SECRET = env("SNOV_CLIENT_SECRET", required=True)
 SNOV_EDITOR_FINDER_ENABLED = (env("SNOV_EDITOR_FINDER_ENABLED", "1") or "1") != "0"
 
+# 2026-06-05: KOL 上稿×任务进度 周报留档表 (按产品审计). 非 secret, 给默认值.
+T_UPLOAD_REPORT = env("T_UPLOAD_REPORT", "tblHrlzTeSIhOjCY")
+
 # 通知目标
 NOTIFY_CHAT_ID = env("NOTIFY_CHAT_ID", "oc_4ddd938ddb73201ed7354337eb2226ac")
 # 格式: "name1:open_id1,name2:open_id2,..."
