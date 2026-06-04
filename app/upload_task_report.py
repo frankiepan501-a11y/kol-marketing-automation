@@ -67,7 +67,7 @@ async def run(dry_run: bool = False, notify: bool = True) -> dict:
     prod_kols, prod_sent_kols = {}, {}
     for d in drafts:
         f = d["fields"]
-        pids = xrid(f.get("关联产品")); kids = xrid(f.get("关联KOL"))
+        pids = xrid(f.get("关联产品")) or []; kids = xrid(f.get("关联KOL")) or []
         sent = ext(f.get("发送状态")) in ("已发送", "成功", "已发")
         for p in pids:
             prod_kols.setdefault(p, set()).update(kids)
@@ -81,7 +81,7 @@ async def run(dry_run: bool = False, notify: bool = True) -> dict:
                                "pname": "", "prid": None})
     for tk in tasks:
         f = tk["fields"]
-        pids = xrid(f.get("目标产品"))
+        pids = xrid(f.get("目标产品")) or []
         prid = pids[0] if pids else None
         pname = ext(f.get("目标产品")) or ext(f.get("任务名"))
         if not prid and not pname:
