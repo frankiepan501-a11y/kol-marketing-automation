@@ -7,7 +7,7 @@ import time
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
@@ -480,6 +480,20 @@ async def zoho_health(authorization: str = Header(default="")):
         msg = " | ".join(f"{b}: {r.get('error', 'ok')}" for b, r in results.items() if not r["ok"])
         await _alert_endpoint_failure("/zoho/health", f"Zoho OAuth 失效: {msg}", "")
     return {"ok": not has_fail, "results": results}
+
+
+@app.post("/kol/dedup/run")
+async def run_kol_dedup(authorization: str = Header(default=""), dry_run: bool = False):
+    """2026-06-04: KOL 同邮箱去重 gate (周 cron). 保留最有进展记录, 弃用无活动重复(可逆);
+    同组有 2+ 活跃记录(有寄样/上稿/已合作)的真冲突 → 跳过+飞书告警 Frankie 人工。?dry_run 只算不写。"""
+    _check_auth(authorization)
+    try:
+        result = await kol_dedup.run(dry_run=dry_run)
+        return {"ok": True, "dry_run": dry_run, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-800:]
+        await _alert_endpoint_failure("/kol/dedup/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
 
 
 @app.post("/deepseek/balance-check")
