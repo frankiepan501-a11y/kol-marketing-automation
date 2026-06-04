@@ -86,6 +86,14 @@ REPLY_EXTRA_ALIASES = {
 # DeepSeek
 DEEPSEEK_API_KEY = env("DEEPSEEK_API_KEY", required=True)
 
+# 2026-06-04: DeepSeek 余额预警阈值(元). 余额低于此或不可用 → /deepseek/balance-check 飞书告警 Frankie.
+# 根因: DeepSeek 欠费 → 整条 AI 生成链(enrich/reply_drafter/regen/talking_points)静默 402 停摆,
+# 全靠运营踩到才发现(张佳烨 2026-06-04 重生 402)。这是关键依赖的 dead-man-switch。
+try:
+    DEEPSEEK_BALANCE_ALERT_THRESHOLD = float(env("DEEPSEEK_BALANCE_ALERT_THRESHOLD", "10") or 10)
+except (ValueError, TypeError):
+    DEEPSEEK_BALANCE_ALERT_THRESHOLD = 10.0
+
 # 通知目标
 NOTIFY_CHAT_ID = env("NOTIFY_CHAT_ID", "oc_4ddd938ddb73201ed7354337eb2226ac")
 # 格式: "name1:open_id1,name2:open_id2,..."

@@ -482,6 +482,53 @@ async def zoho_health(authorization: str = Header(default="")):
     return {"ok": not has_fail, "results": results}
 
 
+@app.post("/deepseek/balance-check")
+async def deepseek_balance_check(authorization: str = Header(default="")):
+    """2026-06-04: DeepSeek 余额预警 (dead-man-switch). 查余额, 低于阈值或不可用 → 飞书告警 Frankie.
+    根因: DeepSeek 欠费 → enrich/reply_drafter/regen/talking_points 全 402 静默停摆(张佳烨 6/4 踩到)。
+    建议 n8n cron 每日 09:00 BJ 跑一次。纯监控不发邮件。"""
+    _check_auth(authorization)
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as cli:
+            r = await cli.get("https://api.deepseek.com/user/balance",
+                              headers={"Authorization": f"Bearer {config.DEEPSEEK_API_KEY}"})
+            r.raise_for_status()
+            d = r.json()
+        avail = bool(d.get("is_available"))
+        infos = d.get("balance_infos") or [{}]
+        bal = float(infos[0].get("total_balance") or 0)
+        cur = infos[0].get("currency", "CNY")
+        thr = config.DEEPSEEK_BALANCE_ALERT_THRESHOLD
+        low = (not avail) or (bal < thr)
+        if low:
+            card = {
+                "header": {"template": "red",
+                           "title": {"tag": "plain_text", "content": "🚨 DeepSeek 余额不足 — 请充值"}},
+                "elements": [
+                    {"tag": "div", "text": {"tag": "lark_md", "content":
+                        (f"**当前余额**: {bal} {cur}　**可用**: {'是' if avail else '否 ⚠️'}\n"
+                         f"**阈值**: {thr} {cur}\n\n"
+                         "⚠️ DeepSeek 是 KOL 全链 AI 生成依赖(冷开发信/回复分类/退回重生/talking points)。"
+                         "**余额耗尽会整条静默 402 停摆**。请尽快充值: https://platform.deepseek.com")}},
+                ],
+            }
+            try:
+                await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card, biz="AUDIT")
+                for name, oid in config.NOTIFY_USERS:
+                    if name.startswith("潘"):  # 只私聊 Frankie (只有他能充值)
+                        try: await feishu.send_card_message("open_id", oid, card, biz="AUDIT")
+                        except Exception: pass
+            except Exception as e:
+                print(f"[deepseek-balance] alert send fail: {e}")
+        return {"ok": True, "balance": bal, "currency": cur, "available": avail,
+                "threshold": thr, "low": low, "alerted": low}
+    except Exception as e:
+        tr = _tb.format_exc()[-800:]
+        await _alert_endpoint_failure("/deepseek/balance-check", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
 @app.get("/zoho/sent-check")
 async def zoho_sent_check(authorization: str = Header(default=""),
                           brand: str = "POWKONG", to: str = ""):
