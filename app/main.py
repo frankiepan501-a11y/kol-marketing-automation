@@ -371,22 +371,35 @@ async def resend_from_button(draft_rid: str = "", secret: str = ""):
                     uid = u.get("id") or ""
                     if uid:
                         union_ids.append(uid)
-        if not union_ids:
-            return HTMLResponse(
-                "<h3>⚠️ 此草稿无关联运营(可能是 retrofit 前的老草稿)</h3>"
-                "<p>解决: 等下一张新发的卡, 或人工去草稿表打开。</p>",
-                status_code=200)
         ok_count = 0
         details = []
-        for uid in union_ids:
-            res = await card_resend.run(draft_rid=draft_rid, operator_union_id=uid)
-            if res.get("ok"):
-                ok_count += 1
-            details.append(f"{uid[:12]}: {res.get('msg') or 'ok'}")
+        if union_ids:
+            # 新草稿: 「关联运营」已填, 按 union_id 重发给原运营
+            for uid in union_ids:
+                res = await card_resend.run(draft_rid=draft_rid, operator_union_id=uid)
+                if res.get("ok"):
+                    ok_count += 1
+                details.append(f"{uid[:12]}: {res.get('msg') or 'ok'}")
+            target_n = len(union_ids)
+        else:
+            # 老草稿(retrofit 前)「关联运营」为空 → fallback 到当前在职独立站运营专员
+            # (resolve_notify_targets 职务实时查, turnover-safe), 用 open_id 重发
+            targets = await feishu.resolve_notify_targets("reviewer")
+            if not targets:
+                return HTMLResponse(
+                    "<h3>⚠️ 此草稿无关联运营, 且未查到在职运营</h3>"
+                    "<p>解决: 人工去草稿表打开, 或联系 Frankie 检查职务配置。</p>",
+                    status_code=200)
+            for name, oid in targets:
+                res = await card_resend.run(draft_rid=draft_rid, operator_open_id=oid)
+                if res.get("ok"):
+                    ok_count += 1
+                details.append(f"{name}: {res.get('msg') or 'ok'}")
+            target_n = len(targets)
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>重发</title></head>
 <body style="font:16px/1.6 system-ui,sans-serif;padding:40px;text-align:center;color:#333;">
 <div style="font-size:48px;">✅</div>
-<h2>已重发卡片 {ok_count}/{len(union_ids)} 位运营</h2>
+<h2>已重发卡片 {ok_count}/{target_n} 位运营</h2>
 <p>请回飞书私聊底部查看新卡</p>
 <p style="color:#999;font-size:12px;">{"<br>".join(details)}</p>
 <script>setTimeout(()=>window.close(),2500);</script>
