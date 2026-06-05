@@ -176,7 +176,8 @@ def _brand_from_email_editor(email: str) -> str:
     return ""
 
 
-async def filter_editors(task_fields: dict, product_rid: str = "", brand: str = "") -> list:
+async def filter_editors(task_fields: dict, product_rid: str = "", brand: str = "",
+                         seen_kb: set = None) -> list:
     """按任务条件筛选媒体人 — 品牌感知三层防重派单 (KOL 资产化 V2).
 
     Layer 1: 合作状态品牌感知
@@ -266,7 +267,7 @@ async def filter_editors(task_fields: dict, product_rid: str = "", brand: str = 
     pool_total = len(items)
 
     hits = []
-    skipped_status, skipped_dedup, skipped_blast = 0, 0, 0
+    skipped_status, skipped_dedup, skipped_blast, skipped_inrun = 0, 0, 0, 0
     for rec in items:
         f = rec.get("fields", {})
         rid = rec["record_id"]
@@ -284,6 +285,9 @@ async def filter_editors(task_fields: dict, product_rid: str = "", brand: str = 
         # Layer 3: 7 天同媒体人同品牌轰炸 (跨品牌不算)
         if rid in recent_blasted_same_brand:
             skipped_blast += 1; continue
+        # P0 本轮内存去重: 同一 cron run 内,同媒体人同品牌已被前序任务派过 → 跳过(防 search 索引延迟漏防的并发重复)
+        if seen_kb and (rid, brand) in seen_kb:
+            skipped_inrun += 1; continue
         if countries_want and ext(f.get("国家")) not in countries_want: continue
         if langs_want_iso and ext(f.get("语言")) not in langs_want_iso: continue
         if types_want and ext(f.get("媒体类型")) not in types_want: continue
@@ -296,7 +300,7 @@ async def filter_editors(task_fields: dict, product_rid: str = "", brand: str = 
 
     print(f"[enrich_editor V2 品牌感知] filter: pool={pool_total} → hits={len(hits)} "
           f"brand={brand} (L1同品牌流程中/拒绝={skipped_status}, L2同产品永久={skipped_dedup}, "
-          f"L3同品牌7天轰炸={skipped_blast}, countries={countries_want}, langs={list(langs_want_iso)})")
+          f"L3同品牌7天轰炸={skipped_blast}, P0本轮去重={skipped_inrun}, countries={countries_want}, langs={list(langs_want_iso)})")
 
     return hits[:hard_pool]
 
@@ -601,7 +605,7 @@ async def write_drafts_and_route(task_rid: str, product_rid: str, brand: str,
 
 
 # ===== 6. 处理一个任务(主流程) =====
-async def enrich_task(task_record: dict) -> dict:
+async def enrich_task(task_record: dict, seen_kb: set = None) -> dict:
     task_rid = task_record["record_id"]
     tf = task_record["fields"]
     task_name = ext(tf.get("任务名"))
@@ -648,7 +652,7 @@ async def enrich_task(task_record: dict) -> dict:
 
     await feishu.update_record(config.T_TASK_EDITOR, task_rid, {"任务状态": "3-富化中"})
 
-    candidates = await filter_editors(tf, product_rid=prod_rid, brand=brand)
+    candidates = await filter_editors(tf, product_rid=prod_rid, brand=brand, seen_kb=seen_kb)
     if not candidates:
         await feishu.update_record(config.T_TASK_EDITOR, task_rid, {
             "任务状态": "7-已完成", "富化候选数": 0, "通过阈值数": 0, "备注": "无候选",
@@ -691,6 +695,12 @@ async def enrich_task(task_record: dict) -> dict:
 
     routed = await write_drafts_and_route(task_rid, prod_rid, brand, sender_alias, signature, passed)
 
+    # P0 本轮内存去重: 登记本任务实际生成草稿的媒体人(同品牌), 供同 cron 后续任务跳过(防并发重复)
+    if seen_kb is not None:
+        for s in passed:
+            if s.get("passed") and s.get("editor_record_id"):
+                seen_kb.add((s["editor_record_id"], brand))
+
     auto_count = sum(1 for r in routed if r.get("path") == "自动通过")
     human_count = sum(1 for r in routed if r.get("path") in ("待人审", "需人改"))
     retry_count = sum(1 for r in routed if r.get("path") == "退回重生")
@@ -719,9 +729,10 @@ async def run() -> dict:
         return {"processed": 0, "message": "no pending editor task"}
 
     results = []
+    seen_kb = set()  # P0: 本轮(本次cron)已派的 (editor_record_id, brand), 跨任务共享防并发重复
     for t in tasks:
         try:
-            r = await enrich_task(t)
+            r = await enrich_task(t, seen_kb=seen_kb)
             results.append(r)
         except Exception as e:
             import traceback
