@@ -22,6 +22,20 @@ DEFAULT_BRAND_LIMIT = 80  # 兜底:产品库未填"品牌每日上限"时
 # True = 恢复产品级拦截(非合规品整个跳过派单)。
 IP_GATE_ENABLED = False
 
+# 销售国家(allowlist) → 市场语言(中文名, 对齐任务台「筛选-语言」MultiSelect 选项).
+# 设计: 硬筛维度是"语言"而非"KOL 国家"——英语红人(US/UK/CA/AU)受众互通英语市场,
+# 用国家硬筛会误杀(澳洲英语 YouTuber 受众覆盖美国)。语言筛保住英语池, 同时挡掉
+# "卖不到的语言"(如食人花不卖日本 → 日语 KOL 被排除)。销售国家留空 → 不派生语言 →
+# 不筛(选填, 不阻断派单), 边界 case 由人审兜底。
+COUNTRY_TO_LANGS = {
+    "US": ["英语"], "UK": ["英语"], "CA": ["英语"], "AU": ["英语"],
+    "PH": ["英语"], "IN": ["英语"], "AE": ["英语"], "TH": ["英语"], "ID": ["英语"],
+    "DE": ["德语"], "FR": ["法语"], "ES": ["西班牙语"], "MX": ["西班牙语"],
+    "IT": ["意大利语"], "NL": ["荷兰语"], "BR": ["葡萄牙语"], "PT": ["葡萄牙语"],
+    "JP": ["日语"], "SE": ["瑞典语"],
+}
+
+
 CATEGORY_PLATFORMS = {
     # 品类 → 推荐筛选平台(为空=不限,enrich 会全平台候选)
     "手柄": ["YouTube", "Instagram", "TikTok"],
@@ -105,6 +119,9 @@ async def create_kol_task(product: dict, batch_size: int, mapping: dict) -> dict
 
     fans_min, fans_max = _fans_range_for_price(p_price)
     platforms = CATEGORY_PLATFORMS.get(p_cat, [])
+    # 销售国家 → 市场语言(硬筛维度). 留空 → sell_langs=[] → enrich 不按语言筛(选填不阻断).
+    sell_countries = list(_parse_multiselect(pf.get("销售国家")))
+    sell_langs = sorted({lg for c in sell_countries for lg in COUNTRY_TO_LANGS.get(c, [])})
     sender_choice = "FUNLAB邮箱(@funlabswitch.com)" if p_brand == "FUNLAB" else "POWKONG邮箱(@powkong.com)"
 
     fields = {
@@ -112,6 +129,7 @@ async def create_kol_task(product: dict, batch_size: int, mapping: dict) -> dict
         "品牌": p_brand,
         "目标产品": [product["record_id"]],
         "筛选-平台": platforms,
+        "筛选-语言": sell_langs,
         "筛选-内容风格": mapping["expected_styles"],
         "筛选-粉丝下限": fans_min,
         "筛选-粉丝上限": fans_max if fans_max else 100_000_000,
