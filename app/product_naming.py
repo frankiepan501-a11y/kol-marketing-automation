@@ -81,6 +81,12 @@ async def resolve_product_en(pf: dict) -> tuple:
         warn = "" if main_kw else "已自动拼英文名, 但缺「主关键词(英文)」(如 Hall-Effect Switch Controller), 名字不够完整。"
         return name, "sku_auto", warn
 
+    # 白牌(Linyuvo) → 纯品类名, 运营手填, 无品牌前缀(2026-06-08)
+    if brand == "白牌":
+        if not existing:
+            return "", "manual", "白牌产品缺「产品英文名」(手填纯品类名, 无品牌前缀, 如 Switch 2 Pro Controller with Hall Effect)。"
+        return existing, "manual", ""
+
     # POWKONG (系列矩阵未补) + 其他 → 手填 + 格式校验
     if not existing:
         return "", "manual", "POWKONG 产品缺「产品英文名」(系列矩阵未补, 暂需手填)。格式: POWKONG [系列] [型号] - [主关键词]。"

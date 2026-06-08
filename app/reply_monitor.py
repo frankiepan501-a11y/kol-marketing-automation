@@ -499,7 +499,8 @@ async def run():
     # 2026-06-01 方案B (alias 盲区根治): 不再按 to:别名列举监控, 改扫整个账户收件箱,
     # 由下方 find_contact 池门控过滤非 KOL 邮件 → 任意我方内部地址
     # (partner/marketing/frankie/sibyl.guo/goya.li/未来新增...) 收到的 KOL 回复都能捕获, 不打地鼠.
-    OUR_DOMAINS = ("powkong.com", "fireflyfunlab.com")
+    # 2026-06-08 配置驱动: 我方域名从 BRAND_CONFIG 派生(自动含白牌 linyuvo.com)
+    OUR_DOMAINS = tuple(c["domain"] for c in config.BRAND_CONFIG.values() if c.get("domain"))
 
     def _our_addr_in_to(m):
         """从 toAddress(+cc) 取我方收件地址(@我方域名), 用于判断是否非 partner@ 别名→强制人审."""
@@ -510,7 +511,7 @@ async def run():
                 return el
         return ""
 
-    for brand in ("POWKONG", "FUNLAB"):
+    for brand in config.BRAND_CONFIG.keys():   # 2026-06-08 配置驱动: 自动含白牌, 扫白牌收件箱
         primary_alias = config.BRAND_CONFIG[brand]["alias_from"]
         try:
             raw = await zoho.list_inbox(brand, per_folder=60)

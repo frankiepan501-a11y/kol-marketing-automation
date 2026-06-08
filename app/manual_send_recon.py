@@ -45,7 +45,7 @@ async def run(dry_run: bool = False) -> dict:
 
     # 3. 扫两品牌发件箱, 找"发过但无草稿"的池内联系人
     found = {}   # email→{first sent msg}
-    for brand in ("POWKONG", "FUNLAB"):
+    for brand in config.BRAND_CONFIG:   # 2026-06-08 配置驱动: 含白牌发件箱补登记
         try:
             sent = await zoho.list_sent_messages(brand, limit=SENT_SCAN_LIMIT)
             msgs = sent.get("messages") or [] if isinstance(sent, dict) else []

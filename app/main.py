@@ -508,7 +508,7 @@ async def zoho_health(authorization: str = Header(default="")):
     from . import zoho
     results = {}
     has_fail = False
-    for brand in ("POWKONG", "FUNLAB"):
+    for brand in config.BRAND_CONFIG.keys():   # 2026-06-08 配置驱动: 含白牌健康检查
         try:
             folders = await zoho.list_folders(brand)
             results[brand] = {"ok": True, "folder_count": len(folders)}

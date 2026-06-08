@@ -118,9 +118,12 @@ async def run(dry_run: bool = False) -> dict:
     processed = 0
     marked = 0
     results = []
-    for brand in ("POWKONG", "FUNLAB"):
+    for brand in config.BRAND_CONFIG:   # 2026-06-08 配置驱动: 含白牌退信扫描
         alias = config.BRAND_CONFIG[brand]["alias_from"]
-        exclude = {alias.lower(), "powkong.com", "fireflyfunlab.com", "funlab"}
+        # 排除我方自有地址(不当退信目标): 别名 + 所有品牌域名/识别子串(自动含白牌 linyuvo)
+        exclude = {alias.lower()}
+        exclude |= {c["domain"] for c in config.BRAND_CONFIG.values() if c.get("domain")}
+        exclude |= {m for c in config.BRAND_CONFIG.values() for m in c.get("match", ())}
         try:
             msgs = await zoho.search_inbox(brand, f"to:{alias}", limit=50)
         except Exception as e:

@@ -122,7 +122,8 @@ async def create_kol_task(product: dict, batch_size: int, mapping: dict) -> dict
     # 销售国家 → 市场语言(硬筛维度). 留空 → sell_langs=[] → enrich 不按语言筛(选填不阻断).
     sell_countries = list(_parse_multiselect(pf.get("销售国家")))
     sell_langs = sorted({lg for c in sell_countries for lg in COUNTRY_TO_LANGS.get(c, [])})
-    sender_choice = "FUNLAB邮箱(@funlabswitch.com)" if p_brand == "FUNLAB" else "POWKONG邮箱(@powkong.com)"
+    # 2026-06-08 配置驱动: 发送邮箱按品牌查 BRAND_CONFIG(支持白牌), 未知品牌兜底 POWKONG
+    sender_choice = config.BRAND_CONFIG.get(p_brand, {}).get("sender_label") or "POWKONG邮箱(@powkong.com)"
 
     fields = {
         "任务名": task_name,
@@ -165,7 +166,7 @@ async def create_editor_task(product: dict, mapping: dict) -> dict:
 
     today = datetime.now().strftime("%Y%m%d")
     task_name = f"PR派单-{today}-{p_brand}-{p_name[:28]}"
-    sender_choice = "FUNLAB邮箱(@fireflyfunlab.com)" if p_brand == "FUNLAB" else "POWKONG邮箱(@powkong.com)"
+    sender_choice = config.BRAND_CONFIG.get(p_brand, {}).get("sender_label") or "POWKONG邮箱(@powkong.com)"
 
     fields = {
         "任务名": task_name,

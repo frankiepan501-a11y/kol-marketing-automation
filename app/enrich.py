@@ -86,6 +86,7 @@ def _check_ban_phrases(body: str) -> list:
 SIGNATURE_POOL = {
     "FUNLAB": ["Tom from FUNLAB Team", "Mia @ FUNLAB Outreach", "Alex / FUNLAB Partnership"],
     "POWKONG": ["Lisa @ POWKONG Team", "Ryan from POWKONG", "Jamie / POWKONG Partnership"],
+    "白牌": ["Emma @ LY Gamer", "Leo @ LY Gamer", "Mia @ LY Gamer"],
 }
 
 # 2026-05-17 A6: 从写死 UTC offset 改成 IANA tz name, 用 zoneinfo 自动处理 DST
@@ -200,12 +201,8 @@ RECENT_BLAST_DAYS_SAME_BRAND = 7
 
 
 def _brand_from_email(email: str) -> str:
-    """通过 partner@ 邮箱反推品牌, 用于草稿表的品牌识别."""
-    if not email: return ""
-    e = str(email).lower()
-    if "powkong" in e: return "POWKONG"
-    if "funlab" in e or "firefly" in e: return "FUNLAB"
-    return ""
+    """通过邮箱反推品牌(草稿表品牌识别). 2026-06-08 改配置驱动(支持白牌)。"""
+    return config.brand_from_text(email)
 
 
 async def filter_kols(task_fields: dict, product_rid: str = "", brand: str = "",

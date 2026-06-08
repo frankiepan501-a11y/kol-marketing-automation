@@ -57,6 +57,7 @@ def _check_ban_phrases(body: str) -> list:
 SIGNATURE_POOL = {
     "FUNLAB": ["Tom from FUNLAB PR", "Mia @ FUNLAB Press", "Alex / FUNLAB Press Office"],
     "POWKONG": ["Lisa @ POWKONG PR", "Ryan from POWKONG Press", "Jamie / POWKONG Press"],
+    "白牌": ["Emma @ LY Gamer", "Leo @ LY Gamer", "Mia @ LY Gamer"],
 }
 
 # 主题前缀池 — Python 端随机选 1 个传给 prompt, 避免 5 条全 "Exclusive:" 模板化
@@ -169,11 +170,8 @@ RECENT_BLAST_DAYS_EDITOR = 7
 
 
 def _brand_from_email_editor(email: str) -> str:
-    if not email: return ""
-    e = str(email).lower()
-    if "powkong" in e: return "POWKONG"
-    if "funlab" in e or "firefly" in e: return "FUNLAB"
-    return ""
+    # 2026-06-08 改配置驱动(支持白牌)
+    return config.brand_from_text(email)
 
 
 async def filter_editors(task_fields: dict, product_rid: str = "", brand: str = "",

@@ -70,6 +70,14 @@ ZOHO_POWKONG_REFRESH_TOKEN = env("ZOHO_POWKONG_REFRESH_TOKEN", required=True)
 ZOHO_POWKONG_ACCOUNT_ID = env("ZOHO_POWKONG_ACCOUNT_ID", required=True)
 ZOHO_POWKONG_ALIAS = env("ZOHO_POWKONG_ALIAS", "partner@powkong.com")
 
+# 白牌 (Linyuvo, 2026-06-08) — 中性外联身份, 给白牌产品发 cold. 选填:
+# env 未设(client_id 空) → 不挂此品牌, POWKONG/FUNLAB 不受影响。
+ZOHO_WHITELABEL_CLIENT_ID = env("ZOHO_WHITELABEL_CLIENT_ID", "")
+ZOHO_WHITELABEL_CLIENT_SECRET = env("ZOHO_WHITELABEL_CLIENT_SECRET", "")
+ZOHO_WHITELABEL_REFRESH_TOKEN = env("ZOHO_WHITELABEL_REFRESH_TOKEN", "")
+ZOHO_WHITELABEL_ACCOUNT_ID = env("ZOHO_WHITELABEL_ACCOUNT_ID", "")
+ZOHO_WHITELABEL_ALIAS = env("ZOHO_WHITELABEL_ALIAS", "support@linyuvo.com")
+
 ZOHO_REGION = env("ZOHO_REGION", ".com")  # .com / .com.cn / .eu
 
 # 2026-06-01 修 reply_monitor alias 盲区 (审计实证: 手动从 marketing@/frankie@ 外联的回复
@@ -146,6 +154,11 @@ BRAND_CONFIG = {
         "refresh_token": ZOHO_FUNLAB_REFRESH_TOKEN,
         "account_id": ZOHO_FUNLAB_ACCOUNT_ID,
         "alias_from": ZOHO_FUNLAB_ALIAS,
+        # 2026-06-08 配置驱动元数据(供 dispatch/reply_monitor/brand 识别派生, 行为不变):
+        "domain": "fireflyfunlab.com",          # reply_monitor OUR_DOMAINS
+        "match": ("funlab", "firefly"),         # 邮箱/别名子串 → 品牌识别
+        "sender_label": "FUNLAB邮箱(@funlabswitch.com)",  # dispatch 发送邮箱字段值
+        "naming": "auto",                       # 产品英文名: 自动拼
     },
     "POWKONG": {
         "client_id": ZOHO_POWKONG_CLIENT_ID,
@@ -153,5 +166,34 @@ BRAND_CONFIG = {
         "refresh_token": ZOHO_POWKONG_REFRESH_TOKEN,
         "account_id": ZOHO_POWKONG_ACCOUNT_ID,
         "alias_from": ZOHO_POWKONG_ALIAS,
+        "domain": "powkong.com",
+        "match": ("powkong",),
+        "sender_label": "POWKONG邮箱(@powkong.com)",
+        "naming": "manual",
     },
 }
+
+# 白牌(Linyuvo) — 仅在 env 配齐时挂载, 否则不存在此品牌(POWKONG/FUNLAB 完全不受影响)
+if ZOHO_WHITELABEL_CLIENT_ID and ZOHO_WHITELABEL_REFRESH_TOKEN:
+    BRAND_CONFIG["白牌"] = {
+        "client_id": ZOHO_WHITELABEL_CLIENT_ID,
+        "client_secret": ZOHO_WHITELABEL_CLIENT_SECRET,
+        "refresh_token": ZOHO_WHITELABEL_REFRESH_TOKEN,
+        "account_id": ZOHO_WHITELABEL_ACCOUNT_ID,
+        "alias_from": ZOHO_WHITELABEL_ALIAS,
+        "domain": "linyuvo.com",
+        "match": ("linyuvo",),
+        "sender_label": "白牌邮箱(@linyuvo.com)",
+        "naming": "manual_generic",             # 纯品类名, 运营手填, 无品牌前缀
+    }
+
+
+def brand_from_text(text: str) -> str:
+    """从邮箱地址/发送邮箱别名文本匹配品牌 key (按 BRAND_CONFIG['match'] 子串)。无匹配返回 ''。
+    取代各处写死的 if 'powkong'/'funlab' 判断, 加品牌只动 BRAND_CONFIG。"""
+    s = (text or "").lower()
+    for _brand, _cfg in BRAND_CONFIG.items():
+        for _m in _cfg.get("match", ()):
+            if _m and _m in s:
+                return _brand
+    return ""

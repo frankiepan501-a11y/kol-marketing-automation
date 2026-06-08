@@ -55,10 +55,8 @@ PER_BRAND_PER_RUN = 10    # 单品牌单次最多 10 封
 
 
 def _brand_from_alias(alias: str) -> str:
-    s = (alias or "").lower()
-    if "powkong" in s: return "POWKONG"
-    if "fireflyfunlab" in s or "funlab" in s: return "FUNLAB"
-    return "FUNLAB"
+    # 2026-06-08 配置驱动(支持白牌); 无匹配兜底 FUNLAB(沿用原默认)
+    return config.brand_from_text(alias) or "FUNLAB"
 
 
 # ===== 发送前占位符校验 =====
@@ -586,8 +584,8 @@ async def run() -> dict:
     if not ready:
         return {"sent": 0, "fail": 0, "scheduled_later": scheduled_later, "skipped": skipped, "msg": "no ready drafts"}
 
-    # 按品牌分组
-    by_brand = {"POWKONG": [], "FUNLAB": []}
+    # 按品牌分组 (2026-06-08 配置驱动: 含白牌, 否则白牌草稿 KeyError 崩)
+    by_brand = {b: [] for b in config.BRAND_CONFIG}
     for r in ready:
         b = _brand_from_alias(ext(r["fields"].get("发送邮箱")))
         by_brand[b].append(r)
@@ -600,7 +598,7 @@ async def run() -> dict:
     queue = []
     max_per = max(len(v) for v in by_brand.values()) if by_brand else 0
     for i in range(max_per):
-        for b in ("POWKONG", "FUNLAB"):
+        for b in by_brand:
             if i < len(by_brand[b]):
                 queue.append(by_brand[b][i])
     queue = queue[:RATE_PER_RUN]  # 全局上限
