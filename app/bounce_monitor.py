@@ -182,12 +182,17 @@ async def run(dry_run: bool = False) -> dict:
                     })
                 except Exception as e:
                     print(f"[bounce_monitor] 跟进记录 fail: {e}")
-                # 飞书通知 (群) — 2026-05-31 加 contact_info compact 帮判断 false positive
+                # 飞书通知 — 2026-06-08 改私聊 Frankie+负责运营(不进群, Frankie #4):
+                # 退信是运营要处理的死邮箱, 走 reviewer(运营专员实时查+Frankie)私聊。
                 try:
                     _ci = await feishu.resolve_contact_info(
                         contact["record_id"], "媒体人" if ctype == "editor" else "KOL")
                     card = _build_card(ctype, name, dead, brand, hit, contact_info=_ci)
-                    await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+                    for _nm, _oid in await feishu.resolve_notify_targets("reviewer"):
+                        try:
+                            await feishu.send_card_message("open_id", _oid, card)
+                        except Exception:
+                            pass
                 except Exception as e:
                     print(f"[bounce_monitor] notify fail: {e}")
                 marked += 1

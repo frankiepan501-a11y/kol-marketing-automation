@@ -98,13 +98,12 @@ async def run(dry_run: bool = False) -> dict:
                          "自动去重不敢动(怕丢真实活动), 需你人工决定保留哪条:\n\n" + lines)[:1800]}},
                 ],
             }
-            await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card, biz="AUDIT")
-            for name, oid in config.NOTIFY_USERS:
-                if name.startswith("潘"):
-                    try:
-                        await feishu.send_card_message("open_id", oid, card, biz="AUDIT")
-                    except Exception:
-                        pass
+            # 2026-06-08 告警不进群(Frankie #4): 私聊 Frankie+负责运营(reviewer 角色)。
+            for name, oid in await feishu.resolve_notify_targets("reviewer"):
+                try:
+                    await feishu.send_card_message("open_id", oid, card, biz="AUDIT")
+                except Exception:
+                    pass
         except Exception as ex:
             print(f"[kol_dedup] 冲突告警发送失败: {str(ex)[:80]}")
 

@@ -49,9 +49,10 @@ async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
         ],
     }
     try:
-        await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card, biz="AUDIT")
+        # 2026-06-08 不进群(Frankie #4)。端点失败=infra 故障, 运营无法处理 → 保持只私聊 Frankie
+        # (退信/重复才给 Frankie+运营; 此处沿用原"防其他人误以为要处理"设计)。
         for name, oid in config.NOTIFY_USERS:
-            if name.startswith("潘"):  # 只发 Frankie 防其他人误以为要处理
+            if name.startswith("潘"):
                 try: await feishu.send_card_message("open_id", oid, card, biz="AUDIT")
                 except Exception: pass
     except Exception as e:

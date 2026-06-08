@@ -118,7 +118,9 @@ SNOV_EDITOR_FINDER_ENABLED = (env("SNOV_EDITOR_FINDER_ENABLED", "1") or "1") != 
 T_UPLOAD_REPORT = env("T_UPLOAD_REPORT", "tblHrlzTeSIhOjCY")
 
 # 通知目标
-NOTIFY_CHAT_ID = env("NOTIFY_CHAT_ID", "oc_4ddd938ddb73201ed7354337eb2226ac")
+# 2026-06-08: KOL/媒体人业务通知群 → 电商运营部(Frankie 拍板从站外运营部 oc_4ddd…26ac 迁出)。
+# 告警类(退信/重复/端点失败)不进此群, 改私聊 Frankie+负责运营(见 bounce_monitor/kol_dedup/main)。
+NOTIFY_CHAT_ID = env("NOTIFY_CHAT_ID", "oc_8b71a652a25ec0dd1c8af2c53e86ed93")
 # 格式: "name1:open_id1,name2:open_id2,..."
 NOTIFY_USERS_STR = env("NOTIFY_USERS",
     # 2026-06-08: 余琦华已离职(飞书人事 resigned=True), 从默认值移除保持与 Zeabur env 一致。
