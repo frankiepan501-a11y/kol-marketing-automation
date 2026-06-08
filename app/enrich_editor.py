@@ -341,6 +341,18 @@ async def gen_pr_draft(editor_record: dict, product: dict, brand: str,
     p_audience = ext(pf.get("目标人群"))
     p_media_endorse_raw = ext(pf.get("媒体报道"))
 
+    # 时效由头 / News Peg (2026-06-08): 媒体外联核心由头, 借游戏 IP 上线节点. 空=行为不变.
+    news_hook = ext(pf.get("时效由头"))
+    news_hook_block = ""
+    if news_hook:
+        news_hook_block = (
+            "\n【时效由头 / News Peg】(本封 pitch 的核心由头, 但严禁暗示该 DLC/活动是我方制作)\n"
+            f"{news_hook}\n"
+            "→ 主题前缀优先用时效型 (Coming this week / Exclusive), "
+            "中段\"为什么现在值得报道\"必须锚定到这个上线节点 "
+            "(官方授权周边 + 玩家配合新内容的报道时机)。\n"
+        )
+
     # UTM 注入
     from . import utm as _utm
     p_url = _utm.make_utm_link(p_url_raw, brand, p_name, name)
@@ -410,7 +422,7 @@ async def gen_pr_draft(editor_record: dict, product: dict, brand: str,
 卖点: {p_s1} | {p_s2} | {p_s3}
 官网: {p_url} | 目标人群: {p_audience or '游戏玩家'}
 {"已有媒体背书 (注意: 已过滤掉收件人自家媒体的话, 安全引用即可): " + p_media_endorse if p_media_endorse else "已有媒体背书: (无, 不要硬编)"}
-
+{news_hook_block}
 【匹配亮点】(系统已确认 {total:.0f} 分, 基于以下维度)
 {angle_hints}
 

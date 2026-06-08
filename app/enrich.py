@@ -377,6 +377,18 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
     p_audience = ext(pf.get("目标人群"))
     p_media = ext(pf.get("媒体报道"))
 
+    # 时效由头 / News Hook (2026-06-08): 借势游戏 IP 上线节点(如戴夫 6/18 DLC). 空=行为不变.
+    news_hook = ext(pf.get("时效由头"))
+    news_hook_block = ""
+    if news_hook:
+        news_hook_block = (
+            "\n【时效由头 / News Hook】(本封必须借势, 但严禁暗示该 DLC/活动内容是我方制作)\n"
+            f"{news_hook}\n"
+            "→ 主题行或正文开头/中段必须自然带出这个时间点 "
+            "(如 \"with the new DLC dropping June 18\" / \"just in time for the launch\"), "
+            "让邮件有时效、不像通用群发模板。我方只是「官方授权周边」, 借玩家为新内容做准备的热度。\n"
+        )
+
     # UTM 注入 (Phase 1 ROI 闭环): 给产品链接加 utm_source/medium/campaign/content
     from . import utm as _utm
     p_url = _utm.make_utm_link(p_url_raw, brand, p_name, kol_name)
@@ -433,7 +445,7 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
 卖点: {p_s1} | {p_s2} | {p_s3}
 目标人群: {p_audience}
 媒体背书: {p_media or '(无)'}
-
+{news_hook_block}
 【产品链接】(原样逐字放进正文, 有几行放几行)
 {links_block}
 
