@@ -246,7 +246,10 @@ async def _layer1b_tracking_followup_overdue(now_ms: int) -> dict:
                 ]},
             ],
         }
-        personal_targets = await feishu.resolve_notify_targets("ship_confirm")
+        # 修复(2026-06-08): 原误写 resolve_notify_targets("ship_confirm") — 该 role 未定义会抛
+        # ValueError 致整个 L1b 通知失败。对齐 L1 ship 块: ship_main(运营专员) + ship_cc(Frankie+吴晓丹)。
+        _main, _cc = await draft_router._ship_confirm_targets()
+        personal_targets = _main + _cc
 
         success, fail, errors, group_msg_id = 0, 0, [], ""
         try:

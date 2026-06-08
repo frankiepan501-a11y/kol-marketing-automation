@@ -121,9 +121,10 @@ T_UPLOAD_REPORT = env("T_UPLOAD_REPORT", "tblHrlzTeSIhOjCY")
 NOTIFY_CHAT_ID = env("NOTIFY_CHAT_ID", "oc_4ddd938ddb73201ed7354337eb2226ac")
 # 格式: "name1:open_id1,name2:open_id2,..."
 NOTIFY_USERS_STR = env("NOTIFY_USERS",
+    # 2026-06-08: 余琦华已离职(飞书人事 resigned=True), 从默认值移除保持与 Zeabur env 一致。
+    # 注: reviewer/ship_main 角色走职务实时查(已自动过滤离职), 此默认仅 env 未设时兜底。
     "潘志聪-Frankie:ou_629ce01f4bc31de078e10fcb038dbf78,"
     "吴晓丹:ou_c65fc5c31c650790db623640b7ac74f7,"
-    "余琦华-独立站运营:ou_40e677ab2d99e763e48efec7f4eb8735,"
     "张佳烨-独立站运营:ou_d850dab47bdbaea6736709d354de4b0f"
 )
 NOTIFY_USERS = [(p.split(":", 1)[0], p.split(":", 1)[1]) for p in NOTIFY_USERS_STR.split(",") if ":" in p]
