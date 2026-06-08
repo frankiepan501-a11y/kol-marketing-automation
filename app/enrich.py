@@ -428,6 +428,9 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
      有几行放几行, 禁止改 href / 禁止合并成一行 / 禁止翻译或改写 <a> 标签里的文字 / 禁止增删链接。
   ✓ CTA 开放式: "Would you be curious to try one? Happy to send it over, no strings attached."
   ✗ 严禁内部 SKU 代号 (YM24/PK02/FL-JC 等), 严禁 <img>, 严禁中文混杂
+  ✗ 产品类型: 这是 Switch 2 无线手柄 (wireless controller / Switch 2 accessory), 充电底座只是随附配件 —
+     主题与正文必须称它为 controller / Switch 2 accessory, 严禁把整个产品叫成 "dock"
+  ✗ 严禁在主题或正文出现任何价格 / 报价 / $ 金额
 
 📌 透明度: 说清品牌/产品, 不承诺佣金, 不推销腔
 📌 语言: 全文 {lang_display} (KOL 国家: {kol_country_cn or kol_country})
@@ -438,7 +441,7 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
 主页: {kol_url}
 
 【产品】
-{p_name} ({p_brand} / {p_cat}) | 报价: ${p_price} USD
+{p_name} ({p_brand} / {p_cat})
 卖点: {p_s1} | {p_s2} | {p_s3}
 目标人群: {p_audience}
 媒体背书: {p_media or '(无)'}

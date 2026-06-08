@@ -397,13 +397,16 @@ async def gen_pr_draft(editor_record: dict, product: dict, brand: str,
     ✓ 用基于 报道品类 / 媒体名 的概括 (参考上面给的开头模板)
   ✓ 中段: 产品新闻角度 (为什么值得报道, 不是"产品多好"):
     - 设计亮点 / 限量 / 与游戏 IP 关联 / 已有媒体背书 (但**不要引收件人自家媒体**, 见下方)
-  ✓ 提供记者需要的: 产品页 (含图) / 报价 (${p_price} USD) / 寄测样意向
+  ✓ 提供记者需要的: 产品页 (含图) / 寄测样意向
   ✓ 1 行产品链接独立段落: <p>📎 Press kit: <a href="{p_url}">Product page →</a></p>
      - en: "Product page →"  / de: "Produktseite →" / fr: "Fiche produit →"
      - es: "Página del producto →"  / pt: "Página do produto →"  / ja: "製品ページ →"
      - it: "Pagina prodotto →" / nl: "Productpagina →"
   ✓ CTA: "Happy to send a review unit or additional assets if it's a good fit for your coverage."
   ✗ 严禁内部 SKU 代号 (YM24/PK02/FL-JC 等), 严禁 <img>, 严禁中文混杂
+  ✗ 产品类型: 这是 Switch 2 无线手柄 (wireless controller / Switch 2 accessory), 充电底座只是随附配件 —
+     必须称它为 controller / Switch 2 accessory, 严禁把整个产品叫成 "dock"
+  ✗ 严禁在主题或正文出现任何价格 / 报价 / $ 金额
 
 📌 透明度: 说清品牌, 不暗示佣金, 不"求报道"
 
@@ -416,7 +419,7 @@ async def gen_pr_draft(editor_record: dict, product: dict, brand: str,
 {(recent or '(无)')[:400]}
 
 【产品】
-{p_name} ({p_brand} / {p_cat}) | 报价: ${p_price} USD
+{p_name} ({p_brand} / {p_cat})
 卖点: {p_s1} | {p_s2} | {p_s3}
 官网: {p_url} | 目标人群: {p_audience or '游戏玩家'}
 {"已有媒体背书 (注意: 已过滤掉收件人自家媒体的话, 安全引用即可): " + p_media_endorse if p_media_endorse else "已有媒体背书: (无, 不要硬编)"}
