@@ -202,7 +202,8 @@ def _sender_signature(brand: str) -> str:
     return {
         "POWKONG": "Frankie\nPOWKONG Partnerships",
         "FUNLAB": "Frankie\nFUNLAB Creator Team",
-    }.get(brand.upper(), "Frankie\nPartnerships")
+        "白牌": "Frankie\nLY Gamer",
+    }.get(brand if brand == "白牌" else brand.upper(), "Frankie\nPartnerships")
 
 
 # ===== 感兴趣子类 AI 判断 =====

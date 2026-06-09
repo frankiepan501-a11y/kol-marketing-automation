@@ -31,10 +31,35 @@ TEMPLATE_WARM_RECAP = (
 
 
 def _brand_from_alias(alias: str) -> str:
-    s = (alias or "").lower()
-    if "powkong" in s:
-        return "POWKONG"
-    return "FUNLAB"
+    # 2026-06-09 配置驱动(支持白牌); 无匹配兜底 FUNLAB
+    return config.brand_from_text(alias) or "FUNLAB"
+
+
+async def _localize_body(body: str, lang: str) -> str:
+    """暖信跟 KOL 沟通语言走 (Frankie 2026-06-09): 整封翻成 KOL「语言」。
+    保留 [DISCOUNT_CODE]/[DISCOUNT_PCT]/链接/产品名/署名不变;
+    翻译失败或占位符丢失 → 降级英文原文(宁可英文也不发坏)。"""
+    if not lang or lang == "en":
+        return body
+    _LN = {"de": "German", "fr": "French", "es": "Spanish", "pt": "Portuguese",
+           "ja": "Japanese", "it": "Italian", "nl": "Dutch", "sv": "Swedish", "zh": "Chinese"}
+    target = _LN.get(lang, lang)
+    from . import deepseek
+    prompt = (
+        f"Translate this gifting email body into {target}, natural and casual for a content creator. "
+        "Keep EXACTLY as-is (do NOT translate): the tokens [DISCOUNT_CODE] and [DISCOUNT_PCT], any URL/link, "
+        "product names, and the signature line(s) after 'Best,'. "
+        'Return JSON {"translated":"<body>"} only.\n\nEMAIL BODY:\n' + body
+    )
+    try:
+        out = await deepseek.chat_json(prompt, max_tokens=1000, temperature=0.2)
+        t = (out.get("translated") or "").strip()
+        if t and "[DISCOUNT_CODE]" in t and "[DISCOUNT_PCT]" in t:
+            return t
+        print(f"[warm_recap] 翻译丢占位符, 降级英文 (lang={lang})")
+    except Exception as e:
+        print(f"[warm_recap] 本地化翻译失败 (lang={lang}), 降级英文: {e}")
+    return body
 
 
 async def _product_brief(prod_rid: str):
@@ -128,7 +153,14 @@ async def build_for_ship_draft(ship_draft: dict) -> dict:
         first_name=first, product_name=product_name, brief_points=brief_points,
         link_line=link_line, signature=reply_drafter._sender_signature(brand),
     )
-    subj = "Re: " + (ext(sf.get("邮件主题")) or f"{product_name}")[:150]
+    # 2026-06-09: 暖信跟 KOL 语言走(和开发信一致) — 整封翻成 KOL「语言」(保留占位符/链接/署名)
+    lang = ext(cf.get("语言")) or "en"
+    body = await _localize_body(body, lang)
+    # 主题: 去掉内部中文标签([手动寄样补登记]/[...补登记]等) + 折叠重复 Re: → 干净 Re: <原主题>
+    _src_subj = ext(sf.get("邮件主题")) or product_name
+    _src_subj = re.sub(r'^\s*\[[^\]]*(手动|补登记|内部)[^\]]*\]\s*', '', _src_subj)
+    _src_subj = re.sub(r'^(\s*Re:\s*)+', '', _src_subj, flags=re.I)
+    subj = "Re: " + _src_subj[:150]
 
     now_ms = int(time.time() * 1000)
     fields = {
@@ -136,7 +168,7 @@ async def build_for_ship_draft(ship_draft: dict) -> dict:
         link_field: [contact_rid],
         "邮件主题": subj[:200],
         "邮件正文": body,
-        "邮件语言": "en",
+        "邮件语言": lang,
         "邮件草稿状态": "待审",
         "邮件草稿来源": WARM_RECAP_SOURCE,
         "对象类型": ctype,
