@@ -154,7 +154,10 @@ async def build_for_ship_draft(ship_draft: dict) -> dict:
         link_line=link_line, signature=reply_drafter._sender_signature(brand),
     )
     # 2026-06-09: 暖信跟 KOL 语言走(和开发信一致) — 整封翻成 KOL「语言」(保留占位符/链接/署名)
+    # "其他"/空/非标准 ISO → en (防翻译目标="其他"出乱码; 实测 186 KOL 语言="其他")
     lang = ext(cf.get("语言")) or "en"
+    if lang not in ("de", "fr", "es", "pt", "ja", "it", "nl", "sv", "zh"):
+        lang = "en"
     body = await _localize_body(body, lang)
     # 主题: 去掉内部中文标签([手动寄样补登记]/[...补登记]等) + 折叠重复 Re: → 干净 Re: <原主题>
     _src_subj = ext(sf.get("邮件主题")) or product_name

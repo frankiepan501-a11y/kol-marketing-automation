@@ -320,6 +320,9 @@ async def generate_for_kol(prod_rid: str, kol_rid: str) -> dict:
     pub_kw = ext(kf.get("上稿匹配关键词"))
     country = ext(kf.get("国家"))
     lang = ext(kf.get("语言")) or "en"
+    # 2026-06-09: "其他"/空/非标准 ISO → en (防 DeepSeek 见中文"其他"就出中文 brief; 186 KOL 受影响)
+    if lang not in ("en", "de", "fr", "es", "pt", "ja", "it", "nl", "sv", "zh"):
+        lang = "en"
 
     hint = _format_hint(platform)  # 主平台默认长/短倾向 (AI 可按风格上调)
     # 产品信息源 (肥→瘦): 亚马逊 listing(标题+五点, 最肥) → Shopify body_html(常稀疏). 都 fail-safe 降级。
