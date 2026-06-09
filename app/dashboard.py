@@ -59,7 +59,7 @@ async def run():
         m = re.search(r"抓取关键词\s*[:：]\s*([^|]+?)(?:\||$)", note)
         kw = m.group(1).strip() if m else "(未知)"
         sender = ext(f.get("发送邮箱"))
-        brand = "FUNLAB" if "fireflyfunlab" in sender else ("POWKONG" if "powkong" in sender else "?")
+        brand = config.brand_from_text(sender) or "?"   # 2026-06-09 配置驱动(支持白牌)
         try: sc = float(f.get("匹配度总分") or 0)
         except (ValueError, TypeError): sc = 0
         return {
@@ -80,7 +80,7 @@ async def run():
         pid = xrid(f.get("关联产品"))
         em = ed_map.get(eid, {}).get("fields", {}) if eid else {}
         sender = ext(f.get("发送邮箱"))
-        brand = "FUNLAB" if "fireflyfunlab" in sender else ("POWKONG" if "powkong" in sender else "?")
+        brand = config.brand_from_text(sender) or "?"   # 2026-06-09 配置驱动(支持白牌)
         try: sc = float(f.get("匹配度总分") or 0)
         except (ValueError, TypeError): sc = 0
         return {
@@ -158,7 +158,7 @@ async def run():
 
     # KOL 维度
     add("KOL", "总览", "全部 KOL", "全部", enriched_kol)
-    for b in ("FUNLAB", "POWKONG"):
+    for b in config.BRAND_CONFIG:   # 2026-06-09 配置驱动: 含白牌品牌维度
         add("KOL", "总览", f"品牌={b}", b, [r for r in enriched_kol if r["brand"]==b])
     by_kw = defaultdict(list)
     for r in enriched_kol: by_kw[r["keyword"]].append(r)
@@ -173,7 +173,7 @@ async def run():
 
     # 编辑维度
     add("媒体人", "总览", "全部 媒体人", "全部", enriched_ed)
-    for b in ("FUNLAB", "POWKONG"):
+    for b in config.BRAND_CONFIG:   # 2026-06-09 配置驱动: 含白牌品牌维度
         add("媒体人", "总览", f"品牌={b}", b, [r for r in enriched_ed if r["brand"]==b])
     by_media = defaultdict(list)
     for r in enriched_ed:

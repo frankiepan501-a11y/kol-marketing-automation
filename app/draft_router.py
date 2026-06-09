@@ -62,13 +62,8 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
     contact_type = ext(f.get("对象类型")) or "KOL"
     source = ext(f.get("邮件草稿来源")) or "cold"
     sender_alias = ext(f.get("发送邮箱")) or ""
-    # 从 alias 推断品牌
-    if "powkong" in sender_alias.lower():
-        brand = "POWKONG"
-    elif "funlab" in sender_alias.lower() or "firefly" in sender_alias.lower():
-        brand = "FUNLAB"
-    else:
-        brand = "FUNLAB"
+    # 从 alias 推断品牌 (2026-06-09 配置驱动, 支持白牌; 无匹配兜底 FUNLAB)
+    brand = config.brand_from_text(sender_alias) or "FUNLAB"
 
     retries = int(f.get("重生次数") or 0)
 
@@ -246,7 +241,7 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
         _ctype = "媒体人" if _is_ed else "KOL"
         _ci = await feishu.resolve_contact_info(_crid, _ctype) if _crid else {}
         _sender = ext(f.get("发送邮箱")) or ""
-        _brand = "POWKONG" if "powkong" in _sender.lower() else "FUNLAB"
+        _brand = config.brand_from_text(_sender) or "FUNLAB"
         _email = ext(f.get("收件邮箱")) or ""
         card = _build_ship_confirm_card(record_id, rec, score, summary, ship_confirm_meta, base_url,
                                         contact_info=_ci, brand=_brand)

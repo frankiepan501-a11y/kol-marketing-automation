@@ -86,7 +86,7 @@ async def run(days: float = 1.0, dry_run: bool = False, max_list: int = 10) -> d
 
             # 品牌 + 收件邮箱 (2026-05-31 统一字段补充)
             sender = ext(f.get("发送邮箱")) or ""
-            brand = "POWKONG" if "powkong" in sender.lower() else "FUNLAB"
+            brand = config.brand_from_text(sender) or "FUNLAB"   # 2026-06-09 配置驱动(支持白牌)
             email = ext(f.get("收件邮箱")) or ""
             overdue.append({
                 "rid": it["record_id"],
