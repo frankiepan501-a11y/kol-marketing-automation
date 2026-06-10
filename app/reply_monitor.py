@@ -104,6 +104,21 @@ INTENT_EMOJI = {
     "质疑/澄清": "🔍",
 }
 
+# 2026-06-10 合作状态阶段 rank — 防 reply_monitor intent 映射把已合作 KOL 打回(stage-blind 倒退).
+# 根因: intent "感兴趣/要报价"→"洽谈中" 原本无条件覆写, 已上稿 14 KOL 中 6 个(43%)被回信打回洽谈中。
+# 终止态(不合适/黑名单/未产出)不在表内 → rank=-1, 由调用处单独逻辑处理(对方拒绝/退订允许直接写)。
+_STATUS_RANK = {
+    "": 0, "未建联": 0,
+    "待回复": 1, "建联中": 1,
+    "洽谈中": 2,
+    "样品评估": 3,
+    "已合作": 5, "已合作-免费": 5, "已合作-免费(多次)": 5, "已合作-付费": 5,
+}
+
+
+def _status_rank(s: str) -> int:
+    return _STATUS_RANK.get((s or "").strip(), -1)
+
 
 def parse_email(addr: str) -> str:
     m = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', addr or "")
@@ -674,7 +689,14 @@ async def run():
             else:
                 new_status = INTENT_TO_STATUS_KOL.get(intent_type)
             if new_status:
-                master_update["合作状态"] = new_status
+                # 2026-06-10 防倒退(stage-blind 审计): intent 映射的"洽谈中"(感兴趣/要报价)不能把已到
+                # 更后阶段(尤其已合作/已上稿)的 KOL 打回 — 已上稿 14 KOL 中 6 个被回信打回洽谈中(43%)。
+                # 明确终止态(不合适/黑名单 = 对方拒绝/退订)仍直接写; 其余只在严格前进时写。
+                _cur_status = ext(cf.get("合作状态")) or ""
+                if new_status in ("不合适", "黑名单"):
+                    master_update["合作状态"] = new_status
+                elif _status_rank(new_status) > _status_rank(_cur_status):
+                    master_update["合作状态"] = new_status
             if intent_type == "委婉拒绝" and decline_reason:
                 fu_feedback_extra = f"\n[拒绝原因: {decline_reason}]"
                 if retry_days > 0:
