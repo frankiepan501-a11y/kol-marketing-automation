@@ -115,6 +115,29 @@ try:
 except (ValueError, TypeError):
     EDITOR_DOMAIN_BOUNCE_RATE = 0.3
 
+# 2026-06-10: KOL 端邮箱域名退信率守卫 (泛化 editor 守卫到 KOL). KOL cold 邮箱来自爬虫/聚合平台,
+# 同样系统性退信. 阈值默认同 editor, 可独立 env 覆盖. 数据驱动: 同域名「无效」≥MIN 且 率≥RATE → 拦.
+try:
+    KOL_DOMAIN_BOUNCE_MIN = int(env("KOL_DOMAIN_BOUNCE_MIN", "2") or 2)
+except (ValueError, TypeError):
+    KOL_DOMAIN_BOUNCE_MIN = 2
+try:
+    KOL_DOMAIN_BOUNCE_RATE = float(env("KOL_DOMAIN_BOUNCE_RATE", "0.3") or 0.3)
+except (ValueError, TypeError):
+    KOL_DOMAIN_BOUNCE_RATE = 0.3
+
+# 2026-06-10: MCN/营销聚合域名静态黑名单 (A 类). 这些域名的地址是"频道名@代投域名"硬拼, 整域作废
+# (退 1 次即拉黑, 不等退信率攒够). 与动态退信率守卫(B 类: 真实大媒体域名 engadget/vox 等, 只拦后续)互补.
+# 命中即停发 cold 草稿 + 标联系人「邮箱验真状态=无效」. 可逆: 从此 env 移除即恢复.
+# 数据来源: 2026-06-10 退信审计 (moreyellow.com 4次/fullscreen/apollomgmt/fluencify 等聚合平台域名).
+AGGREGATOR_BLOCK_DOMAINS = {
+    d.strip().lower() for d in env(
+        "AGGREGATOR_BLOCK_DOMAINS",
+        "moreyellow.com,fullscreen.com,apollomgmt.co,fluencify.io,"
+        "ellify.com,studio71.email,intheblackmedia.com,influencerxbrand.com"
+    ).split(",") if d.strip()
+}
+
 # 2026-06-04: Snov.io Email Finder — 编辑(媒体人)真邮箱解析, 治本替代 {fi}{last}@域名 猜测.
 # enrich_editor 生成编辑 cold 草稿前调 finder 取真邮箱(valid 放行域名守卫; unknown 照发退信回标;
 # 找不到/不可用 → 降级现状). 凭证 repo 公开只走 env 不硬编. SNOV_EDITOR_FINDER_ENABLED=0 可关.

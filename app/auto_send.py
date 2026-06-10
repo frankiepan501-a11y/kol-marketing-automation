@@ -14,21 +14,23 @@ from . import config, feishu, zoho
 from .feishu import ext, xrid
 
 
-# 2026-06-04: 编辑邮箱域名退信率守卫 — 算各域名历史「无效」率, 高退信域名(猜测格式系统性错)集合.
-# 5min cache (一次 cron 内多媒体人草稿共用一次全表扫). 数据来自编辑表 邮箱验真状态=无效.
-_bad_dom_cache = {"ts": 0, "doms": None}
+# 2026-06-04: 邮箱域名退信率守卫 — 算各域名历史「无效」率, 高退信域名(猜测格式系统性错)集合.
+# 5min cache (一次 cron 内多草稿共用一次全表扫). 数据来自主表 邮箱验真状态=无效.
+# 2026-06-10: per-table cache, 泛化到 KOL + editor 两端 (editor/kol wrapper 各自阈值).
+_bad_dom_cache = {}   # table_id -> {"ts": float, "doms": set}
 _BAD_DOM_TTL = 300
 
 
-async def _editor_bad_domains() -> set:
-    """返回历史退信率高的编辑邮箱域名集合 (无效数≥MIN 且 无效率≥RATE). 带 5min cache."""
-    if _bad_dom_cache["doms"] is not None and time.time() - _bad_dom_cache["ts"] < _BAD_DOM_TTL:
-        return _bad_dom_cache["doms"]
+async def _bad_domains(table_id: str, min_inv: int, rate: float) -> set:
+    """返回某主表历史退信率高的邮箱域名集合 (无效数≥min_inv 且 无效率≥rate). 带 5min per-table cache."""
+    c = _bad_dom_cache.get(table_id)
+    if c and c["doms"] is not None and time.time() - c["ts"] < _BAD_DOM_TTL:
+        return c["doms"]
     bad = set()
     try:
-        eds = await feishu.fetch_all_records(config.T_EDITOR)
+        recs = await feishu.fetch_all_records(table_id)
         total, invalid = {}, {}
-        for r in eds:
+        for r in recs:
             e = ext(r["fields"].get("邮箱")).strip().lower()
             if "@" not in e:
                 continue
@@ -37,14 +39,21 @@ async def _editor_bad_domains() -> set:
             if ext(r["fields"].get("邮箱验真状态")) == "无效":
                 invalid[d] = invalid.get(d, 0) + 1
         for d, inv in invalid.items():
-            if inv >= config.EDITOR_DOMAIN_BOUNCE_MIN and inv / max(total.get(d, 1), 1) >= config.EDITOR_DOMAIN_BOUNCE_RATE:
+            if inv >= min_inv and inv / max(total.get(d, 1), 1) >= rate:
                 bad.add(d)
     except Exception as e:
-        print(f"[auto_send] _editor_bad_domains 计算失败 (放行): {e}")
+        print(f"[auto_send] _bad_domains({table_id}) 计算失败 (放行): {e}")
         return set()
-    _bad_dom_cache["doms"] = bad
-    _bad_dom_cache["ts"] = time.time()
+    _bad_dom_cache[table_id] = {"ts": time.time(), "doms": bad}
     return bad
+
+
+async def _editor_bad_domains() -> set:
+    return await _bad_domains(config.T_EDITOR, config.EDITOR_DOMAIN_BOUNCE_MIN, config.EDITOR_DOMAIN_BOUNCE_RATE)
+
+
+async def _kol_bad_domains() -> set:
+    return await _bad_domains(config.T_KOL, config.KOL_DOMAIN_BOUNCE_MIN, config.KOL_DOMAIN_BOUNCE_RATE)
 
 
 # 限速: 每个品牌每小时 40 封, 每次 cron 扫描最多发 N 封
@@ -195,6 +204,30 @@ async def send_one(rec: dict) -> dict:
         except Exception as e:
             print(f"[auto_send] 邮箱验真状态 gate check fail (放行): {e}")
 
+    # 2026-06-10: A 类 MCN/聚合域名静态黑名单 — 整域作废地址(频道名@代投域名硬拼, 实测整域退信),
+    # 退 1 次即拉黑(不等退信率攒够). 与下方动态退信率守卫互补(那个针对真实大媒体域名)。
+    # 仅拦 cold(已建联/回复的邮箱已被对方确认有效, 不卡); 命中即否决草稿 + 标联系人「无效」(可逆)。
+    if ext(f.get("邮件草稿来源")) == "cold" and "@" in to_email:
+        _adom = to_email.split("@", 1)[1].lower()
+        if _adom in config.AGGREGATOR_BLOCK_DOMAINS:
+            try:
+                await feishu.update_record(config.T_DRAFT, rid, {
+                    "发送状态": "失败",
+                    "发送错误": f"邮箱域名 {_adom} 属 MCN/聚合代投域名(地址按频道名硬拼, 整域作废), 停发",
+                    "邮件草稿状态": "已否决",
+                    "审批意见": (f"[聚合域名停发] {_adom} 是 MCN/营销平台聚合域名, 邮箱多为'频道名@该域名'"
+                                 "猜测拼凑, 非达人本人邮箱(实测整域退信)。请找达人本人邮箱(主页/媒体页/"
+                                 "其他渠道)再发。如确认此邮箱有效, 改「邮件草稿状态」重发。")[:500],
+                })
+                if _link_rid:
+                    try:
+                        await feishu.update_record(_link_tbl, _link_rid, {"邮箱验真状态": "无效"})
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[auto_send] 聚合域名黑名单 update fail: {e}")
+            return {"rid": rid, "ok": False, "error": f"aggregator domain {_adom}, skipped"}
+
     # 2026-06-04: 编辑邮箱域名退信率守卫 — 仅对媒体人 cold (猜测邮箱). 该域名历史高退信(格式系统性
     # 猜错, 如 engadget/vox 33-50%)→ 不发(猜准是浪费), 标'域名高退信-需人工找邮箱/PR inbox'。
     # 仅 cold (回复/已建联的不卡, 那些邮箱已被对方确认有效)。多数中小媒体(0%退信)不在 bad 集→不受影响。
@@ -231,6 +264,33 @@ async def send_one(rec: dict) -> dict:
                 return {"rid": rid, "ok": False, "error": f"editor domain {_dom} high-bounce, skipped"}
         except Exception as e:
             print(f"[auto_send] 编辑域名退信守卫 fail (放行): {e}")
+
+    # 2026-06-10: KOL 端邮箱域名退信率守卫 (泛化 editor 守卫). KOL cold 邮箱来自爬虫/聚合平台,
+    # 同样系统性退信. 仅 cold; 联系人「邮箱验真状态=有效」(已确认可送达)放行不卡。
+    # 比 editor 块保守: 只否决当前草稿, 不改联系人状态(域名高退信≠该地址必死, 避免误标真人无效永久停发)。
+    if ext(f.get("对象类型")) == "KOL" and ext(f.get("邮件草稿来源")) == "cold" and "@" in to_email:
+        try:
+            _kbad = await _kol_bad_domains()
+            _kdom = to_email.split("@", 1)[1].lower()
+            _kok = False
+            if _kdom in _kbad and _link_rid:
+                try:
+                    _kc = await feishu.get_record(config.T_KOL, _link_rid)
+                    if ext(_kc["fields"].get("邮箱验真状态")) == "有效":
+                        _kok = True
+                except Exception:
+                    pass
+            if _kdom in _kbad and not _kok:
+                await feishu.update_record(config.T_DRAFT, rid, {
+                    "发送状态": "失败",
+                    "发送错误": f"KOL 邮箱域名 {_kdom} 历史高退信(疑聚合/猜测地址), 停发",
+                    "邮件草稿状态": "已否决",
+                    "审批意见": (f"[域名高退信停发] {_kdom} 的 KOL 邮箱历史高退信率(疑似聚合/猜测地址)。"
+                                 "请找达人本人真实邮箱再发。如确认有效, 改「邮件草稿状态」重发。")[:500],
+                })
+                return {"rid": rid, "ok": False, "error": f"KOL domain {_kdom} high-bounce, skipped"}
+        except Exception as e:
+            print(f"[auto_send] KOL 域名退信守卫 fail (放行): {e}")
 
     # ship_confirm 寄样邮件: 自动用「运单号/物流商」字段值替换正文占位符
     # 张佳烨在草稿表填这两个字段(2 秒动作),无需进正文改文本
