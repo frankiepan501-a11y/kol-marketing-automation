@@ -145,6 +145,40 @@ async def _eligible_kols():
     return eligible
 
 
+def _link_ids(field) -> list:
+    """取关联字段全部 record_id (feishu.xrid 只返首个, 这里要全部)."""
+    if isinstance(field, dict):
+        return field.get("link_record_ids") or field.get("record_ids") or []
+    if isinstance(field, list):
+        out = []
+        for x in field:
+            if isinstance(x, dict):
+                out += x.get("record_ids") or x.get("link_record_ids") or []
+            elif isinstance(x, str):
+                out.append(x)
+        return out
+    return []
+
+
+async def _kol_touched_product_rids(kol_email: str) -> set:
+    """该 KOL 历史草稿接触过的产品 record_id 集合.
+    用于防 secondary_outreach 把 KOL 已合作/上稿过的产品当"新产品"重推
+    (2026-06-10 佳烨报: TG_Geek 为食人花 dock 上稿后又收到同产品二次触达)."""
+    rids = set()
+    if not kol_email:
+        return rids
+    try:
+        drafts = await feishu.search_records(config.T_DRAFT, [
+            {"field_name": "收件邮箱", "operator": "contains", "value": [kol_email]}
+        ])
+        for d in drafts:
+            for pr in _link_ids(d["fields"].get("关联产品")):
+                rids.add(pr)
+    except Exception as e:
+        print(f"[secondary_outreach] touched-products lookup fail ({kol_email}): {e}")
+    return rids
+
+
 async def run(limit: int = 0):
     """每周 cron: 扫已合作 KOL + 生 warm follow-up + 走 reviewer.
     limit=0 跑全部, >0 只跑前 N 个 (smoke test 用)"""
@@ -166,11 +200,25 @@ async def run(limit: int = 0):
         kols = kols[:limit]
         summary["limited_to"] = limit
 
+    product_rid = product["record_id"]
+    skipped_touched = 0
     for k in kols:
         kf = k["fields"]
         kol_name = ext(kf.get("账号名"))
         kol_email = ext(kf.get("邮箱"))
         prev_brand = brand  # v1 简化: 假设上次合作也是同品牌; v2 可读跟进记录精确取
+
+        # 2026-06-10: 防重推已合作产品 — secondary_outreach 本意是推【新】产品给老朋友,
+        # 但 _find_main_product 永远返回同一全局主推产品(食人花 dock). 若该 KOL 历史草稿
+        # 已接触过本次产品(= 他多半就是为这个产品合作/上稿的), 重推 = 骚扰 → 跳过.
+        # (根因: 佳烨报 TG_Geek 为食人花上稿后又收同产品二次触达. v2 应支持 per-KOL 选未接触新品)
+        if product_rid in await _kol_touched_product_rids(kol_email):
+            skipped_touched += 1
+            summary["details"].append({
+                "kol": kol_name,
+                "skip": "已接触本次主推产品(已合作/上稿过), 跳过重推(待 v2 多产品轮换)",
+            })
+            continue
 
         try:
             d = await _gen_warm_followup(kol_name, prev_brand, product, brand)
@@ -223,5 +271,6 @@ async def run(limit: int = 0):
         except Exception as e:
             summary["errors"].append({"rid": k["record_id"], "err": f"mark: {str(e)[:100]}"})
 
+    summary["skipped_touched"] = skipped_touched
     summary["elapsed_s"] = round(time.time() - started, 1)
     return {"ok": True, **summary}
