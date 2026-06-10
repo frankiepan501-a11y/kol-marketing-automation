@@ -71,10 +71,10 @@ async def _gen_warm_followup(contact_name: str, prev_brand: str, new_product: di
     prompt = f"""你给一位 **已合作过** 的海外 KOL 发 warm follow-up 邮件,推介**新产品**.
 
 【关键约束】
-- 这不是 cold email — KOL 之前已合作过 {prev_brand} 品牌的产品,关系是熟人
+- 这不是 cold email — 这位 KOL 之前已和我们合作过,关系是熟人(v2 可能跨品牌推新品, **不要点名上次合作的具体品牌**, 以免说错)
 - 60-100 词,真人口吻,**禁正式 / 禁推销腔 / 禁 partnership 等套路词**
 - 必须以 "Hey {first}," 开头
-- 第 1 句引用上次合作 (e.g. "Loved working with you on the last drop —" / "Hope the {prev_brand} sample is treating you well —")
+- 第 1 句引用上次合作但**不点名品牌** (e.g. "Loved working with you on the last collab —" / "Hope you've been well since our last project —")
 - 第 2-3 句简介新产品 (1-2 个卖点,不堆参数)
 - 1 行产品链接独立段落: <p>👉 <a href="{p_url}">See it in action →</a></p>
 - 软 CTA: "Want me to send one over?" / "Let me know if it's a fit and I'll ship it your way." (不催不绑)
@@ -108,17 +108,16 @@ async def _gen_warm_followup(contact_name: str, prev_brand: str, new_product: di
         }
 
 
-async def _find_main_product():
-    """找本周主推 + 派单就绪的产品 (产品库 上架状态=主推 + 4 个 checkbox 全勾)"""
+async def _find_main_products() -> list:
+    """主推 + 派单就绪(4 checkbox 全勾)的**全部**产品, 供 per-KOL 轮换选未接触新品(v2).
+    优先返回就绪列表; 无就绪时降级返回全部主推(沿用 v1 单产品的降级语义)。"""
     items = await feishu.search_records(config.T_PRODUCT, [
         {"field_name": "上架状态", "operator": "contains", "value": ["主推"]},
     ])
-    for p in items:
-        f = p["fields"]
-        if (f.get("派单-库存OK") and f.get("派单-素材OK") and
-            f.get("派单-文案OK") and f.get("派单-价格OK")):
-            return p
-    return items[0] if items else None
+    ready = [p for p in items if (
+        p["fields"].get("派单-库存OK") and p["fields"].get("派单-素材OK") and
+        p["fields"].get("派单-文案OK") and p["fields"].get("派单-价格OK"))]
+    return ready or items
 
 
 async def _eligible_kols():
@@ -185,43 +184,42 @@ async def run(limit: int = 0):
     started = time.time()
     summary = {"eligible": 0, "drafts_created": 0, "errors": [], "details": []}
 
-    product = await _find_main_product()
-    if not product:
+    products = await _find_main_products()
+    if not products:
         return {"ok": False, "error": "无主推+就绪产品, 跳过本次二次维护"}
-    pf = product["fields"]
-    p_en = ext(pf.get("产品英文名")) or ext(pf.get("产品名"))
-    brand = ext(pf.get("品牌")) or "POWKONG"
-    sender_alias = "partner@powkong.com" if brand.upper() == "POWKONG" else "partner@fireflyfunlab.com"
+    summary["product_pool"] = [ext(p["fields"].get("产品英文名")) or ext(p["fields"].get("产品名")) for p in products]
 
     kols = await _eligible_kols()
     summary["eligible"] = len(kols)
-    summary["product"] = p_en
     if limit > 0 and len(kols) > limit:
         kols = kols[:limit]
         summary["limited_to"] = limit
 
-    product_rid = product["record_id"]
-    skipped_touched = 0
+    skipped_all_touched = 0
     for k in kols:
         kf = k["fields"]
         kol_name = ext(kf.get("账号名"))
         kol_email = ext(kf.get("邮箱"))
-        prev_brand = brand  # v1 简化: 假设上次合作也是同品牌; v2 可读跟进记录精确取
 
-        # 2026-06-10: 防重推已合作产品 — secondary_outreach 本意是推【新】产品给老朋友,
-        # 但 _find_main_product 永远返回同一全局主推产品(食人花 dock). 若该 KOL 历史草稿
-        # 已接触过本次产品(= 他多半就是为这个产品合作/上稿的), 重推 = 骚扰 → 跳过.
-        # (根因: 佳烨报 TG_Geek 为食人花上稿后又收同产品二次触达. v2 应支持 per-KOL 选未接触新品)
-        if product_rid in await _kol_touched_product_rids(kol_email):
-            skipped_touched += 1
+        # v2 多产品轮换: 从主推池选该 KOL **未接触过**的第一个新品 (防重推已合作/上稿过的产品)。
+        # 全池都接触过 → 真没新品可推, skip。一次只推 1 个新品(不轰炸); KOL 级 30 天防重复仍在 _eligible_kols。
+        # (根因: 佳烨报 TG_Geek 为食人花上稿后又收同产品二次触达 → v1 单产品只能 skip, v2 改推未接触新品)
+        touched = await _kol_touched_product_rids(kol_email)
+        product = next((p for p in products if p["record_id"] not in touched), None)
+        if not product:
+            skipped_all_touched += 1
             summary["details"].append({
-                "kol": kol_name,
-                "skip": "已接触本次主推产品(已合作/上稿过), 跳过重推(待 v2 多产品轮换)",
-            })
+                "kol": kol_name, "skip": "主推池产品全已接触过, 无新品可推"})
             continue
 
+        pf = product["fields"]
+        p_en = ext(pf.get("产品英文名")) or ext(pf.get("产品名"))
+        brand = ext(pf.get("品牌")) or "POWKONG"
+        sender_alias = "partner@powkong.com" if brand.upper() == "POWKONG" else "partner@fireflyfunlab.com"
+
         try:
-            d = await _gen_warm_followup(kol_name, prev_brand, product, brand)
+            # prev_brand 传 brand(签名保留), 但 prompt 已改不点名品牌(防跨品牌说错上次合作)
+            d = await _gen_warm_followup(kol_name, brand, product, brand)
         except Exception as e:
             summary["errors"].append({"rid": k["record_id"], "err": f"gen: {str(e)[:100]}"})
             continue
@@ -258,8 +256,8 @@ async def run(limit: int = 0):
             route = await draft_router.route_draft(rid)
             summary["drafts_created"] += 1
             summary["details"].append({
-                "kol": kol_name, "draft_rid": rid, "score": route.get("score"),
-                "path": route.get("path"),
+                "kol": kol_name, "product": p_en, "draft_rid": rid,
+                "score": route.get("score"), "path": route.get("path"),
             })
         except Exception as e:
             summary["errors"].append({"draft_rid": rid, "err": f"route: {str(e)[:100]}"})
@@ -271,6 +269,6 @@ async def run(limit: int = 0):
         except Exception as e:
             summary["errors"].append({"rid": k["record_id"], "err": f"mark: {str(e)[:100]}"})
 
-    summary["skipped_touched"] = skipped_touched
+    summary["skipped_all_touched"] = skipped_all_touched
     summary["elapsed_s"] = round(time.time() - started, 1)
     return {"ok": True, **summary}
