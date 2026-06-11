@@ -110,9 +110,32 @@ def score_anti_spam(kol_fields: dict) -> Tuple[float, str]:
     return 0, f"已在 {coop} 流程,不重复 cold"
 
 
+# 2026-06-11 IP 匹配 — bonus 加分项(不在 100 分制内). 仅当产品标了「适配IP」才生效:
+# 产品「适配IP」(多选)的每个标签若出现在 KOL「IP喜好」(自由文本)里 → 命中, 每命中 +IP_BONUS_PER_HIT,
+# 上限 IP_BONUS_CAP。通用款(适配IP 空, 如 YS11 霍尔手柄)→ 0 分, 完全不影响现有 6 维打分/阈值校准。
+# 设计: IP 联名款(马里奥/宝可梦/动森等)给"爱该 IP 的 KOL"加分往前排提升转化; 不绑 IP 的产品零影响。
+IP_BONUS_PER_HIT = 5
+IP_BONUS_CAP = 10
+
+
+def score_ip(kol_ip_text: str, product_ips: set) -> Tuple[float, str]:
+    """IP 匹配加分(bonus). 产品适配IP 标签 ∈ KOL IP喜好文本(子串) → 命中。
+    产品无适配IP / KOL无记录 / 未命中 → 0(不拖累通用款)。"""
+    if not product_ips:
+        return 0, "产品未标适配IP(不参与IP匹配)"
+    txt = (kol_ip_text or "").lower()
+    if not txt:
+        return 0, "KOL无IP喜好记录"
+    hits = [ip for ip in product_ips if ip and ip.lower() in txt]
+    if not hits:
+        return 0, f"IP未命中(产品要 {'/'.join(sorted(product_ips))})"
+    bonus = min(len(hits) * IP_BONUS_PER_HIT, IP_BONUS_CAP)
+    return bonus, f"IP匹配 +{bonus} ({'/'.join(hits)})"
+
+
 def score_kol(kol_fields: dict, product_fields: dict,
               expected_styles: set, want_platforms: set) -> Tuple[float, dict]:
-    """KOL 综合 6 维打分,返回 (total, breakdown)"""
+    """KOL 综合打分: 6 维(100 分制) + IP 匹配 bonus(仅产品标了适配IP才加)。返回 (total, breakdown)"""
     country = ext(kol_fields.get("国家"))
     lang = ext(kol_fields.get("语言"))
     kol_styles = _parse_multiselect(kol_fields.get("内容风格"))
@@ -132,8 +155,9 @@ def score_kol(kol_fields: dict, product_fields: dict,
     d_fans, r_fans = score_fans_price(subs, price)
     d_plat, r_plat = score_platform(platform, want_platforms)
     d_anti, r_anti = score_anti_spam(kol_fields)
+    d_ip, r_ip = score_ip(ext(kol_fields.get("IP喜好")), _parse_multiselect(product_fields.get("适配IP")))
 
-    total = d_region + d_lang + d_cat + d_fans + d_plat + d_anti
+    total = d_region + d_lang + d_cat + d_fans + d_plat + d_anti + d_ip
     return total, {
         "地区": {"score": d_region, "reason": r_region},
         "语言": {"score": d_lang, "reason": r_lang},
@@ -141,6 +165,7 @@ def score_kol(kol_fields: dict, product_fields: dict,
         "粉丝vs客单价": {"score": d_fans, "reason": r_fans},
         "平台": {"score": d_plat, "reason": r_plat},
         "防骚扰": {"score": d_anti, "reason": r_anti},
+        "IP匹配": {"score": d_ip, "reason": r_ip},
     }
 
 
