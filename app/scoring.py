@@ -118,15 +118,21 @@ IP_BONUS_PER_HIT = 5
 IP_BONUS_CAP = 10
 
 
+def _ip_core(s: str) -> str:
+    """IP 标签归一化: 去'系列'后缀 + 小写。KOL「IP喜好」是自由文本, 大量省略'系列'
+    (写'宝可梦'而非'宝可梦系列'), 实测不归一化漏匹配 ~60%。产品侧规范标签也一并归一对齐。"""
+    return (s or "").replace("系列", "").strip().lower()
+
+
 def score_ip(kol_ip_text: str, product_ips: set) -> Tuple[float, str]:
-    """IP 匹配加分(bonus). 产品适配IP 标签 ∈ KOL IP喜好文本(子串) → 命中。
+    """IP 匹配加分(bonus). 产品适配IP 标签(去'系列'后) ∈ KOL IP喜好文本(去'系列'后) → 命中。
     产品无适配IP / KOL无记录 / 未命中 → 0(不拖累通用款)。"""
     if not product_ips:
         return 0, "产品未标适配IP(不参与IP匹配)"
-    txt = (kol_ip_text or "").lower()
-    if not txt:
+    if not (kol_ip_text or "").strip():
         return 0, "KOL无IP喜好记录"
-    hits = [ip for ip in product_ips if ip and ip.lower() in txt]
+    txt_n = _ip_core(kol_ip_text)
+    hits = [ip for ip in product_ips if _ip_core(ip) and _ip_core(ip) in txt_n]
     if not hits:
         return 0, f"IP未命中(产品要 {'/'.join(sorted(product_ips))})"
     bonus = min(len(hits) * IP_BONUS_PER_HIT, IP_BONUS_CAP)
