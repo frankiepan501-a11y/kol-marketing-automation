@@ -132,19 +132,38 @@ def extract_utm_content(order: dict) -> tuple:
     return (None, None)
 
 
-# === 4. 建 KOL 归因映射 (折扣码 + UTM ID → KOL/编辑记录) ===
+# === 4. 建 KOL 归因映射 (折扣码 + UTM ID + 亚马逊 → KOL/编辑记录) ===
 def _norm_code(s: str) -> str:
     return (s or "").strip().upper()
+
+
+def _norm_alnum(s: str) -> str:
+    """归一: 转小写 + 只留 a-z0-9 (去空格/横线/中文), 供 handle substring 匹配。"""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+# 统一映射脊柱: KOL handle = UTM slug 去 kol_ 前缀 + 归一。所有渠道标识(折扣码/UTM/Amazon
+# campaign 名)只要含此 handle 即可归因 — 加渠道/marketplace 零改码。Amazon campaign 名带
+# handle(如 ...-metalfear4) → 自动抽取匹配, 运营不用再逐个填「亚马逊CampaignID」。
+AMZ_HANDLE_MIN_LEN = 4  # 太短的 handle 不参与自动抽取(防撞)
+
+
+def _handle_from_utm(utmid: str) -> str:
+    h = (utmid or "").strip().lower()
+    if h.startswith("kol_"):
+        h = h[4:]
+    return _norm_alnum(h)
 
 
 async def build_kol_maps() -> dict:
     """一次性读 KOL + 编辑主表, 建三张内存映射:
       code:    {折扣码大写: (table, rid, name)}        ← 独立站折扣码归因 (顾客主动用码=强信号)
       utm:     {utm_id小写: (table, rid, name)}         ← 独立站 UTM 归因 (cold 信链接)
-      amz:  {亚马逊CampaignID: (table, rid, name)}      ← 亚马逊 Attribution 归因 (per-KOL campaignId)
+      amz:        {亚马逊CampaignID精确: (table, rid, name)}  ← 显式精确(现有/覆盖)
+      amz_handle: {handle: (table, rid, name)}              ← UTM slug 派生 handle, 供 campaign 名 substring 抽取
     撞码/撞 utm/撞 campaignId 先到先得 (setdefault), dup_codes 记折扣码冲突数供观测.
     """
-    maps = {"code": {}, "utm": {}, "amz": {}, "dup_codes": 0}
+    maps = {"code": {}, "utm": {}, "amz": {}, "amz_handle": {}, "dup_codes": 0}
     for table, name_field in [(config.T_KOL, "账号名"), (config.T_EDITOR, "媒体人姓名")]:
         try:
             items = await feishu.search_records(
@@ -164,10 +183,32 @@ async def build_kol_maps() -> dict:
             utmid = ext(f.get("UTM ID")).strip().lower()
             if utmid:
                 maps["utm"].setdefault(utmid, (table, rid, nm))
+                h = _handle_from_utm(utmid)
+                if len(h) >= AMZ_HANDLE_MIN_LEN:
+                    maps["amz_handle"].setdefault(h, (table, rid, nm))
             amz_cid = ext(f.get("亚马逊CampaignID")).strip()
             if amz_cid:
                 maps["amz"].setdefault(amz_cid, (table, rid, nm))
     return maps
+
+
+def match_amz_campaign(cid: str, maps: dict) -> tuple:
+    """把一个 Amazon campaign(名串) 归因到 KOL. 返回 (kol_tuple, via) 或 (None, None).
+      via='amz_exact' : 命中显式「亚马逊CampaignID」精确值 (现有/覆盖)
+      via='amz_handle': campaign 名(归一)含某 KOL handle → 自动抽取 (最长 handle 优先防撞)
+    """
+    key = str(cid).strip()
+    kol = maps["amz"].get(key)
+    if kol:
+        return kol, "amz_exact"
+    norm = _norm_alnum(key)
+    best, best_len = None, 0
+    for h, k in maps["amz_handle"].items():
+        if h in norm and len(h) > best_len:
+            best, best_len = k, len(h)
+    if best:
+        return best, "amz_handle"
+    return None, None
 
 
 def _order_ts_ms(order: dict) -> int:
@@ -235,11 +276,12 @@ def attribute_into(agg: dict, orders: list, brand: str, maps: dict, perbrand: di
 
 
 def merge_amazon(agg: dict, report: dict, maps: dict) -> dict:
-    """亚马逊归因: report {campaignId: {clicks,dpv,purchases,sales,brb}} 按 campaignId
-    映射回 KOL (maps['amz']), 累加进 agg 的 a_* 字段. 返回 {matched, unmatched_campaigns}。"""
-    stats = {"matched": 0, "unmatched_campaigns": []}
+    """亚马逊归因: report {campaign名: {clicks,dpv,purchases,sales,brb}} 双匹配回 KOL
+    (显式「亚马逊CampaignID」精确 → handle 抽取), 累加进 agg 的 a_* 字段.
+    返回 {matched, by_exact, by_handle, unmatched_campaigns}。"""
+    stats = {"matched": 0, "by_exact": 0, "by_handle": 0, "unmatched_campaigns": []}
     for cid, m in report.items():
-        kol = maps["amz"].get(str(cid).strip())
+        kol, via = match_amz_campaign(cid, maps)
         if not kol:
             if m.get("clicks") or m.get("purchases") or m.get("sales"):
                 stats["unmatched_campaigns"].append(str(cid))
@@ -251,6 +293,7 @@ def merge_amazon(agg: dict, report: dict, maps: dict) -> dict:
         a["a_sales"] += m.get("sales", 0.0)
         a["a_brb"] += m.get("brb", 0.0)
         stats["matched"] += 1
+        stats["by_exact" if via == "amz_exact" else "by_handle"] += 1
     return stats
 
 
@@ -307,6 +350,7 @@ async def run():
     summary["codes_indexed"] = len(maps["code"])
     summary["utm_ids_indexed"] = len(maps["utm"])
     summary["amz_campaigns_indexed"] = len(maps["amz"])
+    summary["amz_handles_indexed"] = len(maps["amz_handle"])
     summary["dup_codes_ignored"] = maps["dup_codes"]
 
     # 双店并行拉单
@@ -348,6 +392,8 @@ async def run():
             summary["amazon"] = {
                 "campaigns_in_report": len(report),
                 "matched_to_kol": amz_stats["matched"],
+                "matched_by_exact": amz_stats["by_exact"],
+                "matched_by_handle": amz_stats["by_handle"],
                 "unmatched_campaigns": amz_stats["unmatched_campaigns"][:20],
                 "attr_window_days": amazon_attribution.ATTR_LOOKBACK_DAYS,
             }
