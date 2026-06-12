@@ -138,16 +138,17 @@ def _norm_code(s: str) -> str:
 
 
 async def build_kol_maps() -> dict:
-    """一次性读 KOL + 编辑主表, 建两张内存映射:
-      code: {折扣码大写: (table, rid, name)}   ← 折扣码归因 (顾客主动用码=强信号)
-      utm:  {utm_id小写: (table, rid, name)}    ← UTM 归因 (cold 信链接)
-    撞码/撞 utm 先到先得 (setdefault), dup_codes 记冲突数供观测.
+    """一次性读 KOL + 编辑主表, 建三张内存映射:
+      code:    {折扣码大写: (table, rid, name)}        ← 独立站折扣码归因 (顾客主动用码=强信号)
+      utm:     {utm_id小写: (table, rid, name)}         ← 独立站 UTM 归因 (cold 信链接)
+      amz:  {亚马逊CampaignID: (table, rid, name)}      ← 亚马逊 Attribution 归因 (per-KOL campaignId)
+    撞码/撞 utm/撞 campaignId 先到先得 (setdefault), dup_codes 记折扣码冲突数供观测.
     """
-    maps = {"code": {}, "utm": {}, "dup_codes": 0}
+    maps = {"code": {}, "utm": {}, "amz": {}, "dup_codes": 0}
     for table, name_field in [(config.T_KOL, "账号名"), (config.T_EDITOR, "媒体人姓名")]:
         try:
             items = await feishu.search_records(
-                table, [], field_names=["折扣码", "UTM ID", name_field])
+                table, [], field_names=["折扣码", "UTM ID", "亚马逊CampaignID", name_field])
         except Exception:
             items = await feishu.fetch_all_records(table)
         for it in items:
@@ -163,6 +164,9 @@ async def build_kol_maps() -> dict:
             utmid = ext(f.get("UTM ID")).strip().lower()
             if utmid:
                 maps["utm"].setdefault(utmid, (table, rid, nm))
+            amz_cid = ext(f.get("亚马逊CampaignID")).strip()
+            if amz_cid:
+                maps["amz"].setdefault(amz_cid, (table, rid, nm))
     return maps
 
 
@@ -197,22 +201,30 @@ def match_order(order: dict, maps: dict) -> tuple:
     return None, None
 
 
-# === 5. 按 KOL 记录聚合 (折扣码 + utm 并集, 每单只算一次) ===
+# === 5. 按 KOL 记录聚合 (双源: 独立站折扣码/utm + 亚马逊 Attribution, key=table::rid) ===
+def _agg_entry(agg: dict, table: str, rid: str, name: str) -> dict:
+    """get-or-create agg 条目 (独立站源 + 亚马逊源共用一个 KOL 条目)。"""
+    key = f"{table}::{rid}"
+    return agg.setdefault(key, {
+        "table": table, "rid": rid, "name": name,
+        # 独立站 (Shopify) 源
+        "s_orders": 0, "s_gmv": 0.0, "last_order_at_ms": 0, "last_order_id": "",
+        "via": set(), "brands": set(),
+        # 亚马逊 (Attribution) 源
+        "a_clicks": 0.0, "a_purchases": 0.0, "a_sales": 0.0, "a_brb": 0.0,
+    })
+
+
 def attribute_into(agg: dict, orders: list, brand: str, maps: dict, perbrand: dict):
-    """归因 orders 并累加进 agg (key = 'table::rid'). perbrand: {code,utm} via 计数."""
+    """独立站归因: orders 累加进 agg 的 s_* 字段. perbrand: {code,utm} via 计数."""
     for o in orders:
         kol, via = match_order(o, maps)
         if not kol:
             continue
         table, rid, name = kol
-        key = f"{table}::{rid}"
-        a = agg.setdefault(key, {
-            "table": table, "rid": rid, "name": name,
-            "orders": 0, "gmv_usd": 0.0, "last_order_at_ms": 0,
-            "last_order_id": "", "via": set(), "brands": set(),
-        })
-        a["orders"] += 1
-        a["gmv_usd"] += _order_price(o)
+        a = _agg_entry(agg, table, rid, name)
+        a["s_orders"] += 1
+        a["s_gmv"] += _order_price(o)
         a["via"].add(via)
         a["brands"].add(brand)
         ts_ms = _order_ts_ms(o)
@@ -222,22 +234,58 @@ def attribute_into(agg: dict, orders: list, brand: str, maps: dict, perbrand: di
         perbrand[via] = perbrand.get(via, 0) + 1
 
 
+def merge_amazon(agg: dict, report: dict, maps: dict) -> dict:
+    """亚马逊归因: report {campaignId: {clicks,dpv,purchases,sales,brb}} 按 campaignId
+    映射回 KOL (maps['amz']), 累加进 agg 的 a_* 字段. 返回 {matched, unmatched_campaigns}。"""
+    stats = {"matched": 0, "unmatched_campaigns": []}
+    for cid, m in report.items():
+        kol = maps["amz"].get(str(cid).strip())
+        if not kol:
+            if m.get("clicks") or m.get("purchases") or m.get("sales"):
+                stats["unmatched_campaigns"].append(str(cid))
+            continue
+        table, rid, name = kol
+        a = _agg_entry(agg, table, rid, name)
+        a["a_clicks"] += m.get("clicks", 0.0)
+        a["a_purchases"] += m.get("purchases", 0.0)
+        a["a_sales"] += m.get("sales", 0.0)
+        a["a_brb"] += m.get("brb", 0.0)
+        stats["matched"] += 1
+    return stats
+
+
 # === 6. 写回飞书 (按 record_id 直写, 无需 search) ===
-async def write_attribution(agg: dict) -> dict:
-    """idempotent: 直接 PUT 当前累计值 (不是 +=)."""
+async def write_attribution(agg: dict, amazon_enabled: bool = False) -> dict:
+    """idempotent: 直接 PUT 当前累计值 (不是 +=). 双源合并:
+      累计订单数 = 独立站订单 + 亚马逊成交;  累计GMV = 独立站GMV + 亚马逊销售额.
+    亚马逊明细字段仅 amazon_enabled 时写 (未启用则不碰 → 现网行为与单独立站时一致)。"""
+    now_ms = int(time.time() * 1000)
     stats = {"matched": 0, "write_err": 0, "details": []}
     for a in agg.values():
+        total_orders = int(a["s_orders"] + round(a["a_purchases"]))
+        total_gmv = round(a["s_gmv"] + a["a_sales"], 2)
+        fields = {
+            "累计订单数": total_orders,
+            "累计GMV": total_gmv,
+        }
+        # 独立站源有单才写"上次订单"(亚马逊无订单号; 0 值不写避免污染日期字段)
+        if a["last_order_at_ms"]:
+            fields["上次订单日期"] = a["last_order_at_ms"]
+            fields["上次订单ID"] = a["last_order_id"]
+        if amazon_enabled:
+            fields["亚马逊点击数"] = round(a["a_clicks"])
+            fields["亚马逊成交数"] = round(a["a_purchases"])
+            fields["亚马逊GMV"] = round(a["a_sales"], 2)
+            if a["a_clicks"] or a["a_purchases"] or a["a_sales"]:
+                fields["亚马逊归因更新时间"] = now_ms
         try:
-            await feishu.update_record(a["table"], a["rid"], {
-                "累计订单数": a["orders"],
-                "累计GMV": round(a["gmv_usd"], 2),
-                "上次订单日期": a["last_order_at_ms"],
-                "上次订单ID": a["last_order_id"],
-            })
+            await feishu.update_record(a["table"], a["rid"], fields)
             stats["matched"] += 1
             stats["details"].append({
-                "name": a["name"], "rid": a["rid"], "orders": a["orders"],
-                "gmv": round(a["gmv_usd"], 2), "via": sorted(a["via"]),
+                "name": a["name"], "rid": a["rid"],
+                "orders": total_orders, "gmv": total_gmv,
+                "amz_sales": round(a["a_sales"], 2), "amz_purch": round(a["a_purchases"]),
+                "via": sorted(a["via"]),
             })
         except Exception as e:
             stats["write_err"] += 1
@@ -258,6 +306,7 @@ async def run():
         return {"ok": False, "error": f"build_kol_maps: {str(e)[:200]}"}
     summary["codes_indexed"] = len(maps["code"])
     summary["utm_ids_indexed"] = len(maps["utm"])
+    summary["amz_campaigns_indexed"] = len(maps["amz"])
     summary["dup_codes_ignored"] = maps["dup_codes"]
 
     # 双店并行拉单
@@ -288,11 +337,30 @@ async def run():
         summary["brands"][brand]["attributed_by_code"] = perbrand.get("code", 0)
         summary["brands"][brand]["attributed_by_utm"] = perbrand.get("utm", 0)
 
-    summary["kols_matched"] = len(agg)
-    summary["attributed_total"] = sum(a["orders"] for a in agg.values())
+    # 亚马逊源 (Amazon Attribution): env-gated, fail-safe — 凭据未配则跳过, 现网行为不变.
+    from . import amazon_attribution
+    amazon_enabled = amazon_attribution.is_enabled()
+    summary["amazon_enabled"] = amazon_enabled
+    if amazon_enabled:
+        try:
+            report = await amazon_attribution.pull_report()
+            amz_stats = merge_amazon(agg, report, maps)
+            summary["amazon"] = {
+                "campaigns_in_report": len(report),
+                "matched_to_kol": amz_stats["matched"],
+                "unmatched_campaigns": amz_stats["unmatched_campaigns"][:20],
+                "attr_window_days": amazon_attribution.ATTR_LOOKBACK_DAYS,
+            }
+        except Exception as e:
+            import traceback
+            summary["amazon"] = {"error": str(e)[:200], "trace": traceback.format_exc()[-400:]}
 
-    # 写回飞书
-    write_stats = await write_attribution(agg)
+    summary["kols_matched"] = len(agg)
+    summary["attributed_orders_shopify"] = sum(a["s_orders"] for a in agg.values())
+    summary["attributed_purchases_amazon"] = round(sum(a["a_purchases"] for a in agg.values()))
+
+    # 写回飞书 (双源合并)
+    write_stats = await write_attribution(agg, amazon_enabled=amazon_enabled)
     summary["write"] = write_stats
     summary["elapsed_s"] = round(time.time() - started_at, 1)
     summary["lookback_days"] = ATTRIBUTION_LOOKBACK_DAYS

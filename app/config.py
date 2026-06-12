@@ -169,6 +169,20 @@ KOL_REVIEWER_JOB_TITLE = env("KOL_REVIEWER_JOB_TITLE", "独立站运营专员")
 # 服务鉴权 (n8n 调用 webhook 时 Header: Authorization: Bearer <INTERNAL_TOKEN>)
 INTERNAL_TOKEN = env("INTERNAL_TOKEN", required=True)
 
+# Phase B — Amazon Attribution per-KOL ROI (POWKONG US, 2026-06-09). 全部可选:
+# 任一未配 → amazon_attribution.is_enabled()=False → sales_attribution 跳过亚马逊源,
+# 现网行为完全不变 (同白牌品牌"env 配齐才挂载"模式)。凭据走 Zeabur env, 不入仓。
+#   AMZ_ADS_CLIENT_ID / _SECRET   : Login with Amazon (LWA) 应用
+#   AMZ_ADS_REFRESH_TOKEN         : OAuth 授权码流程换得 (/amazon/oauth/callback 一次性)
+#   AMZ_ADS_PROFILE_ID            : GET /v2/profiles 里 US/POWKONG 的 profileId
+#   AMZ_OAUTH_REDIRECT_URI        : LWA Allowed Return URL (与授权请求逐字一致)
+AMZ_ADS_CLIENT_ID = env("AMZ_ADS_CLIENT_ID", "")
+AMZ_ADS_CLIENT_SECRET = env("AMZ_ADS_CLIENT_SECRET", "")
+AMZ_ADS_REFRESH_TOKEN = env("AMZ_ADS_REFRESH_TOKEN", "")
+AMZ_ADS_PROFILE_ID = env("AMZ_ADS_PROFILE_ID", "")
+AMZ_OAUTH_REDIRECT_URI = env("AMZ_OAUTH_REDIRECT_URI",
+                             "https://kol-auto.zeabur.app/amazon/oauth/callback")
+
 
 BRAND_CONFIG = {
     "FUNLAB": {

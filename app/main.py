@@ -277,6 +277,71 @@ async def run_sales_attribution(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
+@app.get("/amazon/oauth/start")
+async def amazon_oauth_start(secret: str = Query(default="")):
+    """一次性: 返回 LWA 授权 URL (点开授权 → 回调拿 refresh_token)。secret=INTERNAL_TOKEN 防滥用。
+    前置: 已配 AMZ_ADS_CLIENT_ID + 在 LWA 应用注册了 redirect_uri (= AMZ_OAUTH_REDIRECT_URI)。"""
+    if secret != config.INTERNAL_TOKEN:
+        raise HTTPException(401, "bad secret")
+    from urllib.parse import urlencode
+    cid = config.AMZ_ADS_CLIENT_ID
+    if not cid:
+        return {"ok": False, "error": "AMZ_ADS_CLIENT_ID 未配 (先建 LWA 应用并配 client_id/secret)"}
+    state = (config.INTERNAL_TOKEN or "x")[:16]
+    q = urlencode({
+        "client_id": cid,
+        "scope": "advertising::campaign_management",
+        "response_type": "code",
+        "redirect_uri": config.AMZ_OAUTH_REDIRECT_URI,
+        "state": state,
+    })
+    return {"ok": True, "authorize_url": f"https://www.amazon.com/ap/oa?{q}",
+            "redirect_uri": config.AMZ_OAUTH_REDIRECT_URI,
+            "note": "登录申请 Amazon Ads API 的那个 Amazon 账号 → 授权 → 回调会把 refresh_token 写进服务日志"}
+
+
+@app.get("/amazon/oauth/callback")
+async def amazon_oauth_callback(code: str = Query(default=""), state: str = Query(default=""),
+                                error: str = Query(default="")):
+    """LWA 授权回调: code → refresh_token。⚠️ 不在浏览器明文回显 token (防泄漏),
+    完整 refresh_token 写进**服务日志** (Zeabur runtime logs), 由开发者取后配进 AMZ_ADS_REFRESH_TOKEN env。"""
+    if error:
+        return HTMLResponse(f"<h3>授权失败</h3><p>{error}</p>", status_code=400)
+    expect_state = (config.INTERNAL_TOKEN or "x")[:16]
+    if state != expect_state:
+        return HTMLResponse("<h3>state 不匹配, 拒绝</h3>", status_code=403)
+    if not code:
+        return HTMLResponse("<h3>缺 code</h3>", status_code=400)
+    from . import amazon_attribution
+    try:
+        d = await amazon_attribution.exchange_code_for_refresh_token(
+            code, config.AMZ_OAUTH_REDIRECT_URI)
+    except Exception as e:
+        return HTMLResponse(f"<h3>换 token 异常</h3><p>{str(e)[:300]}</p>", status_code=500)
+    rt = d.get("refresh_token")
+    if not rt:
+        print(f"[amazon_oauth] exchange FAIL: {d}")
+        return HTMLResponse(f"<h3>换 token 失败</h3><pre>{d}</pre>", status_code=400)
+    # 完整 token 只进服务日志 (开发者从 Zeabur 日志取); 浏览器只回掩码确认
+    print(f"[amazon_oauth] REFRESH_TOKEN_OK len={len(rt)} value={rt}")
+    masked = rt[:8] + "..." + rt[-6:]
+    return HTMLResponse(
+        "<h3>✅ 授权成功</h3>"
+        f"<p>refresh_token 已写入服务日志 (掩码 {masked})。</p>"
+        "<p>请通知开发者从 Zeabur 日志取出, 配进 AMZ_ADS_REFRESH_TOKEN env。此页可关闭。</p>")
+
+
+@app.post("/amazon-attribution/selftest")
+async def amazon_attr_selftest(authorization: str = Header(default="")):
+    """凭据到位后 smoke: 刷 token + 列 profiles + 列 advertisers (找 US/POWKONG profileId)。不写数据。"""
+    _check_auth(authorization)
+    from . import amazon_attribution
+    try:
+        return await amazon_attribution.selftest()
+    except Exception as e:
+        return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-1000:]}
+
+
 @app.post("/card/resend")
 async def run_card_resend(authorization: str = Header(default=""),
                           draft_rid: str = "", operator_open_id: str = "",
