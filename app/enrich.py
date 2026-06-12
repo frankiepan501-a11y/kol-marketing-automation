@@ -231,7 +231,9 @@ async def filter_kols(task_fields: dict, product_rid: str = "", brand: str = "",
     if not isinstance(langs_want_raw, list): langs_want_raw = [langs_want_raw]
     langs_want = {LANG_CN_TO_ISO.get(l, l) for l in langs_want_raw}
 
-    f_min = int(task_fields.get("筛选-粉丝下限") or 0)
+    # 2026-06-12 全局粉丝门槛: 任务没设(=0)则用 config.KOL_MIN_FANS_FLOOR(默认5000)兜底,
+    # 防 daemon 无门槛抓入的粉丝个位数废号被派单(审计:无邮箱号粉丝中位77)。任务设了非0值则尊重任务。
+    f_min = int(task_fields.get("筛选-粉丝下限") or 0) or config.KOL_MIN_FANS_FLOOR
     f_max = int(task_fields.get("筛选-粉丝上限") or 10_000_000)
     batch_limit = int(task_fields.get("批量大小") or 50)
     hard_pool = max(batch_limit * 5, 200)

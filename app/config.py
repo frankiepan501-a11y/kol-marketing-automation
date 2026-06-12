@@ -126,6 +126,14 @@ try:
 except (ValueError, TypeError):
     KOL_DOMAIN_BOUNCE_RATE = 0.3
 
+# 2026-06-12: KOL 入池全局粉丝下限门槛(env 可调). YouTube daemon 用 limit 抓搜索结果**无质量门槛**,
+# 把粉丝个位数的废号全入库(审计: 3099 无邮箱号粉丝中位仅 77, 抽样 3-8 粉僵尸号)。enrich 派单筛选时,
+# 任务没设「筛选-粉丝下限」(=0)则用此兜底, 防废号被派单。任务设了更高/低值则尊重任务。
+try:
+    KOL_MIN_FANS_FLOOR = int(env("KOL_MIN_FANS_FLOOR", "5000") or 5000)
+except (ValueError, TypeError):
+    KOL_MIN_FANS_FLOOR = 5000
+
 # 2026-06-10: MCN/营销聚合域名静态黑名单 (A 类). 这些域名的地址是"频道名@代投域名"硬拼, 整域作废
 # (退 1 次即拉黑, 不等退信率攒够). 与动态退信率守卫(B 类: 真实大媒体域名 engadget/vox 等, 只拦后续)互补.
 # 命中即停发 cold 草稿 + 标联系人「邮箱验真状态=无效」. 可逆: 从此 env 移除即恢复.
