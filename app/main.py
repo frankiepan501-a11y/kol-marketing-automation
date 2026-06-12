@@ -290,7 +290,7 @@ async def amazon_oauth_start(secret: str = Query(default="")):
     state = (config.INTERNAL_TOKEN or "x")[:16]
     q = urlencode({
         "client_id": cid,
-        "scope": "advertising::campaign_management",
+        "scope": "profile advertising::campaign_management",  # profile=拿 /v2/profiles, 缺则 bad-scope
         "response_type": "code",
         "redirect_uri": config.AMZ_OAUTH_REDIRECT_URI,
         "state": state,
@@ -322,13 +322,30 @@ async def amazon_oauth_callback(code: str = Query(default=""), state: str = Quer
     if not rt:
         print(f"[amazon_oauth] exchange FAIL: {d}")
         return HTMLResponse(f"<h3>换 token 失败</h3><pre>{d}</pre>", status_code=400)
-    # 完整 token 只进服务日志 (开发者从 Zeabur 日志取); 浏览器只回掩码确认
+    # 完整 token 进服务日志 + 写容器临时文件 (供 /amazon/oauth/peek bearer 取); 浏览器只回掩码
     print(f"[amazon_oauth] REFRESH_TOKEN_OK len={len(rt)} value={rt}")
+    try:
+        with open("/tmp/amz_rt.txt", "w") as _fh:
+            _fh.write(rt)
+    except Exception as _e:
+        print(f"[amazon_oauth] write /tmp/amz_rt.txt fail: {_e}")
     masked = rt[:8] + "..." + rt[-6:]
     return HTMLResponse(
         "<h3>✅ 授权成功</h3>"
         f"<p>refresh_token 已写入服务日志 (掩码 {masked})。</p>"
         "<p>请通知开发者从 Zeabur 日志取出, 配进 AMZ_ADS_REFRESH_TOKEN env。此页可关闭。</p>")
+
+
+@app.get("/amazon/oauth/peek")
+async def amazon_oauth_peek(authorization: str = Header(default="")):
+    """一次性: 取出 callback 捕获的 refresh_token (开发者配进 AMZ_ADS_REFRESH_TOKEN env 后即弃)。"""
+    _check_auth(authorization)
+    import os as _os
+    try:
+        rt = open("/tmp/amz_rt.txt").read().strip()
+    except Exception:
+        return {"ok": False, "msg": "无捕获 token (本次部署后重新点一次授权链接)"}
+    return {"ok": True, "len": len(rt), "rt": rt}
 
 
 @app.post("/amazon-attribution/selftest")
