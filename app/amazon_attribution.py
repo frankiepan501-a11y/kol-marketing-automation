@@ -195,6 +195,33 @@ async def pull_report(days: int = None, advertiser_ids: str = None) -> dict:
     return out
 
 
+async def sp_ping() -> dict:
+    """只读: 证明 advertising::campaign_management scope 能调 SP 广告管理(不止 Attribution)。
+    POST /sp/campaigns/list (v3, 版本化 media type) maxResults=1, 不建不改任何广告。"""
+    if not is_enabled():
+        return {"ok": False, "enabled": False}
+    tok = await get_access_token()
+    h = {
+        "Authorization": f"Bearer {tok}",
+        "Amazon-Advertising-API-ClientId": os.environ.get("AMZ_ADS_CLIENT_ID", ""),
+        "Amazon-Advertising-API-Scope": os.environ.get("AMZ_ADS_PROFILE_ID", ""),
+        "Content-Type": "application/vnd.spCampaign.v3+json",
+        "Accept": "application/vnd.spCampaign.v3+json",
+    }
+    async with httpx.AsyncClient(timeout=30.0) as c:
+        r = await c.post(f"{ADS_HOST}/sp/campaigns/list", headers=h, json={"maxResults": 1})
+    out = {"status": r.status_code, "ok": r.status_code == 200}
+    try:
+        d = r.json()
+        out["total_results"] = d.get("totalResults")
+        out["sample_count"] = len(d.get("campaigns", []) or [])
+    except Exception:
+        pass
+    if r.status_code != 200:
+        out["body"] = r.text[:300]
+    return out
+
+
 async def selftest() -> dict:
     """云端 smoke (凭据到位后): 刷 token + 列 profiles + 列 advertisers, 不写任何数据。"""
     if not is_enabled():

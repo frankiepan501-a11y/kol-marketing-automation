@@ -359,6 +359,17 @@ async def amazon_attr_selftest(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-1000:]}
 
 
+@app.post("/amazon-ads/sp-ping")
+async def amazon_ads_sp_ping(authorization: str = Header(default="")):
+    """只读 smoke: 证明 campaign_management scope 能调 SP 广告管理 (POST /sp/campaigns/list)。不写广告。"""
+    _check_auth(authorization)
+    from . import amazon_attribution
+    try:
+        return await amazon_attribution.sp_ping()
+    except Exception as e:
+        return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-1000:]}
+
+
 @app.post("/card/resend")
 async def run_card_resend(authorization: str = Header(default=""),
                           draft_rid: str = "", operator_open_id: str = "",
