@@ -7,7 +7,7 @@ import time
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
@@ -79,6 +79,20 @@ async def run_reply_monitor(authorization: str = Header(default="")):
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/reply-monitor/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/keyword-supply/run")
+async def run_keyword_supply(authorization: str = Header(default=""), dry_run: bool = False):
+    """自动关键词供给: YouTube 待触发队列<水位时 DeepSeek 生受众/IP/主题向长尾词补进爬虫任务台,
+    让 daemon 持续有词抓(消除关键词断供的脉冲式产出)。?dry_run=true 只生成不写表。"""
+    _check_auth(authorization)
+    try:
+        result = await keyword_supply.run(dry_run=dry_run)
+        return {"dry_run": dry_run, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/keyword-supply/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 
