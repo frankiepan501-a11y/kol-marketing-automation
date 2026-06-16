@@ -193,21 +193,42 @@ async def build_for_ship_draft(ship_draft: dict) -> dict:
     if task_rid:
         fields["关联任务"] = [task_rid]
 
+    # 2026-06-16: 券码已在 ship_confirm 阶段由运营在飞书卡粘好(同一条寄样草稿演进, sf 带「折扣码」「折扣比例」).
+    # 暖信复用、运营不再粘第二次 (Frankie 拍板)。ship 阶段没存(老数据)→ fail-safe 降级原"粘码 form 卡"。
+    _ship_code = (ext(sf.get("折扣码")) or "").strip()
+    try:
+        _ship_pct = float(sf.get("折扣比例") or 0)
+    except (ValueError, TypeError):
+        _ship_pct = 0
+    _reuse_code = bool(_ship_code) and _ship_pct > 0
+    if _reuse_code:
+        fields["折扣码"] = _ship_code
+        fields["折扣比例"] = _ship_pct
+        fields["审批意见"] = (f"[暖信待发·券码已复用] 该 KOL 发货时已粘 UpPromote 券码 {_ship_code} "
+                              f"({int(round(_ship_pct))}% off), 暖信自动复用、无需再粘。审核无误点「通过」即发; "
+                              "[DISCOUNT_CODE]/[DISCOUNT_PCT] 由系统替换。")[:500]
+
     rid = await feishu.create_record(config.T_DRAFT, fields)
-    # 强制人审, 但 skip_notify=True 不发旧聪哥1号卡 — 改由下面发聪哥3号 form 卡(粘 UpPromote 券码)
-    try:
-        await draft_router.route_draft(rid, force_review_reason="warm_recap 待运营粘 UpPromote 券码",
-                                       skip_notify=True)
-    except Exception as e:
-        print(f"[warm_recap] route_draft fail rid={rid}: {e}")
-    # 发聪哥3号交互卡给 reviewer (按职务实时查在职名单 → union_id), 运营粘券码+填% → 提交回 n8n
-    try:
-        await _notify_warm_recap_card(rid, name or first, product_name, subj, per_kol_brief_md,
-                                       contact_rid=contact_rid, is_editor=is_editor,
-                                       brand=brand, email=email)
-    except Exception as e:
-        print(f"[warm_recap] send card fail rid={rid}: {e}")
-    return {"ok": True, "rid": rid, "contact": name, "product": product_name}
+    if _reuse_code:
+        # 券码已复用 → 普通强制人审(默认审核卡, 运营审一眼点通过即发, 不再粘码)
+        try:
+            await draft_router.route_draft(rid, force_review_reason="warm_recap 券码已复用 ship 阶段(无需再粘), 审核通过即发")
+        except Exception as e:
+            print(f"[warm_recap] route_draft (reuse) fail rid={rid}: {e}")
+    else:
+        # fail-safe 降级: ship 阶段没存券码(老数据/跳过) → 仍发聪哥3号 form 卡让运营粘
+        try:
+            await draft_router.route_draft(rid, force_review_reason="warm_recap 待运营粘 UpPromote 券码",
+                                           skip_notify=True)
+        except Exception as e:
+            print(f"[warm_recap] route_draft fail rid={rid}: {e}")
+        try:
+            await _notify_warm_recap_card(rid, name or first, product_name, subj, per_kol_brief_md,
+                                           contact_rid=contact_rid, is_editor=is_editor,
+                                           brand=brand, email=email)
+        except Exception as e:
+            print(f"[warm_recap] send card fail rid={rid}: {e}")
+    return {"ok": True, "rid": rid, "contact": name, "product": product_name, "reuse_code": _reuse_code}
 
 
 def _build_warm_recap_card(draft_rid: str, kol_name: str, product_name: str, subject: str,

@@ -47,6 +47,9 @@ TEMPLATE_SEND_ASSETS = (
     "Best,\n{signature}"
 )
 
+# 2026-06-16: 购买链接 + 按平台放置要求前移到发货确认 (运营反馈: warm_recap 已签收后才给链接太晚,
+# KOL 常已拍发). {placement_block} 由 reply_drafter 用 per-KOL CTA(按主平台) 拼, 必含
+# [DISCOUNT_CODE]/[DISCOUNT_PCT] 占位符 → auto_send 硬门据此要求运营在 ship 卡粘 UpPromote 券码+%.
 TEMPLATE_SHIP_CONFIRM = (
     "Hi {first_name},\n\n"
     "Awesome — got the address! Your {product_name} is on its way:\n\n"
@@ -54,6 +57,9 @@ TEMPLATE_SHIP_CONFIRM = (
     "Carrier: [CARRIER 待填运营修改]\n\n"
     "Should arrive in the next few days — feel free to drop a line "
     "once it lands.\n\n"
+    "Whenever you're ready to post, here's the collab info so your audience "
+    "can grab it easily:\n\n"
+    "{placement_block}"
     "If you have any specific angles or formats in mind for the content, "
     "happy to flex on what we send.\n\n"
     "Best,\n{signature}"
@@ -592,6 +598,38 @@ async def _is_late_stage_contact(cf: dict, link_field: str, contact_rid: str):
     return False, ""
 
 
+async def _build_ship_placement(contact_type: str, prod_rid, contact_rid: str,
+                                product_link_raw: str) -> tuple:
+    """2026-06-16: ship_confirm 购买引导段 — 优先 per-KOL CTA(按主平台放置指引), 失败降级通用。
+    必含 [DISCOUNT_CODE]/[DISCOUNT_PCT] 占位符 → auto_send 硬门据此要求运营在 ship 卡粘 UpPromote 券码+%。
+    返回 (placement_block, per_kol_brief_md)。媒体人(editor)=PR 不适用 per-KOL CTA, 走通用。"""
+    site_url = product_link_raw or "our online store"
+    cta = ""
+    brief_md = ""
+    if contact_type != "editor" and prod_rid and contact_rid:
+        try:
+            from . import talking_points
+            kb = await talking_points.generate_for_kol(prod_rid, contact_rid)
+            if kb.get("ok"):
+                brief_md = kb.get("brief_md") or ""
+                raw_cta = (kb.get("cta") or "").strip()
+                if raw_cta:
+                    # CTA 用 [CODE]/[X]% 占位符 → 统一成 auto_send 认的 [DISCOUNT_CODE]/[DISCOUNT_PCT]
+                    cta = (raw_cta.replace("[CODE]", "[DISCOUNT_CODE]")
+                                  .replace("[X]%", "[DISCOUNT_PCT]%").replace("[X]", "[DISCOUNT_PCT]"))
+        except Exception as e:
+            print(f"[reply_drafter] ship_confirm per-KOL CTA 生成失败, 降级通用: {e}")
+    if not cta:
+        cta = ("Add the link where your followers can reach it — video description / pinned comment / link in bio — "
+               "and mention the code on screen or out loud so a viewer instantly knows where & how to buy.")
+    placement_block = (
+        f"Discount code for your audience: [DISCOUNT_CODE] ([DISCOUNT_PCT]% off)\n"
+        f"Buy link: {site_url}\n"
+        f"{cta}\n\n"
+    )
+    return placement_block, brief_md
+
+
 async def draft_reply(
     contact_record: dict,
     contact_type: str,             # KOL / editor
@@ -626,6 +664,8 @@ async def draft_reply(
     product_name = "our latest product"
     product_link_raw = ""
     product_price = 0  # P5.11 affiliate_quote 模板需要独立站售价
+    prod_rid = None    # 2026-06-16: 提到 try 外 — ship_confirm 分支拼购买引导段时要用
+    ship_per_kol_brief = ""   # 2026-06-16: ship_confirm 的 per-KOL brief_md, 存草稿供 ship 卡展示
     # 试图从 related_draft 拿产品名 (如有)
     if related_draft_id:
         try:
@@ -711,9 +751,13 @@ async def draft_reply(
 
         subj = "Re: " + original_subject[:150]
         if sub == "ship_confirm":
+            # 2026-06-16: 发货确认即带购买券码+按平台放置指引 (运营反馈链接太晚). 占位符由 auto_send 在
+            # 运营粘 UpPromote 券码后替换; 强制人审 + 硬门兜底防 [DISCOUNT_CODE] 泄漏.
+            placement_block, ship_per_kol_brief = await _build_ship_placement(
+                contact_type, prod_rid, contact_record["record_id"], product_link_raw)
             body = TEMPLATE_SHIP_CONFIRM.format(
                 first_name=first, signature=sig_full,
-                product_name=product_name,
+                product_name=product_name, placement_block=placement_block,
             )
         elif sub == "affiliate_upsell":
             body = TEMPLATE_AFFILIATE_UPSELL.format(
@@ -828,6 +872,9 @@ async def draft_reply(
         fields["国家/地区"] = country_code
         if recipient_phone:
             fields["收件电话"] = recipient_phone
+        # 2026-06-16: 存 per-KOL brief (按平台放置指引) 供 ship 卡展示给运营 → 运营可转给达人
+        if ship_per_kol_brief:
+            fields["Per-KOL Brief"] = ship_per_kol_brief[:4000]
 
     # affiliate_upsell 标记: 草稿打"内容形式受限"标签 (供 ROI 分析时区分 short-only KOL)
     if sub == "affiliate_upsell":

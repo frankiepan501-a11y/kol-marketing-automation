@@ -253,7 +253,8 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
             record_id, _email or contact_type,
             ship_confirm_meta.get("product_name", "") or "the sample",
             subject, "寄样确认",
-            contact_info=_ci, brand=_brand, email=_email, contact_type=_ctype)
+            contact_info=_ci, brand=_brand, email=_email, contact_type=_ctype,
+            per_kol_brief=ext(f.get("Per-KOL Brief")))
     else:
         template_color = "orange" if path == "待人审" else "red"
         title_emoji = "📝" if path == "待人审" else "⚠️"
@@ -560,38 +561,53 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
 def _build_ship_tracking_card(record_id: str, contact_name: str, product_name: str,
                               subject: str, stage_label: str,
                               contact_info: dict = None, brand: str = "",
-                              email: str = "", contact_type: str = "KOL") -> dict:
+                              email: str = "", contact_type: str = "KOL",
+                              per_kol_brief: str = "") -> dict:
     """寄样确认/运单号 表单卡 (聪哥3号发负责人, 卡上填即发, 无需跳表格).
-    填 运单号 + 物流商 → 提交 → event-hub Draft Action(draft_tracking) 置字段+通过 →
-    auto_send 用「运单号/物流商」字段自动替换正文 [TRACKING#]/[CARRIER] + 占位符闸门兜底(空不发).
+    填 运单号 + 物流商 + UpPromote券码 + 折扣% → 提交 → event-hub Draft Action(draft_tracking)
+    置字段+通过 → auto_send 用「运单号/物流商」替换 [TRACKING#]/[CARRIER]、用「折扣码/折扣比例」
+    替换 [DISCOUNT_CODE]/[DISCOUNT_PCT] + 占位符闸门兜底(空不发).
+    2026-06-16: 购买链接(UpPromote 券码)+按平台放置指引前移到发货确认 (运营反馈 warm_recap 太晚).
     contact_info/brand/email/contact_type: 由调用方解析后传入 (2026-05-31 统一字段标准).
     """
     base_val = {"action": "draft_tracking", "app_token": config.FEISHU_APP_TOKEN,
                 "table_id": config.T_DRAFT, "record_id": record_id}
+    elements = [
+        feishu.build_contact_info_block(
+            contact_info=contact_info, product_name=product_name, brand=brand,
+            email=email, contact_type=contact_type),
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**原主题**: {subject}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": "ℹ️ **寄样确认 (一步到位)** — 确认收件地址无误，下面填运单号+物流商、再粘这个 KOL 的 UpPromote 券码+折扣%，提交后系统把运单号和券码自动填进确认邮件发给达人。**只有这一张卡，没有后续重复卡片；收样暖信会复用同一券码，不用再粘。**"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": "📋 查 FBA/海外仓/国内仓库存 → 建 MCF/海外仓/国内订单拿运单号；去 UpPromote 给这个 KOL 建联盟券 → 复制**当前显示**的券码(别凭记忆/旧名)"}},
+    ]
+    if per_kol_brief:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "🎬 **给这位 KOL 的定制 brief (含按平台放置指引, 可转给达人)**:\n" + per_kol_brief[:1800]}})
+    elements += [
+        {"tag": "hr"},
+        {"tag": "form", "name": f"ship_{record_id}", "elements": [
+            {"tag": "input", "name": "tracking_no", "label_position": "left",
+             "label": {"tag": "plain_text", "content": "运单号:"},
+             "placeholder": {"tag": "plain_text", "content": "如 1Z999AA10123456784"}},
+            {"tag": "input", "name": "carrier", "label_position": "left",
+             "label": {"tag": "plain_text", "content": "物流商:"},
+             "placeholder": {"tag": "plain_text", "content": "如 USPS Ground / DHL Express / FedEx"}},
+            {"tag": "input", "name": "discount_code", "label_position": "left",
+             "label": {"tag": "plain_text", "content": "UpPromote券码:"},
+             "placeholder": {"tag": "plain_text", "content": "粘 UpPromote 当前显示的券码(顾客结账输入的)"}},
+            {"tag": "input", "name": "discount_pct", "label_position": "left",
+             "label": {"tag": "plain_text", "content": "折扣%:"},
+             "placeholder": {"tag": "plain_text", "content": "数字, 如 10 或 15"}},
+            {"tag": "button", "action_type": "form_submit", "name": "submit",
+             "text": {"tag": "plain_text", "content": "✅ 确认发送 (自动替换运单号/物流商/券码)"}, "type": "primary",
+             "value": base_val},
+        ]},
+        {"tag": "div", "text": {"tag": "lark_md", "content": "⚠️ 运单号/物流商/券码/折扣% 留空不会发(占位符闸门拦截); 不用进表格改正文, 系统自动替换"}},
+    ]
     return {
         "config": {"wide_screen_mode": True, "update_multi": True},
-        "header": {"template": "red", "title": {"tag": "plain_text", "content": f"📦 {stage_label} — 填运单号发样 ({contact_name})"}},
-        "elements": [
-            feishu.build_contact_info_block(
-                contact_info=contact_info, product_name=product_name, brand=brand,
-                email=email, contact_type=contact_type),
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**原主题**: {subject}"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": "ℹ️ **寄样确认 (一步到位)** — 确认收件地址无误，下面填运单号+物流商提交，系统自动把运单号填进确认邮件并发给达人。**只有这一张卡，没有后续重复卡片。**"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": "📋 查 FBA/海外仓/国内仓库存 → 建 MCF/海外仓/国内订单 → 拿到运单号 → 下面填 → 提交即发"}},
-            {"tag": "hr"},
-            {"tag": "form", "name": f"ship_{record_id}", "elements": [
-                {"tag": "input", "name": "tracking_no", "label_position": "left",
-                 "label": {"tag": "plain_text", "content": "运单号:"},
-                 "placeholder": {"tag": "plain_text", "content": "如 1Z999AA10123456784"}},
-                {"tag": "input", "name": "carrier", "label_position": "left",
-                 "label": {"tag": "plain_text", "content": "物流商:"},
-                 "placeholder": {"tag": "plain_text", "content": "如 USPS Ground / DHL Express / FedEx"}},
-                {"tag": "button", "action_type": "form_submit", "name": "submit",
-                 "text": {"tag": "plain_text", "content": "✅ 确认发送 (自动替换正文运单号/物流商)"}, "type": "primary",
-                 "value": base_val},
-            ]},
-            {"tag": "div", "text": {"tag": "lark_md", "content": "⚠️ 运单号/物流商 留空不会发(占位符闸门拦截); 不用进表格改正文, 系统自动替换"}},
-        ],
+        "header": {"template": "red", "title": {"tag": "plain_text", "content": f"📦 {stage_label} — 填运单号+券码发样 ({contact_name})"}},
+        "elements": elements,
     }
 
 

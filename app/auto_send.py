@@ -305,12 +305,17 @@ async def send_one(rec: dict) -> dict:
         body_html = body_html.replace("[CARRIER待填运营修改]", carrier)
         body_html = body_html.replace("[CARRIER 待填]", carrier)
 
-    # warm_recap 暖信 (P3, UpPromote 转向): 硬门 — 必须 ①「折扣比例」已填 ②正文占位符未被手改
-    # ③「折扣码」(运营在飞书卡片粘的 UpPromote 券码) 非空。
-    # 不再自动建 Shopify 码 — 券码 = UpPromote 真相源 (带佣金追踪), 运营粘进草稿「折扣码」字段。
-    # 防发出半成品暖信(341万粉 Thao 风险): 任一硬门不过 → 改"待修改"拒发。
+    # 折扣占位符替换 + 硬门 (warm_recap 暖信 + ship_confirm 发货确认 共用, 2026-06-16 购买链接前移到发货确认):
+    # 正文带 [DISCOUNT_CODE]/[DISCOUNT_PCT] → 必须 ①「折扣比例」已填 ②占位符未被手改 ③「折扣码」(运营在飞书
+    # 卡片粘的 UpPromote 券码)非空。任一不过 → 改"待修改"拒发 (防发出半成品 / [DISCOUNT_CODE] 泄漏给真 KOL)。
+    # 不自动建 Shopify 码 — 券码 = UpPromote 真相源(带佣金追踪)。ship_confirm 草稿 = reply/affiliate_quote
+    # 来源 + 有寄样订单号 + 阶段待发货 (排除 tracking_followup 第2封, 它来源=tracking_followup 不带券码占位符)。
     source_field = ext(f.get("邮件草稿来源"))
-    if source_field == "warm_recap":
+    _is_ship_confirm = (source_field in ("reply", "affiliate_quote")
+                        and bool(ext(f.get("寄样订单号")))
+                        and ext(f.get("寄样阶段")) in ("", "待发货"))
+    if source_field == "warm_recap" or _is_ship_confirm:
+        _lbl = "暖信" if source_field == "warm_recap" else "发货确认"
         try:
             _pct_raw = f.get("折扣比例")
             _pct = (float(_pct_raw) / 100.0) if _pct_raw not in (None, "") else 0
@@ -319,22 +324,22 @@ async def send_one(rec: dict) -> dict:
         if _pct <= 0:
             await feishu.update_record(config.T_DRAFT, rid, {
                 "邮件草稿状态": "待修改", "审核路径": "需人改",
-                "审批意见": "[暖信待填] 请在飞书卡片填「折扣%」(数字, 如 10) + 粘 UpPromote 券码后再提交。",
+                "审批意见": f"[{_lbl}待填] 请在飞书卡片填「折扣%」(数字, 如 10) + 粘 UpPromote 券码后再提交。",
             })
-            return {"rid": rid, "ok": False, "error": "warm_recap: 折扣比例未填"}
+            return {"rid": rid, "ok": False, "error": f"{_lbl}: 折扣比例未填"}
         if "[DISCOUNT_CODE]" not in body_html or "[DISCOUNT_PCT]" not in body_html:
             await feishu.update_record(config.T_DRAFT, rid, {
                 "邮件草稿状态": "待修改", "审核路径": "需人改",
-                "审批意见": "[暖信占位符被改] 请勿手动改正文里的 [DISCOUNT_CODE]/[DISCOUNT_PCT] —— 系统会用你粘的 UpPromote 券码 + 折扣% 自动替换。请恢复这两个占位符(或重新生成暖信)再走卡片提交。",
+                "审批意见": f"[{_lbl}占位符被改] 请勿手动改正文里的 [DISCOUNT_CODE]/[DISCOUNT_PCT] —— 系统会用你粘的 UpPromote 券码 + 折扣% 自动替换。请恢复这两个占位符(或重新生成)再走卡片提交。",
             })
-            return {"rid": rid, "ok": False, "error": "warm_recap: 占位符被手改, 拒发"}
+            return {"rid": rid, "ok": False, "error": f"{_lbl}: 占位符被手改, 拒发"}
         _code = (ext(f.get("折扣码")) or "").strip()
         if not _code:
             await feishu.update_record(config.T_DRAFT, rid, {
                 "邮件草稿状态": "待修改", "审核路径": "需人改",
-                "审批意见": "[暖信待填券码] 请在飞书卡片粘 UpPromote 券码再提交 —— 「折扣码」不能为空(它是 UpPromote 佣金追踪真相源)。",
+                "审批意见": f"[{_lbl}待填券码] 请在飞书卡片粘 UpPromote 券码再提交 —— 「折扣码」不能为空(它是 UpPromote 佣金追踪真相源)。",
             })
-            return {"rid": rid, "ok": False, "error": "warm_recap: 折扣码(UpPromote 券码)未填"}
+            return {"rid": rid, "ok": False, "error": f"{_lbl}: 折扣码(UpPromote 券码)未填"}
         # 用运营粘的 UpPromote 券码替换占位符 (不再调 Shopify 自建码)
         body_html = body_html.replace("[DISCOUNT_CODE]", _code).replace("[DISCOUNT_PCT]", str(int(round(_pct * 100))))
         # 回写券码到 KOL/编辑主表缓存 (供 sales_attribution 折扣码→KOL 归因)
