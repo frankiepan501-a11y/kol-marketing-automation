@@ -74,6 +74,7 @@ PLACEHOLDER_KEYWORDS = [
     "待填", "[TBD", "[CARRIER", "[TRACKING#", "[ETA",
     "[ADDRESS", "[PRICE", "[QUANTITY", "[xxx", "[XXX",
     "[DISCOUNT_CODE", "[DISCOUNT_PCT",   # warm_recap 暖信折扣占位符: 运营没填折扣比例则不发
+    "[PURCHASE_LINKS",   # ship_confirm 各国追踪购买短链: 运营没粘则不发
 ]
 
 
@@ -350,6 +351,17 @@ async def send_one(rec: dict) -> dict:
                 await feishu.update_record(config.T_EDITOR if _is_ed else config.T_KOL, _crid, {"折扣码": _code})
             except Exception as e:
                 print(f"[auto_send] 回写券码到主表失败 {rid}: {e}")
+        # 购买短链 (2026-06-16 双轨): 正文带 [PURCHASE_LINKS] → 要求草稿「购买短链」非空(运营粘各国追踪短链)。
+        # warm_recap 模板无此占位符不触发; ship_confirm 模板有 → 没填则拦"待修改"防 [PURCHASE_LINKS] 泄漏。
+        if "[PURCHASE_LINKS]" in body_html:
+            _links = (ext(f.get("购买短链")) or "").strip()
+            if not _links:
+                await feishu.update_record(config.T_DRAFT, rid, {
+                    "邮件草稿状态": "待修改", "审核路径": "需人改",
+                    "审批意见": f"[{_lbl}待填购买短链] 请在飞书卡片粘各国/平台追踪购买短链(运营群汇总的, 如 'US amzn.to/x  AU amzn.to/y')再提交。",
+                })
+                return {"rid": rid, "ok": False, "error": f"{_lbl}: 购买短链未填"}
+            body_html = body_html.replace("[PURCHASE_LINKS]", _links)
 
     # 发送前 body 长度 sanity check (V1 最小防御, 防 feishu.ext() multi-segment bug 类再触发)
     # 5/8 ctatechdesk 事故根因: 草稿表 body 是 multi-segment array, ext() 只拿 [0].text 几字符

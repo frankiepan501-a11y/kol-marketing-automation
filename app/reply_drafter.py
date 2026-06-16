@@ -623,9 +623,9 @@ async def _build_ship_placement(contact_type: str, prod_rid, contact_rid: str,
         cta = ("Add the link where your followers can reach it — video description / pinned comment / link in bio — "
                "and mention the code on screen or out loud so a viewer instantly knows where & how to buy.")
     placement_block = (
-        f"Discount code for your audience: [DISCOUNT_CODE] ([DISCOUNT_PCT]% off)\n"
-        f"Buy link: {site_url}\n"
-        f"{cta}\n\n"
+        f"🛒 Shop links — pick the one for your audience's region:\n[PURCHASE_LINKS]\n\n"
+        f"💎 Or on our store: use code [DISCOUNT_CODE] for [DISCOUNT_PCT]% off — {site_url}\n\n"
+        f"📍 Where to place it: {cta}\n\n"
     )
     return placement_block, brief_md
 

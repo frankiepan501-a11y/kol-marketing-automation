@@ -577,8 +577,8 @@ def _build_ship_tracking_card(record_id: str, contact_name: str, product_name: s
             contact_info=contact_info, product_name=product_name, brand=brand,
             email=email, contact_type=contact_type),
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**原主题**: {subject}"}},
-        {"tag": "div", "text": {"tag": "lark_md", "content": "ℹ️ **寄样确认 (一步到位)** — 确认收件地址无误，下面填运单号+物流商、再粘这个 KOL 的 UpPromote 券码+折扣%，提交后系统把运单号和券码自动填进确认邮件发给达人。**只有这一张卡，没有后续重复卡片；收样暖信会复用同一券码，不用再粘。**"}},
-        {"tag": "div", "text": {"tag": "lark_md", "content": "📋 查 FBA/海外仓/国内仓库存 → 建 MCF/海外仓/国内订单拿运单号；去 UpPromote 给这个 KOL 建联盟券 → 复制**当前显示**的券码(别凭记忆/旧名)"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": "ℹ️ **寄样确认 (一步到位)** — 确认收件地址无误，下面填①运单号+物流商 ②各国/平台**追踪购买短链**(群里各渠道运营汇总的) ③独立站 UpPromote 券码+折扣%。提交后系统把运单号、购买短链、券码全自动填进确认邮件发给达人。**只有这一张卡，没有后续重复卡片；收样暖信会复用同一套链接/券码，不用再粘。**"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": "📋 ①查库存+群里问各渠道运营拿各国追踪购买短链(amzn.to 等, 按受众区) ②去 UpPromote 给这个 KOL 建联盟券 → 复制**当前显示**的券码(别凭记忆/旧名)"}},
     ]
     if per_kol_brief:
         elements.append({"tag": "hr"})
@@ -592,6 +592,9 @@ def _build_ship_tracking_card(record_id: str, contact_name: str, product_name: s
             {"tag": "input", "name": "carrier", "label_position": "left",
              "label": {"tag": "plain_text", "content": "物流商:"},
              "placeholder": {"tag": "plain_text", "content": "如 USPS Ground / DHL Express / FedEx"}},
+            {"tag": "input", "name": "purchase_links", "label_position": "left",
+             "label": {"tag": "plain_text", "content": "购买短链:"},
+             "placeholder": {"tag": "plain_text", "content": "粘各国追踪短链(运营群汇总), 如 US amzn.to/x  AU amzn.to/y  MX bit.ly/z"}},
             {"tag": "input", "name": "discount_code", "label_position": "left",
              "label": {"tag": "plain_text", "content": "UpPromote券码:"},
              "placeholder": {"tag": "plain_text", "content": "粘 UpPromote 当前显示的券码(顾客结账输入的)"}},
