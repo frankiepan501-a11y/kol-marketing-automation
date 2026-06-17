@@ -267,6 +267,21 @@ async def run_auto_send(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": tr}
 
 
+@app.get("/auto-send/status")
+async def auto_send_status(authorization: str = Header(default="")):
+    """查发送通道暂停状态 (限速闸/自动暂停, 2026-06-17)"""
+    _check_auth(authorization)
+    return {"ok": True, **auto_send.pause_state()}
+
+
+@app.post("/auto-send/resume")
+async def resume_auto_send(authorization: str = Header(default="")):
+    """人工解除自动暂停 (确认 Zoho 可发后调; 2026-06-17 限速闸配套)"""
+    _check_auth(authorization)
+    auto_send.clear_pause()
+    return {"ok": True, "paused": False, "msg": "已解除暂停, 下次 cron 恢复发送"}
+
+
 @app.post("/reviewer/scan")
 async def run_reviewer_scan(authorization: str = Header(default="")):
     """兜底: 扫所有 待审 + 没 AI评分 的草稿, 跑 reviewer 自审 (防止生成器漏调)"""

@@ -57,10 +57,85 @@ async def _kol_bad_domains() -> set:
 
 
 # 限速: 每个品牌每小时 40 封, 每次 cron 扫描最多发 N 封
-RATE_PER_RUN = 20         # 每次 cron 跑最多 20 封 (n8n 每 10min 触发 = 每小时 ~120 封,但被分到 2 个品牌 + 限速节奏)
+# 2026-06-17 限速闸 (Zoho 账号级封号恢复后防再撞 50封/h·150封/天 限速; 全 env 可调, 恢复头几天调更低如 30)
+#   小时级 = PER_BRAND_PER_RUN × cron频率(10min→6run/h): 6×6 = 36/h/品牌 < 50 ✓
+#   天级   = SEND_DAILY_CAP 滚动24h已发硬上限 < 150 留 buffer
+RATE_PER_RUN = int(config.env("SEND_RATE_PER_RUN", "12"))           # 每次 cron 全局上限
+PER_BRAND_PER_RUN = int(config.env("SEND_PER_BRAND_PER_RUN", "6"))  # 单品牌单次上限 (→ ~36/h/品牌)
+SEND_DAILY_CAP = int(config.env("SEND_DAILY_CAP", "120"))           # 单品牌滚动 24h 上限 (<150)
+PAUSE_THRESHOLD = int(config.env("SEND_PAUSE_THRESHOLD", "3"))      # 连续通道错误数 → 自动暂停
 MIN_DELAY = 3             # 云端 delay 比本地短 (3-10s 而不是 30-90s, n8n 单次执行 ≤5min)
 MAX_DELAY = 10
-PER_BRAND_PER_RUN = 10    # 单品牌单次最多 10 封
+
+# ===== 自动暂停 (通道挂时止血, 防 Zoho 再被封) =====
+_channel_paused = False   # 进程内标志; 连续通道错误触发, 后续 run() 直接跳过
+_pause_reason = ""
+_pause_alerted = False     # 告警去重: 同一次暂停只发 1 次飞书
+
+# 时间敏感(优先发, 配额先给它们): KOL 回信/寄样/报价/暖信/运单跟进; nudge-前缀也算
+_HIGH_PRIORITY_SRC = {"reply", "ship_confirm", "affiliate_quote", "warm_recap", "tracking_followup"}
+# Zoho 通道级错误特征 (区别于单收件人 bad email / 占位符等 — 那些不触发暂停)
+_CHANNEL_ERR_SIGNS = ("server error '5", "500", "550", "unusual sending", "exceeded", "blocked", "429", "too many")
+
+
+def _is_channel_error(err: str) -> bool:
+    e = (err or "").lower()
+    return any(s in e for s in _CHANNEL_ERR_SIGNS)
+
+
+def _draft_priority(rec: dict) -> tuple:
+    """排序键: 时间敏感(reply/ship/quote..)优先, 同级按建议发送时间最旧优先。"""
+    f = rec["fields"]
+    src = ext(f.get("邮件草稿来源")) or ""
+    did = ext(f.get("邮件草稿ID")) or ""
+    is_high = (src in _HIGH_PRIORITY_SRC) or did.startswith("nudge-")
+    try:
+        sched = int(f.get("建议发送时间") or 0)
+    except (ValueError, TypeError):
+        sched = 0
+    return (0 if is_high else 1, sched)
+
+
+def clear_pause():
+    """人工解除暂停 (确认 Zoho 可发后调 /auto-send/resume)。"""
+    global _channel_paused, _pause_reason, _pause_alerted
+    _channel_paused = False
+    _pause_reason = ""
+    _pause_alerted = False
+
+
+def pause_state() -> dict:
+    return {"paused": _channel_paused, "reason": _pause_reason}
+
+
+async def _trigger_pause(reason: str):
+    """连续通道错误 → 置暂停标志 + 发 P0 飞书告警 (运营群 + Frankie, 只发 1 次)。"""
+    global _channel_paused, _pause_reason, _pause_alerted
+    _channel_paused = True
+    _pause_reason = reason
+    print(f"[auto_send PAUSE] {reason}")
+    if _pause_alerted:
+        return
+    _pause_alerted = True
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "red",
+                   "title": {"tag": "plain_text", "content": "🔴 [KOL·P0] 邮件发送通道异常 · 已自动暂停"}},
+        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": (
+            "**已自动暂停 KOL 邮件发送**（防 Zoho 账号再被限流封锁）。\n\n"
+            f"**原因**: {reason}\n\n"
+            "• 你们审批的卡片会**正常排队**，通道恢复后自动补发——不用重复点。\n"
+            "• 通道恢复(Zoho 能发)后，需调 `/auto-send/resume` 或重启服务解除暂停。")}}],
+    }
+    try:
+        await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+    except Exception as e:
+        print(f"[auto_send PAUSE] 群告警失败: {e}")
+    for _name, _oid in config.NOTIFY_USERS:
+        try:
+            await feishu.send_card_message("open_id", _oid, card)
+        except Exception as e:
+            print(f"[auto_send PAUSE] 私聊告警失败 {_oid}: {e}")
 
 
 def _brand_from_alias(alias: str) -> str:
@@ -115,6 +190,23 @@ async def scan_ready() -> tuple:
         if kid: all_drafts_by_kol.setdefault(kid, []).append(rec)
 
     now_ms = int(time.time() * 1000)
+
+    # 滚动 24h 已发计数 (按品牌, 供 run() 天级限速闸; 复用上面 all_recs 零额外查询)
+    day_ago = now_ms - 86400000
+    sent_24h = {b: 0 for b in config.BRAND_CONFIG}
+    for rec in all_recs:
+        ff = rec["fields"]
+        if ext(ff.get("发送状态")) != "已发":
+            continue
+        try:
+            st = int(ff.get("发送时间") or 0)
+        except (ValueError, TypeError):
+            continue
+        if st >= day_ago:
+            b = _brand_from_alias(ext(ff.get("发送邮箱")))
+            if b in sent_24h:
+                sent_24h[b] += 1
+
     ready = []
     scheduled_later = 0
     already_sent = 0
@@ -153,7 +245,7 @@ async def scan_ready() -> tuple:
 
         ready.append(rec)
 
-    return ready, scheduled_later, already_sent + skip_followup
+    return ready, scheduled_later, already_sent + skip_followup, sent_24h
 
 
 # ===== 2. 发一封 =====
@@ -663,7 +755,12 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
 
 # ===== 3. 主入口 =====
 async def run() -> dict:
-    ready, scheduled_later, skipped = await scan_ready()
+    # 自动暂停期间直接跳过 (通道挂时止血, 防 Zoho 再被封; 需 /auto-send/resume 解除)
+    if _channel_paused:
+        return {"sent": 0, "fail": 0, "paused": True, "reason": _pause_reason,
+                "msg": "发送通道已自动暂停, 确认 Zoho 可发后调 /auto-send/resume 解除"}
+
+    ready, scheduled_later, skipped, sent_24h = await scan_ready()
     if not ready:
         return {"sent": 0, "fail": 0, "scheduled_later": scheduled_later, "skipped": skipped, "msg": "no ready drafts"}
 
@@ -673,13 +770,19 @@ async def run() -> dict:
         b = _brand_from_alias(ext(r["fields"].get("发送邮箱")))
         by_brand[b].append(r)
 
-    # 限制每品牌每次最多 PER_BRAND_PER_RUN
+    # 限速闸: 时间敏感优先排序 + 天级滚动24h上限 + 单品牌单次上限 (2026-06-17)
+    caps_info = {}
     for b in by_brand:
-        by_brand[b] = by_brand[b][:PER_BRAND_PER_RUN]
+        by_brand[b].sort(key=_draft_priority)                       # reply/ship/quote 排 cold 前
+        daily_remaining = max(0, SEND_DAILY_CAP - sent_24h.get(b, 0))
+        cap = min(PER_BRAND_PER_RUN, daily_remaining)
+        caps_info[b] = {"sent_24h": sent_24h.get(b, 0), "daily_remaining": daily_remaining,
+                        "queued": len(by_brand[b]), "take": min(cap, len(by_brand[b]))}
+        by_brand[b] = by_brand[b][:cap]
 
     # 交叉队列
     queue = []
-    max_per = max(len(v) for v in by_brand.values()) if by_brand else 0
+    max_per = max((len(v) for v in by_brand.values()), default=0)
     for i in range(max_per):
         for b in by_brand:
             if i < len(by_brand[b]):
@@ -689,12 +792,23 @@ async def run() -> dict:
     results = []
     sent = 0
     fail = 0
+    consec_channel_err = 0     # 连续 Zoho 通道错误 → 达阈值自动暂停
 
     for i, rec in enumerate(queue, 1):
         r = await send_one(rec)
         results.append(r)
-        if r["ok"]: sent += 1
-        else: fail += 1
+        if r["ok"]:
+            sent += 1
+            consec_channel_err = 0
+        else:
+            fail += 1
+            if _is_channel_error(r.get("error", "")):
+                consec_channel_err += 1
+                if consec_channel_err >= PAUSE_THRESHOLD:
+                    await _trigger_pause(f"连续 {consec_channel_err} 次 Zoho 通道错误: {r.get('error','')[:140]}")
+                    break
+            else:
+                consec_channel_err = 0     # 单收件人错误(bad email/占位符)不算通道挂
         # 间隔
         if i < len(queue):
             await asyncio.sleep(random.randint(MIN_DELAY, MAX_DELAY))
@@ -703,5 +817,7 @@ async def run() -> dict:
         "sent": sent, "fail": fail,
         "scheduled_later": scheduled_later, "skipped": skipped,
         "queue_size": len(queue),
+        "caps": caps_info,
+        "paused": _channel_paused,
         "details": results[:10],
     }
