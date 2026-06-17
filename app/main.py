@@ -279,11 +279,11 @@ async def auto_send_status(authorization: str = Header(default="")):
 
 
 @app.post("/auto-send/resume")
-async def resume_auto_send(authorization: str = Header(default="")):
-    """人工解除自动暂停 (确认 Zoho 可发后调; 2026-06-17 限速闸配套)"""
+async def resume_auto_send(authorization: str = Header(default=""), brand: str = ""):
+    """人工解除自动暂停 (确认 Zoho 可发后调; ?brand=POWKONG 只解该品牌, 不传解全部)"""
     _check_auth(authorization)
-    auto_send.clear_pause()
-    return {"ok": True, "paused": False, "msg": "已解除暂停, 下次 cron 恢复发送"}
+    auto_send.clear_pause(brand or None)
+    return {"ok": True, "resumed": brand or "ALL", **auto_send.pause_state()}
 
 
 @app.post("/reviewer/scan")
