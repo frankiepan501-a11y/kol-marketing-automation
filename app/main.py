@@ -267,6 +267,18 @@ async def run_auto_send(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": tr}
 
 
+@app.post("/zoho/send-debug")
+async def zoho_send_debug(authorization: str = Header(default=""),
+                          brand: str = "白牌", to: str = "frankiepan501@gmail.com"):
+    """诊断(只发1封): 抓 Zoho 发送的真实 status+body(看 500 具体原因)"""
+    _check_auth(authorization)
+    from . import zoho
+    try:
+        return {"ok": True, "brand": brand, **(await zoho.raw_send_probe(brand, to))}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-500:]}
+
+
 @app.get("/zoho/accounts")
 async def zoho_accounts(authorization: str = Header(default=""), brand: str = "白牌"):
     """诊断(只读): 列该 brand Zoho token 可访问账号 + 合法发件地址, 排查发送500。

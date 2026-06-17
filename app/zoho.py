@@ -87,6 +87,21 @@ async def list_accounts(brand: str) -> list:
         return r.json().get("data") or []
 
 
+async def raw_send_probe(brand: str, to_addr: str) -> dict:
+    """诊断(只发1封): 原始发送 POST 不 raise, 返回 Zoho 真实 status+body(看 500 具体原因)。
+    payload 与 _send_now 完全一致, 忠实复现失败。"""
+    cfg = config.BRAND_CONFIG[brand]
+    tok = await access(brand)
+    async with httpx.AsyncClient(timeout=30.0) as cli:
+        r = await cli.post(
+            f"https://mail.zoho.com/api/accounts/{cfg['account_id']}/messages",
+            json={"fromAddress": cfg["alias_from"], "toAddress": to_addr,
+                  "subject": "[probe] send debug", "content": "<p>probe</p>", "mailFormat": "html"},
+            headers={"Authorization": f"Zoho-oauthtoken {tok}"},
+        )
+        return {"status": r.status_code, "body": r.text[:900]}
+
+
 async def _list_folders_raw(brand: str) -> list:
     cfg = config.BRAND_CONFIG[brand]
     tok = await access(brand)
