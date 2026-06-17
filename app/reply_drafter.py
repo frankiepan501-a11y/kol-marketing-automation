@@ -17,7 +17,7 @@
 import time
 import re
 from typing import Optional
-from . import config, feishu, deepseek
+from . import config, feishu, deepseek, brand_line_state
 from .feishu import ext, xrid
 
 
@@ -545,56 +545,25 @@ async def _gen_clarify_draft(contact_name: str, original_subject: str,
         }
 
 
-async def _is_late_stage_contact(cf: dict, link_field: str, contact_rid: str):
-    """判断 KOL/媒体人是否已过"早期兴趣"阶段 (已寄样/已谈条款/已上稿/已合作).
-    2026-05-25 stage-blind 修复: late-stage KOL 的「感兴趣」自动回复(早期话术如"要不要样品/
-    你需要什么")是阶段错位 → 强制人审不自动发. 周会 Metalfear4(已签收+直播)/PlayTopia(已谈$100)事故.
-    Returns (is_late: bool, reason: str)."""
-    if ext(cf.get("上次寄样订单号")):
-        return True, "已寄样(上次寄样订单号非空)"
+async def _is_late_stage_contact(cf: dict, link_field: str, contact_rid: str,
+                                 brand: str, contact_type: str):
+    """判断 KOL/媒体人 **该品牌线** 是否已过"早期兴趣"阶段 (已寄样/已谈条款/已上稿).
+    2026-05-25 stage-blind 修复: late-stage 的「感兴趣」自动回复(早期话术如"要不要样品")是阶段错位
+    → 强制人审不自动发. 周会 Metalfear4(已签收+直播)/PlayTopia(已谈$100)事故.
+    2026-06-17 双品牌修(#2): 改为**只看该品牌线**的草稿历史(brand_line_state), 不再读主表混合字段
+    (上次寄样订单号/寄样次数/上稿日期/合作状态 是 KOL 级跨品牌混合 → 另一品牌线的 late-stage 会串过来,
+     如 TG_Geek POWKONG 已上稿致 FUNLAB 线回复被误判 late-stage 拦人审 / 或反之误判早期自动发错话术)。
+    主表回写不可靠(TG_Geek 已寄样主表却全空)→ 草稿历史(寄样阶段/场景标签/affiliate_quote)是可靠源。
+    cf 保留兼容签名不再读。Returns (is_late: bool, reason: str)."""
     try:
-        if int(cf.get("寄样次数") or 0) >= 1:
-            return True, "已寄样(寄样次数≥1)"
-    except (ValueError, TypeError):
-        pass
-    if cf.get("上稿日期"):
-        return True, "已上稿"
-    if ext(cf.get("合作状态")) in ("已合作-免费", "已合作-免费(多次)", "已合作-付费"):
-        return True, "已合作"
-    # 已发过 affiliate_quote 草稿 = 已进入条款谈判 (如 PlayTopia 已谈 $100, 主表无寄样信号)
-    try:
-        prior = await feishu.search_records(config.T_DRAFT, [
-            {"field_name": link_field, "operator": "contains", "value": [contact_rid]},
-            {"field_name": "邮件草稿来源", "operator": "is", "value": ["affiliate_quote"]},
-            {"field_name": "邮件草稿状态", "operator": "is", "value": ["已发送"]},
-        ])
-        if prior:
-            return True, "已谈条款(affiliate_quote 已发送)"
-    except Exception:
-        pass
-    # 2026-05-29 (TG_Geek/Gameknight3227 事故): 上面 5 个信号全读「主表」字段, 但主表的寄样次数/
-    # 上次寄样订单号/上稿日期/合作状态 常没回写 (TG_Geek 已寄样+已发布 review, 主表却全空+合作状态
-    # =洽谈中) → guard 全 blind → 早期"想要样品吗"话术被自动外发. 单封回复的 scenario 又可能=None
-    # (5/29 那封), 连 v4 scenario 强制人审也兜不住. 补: 查该 contact **草稿历史**, 任一草稿命中
-    # 已过早期阶段的信号 = late-stage (不依赖主表回写 / 不依赖当封 scenario)。
-    #   信号: 草稿 寄样阶段∈已发货/在途/已签收/已产出, 或 历史 场景标签 funnel∈寄样物流/brief拍摄/草稿/发布收口。
-    try:
-        from . import stage_model
-        LATE_FUNNELS = {"寄样物流", "brief拍摄", "草稿", "发布收口"}
-        LATE_SHIP = {"已发货", "在途", "已签收", "已产出"}
-        hist = await feishu.search_records(config.T_DRAFT, [
-            {"field_name": link_field, "operator": "contains", "value": [contact_rid]},
-        ], field_names=["场景标签", "寄样阶段"])
-        for d in hist:
-            df = d["fields"]
-            ship = ext(df.get("寄样阶段"))
-            if ship in LATE_SHIP:
-                return True, f"已寄样(历史草稿寄样阶段={ship})"
-            scn = ext(df.get("场景标签"))
-            if scn and stage_model.funnel_stage_of(scn) in LATE_FUNNELS:
-                return True, f"已过早期(历史草稿场景={scn}/{stage_model.funnel_stage_of(scn)}阶段)"
+        st = await brand_line_state.line_state(contact_rid, contact_type, brand)
     except Exception as e:
-        print(f"[reply_drafter] late-stage draft-history check fail (放行): {e}")
+        print(f"[reply_drafter] late-stage line_state fail (放行不拦): {e}")
+        return False, ""
+    if st["is_late_stage"]:
+        why = ("已寄样" if st["shipped"] else "已上稿" if st["uploaded"]
+               else "已谈条款(affiliate_quote)" if st["quoted"] else "已过早期(漏斗)")
+        return True, f"{why}[{brand}线]"
     return False, ""
 
 
@@ -946,7 +915,7 @@ async def draft_reply(
         # 2026-05-25 stage-blind 修复: late-stage KOL 的「感兴趣」早期话术强制人审 (不自动发)
         force_reason = None
         if intent_type == "感兴趣":
-            is_late, late_why = await _is_late_stage_contact(cf, link_field, contact_record["record_id"])
+            is_late, late_why = await _is_late_stage_contact(cf, link_field, contact_record["record_id"], brand, contact_type)
             if is_late:
                 force_reason = late_why
                 try:

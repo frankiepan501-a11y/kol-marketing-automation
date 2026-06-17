@@ -22,7 +22,7 @@ V1 寄样链路 SLA (扫"寄样订单号 != 空"的草稿):
   → 草稿表"低ROI60d标记"=True + 主表「维护标签」加"低ROI候选" + 飞书卡片提示
 """
 import re, time
-from . import config, feishu, draft_router, reply_drafter
+from . import config, feishu, draft_router, reply_drafter, brand_line_state
 from .feishu import ext, xrid
 
 
@@ -426,11 +426,19 @@ async def _layer3_no_content_30d(now_ms: int) -> dict:
             continue
         cf = contact["fields"]
 
-        # Phase 2 daemon 已扫到上稿就跳过 (主表「上稿日期」非空)
-        upload_date = cf.get("上稿日期")
-        if upload_date:
-            skipped += 1
-            continue
+        # 2026-06-17 双品牌修(#6): 按**该品牌线**草稿算"已上稿"才跳过, 不读主表混合上稿日期
+        # (POWKONG 已上稿致主表上稿日期非空 → FUNLAB 线 35d 未产出被误跳漏标)
+        ship_brand = config.brand_from_text(ext(f.get("发送邮箱"))) or "FUNLAB"
+        try:
+            _l3st = await brand_line_state.line_state(contact_rid, contact_type, ship_brand)
+            if _l3st["uploaded"]:
+                skipped += 1
+                continue
+        except Exception as _e:
+            print(f"[sla_check L3] line_state fail, 回落主表上稿日期: {_e}")
+            if cf.get("上稿日期"):     # 降级保守: 取不到草稿信号时回落旧口径
+                skipped += 1
+                continue
 
         contact_name = ext(cf.get("媒体人姓名")) if contact_type == "editor" else ext(cf.get("账号名"))
 
@@ -441,10 +449,16 @@ async def _layer3_no_content_30d(now_ms: int) -> dict:
             print(f"[sla_check L3] mark draft fail: {e}")
 
         # 主表合作状态软标 → "未产出" (如未存在该选项需运营在飞书加; 防 API 失败用 try)
-        try:
-            await feishu.update_record(target_table, contact_rid, {"合作状态": "未产出"})
-        except Exception as e:
-            print(f"[sla_check L3] master 合作状态 fail (option 可能未建): {e}")
+        # 2026-06-17 双品牌(#6): 合作状态是单一 KOL 级字段, 若该 KOL 在**别的品牌线已合作** → 不降级
+        # (否则 FUNLAB 线未产出会把 POWKONG 的已合作覆盖成未产出 = 数据损失)。仍打草稿标 + 发卡。
+        coop_now = ext(cf.get("合作状态")) or ""
+        if coop_now in ("已合作-免费", "已合作-免费(多次)", "已合作-付费"):
+            print(f"[sla_check L3] {contact_rid} 别处已合作({coop_now}), 跳过 未产出 软标防降级")
+        else:
+            try:
+                await feishu.update_record(target_table, contact_rid, {"合作状态": "未产出"})
+            except Exception as e:
+                print(f"[sla_check L3] master 合作状态 fail (option 可能未建): {e}")
 
         # 飞书卡片告警 (2026-05-31 统一字段: 加 KOL 信息块 compact)
         try:

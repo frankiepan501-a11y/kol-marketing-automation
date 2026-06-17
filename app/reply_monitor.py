@@ -1,6 +1,6 @@
 """回复监听 - 迁移自本地 scripts/send_loop/reply_monitor.py"""
 import re, time, html as html_mod
-from . import config, feishu, zoho, deepseek, reply_drafter, stage_model, coop_status
+from . import config, feishu, zoho, deepseek, reply_drafter, stage_model, coop_status, brand_line_state
 from .feishu import ext, xrid
 
 
@@ -306,8 +306,14 @@ async def _manual_ship_recon(contact: dict, ctype: str, draft: dict, brand: str,
     coop = ext(cf.get("合作状态")) or ""
     if coop in ("未建联", "黑名单", "不合适", ""):
         return {"ok": False, "skip": f"coop={coop or '空'} 不符寄样上下文"}
-    if cf.get("上稿日期"):
-        return {"ok": False, "skip": "主表已有上稿日期, 无需补暖信"}
+    # 2026-06-17 双品牌修(#3): 用**该品牌线**草稿算"已上稿", 不读主表混合上稿日期
+    # (MikelTube POWKONG 已上稿致主表上稿日期非空 → FUNLAB 线回"已收到样品"被误拒补登记, 进不了 warm_recap)
+    try:
+        _ust = await brand_line_state.line_state(contact["record_id"], ctype, brand)
+        if _ust["uploaded"]:
+            return {"ok": False, "skip": f"该品牌线已上稿({brand}), 无需补暖信"}
+    except Exception as _e:
+        print(f"[reply_monitor _manual_ship_recon] line_state fail (放行): {_e}")
     prod_rid = xrid(draft["fields"].get("关联产品"))
     if not prod_rid:
         return {"ok": False, "skip": "关联草稿无产品, 跳过(防通用暖信)"}
