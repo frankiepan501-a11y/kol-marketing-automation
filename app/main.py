@@ -269,9 +269,13 @@ async def run_auto_send(authorization: str = Header(default="")):
 
 @app.get("/auto-send/status")
 async def auto_send_status(authorization: str = Header(default="")):
-    """查发送通道暂停状态 (限速闸/自动暂停, 2026-06-17)"""
+    """查发送通道暂停状态 + 限速闸配置 (2026-06-17; 验证 env / 监控用)"""
     _check_auth(authorization)
-    return {"ok": True, **auto_send.pause_state()}
+    return {"ok": True, **auto_send.pause_state(),
+            "caps": {"RATE_PER_RUN": auto_send.RATE_PER_RUN,
+                     "PER_BRAND_PER_RUN": auto_send.PER_BRAND_PER_RUN,
+                     "SEND_DAILY_CAP": auto_send.SEND_DAILY_CAP,
+                     "PAUSE_THRESHOLD": auto_send.PAUSE_THRESHOLD}}
 
 
 @app.post("/auto-send/resume")
