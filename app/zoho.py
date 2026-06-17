@@ -76,6 +76,17 @@ def _strip_html(s: str) -> str:
 
 
 # ===== Folder ID 缓存 (Drafts / Sent) =====
+async def list_accounts(brand: str) -> list:
+    """诊断(只读): 列该 brand token 可访问的全部 Zoho 账号 + 每个的 sendMailDetails(合法发件地址),
+    用于排查发送 500(fromAddress 非合法 send-as 身份 / account_id 不匹配)。"""
+    tok = await access(brand)
+    async with httpx.AsyncClient(timeout=30.0) as cli:
+        r = await cli.get("https://mail.zoho.com/api/accounts",
+                          headers={"Authorization": f"Zoho-oauthtoken {tok}"})
+        r.raise_for_status()
+        return r.json().get("data") or []
+
+
 async def _list_folders_raw(brand: str) -> list:
     cfg = config.BRAND_CONFIG[brand]
     tok = await access(brand)

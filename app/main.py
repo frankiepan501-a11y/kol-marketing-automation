@@ -267,6 +267,36 @@ async def run_auto_send(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": tr}
 
 
+@app.get("/zoho/accounts")
+async def zoho_accounts(authorization: str = Header(default=""), brand: str = "白牌"):
+    """诊断(只读): 列该 brand Zoho token 可访问账号 + 合法发件地址, 排查发送500。
+    对比 config 的 account_id / alias_from 是否与 Zoho 实际一致。"""
+    _check_auth(authorization)
+    from . import zoho
+    try:
+        accts = await zoho.list_accounts(brand)
+        cfg = config.BRAND_CONFIG.get(brand, {})
+        out = []
+        for a in accts:
+            out.append({
+                "accountId": a.get("accountId"),
+                "primaryEmailAddress": a.get("primaryEmailAddress"),
+                "accountDisplayName": a.get("accountDisplayName"),
+                "incomingBlocked": a.get("incomingBlocked"),
+                "outgoingBlocked": a.get("outgoingBlocked"),
+                "sendMailDetails": [{"fromAddress": s.get("fromAddress"),
+                                     "displayName": s.get("displayName"),
+                                     "validated": s.get("validated"),
+                                     "default": s.get("sendMailId") and s.get("default")}
+                                    for s in (a.get("sendMailDetails") or [])],
+            })
+        return {"ok": True, "brand": brand,
+                "config": {"account_id": cfg.get("account_id"), "alias_from": cfg.get("alias_from")},
+                "zoho_accounts": out}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-500:]}
+
+
 @app.get("/auto-send/status")
 async def auto_send_status(authorization: str = Header(default="")):
     """查发送通道暂停状态 + 限速闸配置 (2026-06-17; 验证 env / 监控用)"""
