@@ -229,7 +229,8 @@ async def _get_sent_drafts():
         config.T_DRAFT,
         [{"field_name": "邮件草稿状态", "operator": "is", "value": ["已发送"]}],
         field_names=["关联KOL", "关联媒体人", "关联产品", "邮件草稿来源", "是否回复",
-                     "回复原文", "发送时间", "邮件主题", "发送邮箱"],  # 2026-06-17: 加发送邮箱供 find_draft 同品牌过滤
+                     "回复原文", "发送时间", "邮件主题", "发送邮箱",  # 2026-06-17: 加发送邮箱供 find_draft 同品牌过滤
+                     "寄样阶段", "场景标签"],  # 2026-06-17 #1: 供 _contact_stage_label_by_brand 按品牌线算阶段
     )
     _sent_drafts_cache["items"] = items
     _sent_drafts_cache["timestamp"] = _t.time()
@@ -395,6 +396,39 @@ def _contact_stage_label(cf: dict) -> str:
         "洽谈中": "💬 洽谈中", "待回复": "✉️ 已发信待回复", "未建联": "🆕 未建联",
         "不合适": "🚫 不合适", "黑名单": "⛔ 黑名单", "未产出": "📭 已寄样未产出",
     }.get(coop, coop or "🆕 新建联")
+
+
+# 2026-06-17 #1: 「发布收口」漏斗的全部场景标签 (一处算出, 供按品牌阶段派生用 已上稿 判定)。
+_PUBLISH_LABELS = frozenset(
+    lbl for lbl, m in stage_model.SCENARIO_MODEL.items()
+    if (m or {}).get("funnel_stage") == "发布收口"
+)
+
+
+def _contact_stage_label_by_brand(cf: dict, brand: str, drafts: list) -> str:
+    """按当前**品牌线**的草稿历史算漏斗阶段标签 (2026-06-17 双品牌混淆修 #1)。
+
+    旧 _contact_stage_label 读 KOL/媒体人主表混合字段(上稿日期/寄样次数/合作状态, 跨品牌共用):
+    Carlos POWKONG 食人花已上稿 → 主表上稿日期非空 → FUNLAB 线卡片也被误标"已上稿"(实际洽谈中)。
+    这里只看该 contact **该品牌的已发送草稿**(草稿「发送邮箱」别名定品牌)派生阶段, 互不串台;
+    该品牌完全无草稿(罕见: 纯手动发) 才降级读主表旧标签(不比改前差)。纯卡片显示, 不影响发送/流程。
+    """
+    bdrafts = [d for d in (drafts or [])
+               if config.brand_from_text(ext(d["fields"].get("发送邮箱"))) == brand]
+    if not bdrafts:
+        return _contact_stage_label(cf)
+
+    def _f(d, k):
+        return ext(d["fields"].get(k)) or ""
+
+    # 优先级: 已上稿 > 已寄样 > 洽谈中 > 已发信待回复
+    if any(_f(d, "寄样阶段") == "已产出" or _f(d, "场景标签") in _PUBLISH_LABELS for d in bdrafts):
+        return "🎬 已上稿"
+    if any(_f(d, "寄样阶段") in ("待发货", "已发货", "已签收") for d in bdrafts):
+        return "📦 已寄样"
+    if any(_f(d, "邮件草稿来源") == "affiliate_quote" for d in bdrafts):
+        return "💬 洽谈中"
+    return "✉️ 已发信待回复"
 
 
 def _stage_action_hint(stage: str, ai_action: str) -> str:
@@ -810,7 +844,8 @@ async def run():
                 "name": name, "source": source,
                 "country": ext(cf.get("国家原文")) or ext(cf.get("国家")),
                 "email": from_addr,
-                "stage": _contact_stage_label(cf),
+                # 2026-06-17 #1: 按当前收件箱品牌线的草稿历史算阶段, 防跨品牌混淆(Carlos 案例)
+                "stage": _contact_stage_label_by_brand(cf, brand, all_matched),
             }
             # 产品名 (多产品并跑时辨识该卡对应哪个产品的任务) — 从草稿「关联产品」解析
             product_name = ""
