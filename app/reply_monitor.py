@@ -229,16 +229,22 @@ async def _get_sent_drafts():
         config.T_DRAFT,
         [{"field_name": "邮件草稿状态", "operator": "is", "value": ["已发送"]}],
         field_names=["关联KOL", "关联媒体人", "关联产品", "邮件草稿来源", "是否回复",
-                     "回复原文", "发送时间", "邮件主题"],
+                     "回复原文", "发送时间", "邮件主题", "发送邮箱"],  # 2026-06-17: 加发送邮箱供 find_draft 同品牌过滤
     )
     _sent_drafts_cache["items"] = items
     _sent_drafts_cache["timestamp"] = _t.time()
     return items
 
 
-async def find_draft(contact_rid: str, contact_type: str):
+async def find_draft(contact_rid: str, contact_type: str, brand: str = None):
     """找到该 contact 关联的"待监听"草稿 + 该 contact 的所有已发送草稿(供 body 去重用).
-    优先取「未回复 + 发送时间最新」的草稿；都已回复时回 fallback 取最新一条。
+    优先取「同品牌 + 未回复 + 发送时间最新」的草稿；都已回复时回 fallback 取最新一条。
+
+    2026-06-17 (MikelTube 跨品牌错配修): 多品牌触达的 KOL(MikelTube 被 POWKONG 食人花 +
+    FUNLAB PlayStation Portal 两条线 cold) 回信匹配原草稿时**必须按收件箱品牌优先**, 否则
+    find_draft 跨品牌取"最新未回复"会错配 —— FUNLAB 收件箱的回信关联到 POWKONG 食人花草稿,
+    生成"品牌 FUNLAB + 产品食人花"自相矛盾的草稿。best_draft 在同品牌草稿里选; 无同品牌草稿
+    才降级全部(不破坏单品牌 KOL)。all_matched(第2返回值) 仍返回全部, 供 V3-C dedup 全量比对。
 
     2026-05-19 Plan A (Metalfear4 多轮丢回信根因修, 取代 V3-B 排除法):
         V3-B 曾排除 邮件草稿来源=reply 的草稿以修 1upBinge 死循环, 但副作用 =
@@ -258,13 +264,20 @@ async def find_draft(contact_rid: str, contact_type: str):
     matched = [r for r in items if xrid(r["fields"].get(link_field)) == contact_rid]
     if not matched:
         return None, []
+    # 2026-06-17: 按收件箱品牌优先选 best_draft (防跨品牌错配, 见 docstring)。
+    # 草稿品牌 = 其「发送邮箱」别名所属品牌; 同品牌有草稿就只在同品牌里选, 否则降级全部。
+    pool_src = matched
+    if brand:
+        same_brand = [r for r in matched
+                      if config.brand_from_text(ext(r["fields"].get("发送邮箱"))) == brand]
+        if same_brand:
+            pool_src = same_brand
     # Plan A (2026-05-19): 不再按 邮件草稿来源 排除 reply 草稿。
     # 取最新一封"未回复"草稿 (任意来源, 含 reply); 都已回复时 fallback 取最新一封。
-    # matched 此处必非空 (上面已 `if not matched: return None, []`), 故 pool 必非空。
     # 1upBinge 类死循环由下游 V3-C dedup 拦 (同一 inbox email 的 [MID:] 已写进
     # 匹配草稿的「回复原文」, 再次拉到同封 email 时 already_seen=True 直接 skip)。
-    unreplied = [r for r in matched if not r["fields"].get("是否回复")]
-    pool = unreplied if unreplied else matched
+    unreplied = [r for r in pool_src if not r["fields"].get("是否回复")]
+    pool = unreplied if unreplied else pool_src
     pool.sort(key=lambda r: r["fields"].get("发送时间") or 0, reverse=True)
     return pool[0], matched
 
@@ -553,7 +566,8 @@ async def run():
             contact, ctype = await find_contact(from_addr)
             if not contact: continue
 
-            draft, all_matched = await find_draft(contact["record_id"], ctype)
+            # 2026-06-17: 传当前收件箱品牌 → find_draft 同品牌优先(防跨品牌错配产品, 见 find_draft docstring)
+            draft, all_matched = await find_draft(contact["record_id"], ctype, brand=brand)
             if not draft: continue
             # Plan A (2026-05-19): 删掉旧的 `if 是否回复: continue` 短路 —
             # 它会把 KOL 第 2 轮+ 回信 (含给地址那封) 全量丢弃。
