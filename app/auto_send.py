@@ -153,6 +153,37 @@ PLACEHOLDER_KEYWORDS = [
 ]
 
 
+def format_purchase_links(raw: str) -> str:
+    """把运营粘的"标签 链接"文本(空格/逗号/换行/分号分隔, 标签可多词可中文)解析成
+    '• 标签: 链接' 清单, 每条独立一行。标签按运营原样保留(支持 Amazon US / Walmart US / 美国 等
+    任意平台×国家×独立站组合)。识别不出标签的链接给默认 'Link N'; 完全无链接 → 原样返回(兜底)。
+    2026-06-17 接入: 解决运营多站点多链接不知怎么填 + 原样塞进邮件一坨乱的问题。"""
+    if not raw or not raw.strip():
+        return raw or ""
+    tokens = re.split(r'[\s,;，；、\n\r]+', raw.strip())
+
+    def _is_url(t: str) -> bool:
+        t = t.strip().rstrip('.,)，。')
+        if t.lower().startswith(('http://', 'https://')):
+            return True
+        return bool(re.match(r'^[\w-]+(\.[\w-]+)+(/\S*)?$', t)) and '.' in t
+
+    items = []
+    label = []
+    for tok in tokens:
+        if not tok:
+            continue
+        if _is_url(tok):
+            lbl = " ".join(label).strip().rstrip(':：').strip()
+            items.append((lbl or f"Link {len(items) + 1}", tok))
+            label = []
+        else:
+            label.append(tok)
+    if not items:
+        return raw.strip()
+    return "\n".join(f"• {lbl}: {url}" for lbl, url in items)
+
+
 def has_unfilled_placeholder(subject: str, body: str) -> tuple:
     """检查 subject + body 是否还含未填写的占位符 → (bool, 命中的关键词)"""
     text = (subject or "") + "\n" + (body or "")
@@ -450,10 +481,11 @@ async def send_one(rec: dict) -> dict:
             if not _links:
                 await feishu.update_record(config.T_DRAFT, rid, {
                     "邮件草稿状态": "待修改", "审核路径": "需人改",
-                    "审批意见": f"[{_lbl}待填购买短链] 请在飞书卡片粘各国/平台追踪购买短链(运营群汇总的, 如 'US amzn.to/x  AU amzn.to/y')再提交。",
+                    "审批意见": f"[{_lbl}待填购买短链] 卡片「购买短链」栏填: 标签+链接, 多条空格或换行隔开(如 '美国 amzn.to/x  澳洲 amzn.to/y  独立站 powkong.com/...'), 只1条也行, 系统自动排成清单。",
                 })
                 return {"rid": rid, "ok": False, "error": f"{_lbl}: 购买短链未填"}
-            body_html = body_html.replace("[PURCHASE_LINKS]", _links)
+            # 2026-06-17: 解析成"• 标签: 链接"清单(不再原样塞), 运营多站点多链接随意粘格式都规整
+            body_html = body_html.replace("[PURCHASE_LINKS]", format_purchase_links(_links))
 
     # 发送前 body 长度 sanity check (V1 最小防御, 防 feishu.ext() multi-segment bug 类再触发)
     # 5/8 ctatechdesk 事故根因: 草稿表 body 是 multi-segment array, ext() 只拿 [0].text 几字符
