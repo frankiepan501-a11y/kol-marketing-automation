@@ -17,6 +17,7 @@ from . import config, feishu, draft_router
 from .feishu import ext, xrid
 
 STALL_DAYS = int(config.env("NEGOTIATION_STALL_DAYS", "10"))
+MAX_STALL_DAYS = int(config.env("NEGOTIATION_STALL_MAX_DAYS", "60"))  # 超此天数=死线索, 卡片不列(只提示数, 建议标不合适)
 MAX_CARD = 25   # 卡片最多列这么多, 超出只提示总数
 
 _PENDING_STATUS = {"待审", "待修改"}
@@ -71,7 +72,7 @@ def detect_stalls(kols: list, drafts_by_kol: dict, now_ms: int) -> list:
     return out
 
 
-async def run(dry_run: bool = False) -> dict:
+async def run(dry_run: bool = False, max_days: int = None) -> dict:
     now_ms = int(time.time() * 1000)
     kols = await feishu.search_records(config.T_KOL, [
         {"field_name": "合作状态", "operator": "is", "value": ["洽谈中"]},
@@ -100,17 +101,27 @@ async def run(dry_run: bool = False) -> dict:
             except Exception:
                 pcache[prid] = ""
 
-    result = {"ok": True, "stalled": len(stalls), "stall_days": STALL_DAYS,
+    # 上限: 超 cap 天=死线索, 不进卡片(只报数, 建议直接标不合适); cap=0=不限(首张卡列全部)。
+    cap = MAX_STALL_DAYS if max_days is None else max_days
+    if cap and cap > 0:
+        shown = [s for s in stalls if s["days"] == -1 or s["days"] <= cap]
+        over = [s for s in stalls if s["days"] != -1 and s["days"] > cap]
+    else:
+        shown, over = stalls, []
+
+    result = {"ok": True, "stalled": len(stalls), "shown": len(shown), "over_cap": len(over),
+              "cap": cap, "stall_days": STALL_DAYS,
               "details": [{"name": ext(s["kf"].get("账号名")), "email": ext(s["kf"].get("邮箱")),
-                           "days": s["days"], "note": s["note"]} for s in stalls[:MAX_CARD]]}
+                           "days": s["days"], "note": s["note"]} for s in shown[:MAX_CARD]]}
     if dry_run:
         return result
-    if not stalls:
-        return {"ok": True, "stalled": 0, "msg": f"无停滞洽谈中 KOL (阈值 {STALL_DAYS} 天)"}
+    if not shown:
+        return {"ok": True, "stalled": len(stalls), "shown": 0, "over_cap": len(over),
+                "msg": f"无可跟进停滞(阈值 {STALL_DAYS}-{cap}天); 另有 {len(over)} 个 >{cap}天 死线索"}
 
     # 卡片
     rows = []
-    for s in stalls[:MAX_CARD]:
+    for s in shown[:MAX_CARD]:
         kf = s["kf"]
         name = ext(kf.get("账号名")) or "?"
         email = ext(kf.get("邮箱")) or "?"
@@ -123,12 +134,14 @@ async def run(dry_run: bool = False) -> dict:
         dtxt = "无草稿" if s["days"] == -1 else f"静默 {s['days']} 天"
         rows.append(f"**{name}** · {email}\n　{prod} · {dtxt} · {s['note']}" +
                     (f" · {plat} {fans}粉" if plat else ""))
-    more = f"\n\n…另有 {len(stalls) - MAX_CARD} 个未列出" if len(stalls) > MAX_CARD else ""
+    more = f"\n\n…另有 {len(shown) - MAX_CARD} 个未列出" if len(shown) > MAX_CARD else ""
+    if over:
+        more += f"\n\n🗑 另有 **{len(over)} 个 >{cap} 天**的死线索(对方/我们长期无动作), 建议直接标「不合适」清掉, 不用跟进。"
     base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_KOL}"
     card = {
         "config": {"wide_screen_mode": True},
         "header": {"template": "orange",
-                   "title": {"tag": "plain_text", "content": f"💬 洽谈中线索停滞 — {len(stalls)} 个待人工跟进 (静默 ≥ {STALL_DAYS} 天)"}},
+                   "title": {"tag": "plain_text", "content": f"💬 洽谈中线索停滞 — {len(shown)} 个待人工跟进 (静默 {STALL_DAYS}-{cap}天)"}},
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content":
                 "这些洽谈中的 KOL 回复后冷下来了、系统无待发草稿。**请人工判断要不要个性化跟进**(温线索, 别群发模板)。\n"
