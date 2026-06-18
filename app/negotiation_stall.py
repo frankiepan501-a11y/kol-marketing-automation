@@ -75,8 +75,10 @@ async def run(dry_run: bool = False) -> dict:
     now_ms = int(time.time() * 1000)
     kols = await feishu.search_records(config.T_KOL, [
         {"field_name": "合作状态", "operator": "is", "value": ["洽谈中"]},
-    ])
-    all_drafts = await feishu.fetch_all_records(config.T_DRAFT)
+    ], field_names=["账号名", "邮箱", "合作状态", "主平台", "粉丝数"])
+    # 性能: 用 search(page_size 500 + field_names) 而非 fetch_all_records(全字段 100/页, 慢到 HTTP 超时)
+    all_drafts = await feishu.search_records(config.T_DRAFT, [], field_names=[
+        "关联KOL", "邮件草稿状态", "发送状态", "发送时间", "是否回复", "关联产品"])
     by_kol = {}
     for d in all_drafts:
         kid = xrid(d["fields"].get("关联KOL"))
