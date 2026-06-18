@@ -71,6 +71,33 @@ MAX_DELAY = 10
 _paused_brands = {}        # brand -> reason; 该品牌连续通道错误自动暂停
 _pause_alerted = set()     # 已告警品牌 (去重)
 
+# ===== DRY-RUN 守卫 (2026-06-18, 防本 session 根因事故复发) =====
+# EMAIL_DRY_RUN_TO 有值=有人在测邮件 → run() 拒绝跑全表, 防"DRY-RUN+全表 auto-send"
+# 误把真草稿标已发送(→真 KOL 永久漏发)。测邮件用隔离方式(单条合成/纯函数), 不碰全表。
+_dryrun_alerted = False    # 一次性提醒去重 (DRY-RUN 清掉后重置 → 下次再设会重新提醒)
+
+
+async def _dryrun_alert_once(dry_to: str):
+    """DRY-RUN 开着挡住生产发送 → 一次性飞书提醒 Frankie(防忘记关 env 致发送长期停)。"""
+    global _dryrun_alerted
+    if _dryrun_alerted:
+        return
+    _dryrun_alerted = True
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "yellow",
+                   "title": {"tag": "plain_text", "content": "🟡 [KOL] DRY-RUN 开着 · 生产发送已暂停"}},
+        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": (
+            f"检测到 `EMAIL_DRY_RUN_TO={dry_to}` → auto_send 已**拒绝全表发送**(防误污染真草稿)。\n\n"
+            "• 这是改邮件代码时的测试态, 正常。\n"
+            "• **测完记得删掉这个 Zeabur env** → 生产发送才会恢复。\n"
+            "• 期间测邮件用隔离方式(单条合成草稿/纯函数), 别调全表 /auto-send/run。")}}],
+    }
+    try:
+        await feishu.send_card_message("open_id", "ou_629ce01f4bc31de078e10fcb038dbf78", card)
+    except Exception as e:
+        print(f"[auto_send DRY-RUN alert fail] {e}")
+
 # 时间敏感(优先发, 配额先给它们): KOL 回信/寄样/报价/暖信/运单跟进; nudge-前缀也算
 _HIGH_PRIORITY_SRC = {"reply", "ship_confirm", "affiliate_quote", "warm_recap", "tracking_followup"}
 # Zoho 通道级错误特征 (区别于单收件人 bad email / 占位符等 — 那些不触发暂停)
@@ -787,6 +814,17 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
 
 # ===== 3. 主入口 =====
 async def run() -> dict:
+    # 2026-06-18 DRY-RUN 守卫: EMAIL_DRY_RUN_TO 有值(有人在测邮件) → 拒绝跑全表,
+    # 防"DRY-RUN+全表 auto-send"误把真草稿标已发送(→真 KOL 永久漏发, 本 session 事故根因)。
+    global _dryrun_alerted
+    _dry = (config.env("EMAIL_DRY_RUN_TO", "") or "").strip()
+    if _dry:
+        await _dryrun_alert_once(_dry)
+        return {"sent": 0, "fail": 0, "skipped_dryrun": True, "dry_run_to": _dry,
+                "msg": f"DRY-RUN active(EMAIL_DRY_RUN_TO={_dry}) → 全表自动发送已拒绝(防污染真草稿)。"
+                       "测邮件用隔离方式(单条合成/纯函数), 测完删此 env 恢复生产发送。"}
+    _dryrun_alerted = False     # DRY-RUN 已清 → 重置提醒, 下次再设会重新提醒
+
     ready, scheduled_later, skipped, sent_24h = await scan_ready()
     if not ready:
         return {"sent": 0, "fail": 0, "scheduled_later": scheduled_later, "skipped": skipped, "msg": "no ready drafts"}

@@ -313,7 +313,10 @@ async def zoho_accounts(authorization: str = Header(default=""), brand: str = "�
 async def auto_send_status(authorization: str = Header(default="")):
     """查发送通道暂停状态 + 限速闸配置 (2026-06-17; 验证 env / 监控用)"""
     _check_auth(authorization)
+    import os as _os
+    _dry = (_os.environ.get("EMAIL_DRY_RUN_TO", "") or "").strip()
     return {"ok": True, **auto_send.pause_state(),
+            "dry_run_active": bool(_dry), "dry_run_to": _dry or None,
             "caps": {"RATE_PER_RUN": auto_send.RATE_PER_RUN,
                      "PER_BRAND_PER_RUN": auto_send.PER_BRAND_PER_RUN,
                      "SEND_DAILY_CAP": auto_send.SEND_DAILY_CAP,
