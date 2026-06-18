@@ -64,6 +64,9 @@ RATE_PER_RUN = int(config.env("SEND_RATE_PER_RUN", "12"))           # 每次 cro
 PER_BRAND_PER_RUN = int(config.env("SEND_PER_BRAND_PER_RUN", "6"))  # 单品牌单次上限 (→ ~36/h/品牌)
 SEND_DAILY_CAP = int(config.env("SEND_DAILY_CAP", "120"))           # 单品牌滚动 24h 上限 (<150)
 PAUSE_THRESHOLD = int(config.env("SEND_PAUSE_THRESHOLD", "3"))      # 连续通道错误数 → 自动暂停
+# 2026-06-18 回信预留: cold 每天最多 SEND_DAILY_CAP - REPLY_RESERVE, 留 REPLY_RESERVE 给时间敏感
+# (reply/ship/quote)防被 cold 吃光额度饿住。**动态**: 只为"当前真有待发回信"预留, 没回信全释放给 cold(不浪费)。
+REPLY_RESERVE = int(config.env("SEND_REPLY_RESERVE", "30"))
 MIN_DELAY = 3             # 云端 delay 比本地短 (3-10s 而不是 30-90s, n8n 单次执行 ≤5min)
 MAX_DELAY = 10
 
@@ -100,6 +103,36 @@ async def _dryrun_alert_once(dry_to: str):
 
 # 时间敏感(优先发, 配额先给它们): KOL 回信/寄样/报价/暖信/运单跟进; nudge-前缀也算
 _HIGH_PRIORITY_SRC = {"reply", "ship_confirm", "affiliate_quote", "warm_recap", "tracking_followup"}
+_COLD_SRC = {"cold", "followup"}     # 非时间敏感(批量 cold + 跟进), 受 cold 天级上限(留预留给回信)
+
+
+def _is_priority(rec: dict) -> bool:
+    """时间敏感草稿(回信/寄样/报价/暖信/运单跟进/nudge) → 不受 cold 上限, 有专属预留。"""
+    f = rec["fields"]
+    src = ext(f.get("邮件草稿来源")) or ""
+    did = ext(f.get("邮件草稿ID")) or ""
+    return (src in _HIGH_PRIORITY_SRC) or did.startswith("nudge-")
+
+
+def _select_brand_drafts(prio: list, cold: list, sent_24h_b: int, cold_sent_24h_b: int) -> tuple:
+    """纯函数(可单测): 选该品牌本轮要发的草稿。
+    时间敏感(prio)用全部总剩余额度(优先发, 永不被 cold 饿住);
+    cold 受 cold天级上限 = SEND_DAILY_CAP - reserve, reserve=min(REPLY_RESERVE, 当前待发回信数)
+    → 没回信待发 reserve=0, cold 用满 SEND_DAILY_CAP(不浪费预留)。
+    返回 (merged 列表[回信在前, 截到 PER_BRAND_PER_RUN], info dict)。"""
+    total_remaining = max(0, SEND_DAILY_CAP - sent_24h_b)
+    reserve = min(REPLY_RESERVE, len(prio))                   # 动态: 只为当前待发回信预留
+    cold_ceiling = max(0, SEND_DAILY_CAP - reserve)
+    cold_remaining = max(0, cold_ceiling - cold_sent_24h_b)
+    take_prio = prio[:total_remaining]
+    cold_room = max(0, total_remaining - len(take_prio))      # 总额度里留给 cold 的
+    take_cold = cold[:min(cold_remaining, cold_room)]
+    merged = (take_prio + take_cold)[:PER_BRAND_PER_RUN]
+    info = {"sent_24h": sent_24h_b, "cold_sent_24h": cold_sent_24h_b,
+            "total_remaining": total_remaining, "reserve": reserve,
+            "cold_remaining": cold_remaining, "prio_pending": len(prio),
+            "cold_pending": len(cold), "take": len(merged)}
+    return merged, info
 # Zoho 通道级错误特征 (区别于单收件人 bad email / 占位符等 — 那些不触发暂停)
 _CHANNEL_ERR_SIGNS = ("server error '5", "500", "550", "unusual sending", "exceeded", "blocked", "429", "too many")
 
@@ -252,6 +285,7 @@ async def scan_ready() -> tuple:
     # 滚动 24h 已发计数 (按品牌, 供 run() 天级限速闸; 复用上面 all_recs 零额外查询)
     day_ago = now_ms - 86400000
     sent_24h = {b: 0 for b in config.BRAND_CONFIG}
+    cold_sent_24h = {b: 0 for b in config.BRAND_CONFIG}     # 其中 cold/followup 已发数 (供回信预留闸)
     for rec in all_recs:
         ff = rec["fields"]
         if ext(ff.get("发送状态")) != "已发":
@@ -264,6 +298,8 @@ async def scan_ready() -> tuple:
             b = _brand_from_alias(ext(ff.get("发送邮箱")))
             if b in sent_24h:
                 sent_24h[b] += 1
+                if (ext(ff.get("邮件草稿来源")) or "") in _COLD_SRC:
+                    cold_sent_24h[b] += 1
 
     ready = []
     scheduled_later = 0
@@ -303,7 +339,7 @@ async def scan_ready() -> tuple:
 
         ready.append(rec)
 
-    return ready, scheduled_later, already_sent + skip_followup, sent_24h
+    return ready, scheduled_later, already_sent + skip_followup, sent_24h, cold_sent_24h
 
 
 # ===== 2. 发一封 =====
@@ -825,7 +861,7 @@ async def run() -> dict:
                        "测邮件用隔离方式(单条合成/纯函数), 测完删此 env 恢复生产发送。"}
     _dryrun_alerted = False     # DRY-RUN 已清 → 重置提醒, 下次再设会重新提醒
 
-    ready, scheduled_later, skipped, sent_24h = await scan_ready()
+    ready, scheduled_later, skipped, sent_24h, cold_sent_24h = await scan_ready()
     if not ready:
         return {"sent": 0, "fail": 0, "scheduled_later": scheduled_later, "skipped": skipped, "msg": "no ready drafts"}
 
@@ -840,15 +876,16 @@ async def run() -> dict:
         if b in _paused_brands:
             by_brand[b] = []
 
-    # 限速闸: 时间敏感优先排序 + 天级滚动24h上限 + 单品牌单次上限 (2026-06-17)
+    # 限速闸 (2026-06-17 天级上限 + 2026-06-18 回信动态预留):
+    #   时间敏感(reply/ship/quote..) 可用全部 daily_remaining(优先发, 永不被 cold 饿住);
+    #   cold/followup 受 cold 上限 = SEND_DAILY_CAP - reserve, reserve=min(REPLY_RESERVE, 当前待发回信数)
+    #   → 没回信待发则 reserve=0, cold 可用满 SEND_DAILY_CAP(不浪费预留)。
     caps_info = {}
     for b in by_brand:
-        by_brand[b].sort(key=_draft_priority)                       # reply/ship/quote 排 cold 前
-        daily_remaining = max(0, SEND_DAILY_CAP - sent_24h.get(b, 0))
-        cap = min(PER_BRAND_PER_RUN, daily_remaining)
-        caps_info[b] = {"sent_24h": sent_24h.get(b, 0), "daily_remaining": daily_remaining,
-                        "queued": len(by_brand[b]), "take": min(cap, len(by_brand[b]))}
-        by_brand[b] = by_brand[b][:cap]
+        prio = sorted([d for d in by_brand[b] if _is_priority(d)], key=_draft_priority)
+        cold = sorted([d for d in by_brand[b] if not _is_priority(d)], key=_draft_priority)
+        by_brand[b], caps_info[b] = _select_brand_drafts(
+            prio, cold, sent_24h.get(b, 0), cold_sent_24h.get(b, 0))
 
     # 交叉队列
     queue = []

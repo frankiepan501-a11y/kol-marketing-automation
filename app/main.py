@@ -320,6 +320,7 @@ async def auto_send_status(authorization: str = Header(default="")):
             "caps": {"RATE_PER_RUN": auto_send.RATE_PER_RUN,
                      "PER_BRAND_PER_RUN": auto_send.PER_BRAND_PER_RUN,
                      "SEND_DAILY_CAP": auto_send.SEND_DAILY_CAP,
+                     "REPLY_RESERVE": auto_send.REPLY_RESERVE,
                      "PAUSE_THRESHOLD": auto_send.PAUSE_THRESHOLD}}
 
 
