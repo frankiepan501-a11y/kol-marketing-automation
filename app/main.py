@@ -309,6 +309,21 @@ async def zoho_accounts(authorization: str = Header(default=""), brand: str = "�
         return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-500:]}
 
 
+@app.post("/negotiation-stall/run")
+async def run_negotiation_stall(authorization: str = Header(default=""), dry_run: bool = False):
+    """洽谈中 stall 自动检测 (2026-06-18 weekly cron): 找回复后冷下来的温线索发卡给运营人工跟进。
+    ?dry_run=true 只算不发卡。"""
+    _check_auth(authorization)
+    from . import negotiation_stall
+    try:
+        result = await negotiation_stall.run(dry_run=dry_run)
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/negotiation-stall/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
 @app.get("/auto-send/status")
 async def auto_send_status(authorization: str = Header(default="")):
     """查发送通道暂停状态 + 限速闸配置 (2026-06-17; 验证 env / 监控用)"""
