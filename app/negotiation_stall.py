@@ -86,7 +86,8 @@ async def run(dry_run: bool = False) -> dict:
             by_kol.setdefault(kid, []).append(d)
 
     stalls = detect_stalls(kols, by_kol, now_ms)
-    stalls.sort(key=lambda s: -(s["days"] if s["days"] is not None else 0))
+    # 排序: 最新停滞在前(还温, 最该趁热跟进), 久的(5月级死线索)沉底, 无草稿数据异常垫底
+    stalls.sort(key=lambda s: (s["days"] == -1, s["days"] if s["days"] is not None else 0))
 
     # 产品名解析 (缓存)
     pcache = {}
