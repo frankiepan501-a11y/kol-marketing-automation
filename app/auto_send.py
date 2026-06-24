@@ -498,9 +498,12 @@ async def send_one(rec: dict) -> dict:
     # 不自动建 Shopify 码 — 券码 = UpPromote 真相源(带佣金追踪)。ship_confirm 草稿 = reply/affiliate_quote
     # 来源 + 有寄样订单号 + 阶段待发货 (排除 tracking_followup 第2封, 它来源=tracking_followup 不带券码占位符)。
     source_field = ext(f.get("邮件草稿来源"))
+    # 2026-06-24 修阿烨「填了运单号/券码却发不出去」: 原条件加了 寄样阶段∈{空,待发货},
+    # 但寄样确认邮件本就在"已发货"前后发, 阶段=已发货/非寄样邮件 的草稿被整段占位符替换跳过 →
+    # [DISCOUNT_CODE]/[PURCHASE_LINKS] 留在正文 → 末尾闸门拦回"待修改"→永远发不出。
+    # 寄样订单号+来源 已足够界定寄样确认, 下游"字段没填即拦待修改"已防半成品, 故去掉阶段门(不按标签卡)。
     _is_ship_confirm = (source_field in ("reply", "affiliate_quote")
-                        and bool(ext(f.get("寄样订单号")))
-                        and ext(f.get("寄样阶段")) in ("", "待发货"))
+                        and bool(ext(f.get("寄样订单号"))))
     if source_field == "warm_recap" or _is_ship_confirm:
         _lbl = "暖信" if source_field == "warm_recap" else "发货确认"
         try:
