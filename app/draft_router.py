@@ -510,6 +510,14 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**AI评分**: {score}/10"}},
         ]},
     ]
+    # 2026-06-24 A 止损: 粉丝/主平台来自历史迁移/爬虫且未核实(实测虚高 9-20 倍 + 主平台靠聚合页猜),
+    # 卡上明确标注「未核实」+ 数据来源, 防运营据假粉丝判断 KOL 体量/优先级。验真后(B)此警告随 验真状态=已核实 撤掉。
+    _src = ext(f.get("发现来源"))
+    _fans_verified = ext(f.get("粉丝验真状态")) == "已核实"
+    if (ci.get("fans") or ci.get("platform")) and not _fans_verified:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
+            f"⚠️ **粉丝/主平台未核实**(来源: {_src or '未知'}) — 历史迁移/爬虫数据实测常虚高数倍、主平台靠聚合页推定, "
+            f"**勿据此判断体量**, 以真实平台主页为准。"}})
     # 2026-06-03 卡片合并: 审核卡内置"KOL 这封回复说了什么"(原独立知会卡内容) → reviewer 一张卡看全+操作
     elements += _inbound_reply_elements(inbound_reply)
     elements += [
