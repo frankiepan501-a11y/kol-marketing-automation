@@ -186,11 +186,12 @@ async def run_cs_ingest(authorization: str = Header(default=""),
 
 
 @app.post("/cs/dispatch")
-async def run_cs_dispatch(authorization: str = Header(default=""), limit: int = 10):
-    """客服助手 v0: 工单台待派 → 派单卡片. 观察期(CS_DISPATCH_OBSERVE=1)全部发 Frankie 校准."""
+async def run_cs_dispatch(authorization: str = Header(default=""), limit: int = 10, rids: str = ""):
+    """客服助手 v0: 工单台待派 → 派单卡片. 观察期(CS_DISPATCH_OBSERVE=1)全部发 Frankie 校准.
+    ?rids=rid1,rid2 定向派指定工单(审计后精确放行, 避开未审计渠道)."""
     _check_auth(authorization)
     try:
-        result = await cs_dispatch.run(limit=limit)
+        result = await cs_dispatch.run(limit=limit, rids=rids)
         return {"ok": True, **result}
     except Exception as e:
         tr = _tb.format_exc()[-1000:]

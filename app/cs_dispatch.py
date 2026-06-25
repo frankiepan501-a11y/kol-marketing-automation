@@ -150,15 +150,28 @@ def _build_card(rid: str, f: dict) -> dict:
             "elements": elements}
 
 
-async def run(limit: int = 10) -> dict:
+async def run(limit: int = 10, rids: str = "") -> dict:
     if not CS_ASSIST_SECRET:
         return {"error": "FEISHU_CS_ASSISTANT_APP_SECRET 未配"}
-    body = {"filter": {"conjunction": "and", "conditions": [
-        {"field_name": "状态", "operator": "is", "value": ["待派"]}]},
-        "page_size": min(int(limit) * 3, 200)}
-    d = await feishu.api("POST", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/search",
-                         body, which="notify")
-    items = d.get("data", {}).get("items", [])
+    if rids:
+        # 定向派单: 只派指定 rid(逐个 GET), 用于审计后精确放行(避开未审计渠道如 Discord 待派)
+        items = []
+        for rid in [x.strip() for x in rids.split(",") if x.strip()]:
+            try:
+                rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                                       which="notify")
+                rf = ((rec.get("data", {}) or {}).get("record", {}) or {})
+                if rf:
+                    items.append({"record_id": rid, "fields": rf.get("fields", {})})
+            except Exception:
+                continue
+    else:
+        body = {"filter": {"conjunction": "and", "conditions": [
+            {"field_name": "状态", "operator": "is", "value": ["待派"]}]},
+            "page_size": min(int(limit) * 3, 200)}
+        d = await feishu.api("POST", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/search",
+                             body, which="notify")
+        items = d.get("data", {}).get("items", [])
     sent, samples = 0, []
     for it in items:
         if sent >= limit:
