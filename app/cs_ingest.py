@@ -40,6 +40,7 @@ NE_IMAP = os.environ.get("NETEASE_IMAP_HOST", "imap.qiye.163.com")
 # Zeabur 东京可直连 Discord API, 无需代理。
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 DC_SUPPORT_CHAN = os.environ.get("DISCORD_FUNLAB_SUPPORT_CHANNEL_ID", "1012184626640470089")
+DC_GUILD = os.environ.get("DISCORD_FUNLAB_GUILD_ID", "1009762946437619742")
 
 PLATFORM_OPTS = ["亚马逊-美国", "亚马逊-墨西哥", "亚马逊-加拿大", "亚马逊-日本",
                  "亚马逊-英国", "亚马逊-欧洲", "独立站", "美客多", "沃尔玛", "TikTok", "未知"]
@@ -228,34 +229,61 @@ async def _fetch_funlab(limit: int) -> list:
     return await asyncio.to_thread(_fetch_funlab_sync, limit)
 
 
-# ===== 源 ③ Discord (FUN Bot REST, 公开 #support-center) =====
-async def _fetch_discord(limit: int) -> list:
-    if not (DISCORD_BOT_TOKEN and DC_SUPPORT_CHAN):
-        return []
+# ===== 源 ③ Discord (FUN Bot REST: 公开 #support-center + 私有工单 MEE6) =====
+def _dc_hdr():
+    return {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "User-Agent": "DiscordBot (cs,1.0)"}
+
+
+def _dc_item(m: dict, ticket: str = "") -> dict:
     from datetime import datetime
+    au = m.get("author") or {}
+    try:
+        ms = int(datetime.fromisoformat(
+            (m.get("timestamp", "") or "").replace("Z", "+00:00")).timestamp() * 1000)
+    except Exception:
+        ms = 0
+    frm = au.get("global_name") or au.get("username") or str(au.get("id", ""))
+    sfx = f"·工单{ticket}" if ticket else ""
+    return {"id": m.get("id"), "id_prefix": "CSD", "frm": f"{frm} (Discord{sfx})",
+            "subj": "", "received_ms": ms, "body": (m.get("content") or "").strip(),
+            "channel": "Discord", "brand_default": "FUNLAB"}
+
+
+async def _fetch_discord(limit: int) -> list:
+    if not DISCORD_BOT_TOKEN:
+        return []
+    out, per = [], min(int(limit), 50)
     async with httpx.AsyncClient(timeout=30.0) as c:
-        r = await c.get(
-            f"https://discord.com/api/v10/channels/{DC_SUPPORT_CHAN}/messages?limit={min(int(limit), 50)}",
-            headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "User-Agent": "DiscordBot (cs,1.0)"})
-        r.raise_for_status()
-        msgs = r.json()
-    out = []
-    for m in (msgs if isinstance(msgs, list) else []):
-        au = m.get("author") or {}
-        if au.get("bot"):          # 跳过 bot(MEE6/FUN Bot/GiveawayBot 等)
-            continue
-        content = (m.get("content") or "").strip()
-        if not content:            # 纯附件/表情消息跳过(分类需文本)
-            continue
-        try:
-            received_ms = int(datetime.fromisoformat(
-                (m.get("timestamp", "") or "").replace("Z", "+00:00")).timestamp() * 1000)
-        except Exception:
-            received_ms = 0
-        frm = au.get("global_name") or au.get("username") or str(au.get("id", ""))
-        out.append({"id": m.get("id"), "id_prefix": "CSD", "frm": f"{frm} (Discord)",
-                    "subj": "", "received_ms": received_ms, "body": content,
-                    "channel": "Discord", "brand_default": "FUNLAB"})
+        targets = []  # (channel_id, ticket_name)
+        if DC_SUPPORT_CHAN:
+            targets.append((DC_SUPPORT_CHAN, ""))
+        if DC_GUILD:  # 枚举 🔧SUPPORT 分类下的 MEE6 工单频道(#N-name)
+            try:
+                gr = await c.get(f"https://discord.com/api/v10/guilds/{DC_GUILD}/channels", headers=_dc_hdr())
+                if gr.status_code == 200:
+                    chans = gr.json()
+                    cats = {x["id"] for x in chans if x.get("type") == 4
+                            and ("SUPPORT" in (x.get("name", "").upper()) or "🔧" in x.get("name", ""))}
+                    for x in chans:
+                        if (x.get("type") == 0 and x.get("parent_id") in cats
+                                and re.match(r"^\d+-", x.get("name", ""))):
+                            targets.append((x["id"], x.get("name", "")))
+            except Exception:
+                pass
+        for cid, tname in targets:
+            try:
+                r = await c.get(f"https://discord.com/api/v10/channels/{cid}/messages?limit={per}", headers=_dc_hdr())
+                if r.status_code != 200:
+                    continue
+                msgs = r.json()
+            except Exception:
+                continue
+            for m in (msgs if isinstance(msgs, list) else []):
+                if (m.get("author") or {}).get("bot"):
+                    continue
+                if not (m.get("content") or "").strip():
+                    continue
+                out.append(_dc_item(m, tname))
     return out
 
 
