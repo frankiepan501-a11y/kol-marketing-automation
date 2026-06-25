@@ -5,7 +5,7 @@ import asyncio
 import os
 import time
 import traceback as _tb
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
@@ -196,6 +196,18 @@ async def run_cs_dispatch(authorization: str = Header(default=""), limit: int = 
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/cs/dispatch", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/cs/callback")
+async def cs_callback(request: Request, authorization: str = Header(default="")):
+    """客服卡片按钮回调(经 n8n cs-assistant-callback 转发). 返回 toast 给操作人即时反馈."""
+    _check_auth(authorization)
+    try:
+        payload = await request.json()
+        event = payload.get("event", payload)
+        return await cs_dispatch.handle_callback(event)
+    except Exception as e:
+        return {"toast": {"type": "error", "content": "处理失败，请稍后重试"}}
 
 
 @app.post("/kol-discount/selftest")

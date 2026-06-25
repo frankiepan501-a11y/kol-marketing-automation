@@ -155,3 +155,62 @@ async def run(limit: int = 10) -> dict:
                 samples.append({"产品": _x(f, "产品"), "平台": _x(f, "销售平台"),
                                 "建议运营": _x(f, "分配运营"), "摘要": _x(f, "客诉摘要")[:40]})
     return {"observe": OBSERVE, "candidates": len(items), "sent": sent, "samples": samples}
+
+
+# ===== 卡片按钮回调处理 (card.action.trigger, 经 n8n 转发到 /cs/callback) =====
+def _toast(content: str, typ: str = "success") -> dict:
+    return {"toast": {"type": typ, "content": content}}
+
+
+async def _notify_frankie(text: str):
+    try:
+        tok = await _token()
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            await c.post("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=union_id",
+                         headers={"Authorization": f"Bearer {tok}"},
+                         json={"receive_id": OBSERVE_UNION, "msg_type": "text",
+                               "content": json.dumps({"text": text}, ensure_ascii=False)})
+    except Exception:
+        pass
+
+
+async def handle_callback(event: dict) -> dict:
+    """飞书卡片按钮回调: 发送回复 / 改派 / 升级。返回 toast 给操作人即时反馈。"""
+    action = event.get("action", {}) or {}
+    val = action.get("value", {}) or {}
+    act = val.get("act")
+    rid = val.get("rid")
+    if not rid:
+        return _toast("缺少工单ID", "error")
+    try:
+        rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                               which="notify")
+        f = ((rec.get("data", {}) or {}).get("record", {}) or {}).get("fields", {}) or {}
+    except Exception:
+        f = {}
+    tag = f"{_x(f, '品牌')}·{_x(f, '销售平台')}·{_x(f, '客户标识')}"
+
+    if act == "escalate":
+        await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                         {"fields": {"状态": "已升级"}}, which="notify")
+        await _notify_frankie(f"⬆️ 工单升级\n{tag}\n{_x(f, '客诉摘要')}")
+        return _toast("已升级给负责人 ✓")
+
+    if act == "reassign":
+        await _notify_frankie(f"🔁 改派请求（原派 {_x(f, '分配运营')}）\n{tag}\n{_x(f, '客诉摘要')}")
+        return _toast("已通知负责人改派 ✓")
+
+    if act == "send_reply":
+        form = action.get("form_value", {}) or {}
+        reply = (form.get("custom_reply") or "").strip() or _x(f, "AI草稿")
+        if len((reply or "").strip()) < 10:
+            return _toast("回复内容过短，请填写后再发", "error")
+        # CS_REPLY_LIVE=1 时才真发客户(待建 Zoho/网易/Discord 发送 + DRY-RUN 验证)
+        fields = {"最终回复": reply[:5000], "状态": "已回复"}
+        await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                         fields, which="notify")
+        if CS_REPLY_LIVE:
+            return _toast("已发送给客户 ✓")
+        return _toast("已记录回复 ✓ 发送闭环灰度中，请暂在原渠道发给客户")
+
+    return _toast("未知操作", "error")
