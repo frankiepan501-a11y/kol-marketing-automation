@@ -171,12 +171,12 @@ async def run_warm_recap(authorization: str = Header(default="")):
 
 @app.post("/cs/ingest")
 async def run_cs_ingest(authorization: str = Header(default=""),
-                        limit: int = 20, dry_run: bool = False):
-    """客服助手 v0: 拉 Powkong 邮箱 → DeepSeek 分类/路由 → 写客服工单台(只读观察, 不发卡不回客户).
-    ?limit=N 拉最近 N 封 / ?dry_run=true 只分类不写表(返回 samples)."""
+                        source: str = "all", limit: int = 20, dry_run: bool = False):
+    """客服助手 v0: 拉客服邮箱(Powkong=Zoho / Funlab=网易IMAP) → DeepSeek 分类/路由 → 写工单台(只读观察).
+    ?source=all|powkong|funlab / ?limit=N / ?dry_run=true 只分类不写表(返回 samples)."""
     _check_auth(authorization)
     try:
-        result = await cs_ingest.run(limit=limit, dry_run=dry_run)
+        result = await cs_ingest.run(source=source, limit=limit, dry_run=dry_run)
         return {"ok": True, **result}
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
