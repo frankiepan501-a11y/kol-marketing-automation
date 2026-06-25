@@ -234,22 +234,21 @@ def _dc_hdr():
     return {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "User-Agent": "DiscordBot (cs,1.0)"}
 
 
-def _dc_item(m: dict, ticket: str = "") -> dict:
+def _dc_ts(m: dict) -> int:
     from datetime import datetime
-    au = m.get("author") or {}
     try:
-        ms = int(datetime.fromisoformat(
+        return int(datetime.fromisoformat(
             (m.get("timestamp", "") or "").replace("Z", "+00:00")).timestamp() * 1000)
     except Exception:
-        ms = 0
-    frm = au.get("global_name") or au.get("username") or str(au.get("id", ""))
-    sfx = f"·工单{ticket}" if ticket else ""
-    return {"id": m.get("id"), "id_prefix": "CSD", "frm": f"{frm} (Discord{sfx})",
-            "subj": "", "received_ms": ms, "body": (m.get("content") or "").strip(),
-            "channel": "Discord", "brand_default": "FUNLAB"}
+        return 0
+
+
+def _dc_name(au: dict) -> str:
+    return au.get("global_name") or au.get("username") or str(au.get("id", ""))
 
 
 async def _fetch_discord(limit: int) -> list:
+    """降噪聚合: 工单频道→1工单1条(合并客户全部消息); 公开频道→合并连续同人消息+跳碎片。"""
     if not DISCORD_BOT_TOKEN:
         return []
     out, per = [], min(int(limit), 50)
@@ -278,12 +277,37 @@ async def _fetch_discord(limit: int) -> list:
                 msgs = r.json()
             except Exception:
                 continue
-            for m in (msgs if isinstance(msgs, list) else []):
-                if (m.get("author") or {}).get("bot"):
-                    continue
-                if not (m.get("content") or "").strip():
-                    continue
-                out.append(_dc_item(m, tname))
+            hm = [m for m in (msgs if isinstance(msgs, list) else [])
+                  if not (m.get("author") or {}).get("bot") and (m.get("content") or "").strip()]
+            hm.reverse()  # API 返回最新在前 → 转成时间正序
+            if not hm:
+                continue
+            if tname:
+                # 工单频道: 整票客户消息聚合成 1 条工单
+                body = "\n".join((m.get("content") or "").strip() for m in hm)[:6000]
+                au = hm[0].get("author") or {}
+                out.append({"id": f"ticket-{cid}", "id_prefix": "CSDT",
+                            "frm": f"{_dc_name(au)} (Discord·工单{tname})", "subj": "",
+                            "received_ms": _dc_ts(hm[-1]), "body": body,
+                            "channel": "Discord", "brand_default": "FUNLAB"})
+            else:
+                # 公开频道: 合并连续同一作者的消息为 1 条, 跳过纯碎片
+                groups = []
+                for m in hm:
+                    aid = (m.get("author") or {}).get("id")
+                    if groups and groups[-1][0] == aid:
+                        groups[-1][1].append(m)
+                    else:
+                        groups.append([aid, [m]])
+                for _aid, grp in groups:
+                    body = "\n".join((g.get("content") or "").strip() for g in grp)[:6000]
+                    if len(body) < 12 and "?" not in body:   # 纯寒暄/碎片("ok"/"thanks")跳过
+                        continue
+                    au = grp[0].get("author") or {}
+                    out.append({"id": grp[0].get("id"), "id_prefix": "CSD",
+                                "frm": f"{_dc_name(au)} (Discord)", "subj": "",
+                                "received_ms": _dc_ts(grp[-1]), "body": body,
+                                "channel": "Discord", "brand_default": "FUNLAB"})
     return out
 
 
@@ -318,6 +342,7 @@ CLASSIFY_PROMPT = """你是跨境电商(游戏配件 POWKONG/FUNLAB)客服分诊
    - 无订单号且分不清是客户还是分销商 → 默认当客户, platform=独立站.
 2. 供应商/B2B/合作/分销 询盘 → is_cs=false, route=B2B群.
 3. 营销推广/SEO外链/平台系统通知/纯垃圾 → is_cs=false, route=忽略.
+4. 纯寒暄/致谢/确认收到/无实际问题或诉求的对话碎片(尤其 Discord 闲聊) → is_cs=false, route=忽略.
 字段:
 is_cs(bool), is_amazon(bool), route(B2B群/忽略/空),
 brand(FUNLAB或POWKONG, 据产品判断, 不确定用给定的默认品牌),
