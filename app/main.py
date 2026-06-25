@@ -9,6 +9,7 @@ from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
+from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
 
@@ -165,6 +166,21 @@ async def run_warm_recap(authorization: str = Header(default="")):
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/warm-recap/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/cs/ingest")
+async def run_cs_ingest(authorization: str = Header(default=""),
+                        limit: int = 20, dry_run: bool = False):
+    """客服助手 v0: 拉 Powkong 邮箱 → DeepSeek 分类/路由 → 写客服工单台(只读观察, 不发卡不回客户).
+    ?limit=N 拉最近 N 封 / ?dry_run=true 只分类不写表(返回 samples)."""
+    _check_auth(authorization)
+    try:
+        result = await cs_ingest.run(limit=limit, dry_run=dry_run)
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/ingest", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 
