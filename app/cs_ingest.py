@@ -35,6 +35,12 @@ NE_USER = os.environ.get("NETEASE_FUNLAB_CS_USER", "")
 NE_CODE = os.environ.get("NETEASE_FUNLAB_CS_AUTHCODE", "")
 NE_IMAP = os.environ.get("NETEASE_IMAP_HOST", "imap.qiye.163.com")
 
+# ---- Discord FUN Bot (token=env secret; 频道 id 非 secret 给默认值) ----
+# v0 只接 FUNLAB 公开 #support-center (FUN Bot 可读)。私有工单(MEE6)待官号 2FA 授权后补。
+# Zeabur 东京可直连 Discord API, 无需代理。
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+DC_SUPPORT_CHAN = os.environ.get("DISCORD_FUNLAB_SUPPORT_CHANNEL_ID", "1012184626640470089")
+
 PLATFORM_OPTS = ["亚马逊-美国", "亚马逊-墨西哥", "亚马逊-加拿大", "亚马逊-日本",
                  "亚马逊-英国", "亚马逊-欧洲", "独立站", "美客多", "沃尔玛", "TikTok", "未知"]
 TYPE_OPTS = ["物流", "产品", "退换货", "售后", "投诉升级"]
@@ -222,6 +228,37 @@ async def _fetch_funlab(limit: int) -> list:
     return await asyncio.to_thread(_fetch_funlab_sync, limit)
 
 
+# ===== 源 ③ Discord (FUN Bot REST, 公开 #support-center) =====
+async def _fetch_discord(limit: int) -> list:
+    if not (DISCORD_BOT_TOKEN and DC_SUPPORT_CHAN):
+        return []
+    from datetime import datetime
+    async with httpx.AsyncClient(timeout=30.0) as c:
+        r = await c.get(
+            f"https://discord.com/api/v10/channels/{DC_SUPPORT_CHAN}/messages?limit={min(int(limit), 50)}",
+            headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "User-Agent": "DiscordBot (cs,1.0)"})
+        r.raise_for_status()
+        msgs = r.json()
+    out = []
+    for m in (msgs if isinstance(msgs, list) else []):
+        au = m.get("author") or {}
+        if au.get("bot"):          # 跳过 bot(MEE6/FUN Bot/GiveawayBot 等)
+            continue
+        content = (m.get("content") or "").strip()
+        if not content:            # 纯附件/表情消息跳过(分类需文本)
+            continue
+        try:
+            received_ms = int(datetime.fromisoformat(
+                (m.get("timestamp", "") or "").replace("Z", "+00:00")).timestamp() * 1000)
+        except Exception:
+            received_ms = 0
+        frm = au.get("global_name") or au.get("username") or str(au.get("id", ""))
+        out.append({"id": m.get("id"), "id_prefix": "CSD", "frm": f"{frm} (Discord)",
+                    "subj": "", "received_ms": received_ms, "body": content,
+                    "channel": "Discord", "brand_default": "FUNLAB"})
+    return out
+
+
 # ===== 去重 =====
 async def _existing_thread_ids() -> set:
     ids, page = set(), ""
@@ -337,6 +374,11 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
             msgs += await _fetch_funlab(limit)
         except Exception as e:
             src_err["funlab"] = str(e)[:200]
+    if source in ("all", "discord"):
+        try:
+            msgs += await _fetch_discord(limit)
+        except Exception as e:
+            src_err["discord"] = str(e)[:200]
 
     existing = await _existing_thread_ids()
     new_cnt, skip_cnt, err_cnt = 0, 0, 0
