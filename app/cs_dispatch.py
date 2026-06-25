@@ -22,8 +22,36 @@ CS_ASSIST_SECRET = os.environ.get("FEISHU_CS_ASSISTANT_APP_SECRET", "")
 OBSERVE = (os.environ.get("CS_DISPATCH_OBSERVE", "1") or "1") != "0"
 OBSERVE_UNION = os.environ.get("CS_DISPATCH_OBSERVE_UNION",
                                "on_6e85dd60606f76f2d5af892785ac1dfe")  # Frankie union_id
+# 一键回客户闭环是否已上线(默认否 → 卡片提示同事先在原渠道回; 闭环建好+DRY-RUN验证后置 1)
+CS_REPLY_LIVE = (os.environ.get("CS_REPLY_LIVE", "0") or "0") != "0"
+# 销售平台→运营 的 open_id(聪哥1号 namespace); 兜底/待定 → 降级 Frankie
+OP_OPENID = {
+    "黄奕纯": "ou_1b981067ce8edfd82af7c70c109310e4",
+    "陈翔宇": "ou_9c322382284a7a6672a091b9f4c0a551",
+    "林明坚": "ou_35aa6883c0598bac5c7e06fcb06f7c4d",
+    "张佳烨": "ou_d850dab47bdbaea6736709d354de4b0f",
+    "梁俊辉": "ou_b9dd2272e72908fe68964d7bba53109f",
+}
+_union_cache = {}
 
 _tok = {"v": "", "exp": 0.0}
+
+
+async def _resolve_union(operator: str) -> str:
+    """运营姓名 → union_id(经聪哥1号 open_id→union, 跨app通用)。兜底/待定/查不到 → 返回''(调用方降级 Frankie)。"""
+    oid = OP_OPENID.get((operator or "").strip())
+    if not oid:
+        return ""
+    if oid in _union_cache:
+        return _union_cache[oid]
+    try:
+        d = await feishu.api("GET", f"/contact/v3/users/{oid}?user_id_type=open_id", which="notify")
+        u = ((d.get("data", {}) or {}).get("user", {}) or {}).get("union_id", "")
+        if u:
+            _union_cache[oid] = u
+        return u
+    except Exception:
+        return ""
 
 
 async def _token() -> str:
@@ -90,6 +118,9 @@ def _build_card(rid: str, f: dict) -> dict:
     if OBSERVE:
         elements.append({"tag": "note", "elements": [{"tag": "plain_text",
                         "content": "🔎 观察期：全部卡片暂发你一人；点按钮暂不真回客户，仅供你校准路由/草稿质量"}]})
+    elif not CS_REPLY_LIVE:
+        elements.append({"tag": "note", "elements": [{"tag": "plain_text",
+                        "content": "💬 一键回客户闭环灰度中：请先复制上方 AI 草稿，在原渠道(邮箱/Discord)回复客户；闭环验证完即开"}]})
     return {"config": {"wide_screen_mode": True},
             "header": {"template": "orange",
                        "title": {"tag": "plain_text", "content": f"🟠 [客服·待回] {brand} · {product} · {platform}"}},
@@ -113,7 +144,8 @@ async def run(limit: int = 10) -> dict:
         rid = it.get("record_id")
         if _x(f, "卡片消息ID") or _x(f, "状态") != "待派":
             continue
-        union = OBSERVE_UNION  # 观察期统一发 Frankie; 生产期再按运营路由
+        # 观察期统一发 Frankie; 生产期按「分配运营」路由(兜底/待定/查不到 → 降级 Frankie)
+        union = OBSERVE_UNION if OBSERVE else (await _resolve_union(_x(f, "分配运营")) or OBSERVE_UNION)
         mid = await _send_card(union, _build_card(rid, f))
         if mid:
             await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
