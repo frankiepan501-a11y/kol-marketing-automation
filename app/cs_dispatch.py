@@ -7,13 +7,21 @@
 当前只 ack 不真回客户(安全)。观察稳定后 =0 → 按「分配运营」路由到对应运营(需 open_id→union)。
 凭据走 env(public 仓铁律)。
 """
+import asyncio
 import json
 import os
+import re
+import ssl
+import smtplib
 import time
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import formataddr, formatdate, make_msgid, parseaddr
 
 import httpx
 
 from . import feishu
+from . import cs_ingest as _csi  # 复用采集侧 Zoho/网易/Discord 凭据与 token
 
 CS_APP = os.environ.get("CS_TICKET_APP_TOKEN", "J2fibLgBZaLGTNsQOPHcQXLonZe")
 T_TICKET = os.environ.get("CS_TICKET_TABLE_ID", "tblAhXMA9uDbGEMS")
@@ -24,6 +32,18 @@ OBSERVE_UNION = os.environ.get("CS_DISPATCH_OBSERVE_UNION",
                                "on_6e85dd60606f76f2d5af892785ac1dfe")  # Frankie union_id
 # 一键回客户闭环是否已上线(默认否 → 卡片提示同事先在原渠道回; 闭环建好+DRY-RUN验证后置 1)
 CS_REPLY_LIVE = (os.environ.get("CS_REPLY_LIVE", "0") or "0") != "0"
+# Scott Stein 铁律: 改/上线回客户代码先开此 env → 全部回复改发测试邮箱(真客户/频道不收), 验证 raw 完整再删
+CS_REPLY_DRY_RUN_TO = (os.environ.get("CS_REPLY_DRY_RUN_TO", "") or "").strip()
+# 发件身份 (Zoho send-as / 网易登录账号)
+ZOHO_CS_FROM = os.environ.get("ZOHO_POWKONG_CS_FROM", "support@powkong.com")
+NE_SMTP = os.environ.get("NETEASE_SMTP_HOST", "smtp.qiye.163.com")
+
+# 占位符黑名单 — 发送前扫描, 命中即拦截(防把"待确认/[TBD]"发给客户)
+_PLACEHOLDER_BLACKLIST = [
+    "待确认", "待填", "占位", "tbd", "[carrier", "[tracking", "[address",
+    "[price", "[eta", "[quantity", "[xxx", "<placeholder",
+]
+_PLACEHOLDER_RE = re.compile(r"[\[【][^\]】]{0,30}(待确认|待填|占位|tbd|placeholder)[^\]】]{0,30}[\]】]", re.I)
 # 销售平台→运营 的 open_id(聪哥1号 namespace); 兜底/待定 → 降级 Frankie
 OP_OPENID = {
     "黄奕纯": "ou_1b981067ce8edfd82af7c70c109310e4",
@@ -115,12 +135,15 @@ def _build_card(rid: str, f: dict) -> dict:
              "value": {"act": "escalate", "rid": rid}},
         ]},
     ]
-    if OBSERVE:
-        elements.append({"tag": "note", "elements": [{"tag": "plain_text",
-                        "content": "🔎 观察期：全部卡片暂发你一人；点按钮暂不真回客户，仅供你校准路由/草稿质量"}]})
-    elif not CS_REPLY_LIVE:
-        elements.append({"tag": "note", "elements": [{"tag": "plain_text",
-                        "content": "💬 一键回客户闭环灰度中：请先复制上方 AI 草稿，在原渠道(邮箱/Discord)回复客户；闭环验证完即开"}]})
+    if CS_REPLY_DRY_RUN_TO:
+        note = "🧪 DRY-RUN 验证中：点「发送回复」会改发测试邮箱（真客户/频道不会收到），用于核对内容完整"
+    elif CS_REPLY_LIVE:
+        note = "✅ 点「发送回复」将直接回复到客户原渠道（邮箱串原 thread / Discord 回原频道）"
+    elif OBSERVE:
+        note = "🔎 观察期：全部卡片暂发你一人；点按钮暂不真回客户，仅供你校准路由/草稿质量"
+    else:
+        note = "💬 一键回客户闭环灰度中：请先复制上方 AI 草稿，在原渠道(邮箱/Discord)回复客户；闭环验证完即开"
+    elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
     return {"config": {"wide_screen_mode": True},
             "header": {"template": "orange",
                        "title": {"tag": "plain_text", "content": f"🟠 [客服·待回] {brand} · {product} · {platform}"}},
@@ -157,9 +180,156 @@ async def run(limit: int = 10) -> dict:
     return {"observe": OBSERVE, "candidates": len(items), "sent": sent, "samples": samples}
 
 
+# ===== 回客户真实渠道发送 (CSP=Powkong Zoho / CSF=Funlab 网易 SMTP / CSD·CSDT=Discord) =====
+def _placeholder_hit(text: str) -> str:
+    """回复正文含未替换占位符 → 返回命中片段(供拦截), 否则 ''。"""
+    low = (text or "").lower()
+    for kw in _PLACEHOLDER_BLACKLIST:
+        if kw in low:
+            return kw
+    m = _PLACEHOLDER_RE.search(text or "")
+    return m.group(0)[:30] if m else ""
+
+
+def _to_html(body: str) -> str:
+    """纯文本回复 → 简单 HTML (邮件用); 已含标签则原样返回。"""
+    if not body:
+        return ""
+    if re.search(r"<(p|div|br|table|strong|a)\b", body, re.I):
+        return body
+    s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", body)
+    paras = [p.strip() for p in s.split("\n\n") if p.strip()]
+    return "".join(f"<p>{p.replace(chr(10), '<br>')}</p>" for p in paras)
+
+
+def _orig_subject(f: dict) -> str:
+    """从「原文」(subj\\n\\nbody) 还原原邮件主题, 去掉已有 Re:/Fwd: 前缀。"""
+    raw = _x(f, "原文")
+    subj = raw.split("\n\n", 1)[0].strip() if raw else ""
+    subj = re.sub(r"^\s*(re|fwd|fw)\s*:\s*", "", subj, flags=re.I).strip()
+    return subj or "your message"
+
+
+async def _zoho_send(to_addr: str, subject: str, html: str, reply_to_msgid: str = "") -> str:
+    """Powkong 客服 Zoho 发信; 带 reply_to_msgid 走 action:reply 串原 thread, 失败降级新邮件。"""
+    tok = await _csi._ztoken()
+    base = f"https://mail.zoho.com/api/accounts/{_csi.ZACC}/messages"
+    url, payload = base, {"fromAddress": ZOHO_CS_FROM, "toAddress": to_addr,
+                          "subject": subject, "content": html, "mailFormat": "html"}
+    if reply_to_msgid:
+        url = f"{base}/{reply_to_msgid}"
+        payload["action"] = "reply"
+    async with httpx.AsyncClient(timeout=45.0) as c:
+        r = await c.post(url, json=payload, headers={"Authorization": f"Zoho-oauthtoken {tok}"})
+        d = r.json()
+    if (d.get("status", {}) or {}).get("code") != 200:
+        if reply_to_msgid:  # reply 端点失败(原 msgId 失效) → 降级普通新邮件
+            return await _zoho_send(to_addr, subject, html, "")
+        raise Exception(f"Zoho 发送失败: {str(d)[:300]}")
+    return (d.get("data", {}) or {}).get("messageId", "ok")
+
+
+def _netease_send_sync(to_addr: str, subject: str, html: str, in_reply_to: str = "") -> str:
+    msg = MIMEMultipart("alternative")
+    msg["From"] = formataddr(("FUNLAB Support", _csi.NE_USER))
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain="funlabswitch.com")
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
+    plain = re.sub(r"<[^>]+>", "", html).replace("&nbsp;", " ").strip()
+    msg.attach(MIMEText(plain or " ", "plain", "utf-8"))
+    msg.attach(MIMEText(html, "html", "utf-8"))
+    with smtplib.SMTP_SSL(NE_SMTP, 465, context=ssl.create_default_context(), timeout=30) as s:
+        s.login(_csi.NE_USER, _csi.NE_CODE)
+        s.sendmail(_csi.NE_USER, [to_addr], msg.as_string())
+    return "ok"
+
+
+async def _netease_send(to_addr: str, subject: str, html: str, in_reply_to: str = "") -> str:
+    return await asyncio.to_thread(_netease_send_sync, to_addr, subject, html, in_reply_to)
+
+
+async def _discord_send(channel_id: str, content: str, reply_to_msgid: str = "") -> str:
+    payload = {"content": (content or "")[:1900]}
+    if reply_to_msgid and reply_to_msgid.isdigit():
+        payload["message_reference"] = {"message_id": reply_to_msgid, "fail_if_not_exists": False}
+    async with httpx.AsyncClient(timeout=30.0) as c:
+        r = await c.post(f"https://discord.com/api/v10/channels/{channel_id}/messages",
+                         headers={"Authorization": f"Bot {_csi.DISCORD_BOT_TOKEN}",
+                                  "User-Agent": "DiscordBot (cs,1.0)"}, json=payload)
+    if r.status_code not in (200, 201):
+        raise Exception(f"Discord 发送失败 {r.status_code}: {r.text[:200]}")
+    return "ok"
+
+
+def _route_label(prefix: str, channel: str, cust_email: str, thread: str) -> str:
+    if prefix == "CSP":
+        return f"Powkong邮箱:{cust_email}"
+    if prefix == "CSF":
+        return f"Funlab邮箱:{cust_email}"
+    if prefix in ("CSDT", "CSD"):
+        return f"Discord:{thread}"
+    return f"{channel}:{cust_email or thread}"
+
+
+async def _dispatch_reply(f: dict, reply: str) -> tuple:
+    """把运营确认的回复真发到客户原渠道。返回 (ok, detail)。
+    DRY-RUN(CS_REPLY_DRY_RUN_TO 有值): 所有渠道一律改发测试邮箱 + banner 标真实去向, 真客户/频道不收。"""
+    ticket_id = _x(f, "工单ID")
+    prefix = ticket_id.split("-", 1)[0] if ticket_id else ""
+    channel = _x(f, "渠道")
+    brand = _x(f, "品牌")
+    thread = _x(f, "线程ID")
+    customer = _x(f, "客户标识")
+    cust_email = parseaddr(customer)[1] or customer
+    subj = "Re: " + _orig_subject(f)
+    html = _to_html(reply)
+
+    if CS_REPLY_DRY_RUN_TO:
+        target = _route_label(prefix, channel, cust_email, thread)
+        banner = (f'<div style="background:#fff3cd;padding:8px;border:1px solid #ffc107;margin-bottom:12px">'
+                  f'<strong>⚠️ CS DRY-RUN</strong> — 本应发往 <code>{target}</code>，真客户/频道不会收到。'
+                  f'渠道={channel} / 品牌={brand} / 工单={ticket_id}</div>')
+        await _zoho_send(CS_REPLY_DRY_RUN_TO, f"[CS-DRY-RUN→{target}] {subj}", banner + html, "")
+        return True, f"DRY-RUN→{CS_REPLY_DRY_RUN_TO}（本应 {target}）"
+
+    if prefix == "CSP":  # Powkong → Zoho reply(串原 thread)
+        if "@" not in cust_email:
+            return False, "无有效客户邮箱"
+        await _zoho_send(cust_email, subj, html, thread)
+        return True, f"Zoho→{cust_email}"
+    if prefix == "CSF":  # Funlab → 网易 SMTP
+        if "@" not in cust_email:
+            return False, "无有效客户邮箱"
+        await _netease_send(cust_email, subj, html, thread)
+        return True, f"网易→{cust_email}"
+    if prefix in ("CSDT", "CSD"):  # Discord
+        if prefix == "CSDT" and thread.startswith("ticket-"):
+            await _discord_send(thread[len("ticket-"):], reply, "")  # 工单频道: thread=ticket-{cid}
+        else:
+            await _discord_send(_csi.DC_SUPPORT_CHAN, reply, thread)  # 公开频道: 回 #support-center
+        return True, f"Discord→{prefix}"
+    # 兜底: 工单ID 前缀不明但渠道=邮箱 → 按品牌选发信通道
+    if channel == "邮箱" and "@" in cust_email:
+        if brand == "FUNLAB":
+            await _netease_send(cust_email, subj, html, thread)
+        else:
+            await _zoho_send(cust_email, subj, html, thread)
+        return True, f"邮箱(兜底brand={brand})→{cust_email}"
+    return False, f"无法路由(prefix={prefix} 渠道={channel})"
+
+
 # ===== 卡片按钮回调处理 (card.action.trigger, 经 n8n 转发到 /cs/callback) =====
 def _toast(content: str, typ: str = "success") -> dict:
     return {"toast": {"type": typ, "content": content}}
+
+
+def _operator_label(event: dict) -> str:
+    op = event.get("operator", {}) or {}
+    return (op.get("union_id") or op.get("open_id") or "运营自助")[:60]
 
 
 async def _notify_frankie(text: str):
@@ -202,15 +372,36 @@ async def handle_callback(event: dict) -> dict:
 
     if act == "send_reply":
         form = action.get("form_value", {}) or {}
-        reply = (form.get("custom_reply") or "").strip() or _x(f, "AI草稿")
-        if len((reply or "").strip()) < 10:
+        reply = ((form.get("custom_reply") or "").strip() or _x(f, "AI草稿") or "").strip()
+        if len(reply) < 10:
             return _toast("回复内容过短，请填写后再发", "error")
-        # CS_REPLY_LIVE=1 时才真发客户(待建 Zoho/网易/Discord 发送 + DRY-RUN 验证)
-        fields = {"最终回复": reply[:5000], "状态": "已回复"}
+        # 发送前占位符校验拦截 (Scott Stein 铁律)
+        ph = _placeholder_hit(reply)
+        if ph:
+            return _toast(f"回复含未替换占位符「{ph}」，请改完再发", "error")
+
+        # 闭环未开 且 未开 DRY-RUN → 旧行为: 只记录, 提示同事在原渠道回
+        if not CS_REPLY_LIVE and not CS_REPLY_DRY_RUN_TO:
+            await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                             {"fields": {"最终回复": reply[:5000], "状态": "已回复"}}, which="notify")
+            return _toast("已记录回复 ✓ 发送闭环灰度中，请暂在原渠道发给客户")
+
+        # DRY-RUN 或 LIVE → 真发(dry-run 改发测试邮箱)
+        try:
+            ok, detail = await _dispatch_reply(f, reply)
+        except Exception as e:
+            return _toast(f"发送失败: {str(e)[:80]}", "error")
+        if not ok:
+            return _toast(f"发送失败: {detail}", "error")
+
+        if CS_REPLY_DRY_RUN_TO:
+            # dry-run 只验证发送, 不动真工单状态(避免误关真实工单)
+            return _toast(f"🧪 DRY-RUN 已发测试邮箱 ✓（工单状态不变）{detail}")
+        # LIVE 真发成功 → 回写工单台
         await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
-                         fields, which="notify")
-        if CS_REPLY_LIVE:
-            return _toast("已发送给客户 ✓")
-        return _toast("已记录回复 ✓ 发送闭环灰度中，请暂在原渠道发给客户")
+                         {"fields": {"最终回复": reply[:5000], "状态": "已回复",
+                                     "回复时间": int(time.time() * 1000),
+                                     "回复人": _operator_label(event)}}, which="notify")
+        return _toast(f"已发送给客户 ✓ {detail}")
 
     return _toast("未知操作", "error")
