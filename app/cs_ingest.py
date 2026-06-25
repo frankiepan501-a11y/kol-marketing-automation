@@ -13,6 +13,7 @@
 import asyncio
 import os
 import re
+import time
 import httpx
 from . import deepseek, feishu
 
@@ -39,12 +40,68 @@ PLATFORM_OPTS = ["亚马逊-美国", "亚马逊-墨西哥", "亚马逊-加拿大
 TYPE_OPTS = ["物流", "产品", "退换货", "售后", "投诉升级"]
 LANG_OPTS = ["EN", "中文", "德", "法", "西", "葡", "日", "其他"]
 CONF_OPTS = ["AI直答", "AI起草人工审", "必须人工"]
-AMZ_ORDER_RE = re.compile(r"\b\d{3}-\d{7}-\d{7}\b")
+AMZ_ORDER_RE = re.compile(r"\d{3}-\d{7}-\d{7}")
+
+# ---- 领星反查 (亚马逊订单号 → sid → 店铺 country → 运营) ----
+LX_PROXY_URL = os.environ.get("LINGXING_PROXY_URL", "")
+LX_PROXY_TOKEN = os.environ.get("LINGXING_PROXY_TOKEN", "")
+# country → (销售平台选项, 运营). 巴西/澳洲等未映射 → 兜底待人工。
+COUNTRY_MAP = {
+    "美国": ("亚马逊-美国", "黄奕纯"),
+    "加拿大": ("亚马逊-加拿大", "陈翔宇"),
+    "墨西哥": ("亚马逊-墨西哥", "陈翔宇"),
+    "日本": ("亚马逊-日本", "陈翔宇"),
+    "英国": ("亚马逊-英国", "林明坚"),
+    "德国": ("亚马逊-欧洲", "林明坚"), "法国": ("亚马逊-欧洲", "林明坚"),
+    "西班牙": ("亚马逊-欧洲", "林明坚"), "意大利": ("亚马逊-欧洲", "林明坚"),
+    "荷兰": ("亚马逊-欧洲", "林明坚"), "比利时": ("亚马逊-欧洲", "林明坚"),
+    "波兰": ("亚马逊-欧洲", "林明坚"), "瑞典": ("亚马逊-欧洲", "林明坚"),
+    "爱尔兰": ("亚马逊-欧洲", "林明坚"), "土耳其": ("亚马逊-欧洲", "林明坚"),
+}
+_seller_cache = {"map": {}, "ts": 0.0}
+_SELLER_TTL = 3600
 
 
 def _strip_html(s: str) -> str:
     s = re.sub(r"<[^>]+>", " ", s or "")
     return re.sub(r"\s+", " ", s.replace("&nbsp;", " ")).strip()
+
+
+# ===== 领星反查 (亚马逊订单号 → 站点/运营) =====
+async def _lx_proxy(method: str, path: str, params: dict) -> dict:
+    async with httpx.AsyncClient(timeout=40.0) as c:
+        r = await c.post(LX_PROXY_URL,
+                         headers={"Authorization": f"Bearer {LX_PROXY_TOKEN}",
+                                  "Content-Type": "application/json"},
+                         json={"method": method, "path": path, "params": params})
+        r.raise_for_status()
+        return r.json()
+
+
+async def _get_sid_country() -> dict:
+    if _seller_cache["map"] and (time.time() - _seller_cache["ts"] < _SELLER_TTL):
+        return _seller_cache["map"]
+    rows = (await _lx_proxy("GET", "/erp/sc/data/seller/lists", {})).get("data") or []
+    m = {str(x.get("sid")): x.get("country") for x in rows if x.get("sid")}
+    if m:
+        _seller_cache["map"], _seller_cache["ts"] = m, time.time()
+    return m
+
+
+async def _lookup_amazon_route(order_id: str):
+    """亚马逊订单号 → (销售平台, 运营)。查不到/未映射(巴西/澳洲等) → (None, None)。"""
+    if not (order_id and LX_PROXY_URL and LX_PROXY_TOKEN):
+        return None, None
+    try:
+        data = (await _lx_proxy("POST", "/erp/sc/data/mws/orderDetail",
+                                {"order_id": order_id})).get("data") or []
+        row = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else None)
+        if not row:
+            return None, None
+        country = (await _get_sid_country()).get(str(row.get("sid") or ""))
+        return COUNTRY_MAP.get(country, (None, None))
+    except Exception:
+        return None, None
 
 
 # ===== 源 ① Powkong (Zoho) =====
@@ -218,7 +275,7 @@ def _pick(v, opts, default=None):
     return v if v in opts else default
 
 
-def _to_fields(msg: dict, c: dict) -> dict:
+def _to_fields(msg: dict, c: dict, amz_override=None) -> dict:
     order_no = (c.get("order_no") or "").strip()
     is_amazon = bool(c.get("is_amazon")) or bool(AMZ_ORDER_RE.search(order_no))
     is_cs = bool(c.get("is_cs"))
@@ -231,8 +288,11 @@ def _to_fields(msg: dict, c: dict) -> dict:
     else:
         status = "待派"
         if is_amazon:
-            platform, operator = "未知", "待定·领星反查站点"
-            summary = f"[亚马逊单·待领星定站点] {summary}"
+            if amz_override and amz_override[0]:
+                platform, operator = amz_override  # 领星反查命中真实站点
+            else:
+                platform, operator = "未知", "待定·领星反查站点"
+                summary = f"[亚马逊单·待领星定站点] {summary}"
         elif c.get("platform") == "美客多":
             platform, operator = "美客多", "梁俊辉"
         else:
@@ -290,7 +350,15 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
         except Exception:
             err_cnt += 1
             continue
-        fields = _to_fields(m, c)
+        # 亚马逊客诉 → 领星反查真实站点 → 对应运营(订单号格式判不出站点)
+        amz_override = None
+        if c.get("is_cs"):
+            mo = AMZ_ORDER_RE.search(c.get("order_no") or "")
+            if mo:
+                p, op = await _lookup_amazon_route(mo.group(0))
+                if p:
+                    amz_override = (p, op)
+        fields = _to_fields(m, c, amz_override)
         if len(samples) < 14:
             samples.append({"渠道品牌": f"{fields['品牌']}", "from": m["frm"][:26],
                             "is_cs": c.get("is_cs"), "平台": fields["销售平台"],
