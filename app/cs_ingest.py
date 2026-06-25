@@ -343,6 +343,14 @@ CLASSIFY_PROMPT = """你是跨境电商(游戏配件 POWKONG/FUNLAB)客服分诊
 2. 供应商/B2B/合作/分销 询盘 → is_cs=false, route=B2B群.
 3. 营销推广/SEO外链/平台系统通知/纯垃圾 → is_cs=false, route=忽略.
 4. 纯寒暄/致谢/确认收到/无实际问题或诉求的对话碎片(尤其 Discord 闲聊) → is_cs=false, route=忽略.
+
+【公司售后政策 — draft_reply 必须遵守, 禁止再写"待确认/TBD/占位"】
+- 质保期统一 12 个月。
+- 缺陷默认免费补发/换新(不默认退款); 要客户提供故障视频/照片确认。
+- 不要求寄回坏件(确认后直接补发)。
+- 质保期内缺陷的补发/退款运费由公司承担。
+- 退款只在: 客户坚持退款 / 补发后仍故障 / 缺货 / Amazon 退货窗口(30天)内要退 / 物流丢件不愿等。
+draft_reply 须自然体现以上(如英文"within the 12-month warranty we'll ship a free replacement, no need to return the faulty unit, and we cover the shipping")。
 字段:
 is_cs(bool), is_amazon(bool), route(B2B群/忽略/空),
 brand(FUNLAB或POWKONG, 据产品判断, 不确定用给定的默认品牌),
