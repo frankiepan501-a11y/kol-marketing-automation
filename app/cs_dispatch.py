@@ -57,9 +57,21 @@ _union_cache = {}
 _tok = {"v": "", "exp": 0.0}
 
 # 防重复发送(飞书卡片回调 >3s 会 timeout+自动重试 → 同一回复重发给客户):
-# _inflight = 正在异步发送中的 rid(同进程并发去重); 配合"工单状态已是终态"二次去重(跨重试/再点击)。
+# _inflight = 正在异步发送中的 rid(并发去重); _recent = 刚发完的 rid→ts(防飞书读后写延迟
+# 导致状态读到旧"待派"再发一次, 单进程内存即时可见, 不受 bitable 同步延迟影响);
+# 配合"工单状态已是终态"持久去重(跨进程/重启/超 _RECENT_TTL)。三层互补。
 _inflight = set()
+_recent = {}
 _bg_tasks = set()
+_RECENT_TTL = 300  # 秒: 刚发完 5 分钟内同 rid 再点 → 拦下
+
+
+def _recent_seen(rid: str) -> bool:
+    now = time.time()
+    if len(_recent) > 500:  # 轻量清理
+        for k in [k for k, ts in _recent.items() if now - ts > _RECENT_TTL]:
+            _recent.pop(k, None)
+    return _recent.get(rid, 0) > now - _RECENT_TTL
 
 
 async def _resolve_union(operator: str) -> str:
@@ -367,17 +379,20 @@ async def _notify_frankie(text: str):
 
 
 async def _send_async(rid: str, f: dict, reply: str, event: dict):
-    """后台真发(不阻塞卡片回调, 防飞书 3s timeout)。成功回写工单台; 失败 IM 通知操作人+Frankie。"""
+    """后台真发(不阻塞卡片回调, 防飞书 3s timeout)。成功回写工单台 + 保留 _recent 防重发;
+    失败 → 清 _recent(放行重试) + IM 通知操作人+Frankie。"""
     op_union = ((event.get("operator", {}) or {}).get("union_id") or "")
     tag = f"{_x(f, '品牌')}·{_x(f, '销售平台')}·{_x(f, '客户标识')}"
+    success = False
     try:
         ok, detail = await _dispatch_reply(f, reply)
         if not ok:
             for u in {op_union, OBSERVE_UNION} - {""}:
                 await _notify_union(u, f"❌ 客服回复发送失败\n{tag}\n原因: {detail}\n请重试或在原渠道手动回复。")
             return
+        success = True
         if CS_REPLY_DRY_RUN_TO:
-            return  # dry-run: 不改真工单状态
+            return  # dry-run: 不改真工单状态(但保留 _recent 防 5min 内重复测试)
         await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                          {"fields": {"最终回复": reply[:5000], "状态": "已回复",
                                      "回复时间": int(time.time() * 1000),
@@ -387,6 +402,10 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict):
             await _notify_union(u, f"❌ 客服回复发送异常\n{tag}\n{str(e)[:160]}\n请重试或在原渠道手动回复。")
     finally:
         _inflight.discard(rid)
+        if success:
+            _recent[rid] = time.time()   # 成功 → 保持去重窗口
+        else:
+            _recent.pop(rid, None)       # 失败 → 清掉 claim 时的标记, 放行操作人重试
 
 
 async def handle_callback(event: dict) -> dict:
@@ -424,21 +443,23 @@ async def handle_callback(event: dict) -> dict:
         ph = _placeholder_hit(reply)
         if ph:
             return _toast(f"回复含未替换占位符「{ph}」，请改完再发", "error")
-        # 🚨 去重①: 工单已是终态(已回复/已解决/已升级) → 跨重试/再点击不重发
+        # 🚨 去重①(内存即时): 正在发送中 / 刚发完 5min 内(防 bitable 读后写延迟漏判) → 拦下
+        if rid in _inflight or _recent_seen(rid):
+            return _toast("该回复正在发送或刚已发送，请勿重复点击")
+        # 🚨 去重②(持久): 工单已终态(已回复/已解决/已升级) → 跨进程/重启/超 5min 兜底
         if _x(f, "状态") in ("已回复", "已解决", "已升级"):
             return _toast("该工单已处理 ✓ 无需重复发送")
-        # 🚨 去重②: 同 rid 正在发送中(飞书 3s timeout 自动重试的并发) → 拦下
-        if rid in _inflight:
-            return _toast("正在发送中，请勿重复点击")
 
         # 闭环未开 且 未开 DRY-RUN → 旧行为: 只记录(快, 同步)
         if not CS_REPLY_LIVE and not CS_REPLY_DRY_RUN_TO:
+            _recent[rid] = time.time()
             await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                              {"fields": {"最终回复": reply[:5000], "状态": "已回复"}}, which="notify")
             return _toast("已记录回复 ✓ 发送闭环灰度中，请暂在原渠道发给客户")
 
         # DRY-RUN 或 LIVE → 异步真发(立即返回 toast, 防飞书卡片回调 >3s timeout+重试导致重复发送)
         _inflight.add(rid)
+        _recent[rid] = time.time()  # 立即标记, 防 bitable 读后写延迟下的重复
         t = asyncio.create_task(_send_async(rid, f, reply, event))
         _bg_tasks.add(t)
         t.add_done_callback(_bg_tasks.discard)
