@@ -56,6 +56,11 @@ _union_cache = {}
 
 _tok = {"v": "", "exp": 0.0}
 
+# 防重复发送(飞书卡片回调 >3s 会 timeout+自动重试 → 同一回复重发给客户):
+# _inflight = 正在异步发送中的 rid(同进程并发去重); 配合"工单状态已是终态"二次去重(跨重试/再点击)。
+_inflight = set()
+_bg_tasks = set()
+
 
 async def _resolve_union(operator: str) -> str:
     """运营姓名 → union_id(经聪哥1号 open_id→union, 跨app通用)。兜底/待定/查不到 → 返回''(调用方降级 Frankie)。"""
@@ -345,16 +350,43 @@ def _operator_label(event: dict) -> str:
     return (op.get("union_id") or op.get("open_id") or "运营自助")[:60]
 
 
-async def _notify_frankie(text: str):
+async def _notify_union(union: str, text: str):
     try:
         tok = await _token()
         async with httpx.AsyncClient(timeout=30.0) as c:
             await c.post("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=union_id",
                          headers={"Authorization": f"Bearer {tok}"},
-                         json={"receive_id": OBSERVE_UNION, "msg_type": "text",
+                         json={"receive_id": union, "msg_type": "text",
                                "content": json.dumps({"text": text}, ensure_ascii=False)})
     except Exception:
         pass
+
+
+async def _notify_frankie(text: str):
+    await _notify_union(OBSERVE_UNION, text)
+
+
+async def _send_async(rid: str, f: dict, reply: str, event: dict):
+    """后台真发(不阻塞卡片回调, 防飞书 3s timeout)。成功回写工单台; 失败 IM 通知操作人+Frankie。"""
+    op_union = ((event.get("operator", {}) or {}).get("union_id") or "")
+    tag = f"{_x(f, '品牌')}·{_x(f, '销售平台')}·{_x(f, '客户标识')}"
+    try:
+        ok, detail = await _dispatch_reply(f, reply)
+        if not ok:
+            for u in {op_union, OBSERVE_UNION} - {""}:
+                await _notify_union(u, f"❌ 客服回复发送失败\n{tag}\n原因: {detail}\n请重试或在原渠道手动回复。")
+            return
+        if CS_REPLY_DRY_RUN_TO:
+            return  # dry-run: 不改真工单状态
+        await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                         {"fields": {"最终回复": reply[:5000], "状态": "已回复",
+                                     "回复时间": int(time.time() * 1000),
+                                     "回复人": _operator_label(event)}}, which="notify")
+    except Exception as e:
+        for u in {op_union, OBSERVE_UNION} - {""}:
+            await _notify_union(u, f"❌ 客服回复发送异常\n{tag}\n{str(e)[:160]}\n请重试或在原渠道手动回复。")
+    finally:
+        _inflight.discard(rid)
 
 
 async def handle_callback(event: dict) -> dict:
@@ -392,29 +424,26 @@ async def handle_callback(event: dict) -> dict:
         ph = _placeholder_hit(reply)
         if ph:
             return _toast(f"回复含未替换占位符「{ph}」，请改完再发", "error")
+        # 🚨 去重①: 工单已是终态(已回复/已解决/已升级) → 跨重试/再点击不重发
+        if _x(f, "状态") in ("已回复", "已解决", "已升级"):
+            return _toast("该工单已处理 ✓ 无需重复发送")
+        # 🚨 去重②: 同 rid 正在发送中(飞书 3s timeout 自动重试的并发) → 拦下
+        if rid in _inflight:
+            return _toast("正在发送中，请勿重复点击")
 
-        # 闭环未开 且 未开 DRY-RUN → 旧行为: 只记录, 提示同事在原渠道回
+        # 闭环未开 且 未开 DRY-RUN → 旧行为: 只记录(快, 同步)
         if not CS_REPLY_LIVE and not CS_REPLY_DRY_RUN_TO:
             await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                              {"fields": {"最终回复": reply[:5000], "状态": "已回复"}}, which="notify")
             return _toast("已记录回复 ✓ 发送闭环灰度中，请暂在原渠道发给客户")
 
-        # DRY-RUN 或 LIVE → 真发(dry-run 改发测试邮箱)
-        try:
-            ok, detail = await _dispatch_reply(f, reply)
-        except Exception as e:
-            return _toast(f"发送失败: {str(e)[:80]}", "error")
-        if not ok:
-            return _toast(f"发送失败: {detail}", "error")
-
+        # DRY-RUN 或 LIVE → 异步真发(立即返回 toast, 防飞书卡片回调 >3s timeout+重试导致重复发送)
+        _inflight.add(rid)
+        t = asyncio.create_task(_send_async(rid, f, reply, event))
+        _bg_tasks.add(t)
+        t.add_done_callback(_bg_tasks.discard)
         if CS_REPLY_DRY_RUN_TO:
-            # dry-run 只验证发送, 不动真工单状态(避免误关真实工单)
-            return _toast(f"🧪 DRY-RUN 已发测试邮箱 ✓（工单状态不变）{detail}")
-        # LIVE 真发成功 → 回写工单台
-        await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
-                         {"fields": {"最终回复": reply[:5000], "状态": "已回复",
-                                     "回复时间": int(time.time() * 1000),
-                                     "回复人": _operator_label(event)}}, which="notify")
-        return _toast(f"已发送给客户 ✓ {detail}")
+            return _toast("🧪 DRY-RUN 已提交（发测试邮箱，工单状态不变）")
+        return _toast("✅ 已提交，正在发送给客户…稍候在工单台看「已回复」")
 
     return _toast("未知操作", "error")
