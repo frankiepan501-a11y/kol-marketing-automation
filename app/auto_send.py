@@ -782,7 +782,7 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
         first_name=first,
         product_name=product_name,
         signature=reply_drafter._sender_signature(
-            "POWKONG" if "powkong" in (sender_alias or "").lower() else "FUNLAB"
+            config.brand_from_text(sender_alias or "") or "FUNLAB"  # 2026-06-26 修白牌错标
         ),
     )
     subj = parent_subject if parent_subject.startswith("Re:") else f"Re: {parent_subject}"
@@ -831,7 +831,7 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
         _ctype = "媒体人" if _is_ed else "KOL"
         _ci = await feishu.resolve_contact_info(_crid, _ctype) if _crid else {}
         _sender = ext(pf.get("发送邮箱")) or ""
-        _brand = "POWKONG" if "powkong" in _sender.lower() else "FUNLAB"
+        _brand = config.brand_from_text(_sender) or "FUNLAB"  # 2026-06-26 修白牌错标
         _email = ext(pf.get("收件邮箱")) or ""
         track_card = _build_ship_tracking_card(
             new_rid, contact_name, product_name, subj, "运单号追加",

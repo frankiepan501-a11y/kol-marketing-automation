@@ -261,7 +261,9 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
         # 2026-06-03: 联系人/产品信息提前算 → 群信息卡 + 操作卡共用 (修卡片合并后群卡字段回退,
         # 群卡之前只剩评分/主题/理由, 缺 KOL名/阶段/平台/粉丝/产品/品牌/收件人/国家 — 佳烨反馈信息不全)
         sender_alias2 = ext(f.get("发送邮箱")) or ""
-        brand2 = "POWKONG" if "powkong" in sender_alias2.lower() else "FUNLAB"
+        # 2026-06-26 修: 原二元判断(powkong else FUNLAB)把白牌 Linyuvo(support@linyuvo.com)
+        # 错标成 FUNLAB → 运营去 FUNLAB 收件箱找回复找不到(回复实际在白牌账号)。改用 brand_from_text 识别全部品牌。
+        brand2 = config.brand_from_text(sender_alias2) or "FUNLAB"
         email2 = ext(f.get("收件邮箱")) or ""
         prod_name = ""
         _prid = feishu.xrid(f.get("关联产品"))

@@ -120,7 +120,7 @@ async def run() -> dict:
             details.append({"rid": rid, "kol": kol_name, "result": "no_email"})
             continue
 
-        brand = "POWKONG" if "powkong" in (ext(f.get("发送邮箱")) or "").lower() else "FUNLAB"
+        brand = config.brand_from_text(ext(f.get("发送邮箱")) or "") or "FUNLAB"  # 2026-06-26 修白牌错标
         if brand not in sent_cache:
             sent_cache[brand] = await _list_sent_paged(brand)
         fid, msgs = sent_cache[brand]

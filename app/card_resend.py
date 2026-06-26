@@ -81,7 +81,7 @@ async def _build_resend_card(draft_rid: str, rec: dict) -> dict:
     )
     path = ext(f.get("审核路径")) or "待人审"
     sender = ext(f.get("发送邮箱")) or ""
-    brand = "POWKONG" if "powkong" in sender.lower() else "FUNLAB"
+    brand = config.brand_from_text(sender) or "FUNLAB"  # 2026-06-26 修白牌错标
 
     contact_info = {}
     if cf:

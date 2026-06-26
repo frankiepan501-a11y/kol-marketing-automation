@@ -342,7 +342,7 @@ async def _layer2_content_reminder(now_ms: int) -> dict:
                 pass
 
         sender_alias = ext(f.get("发送邮箱"))
-        brand = "POWKONG" if "powkong" in sender_alias.lower() else "FUNLAB"
+        brand = config.brand_from_text(sender_alias) or "FUNLAB"  # 2026-06-26 修白牌错标
         sig = reply_drafter._sender_signature(brand)
 
         body = reply_drafter.TEMPLATE_CONTENT_REMINDER.format(
@@ -745,7 +745,7 @@ async def _layer_soft_nudge(now_ms: int) -> dict:
                 pass
 
         sender_alias = ext(f.get("发送邮箱"))
-        brand = "POWKONG" if "powkong" in sender_alias.lower() else "FUNLAB"
+        brand = config.brand_from_text(sender_alias) or "FUNLAB"  # 2026-06-26 修白牌错标
         sig = reply_drafter._sender_signature(brand)
 
         body = reply_drafter.TEMPLATE_SOFT_NUDGE.format(
