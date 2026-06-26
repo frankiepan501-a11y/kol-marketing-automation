@@ -378,6 +378,28 @@ async def _notify_frankie(text: str):
     await _notify_union(OBSERVE_UNION, text)
 
 
+def _spawn(coro):
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+
+
+async def _escalate_async(rid: str, tag: str, summary: str):
+    try:
+        await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                         {"fields": {"状态": "已升级"}}, which="notify")
+        await _notify_frankie(f"⬆️ 工单升级\n{tag}\n{summary}")
+    except Exception as e:
+        print(f"[cs_dispatch._escalate_async] rid={rid} err={e}")
+
+
+async def _reassign_async(tag: str, op: str, summary: str):
+    try:
+        await _notify_frankie(f"🔁 改派请求（原派 {op}）\n{tag}\n{summary}")
+    except Exception as e:
+        print(f"[cs_dispatch._reassign_async] err={e}")
+
+
 async def _send_async(rid: str, f: dict, reply: str, event: dict):
     """后台真发(不阻塞卡片回调, 防飞书 3s timeout)。成功回写工单台 + 保留 _recent 防重发;
     失败 → 清 _recent(放行重试) + IM 通知操作人+Frankie。"""
@@ -425,13 +447,18 @@ async def handle_callback(event: dict) -> dict:
     tag = f"{_x(f, '品牌')}·{_x(f, '销售平台')}·{_x(f, '客户标识')}"
 
     if act == "escalate":
-        await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
-                         {"fields": {"状态": "已升级"}}, which="notify")
-        await _notify_frankie(f"⬆️ 工单升级\n{tag}\n{_x(f, '客诉摘要')}")
+        # 去重(防飞书回调 timeout 重试重复通知 Frankie): 已升级 / 5min 内已升过 → 拦下
+        if _x(f, "状态") == "已升级" or _recent_seen(f"{rid}:esc"):
+            return _toast("该工单已升级 ✓ 无需重复")
+        _recent[f"{rid}:esc"] = time.time()
+        _spawn(_escalate_async(rid, tag, _x(f, "客诉摘要")))  # 异步, 立即返回防 timeout
         return _toast("已升级给负责人 ✓")
 
     if act == "reassign":
-        await _notify_frankie(f"🔁 改派请求（原派 {_x(f, '分配运营')}）\n{tag}\n{_x(f, '客诉摘要')}")
+        if _recent_seen(f"{rid}:rea"):
+            return _toast("已通知改派 ✓ 无需重复")
+        _recent[f"{rid}:rea"] = time.time()
+        _spawn(_reassign_async(tag, _x(f, "分配运营"), _x(f, "客诉摘要")))
         return _toast("已通知负责人改派 ✓")
 
     if act == "send_reply":
