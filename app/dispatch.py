@@ -119,7 +119,11 @@ async def create_kol_task(product: dict, batch_size: int, mapping: dict) -> dict
 
     fans_min, fans_max = _fans_range_for_price(p_price)
     platforms = CATEGORY_PLATFORMS.get(p_cat, [])
-    # 销售国家 → 市场语言(硬筛维度). 留空 → sell_langs=[] → enrich 不按语言筛(选填不阻断).
+    # 销售国家 → ① 任务「筛选-国家」(国家硬筛, Frankie 2026-06-27: 任务有国家就硬筛/无则不控)
+    #            ② 市场语言「筛选-语言」(语言硬筛, 兜底挡卖不到的语言).
+    # 留空 → sell_countries=[]/sell_langs=[] → enrich 两个 if 都 falsy → 不筛(选填不阻断).
+    # 2026-06-27 修: 原只写 筛选-语言 → US/UK/CA/AU 英语红人全通过(翔宇报 UK/MX 产品派给 CA 红人,
+    # 寄样+前期沟通全白费)。enrich 早有「筛选-国家」硬筛能力但 dispatch 从没喂 → 现按销售国家喂上。
     sell_countries = list(_parse_multiselect(pf.get("销售国家")))
     sell_langs = sorted({lg for c in sell_countries for lg in COUNTRY_TO_LANGS.get(c, [])})
     # 2026-06-08 配置驱动: 发送邮箱按品牌查 BRAND_CONFIG(支持白牌), 未知品牌兜底 POWKONG
@@ -130,6 +134,7 @@ async def create_kol_task(product: dict, batch_size: int, mapping: dict) -> dict
         "品牌": p_brand,
         "目标产品": [product["record_id"]],
         "筛选-平台": platforms,
+        "筛选-国家": sell_countries,
         "筛选-语言": sell_langs,
         "筛选-内容风格": mapping["expected_styles"],
         "筛选-粉丝下限": fans_min,
