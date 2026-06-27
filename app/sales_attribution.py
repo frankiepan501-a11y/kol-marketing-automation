@@ -183,9 +183,13 @@ async def build_kol_maps() -> dict:
             utmid = ext(f.get("UTM ID")).strip().lower()
             if utmid:
                 maps["utm"].setdefault(utmid, (table, rid, nm))
-                h = _handle_from_utm(utmid)
-                if len(h) >= AMZ_HANDLE_MIN_LEN:
-                    maps["amz_handle"].setdefault(h, (table, rid, nm))
+                # amz_handle 只从 KOL 表建: 亚马逊 Attribution 是 KOL/联盟机制, 媒体人(earned
+                # media)无 campaign。把媒体人 handle 建进来只会造成子串误撞(同 decision_feedback
+                # 只扫 T_KOL 的口径)。2026-06-26 修: 之前含媒体人 → 978 handle 误匹配 2 个 campaign。
+                if table == config.T_KOL:
+                    h = _handle_from_utm(utmid)
+                    if len(h) >= AMZ_HANDLE_MIN_LEN:
+                        maps["amz_handle"].setdefault(h, (table, rid, nm))
             amz_cid = ext(f.get("亚马逊CampaignID")).strip()
             if amz_cid:
                 maps["amz"].setdefault(amz_cid, (table, rid, nm))
@@ -195,19 +199,18 @@ async def build_kol_maps() -> dict:
 def match_amz_campaign(cid: str, maps: dict) -> tuple:
     """把一个 Amazon campaign(名串) 归因到 KOL. 返回 (kol_tuple, via) 或 (None, None).
       via='amz_exact' : 命中显式「亚马逊CampaignID」精确值 (现有/覆盖)
-      via='amz_handle': campaign 名(归一)含某 KOL handle → 自动抽取 (最长 handle 优先防撞)
+      via='amz_handle': campaign 名按非字母数字切 token, 某 token **精确等于** KOL handle → 自动抽取。
+    用 token 精确(不是子串)防撞: 'robert' 不会误命中 'Roberto Doriano'。运营 SOP=campaign 名里把
+    handle 作为独立 token(如 `...-metalfear4`)。token 同时命中多个 KOL → 视为歧义不归因(防错写)。
     """
     key = str(cid).strip()
     kol = maps["amz"].get(key)
     if kol:
         return kol, "amz_exact"
-    norm = _norm_alnum(key)
-    best, best_len = None, 0
-    for h, k in maps["amz_handle"].items():
-        if h in norm and len(h) > best_len:
-            best, best_len = k, len(h)
-    if best:
-        return best, "amz_handle"
+    tokens = set(re.findall(r"[a-z0-9]+", key.lower()))
+    hits = {maps["amz_handle"][h] for h in maps["amz_handle"] if h in tokens}
+    if len(hits) == 1:
+        return next(iter(hits)), "amz_handle"
     return None, None
 
 
