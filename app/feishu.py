@@ -506,8 +506,56 @@ async def write_card_recipients_msgids(draft_rid: str,
 # 字段标准: KOL名/媒体人姓名 + 阶段(_contact_stage_label) + 平台 + 粉丝 + 产品 + 品牌 + 收件邮箱
 # 各卡按用途取舍: 操作类全字段 / SLA/退信告警类 compact=True 省产品/品牌/邮箱
 
+# ===== 多平台粉丝展示 (2026-06-27) =====
+# KOL 主表有 3 个分平台粉丝字段(粉丝-YouTube/TikTok/Instagram, 都是数字字段) + 主平台(单选) + 粉丝数(=各平台最大).
+# 审核卡把该 KOL 所有有数据的平台都列出来 + 标主平台, 例: 'YouTube 288K(主) / TikTok 484K / IG 37K'.
+# 优雅降级: 分平台字段全空 → 调用方回退显示 主平台 + 粉丝数。
+_FANS_PLATFORMS = [
+    ("粉丝-YouTube", "YouTube", ("youtube", "yt")),
+    ("粉丝-TikTok", "TikTok", ("tiktok", "tt")),
+    ("粉丝-Instagram", "IG", ("instagram", "ig")),
+]
+
+
+def _to_int(v):
+    """飞书数字字段 → int (None/空/非数返 0)."""
+    if v is None or v == "":
+        return 0
+    try:
+        return int(float(v))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _abbrev_count(n: int) -> str:
+    """65000 -> '65K' / 3580000 -> '3.6M' / 821 -> '821' (卡片多平台一行不挤)."""
+    n = int(n)
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}K"
+    return str(n)
+
+
+def fans_display(cf: dict) -> str:
+    """从 KOL 主表 fields 构建多平台粉丝展示串.
+    例: 'YouTube 288K(主) / TikTok 484K / IG 37K'.
+    分平台字段全空 → 返 ''(调用方据此回退到 主平台+粉丝数, 别显示一堆空)."""
+    if not cf:
+        return ""
+    main = (ext(cf.get("主平台")) or "").strip().lower()
+    parts = []
+    for fld, label, keys in _FANS_PLATFORMS:
+        n = _to_int(cf.get(fld))
+        if not n:
+            continue
+        is_main = any(k in main for k in keys) if main else False
+        parts.append(f"{label} {_abbrev_count(n)}{'(主)' if is_main else ''}")
+    return " / ".join(parts)
+
+
 async def resolve_contact_info(contact_rid: str, contact_type: str = "KOL") -> dict:
-    """拉 KOL/媒体人主表 → {name, stage, platform, fans}.
+    """拉 KOL/媒体人主表 → {name, stage, platform, fans, fans_detail}.
     contact_type: "KOL" 或 "媒体人". fail-safe: 失败返 {}(调用方显示 '?')."""
     if not contact_rid:
         return {}
@@ -527,6 +575,7 @@ async def resolve_contact_info(contact_rid: str, contact_type: str = "KOL") -> d
                 out["fans"] = f"{int(cf.get('粉丝数') or 0):,}"
             except (ValueError, TypeError):
                 out["fans"] = str(cf.get("粉丝数") or "")
+            out["fans_detail"] = fans_display(cf)  # 多平台串, 空则调用方回退到 fans
         return out
     except Exception as e:
         print(f"[resolve_contact_info] {contact_rid} fail: {e}")
@@ -547,11 +596,13 @@ def build_contact_info_block(contact_info: dict = None,
     调用方插到卡 elements 头部."""
     ci = contact_info or {}
     who = "媒体人" if contact_type == "媒体人" else "KOL"
+    # 多平台粉丝优先(fans_detail), 空则回退单平台 fans (优雅降级)
+    _fans_show = ci.get("fans_detail") or ci.get("fans") or "—"
     fields = [
         {"is_short": True, "text": {"tag": "lark_md", "content": f"**{who}**: {ci.get('name') or '?'}"}},
         {"is_short": True, "text": {"tag": "lark_md", "content": f"**阶段**: {ci.get('stage') or '?'}"}},
         {"is_short": True, "text": {"tag": "lark_md", "content": f"**平台**: {ci.get('platform') or '?'}"}},
-        {"is_short": True, "text": {"tag": "lark_md", "content": f"**粉丝**: {ci.get('fans') or '—'}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**粉丝**: {_fans_show}"}},
     ]
     if not compact:
         if product_name:

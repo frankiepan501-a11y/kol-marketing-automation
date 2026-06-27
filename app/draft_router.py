@@ -293,7 +293,8 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
                         _fans = str(_ccf.get("粉丝数") or "")
                     contact_info = {"name": ext(_ccf.get("账号名")) or "?",
                                     "platform": ext(_ccf.get("主平台")) or "",
-                                    "fans": _fans, "stage": reply_monitor._contact_stage_label(_ccf)}
+                                    "fans": _fans, "fans_detail": feishu.fans_display(_ccf),
+                                    "stage": reply_monitor._contact_stage_label(_ccf)}
         except Exception as _e:
             print(f"[draft_router] 联系人信息解析失败: {_e}")
         _ci2 = contact_info or {}
@@ -309,7 +310,7 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
                 {"tag": "div", "fields": [
                     {"is_short": True, "text": {"tag": "lark_md", "content": f"**{who2}**: {_ci2.get('name') or '?'}"}},
                     {"is_short": True, "text": {"tag": "lark_md", "content": f"**平台**: {_ci2.get('platform') or '?'}"}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**粉丝**: {_ci2.get('fans') or '—'}"}},
+                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**粉丝**: {_ci2.get('fans_detail') or _ci2.get('fans') or '—'}"}},
                     {"is_short": True, "text": {"tag": "lark_md", "content": f"**国家**: {country2 or '?'}"}},
                     {"is_short": True, "text": {"tag": "lark_md", "content": f"**产品**: {prod_name or '?'}"}},
                     {"is_short": True, "text": {"tag": "lark_md", "content": f"**品牌**: {brand2}"}},
@@ -505,7 +506,7 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**{who_label}**: {ci.get('name') or '?'}"}},
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**阶段**: {ci.get('stage') or '?'}"}},
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**平台**: {ci.get('platform') or '?'}"}},
-            {"is_short": True, "text": {"tag": "lark_md", "content": f"**粉丝**: {ci.get('fans') or '—'}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**粉丝**: {ci.get('fans_detail') or ci.get('fans') or '—'}"}},
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**产品**: {product_name or '?'}"}},
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**品牌**: {brand}"}},
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**收件人**: {email or '?'}"}},
