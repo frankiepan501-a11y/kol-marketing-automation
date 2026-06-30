@@ -78,6 +78,7 @@ _pause_alerted = set()     # 已告警品牌 (去重)
 # EMAIL_DRY_RUN_TO 有值=有人在测邮件 → run() 拒绝跑全表, 防"DRY-RUN+全表 auto-send"
 # 误把真草稿标已发送(→真 KOL 永久漏发)。测邮件用隔离方式(单条合成/纯函数), 不碰全表。
 _dryrun_alerted = False    # 一次性提醒去重 (DRY-RUN 清掉后重置 → 下次再设会重新提醒)
+_run_lock = asyncio.Lock()
 
 
 async def _dryrun_alert_once(dry_to: str):
@@ -104,6 +105,76 @@ async def _dryrun_alert_once(dry_to: str):
 # 时间敏感(优先发, 配额先给它们): KOL 回信/寄样/报价/暖信/运单跟进; nudge-前缀也算
 _HIGH_PRIORITY_SRC = {"reply", "ship_confirm", "affiliate_quote", "warm_recap", "tracking_followup"}
 _COLD_SRC = {"cold", "followup"}     # 非时间敏感(批量 cold + 跟进), 受 cold 天级上限(留预留给回信)
+_READY_DRAFT_STATUSES = {"自动通过", "通过"}
+_SENT_SEND_STATUSES = {"已发", "已发送"}
+
+
+def _draft_id_of(f: dict) -> str:
+    return ext(f.get("邮件草稿ID")).strip()
+
+
+def _contact_rid_of(f: dict) -> str:
+    return xrid(f.get("关联KOL")) or xrid(f.get("关联媒体人")) or ""
+
+
+def _product_rid_of(f: dict) -> str:
+    return xrid(f.get("关联产品")) or ""
+
+
+def _is_ready_status(f: dict) -> bool:
+    return ext(f.get("邮件草稿状态")) in _READY_DRAFT_STATUSES and ext(f.get("发送状态")) in ("", "未发")
+
+
+def _is_sent_status(f: dict) -> bool:
+    return ext(f.get("发送状态")) in _SENT_SEND_STATUSES
+
+
+def _cold_dedup_key(f: dict):
+    """Business dedup key for non-conversational outreach.
+
+    Cold/follow-up should have at most one active or sent draft per
+    contact x product x brand. Replies/tracking/warm recap are conversation
+    events, so they are guarded by exact draft_id only.
+    """
+    source = ext(f.get("邮件草稿来源")) or "cold"
+    if source not in ("cold", "followup"):
+        return None
+    contact = _contact_rid_of(f)
+    product = _product_rid_of(f)
+    if not contact or not product:
+        return None
+    brand = _brand_from_alias(ext(f.get("发送邮箱")))
+    return (source, contact, product, brand)
+
+
+def _ready_order(rec: dict) -> tuple:
+    f = rec.get("fields") or {}
+    try:
+        sched = int(f.get("建议发送时间") or 0)
+    except (ValueError, TypeError):
+        sched = 0
+    try:
+        gen = int(f.get("生成时间") or 0)
+    except (ValueError, TypeError):
+        gen = 0
+    return (sched or gen or 0, gen or 0, rec.get("record_id", ""))
+
+
+async def _deny_duplicate_ready(rec: dict, reason: str) -> None:
+    """Deny a duplicate ready draft without touching send status."""
+    rid = rec["record_id"]
+    f = rec.get("fields") or {}
+    old_note = ext(f.get("审批意见"))
+    note = f"[自动去重] {reason}"
+    if old_note and note not in old_note:
+        note = (old_note + " | " + note)[:500]
+    try:
+        if note:
+            await feishu.update_record(config.T_DRAFT, rid, {"审批意见": note[:500]})
+        # Single-select in its own write: avoid Feishu multi-field select-clearing.
+        await feishu.update_record(config.T_DRAFT, rid, {"邮件草稿状态": "已否决"})
+    except Exception as e:
+        print(f"[auto_send] deny duplicate fail rid={rid}: {e}")
 
 
 def _is_priority(rec: dict) -> bool:
@@ -301,12 +372,28 @@ async def scan_ready() -> tuple:
                 if (ext(ff.get("邮件草稿来源")) or "") in _COLD_SRC:
                     cold_sent_24h[b] += 1
 
+    sent_draft_ids = set()
+    sent_cold_keys = set()
+    for rec in all_recs:
+        ff = rec.get("fields") or {}
+        if not _is_sent_status(ff):
+            continue
+        did = _draft_id_of(ff)
+        if did:
+            sent_draft_ids.add(did)
+        ckey = _cold_dedup_key(ff)
+        if ckey:
+            sent_cold_keys.add(ckey)
+
     ready = []
     scheduled_later = 0
     already_sent = 0
     skip_followup = 0
+    skip_duplicate = 0
+    run_draft_ids = set()
+    run_cold_keys = set()
 
-    for rec in items:
+    for rec in sorted(items, key=_ready_order):
         f = rec["fields"]
         send_status = ext(f.get("发送状态"))
         if send_status and send_status not in ("未发", ""):
@@ -327,6 +414,26 @@ async def scan_ready() -> tuple:
                 skip_followup += 1
                 continue
 
+        did = _draft_id_of(f)
+        ckey = _cold_dedup_key(f)
+        dup_reason = ""
+        if did and did in sent_draft_ids:
+            dup_reason = f"同一邮件草稿ID {did} 已有已发记录"
+        elif did and did in run_draft_ids:
+            dup_reason = f"本轮同一邮件草稿ID {did} 已保留更早一条"
+        elif ckey and ckey in sent_cold_keys:
+            dup_reason = "同一联系人×产品×品牌 cold/followup 已有已发记录"
+        elif ckey and ckey in run_cold_keys:
+            dup_reason = "本轮同一联系人×产品×品牌 cold/followup 已保留更早一条"
+        if dup_reason:
+            await _deny_duplicate_ready(rec, dup_reason)
+            skip_duplicate += 1
+            continue
+        if did:
+            run_draft_ids.add(did)
+        if ckey:
+            run_cold_keys.add(ckey)
+
         target_ms = f.get("建议发送时间")
         if target_ms:
             try:
@@ -339,7 +446,7 @@ async def scan_ready() -> tuple:
 
         ready.append(rec)
 
-    return ready, scheduled_later, already_sent + skip_followup, sent_24h, cold_sent_24h
+    return ready, scheduled_later, already_sent + skip_followup + skip_duplicate, sent_24h, cold_sent_24h
 
 
 # ===== 2. 发一封 =====
@@ -853,6 +960,13 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
 
 # ===== 3. 主入口 =====
 async def run() -> dict:
+    if _run_lock.locked():
+        return {"sent": 0, "fail": 0, "skipped_overlap": True, "msg": "auto_send already running"}
+    async with _run_lock:
+        return await _run_unlocked()
+
+
+async def _run_unlocked() -> dict:
     # 2026-06-18 DRY-RUN 守卫: EMAIL_DRY_RUN_TO 有值(有人在测邮件) → 拒绝跑全表,
     # 防"DRY-RUN+全表 auto-send"误把真草稿标已发送(→真 KOL 永久漏发, 本 session 事故根因)。
     global _dryrun_alerted

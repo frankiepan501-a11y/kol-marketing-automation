@@ -7,7 +7,7 @@ import time
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
@@ -564,6 +564,33 @@ async def run_draft_status_audit(authorization: str = Header(default=""),
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/draft-status-audit/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/draft-duplicate-audit/run")
+async def run_draft_duplicate_audit(authorization: str = Header(default=""),
+                                    dry_run: bool = True,
+                                    auto_fix: bool = False,
+                                    notify: bool = False,
+                                    notify_report_only: bool = False,
+                                    sample_limit: int = 20):
+    """重复草稿审计.
+
+    检查: 同一邮件草稿ID重复, 或 cold/followup 同一联系人×产品×品牌重复。
+    默认 dry_run=true 只报不写; auto_fix=true 且 dry_run=false 时, 仅把多余的
+    通过/自动通过 + 未发 草稿改成 已否决。不会触发邮件发送。
+    """
+    _check_auth(authorization)
+    try:
+        return {"ok": True, **(await draft_duplicate_audit.run(
+            dry_run=dry_run,
+            auto_fix=auto_fix,
+            notify=notify,
+            notify_report_only=notify_report_only,
+            sample_limit=sample_limit))}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/draft-duplicate-audit/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 

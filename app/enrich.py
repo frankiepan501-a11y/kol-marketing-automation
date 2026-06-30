@@ -14,6 +14,8 @@ from . import config, feishu, deepseek, draft_router, product_naming
 from .feishu import ext, xrid
 from .scoring import score_kol, _parse_multiselect
 
+_run_lock = asyncio.Lock()
+
 
 COUNTRY_TO_LANG = {
     "US": "en", "UK": "en", "CA": "en", "AU": "en", "PH": "en", "IN": "en",
@@ -564,6 +566,41 @@ async def score_and_draft_one(kol_record: dict, product: dict, brand: str,
 
 
 # ===== 6. 写草稿 + 调 router =====
+async def _existing_active_drafts(draft_id: str, kol_rid: str, product_rid: str) -> list:
+    """Return non-terminal drafts that would make a new cold draft duplicate.
+
+    This is a best-effort idempotency guard before create. The final hard stop
+    still lives in auto_send, because Feishu search indexing is eventually
+    consistent and concurrent enrich executions can race.
+    """
+    found = []
+    if draft_id:
+        try:
+            for rec in await feishu.search_records(config.T_DRAFT, [
+                {"field_name": "邮件草稿ID", "operator": "is", "value": [draft_id]},
+            ], field_names=["邮件草稿ID", "邮件草稿状态", "发送状态"]):
+                f = rec.get("fields") or {}
+                if ext(f.get("邮件草稿状态")) not in _DRAFT_REUSABLE_STATES:
+                    found.append(rec)
+        except Exception as e:
+            print(f"[enrich] draft-id dedup lookup fail draft_id={draft_id}: {e}")
+
+    # Same KOL x same product is the stronger business-level dedup key.
+    if kol_rid and product_rid:
+        try:
+            for rec in await feishu.search_records(config.T_DRAFT, [
+                {"field_name": "对象类型", "operator": "is", "value": ["KOL"]},
+                {"field_name": "关联KOL", "operator": "contains", "value": [kol_rid]},
+                {"field_name": "关联产品", "operator": "contains", "value": [product_rid]},
+            ], field_names=["邮件草稿ID", "邮件草稿状态", "发送状态", "关联KOL", "关联产品"]):
+                f = rec.get("fields") or {}
+                if ext(f.get("邮件草稿状态")) not in _DRAFT_REUSABLE_STATES:
+                    found.append(rec)
+        except Exception as e:
+            print(f"[enrich] KOL-product dedup lookup fail kol={kol_rid}: {e}")
+    return found
+
+
 async def write_drafts_and_route(task_rid: str, product_rid: str, brand: str,
                                   sender_alias: str, signature: str,
                                   passed_list: list) -> list:
@@ -571,10 +608,20 @@ async def write_drafts_and_route(task_rid: str, product_rid: str, brand: str,
     results = []
     for s in passed_list:
         if not s.get("passed"): continue
+        draft_id = f"{task_rid[:8]}-{s['kol_name'][:20]}"
+        existing = await _existing_active_drafts(draft_id, s["kol_record_id"], product_rid)
+        if existing:
+            results.append({
+                "kol": s["kol_name"],
+                "skip": "duplicate_active_draft",
+                "draft_id": draft_id,
+                "existing": [x.get("record_id") for x in existing[:3]],
+            })
+            continue
         bk = s["breakdown"]
         send_ms, send_desc = _next_send_time(s.get("kol_country", "US") or "US")
         fields = {
-            "邮件草稿ID": f"{task_rid[:8]}-{s['kol_name'][:20]}",
+            "邮件草稿ID": draft_id,
             "关联任务": [task_rid],
             "关联KOL": [s["kol_record_id"]],
             "关联产品": [product_rid],
@@ -806,6 +853,13 @@ async def enrich_task(task_record: dict, seen_kb: set = None) -> dict:
 
 # ===== 8. 入口 =====
 async def run() -> dict:
+    if _run_lock.locked():
+        return {"processed": 0, "skipped_overlap": True, "message": "KOL enrich already running"}
+    async with _run_lock:
+        return await _run_unlocked()
+
+
+async def _run_unlocked() -> dict:
     tasks = await find_pending_tasks()
     if not tasks:
         return {"processed": 0, "message": "no pending KOL task"}
