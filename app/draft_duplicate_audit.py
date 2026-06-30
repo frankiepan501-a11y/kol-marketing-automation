@@ -148,47 +148,74 @@ def plan_auto_denials(groups: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, A
     """Plan safe auto-denials for ready unsent duplicate records.
 
     Rules:
-    - If a duplicate group already has a sent record, deny every ready unsent
-      record in that group.
-    - If a duplicate group has multiple ready unsent records and no sent record,
-      keep the earliest one and deny the rest.
-    """
-    plan: Dict[str, Dict[str, Any]] = {}
-    for group in groups:
-        recs = group["records"]
-        sent = [r for r in recs if is_sent(r.get("fields") or {})]
-        ready = [r for r in recs if is_ready_unsent(r.get("fields") or {})]
-        if sent:
-            deny = ready
-            reason = f"{group['group_type']}={group['group_key']} 已有已发记录"
-        elif len(ready) > 1:
-            deny = ready[1:]
-            keep = ready[0].get("record_id", "")
-            reason = f"{group['group_type']}={group['group_key']} 本批重复，保留最早记录 {keep}"
-        else:
-            continue
+    - Seed sent draft IDs / cold keys from already-sent records.
+    - Walk ready records by send order.
+    - Keep the first ready record for each draft ID and cold business key.
+    - Deny later ready records that collide with a sent or already-kept key.
 
-        for rec in deny:
+    This mirrors app.auto_send.scan_ready. It avoids over-denying chained
+    duplicates such as A~B by cold key and B~C by draft ID; if B is denied,
+    C can remain as the first kept record for its draft ID.
+    """
+    unique_records: Dict[str, Dict[str, Any]] = {}
+    rid_to_groups = defaultdict(list)
+    for group in groups:
+        marker = {"group_type": group["group_type"], "group_key": group["group_key"]}
+        for rec in group["records"]:
             rid = rec.get("record_id", "")
             if not rid:
                 continue
-            existing = plan.get(rid)
-            if existing:
-                if reason not in existing["reason"]:
-                    existing["reason"] = (existing["reason"] + " | " + reason)[:500]
-                existing["groups"].append({
-                    "group_type": group["group_type"],
-                    "group_key": group["group_key"],
-                })
-                continue
+            unique_records[rid] = rec
+            rid_to_groups[rid].append(marker)
+
+    sent_draft_ids = set()
+    sent_cold_keys = set()
+    for rec in unique_records.values():
+        fields = rec.get("fields") or {}
+        if not is_sent(fields):
+            continue
+        did = draft_id_of(fields)
+        if did:
+            sent_draft_ids.add(did)
+        ckey = cold_key_of(fields)
+        if ckey:
+            sent_cold_keys.add(ckey)
+
+    plan: Dict[str, Dict[str, Any]] = {}
+    run_draft_ids = set()
+    run_cold_keys = set()
+
+    for rec in sorted(unique_records.values(), key=ready_order):
+        rid = rec.get("record_id", "")
+        fields = rec.get("fields") or {}
+        if not rid or not is_ready_unsent(fields):
+            continue
+
+        did = draft_id_of(fields)
+        ckey = cold_key_of(fields)
+        reason = ""
+        if did and did in sent_draft_ids:
+            reason = f"同一邮件草稿ID {did} 已有已发记录"
+        elif did and did in run_draft_ids:
+            reason = f"本批同一邮件草稿ID {did} 已保留更早一条"
+        elif ckey and ckey in sent_cold_keys:
+            reason = "同一联系人×产品×品牌 cold/followup 已有已发记录"
+        elif ckey and ckey in run_cold_keys:
+            reason = "本批同一联系人×产品×品牌 cold/followup 已保留更早一条"
+
+        if reason:
             plan[rid] = {
                 "record": rec,
                 "reason": reason[:500],
-                "groups": [{
-                    "group_type": group["group_type"],
-                    "group_key": group["group_key"],
-                }],
+                "groups": rid_to_groups.get(rid, [])[:5],
             }
+            continue
+
+        if did:
+            run_draft_ids.add(did)
+        if ckey:
+            run_cold_keys.add(ckey)
+
     return plan
 
 

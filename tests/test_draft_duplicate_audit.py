@@ -55,7 +55,7 @@ class DraftDuplicateAuditTest(unittest.TestCase):
         plan = plan_auto_denials(build_duplicate_groups(records))
         self.assertNotIn("keep", plan)
         self.assertIn("deny", plan)
-        self.assertIn("cold_key", plan["deny"]["reason"])
+        self.assertIn("同一联系人×产品×品牌", plan["deny"]["reason"])
 
     def test_reply_is_not_business_key_deduped(self):
         records = [
@@ -68,6 +68,24 @@ class DraftDuplicateAuditTest(unittest.TestCase):
         ]
         plan = plan_auto_denials(build_duplicate_groups(records))
         self.assertEqual({}, plan)
+
+    def test_chained_duplicates_do_not_over_deny(self):
+        records = [
+            # A and B collide by cold key, so B should be denied.
+            rec("a", 邮件草稿ID="draft-a", 邮件草稿状态="通过", 发送状态="",
+                邮件草稿来源="cold", 关联KOL=link("kol5"), 关联产品=link("prod5"),
+                发送邮箱="partner@fireflyfunlab.com", 生成时间=100),
+            rec("b", 邮件草稿ID="draft-b", 邮件草稿状态="通过", 发送状态="",
+                邮件草稿来源="cold", 关联KOL=link("kol5"), 关联产品=link("prod5"),
+                发送邮箱="partner@fireflyfunlab.com", 生成时间=200),
+            # B and C collide by draft ID. Because B is denied, C remains the
+            # first kept record for draft-b and should not be denied.
+            rec("c", 邮件草稿ID="draft-b", 邮件草稿状态="通过", 发送状态="",
+                邮件草稿来源="cold", 关联KOL=link("kol6"), 关联产品=link("prod6"),
+                发送邮箱="partner@fireflyfunlab.com", 生成时间=300),
+        ]
+        plan = plan_auto_denials(build_duplicate_groups(records))
+        self.assertEqual({"b"}, set(plan))
 
 
 if __name__ == "__main__":
