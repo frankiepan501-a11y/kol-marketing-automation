@@ -7,7 +7,7 @@ import time
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
@@ -38,14 +38,26 @@ async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
         return  # 冷却期内, 跳过
     _alert_last[endpoint] = now
 
+    transient = "1254607" in (error or "") or "Data not ready" in (error or "") or "1254607" in (trace or "")
+    level = "P2" if transient else "P1"
+    template = "yellow" if transient else "red"
+    impact = "本轮 endpoint 未完成；下次 cron 会再跑。若连续出现再查 Zeabur/飞书。"
+    if endpoint == "/auto-send/run":
+        impact = "本轮 auto-send 可能跳过，已通过 1h 冷却避免重复刷屏；下次 cron 会再尝试。"
+
     card = {
         "header": {
-            "template": "red",
-            "title": {"tag": "plain_text", "content": f"🚨 KOL service endpoint 异常: {endpoint}"},
+            "template": template,
+            "title": {"tag": "plain_text", "content": f"KOL 发信链运行异常 · {endpoint}"},
         },
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md",
-                "content": f"**错误**: {error[:300]}\n\n**冷却**: 同 endpoint 1h 内只告 1 次, 重复失败请查 Zeabur 日志"}},
+                "content": (
+                    "**类型**: endpoint 运行失败（不是草稿状态审计）\n"
+                    f"**影响**: {impact}\n"
+                    f"**错误**: {(error or '')[:300]}\n"
+                    "**冷却**: 同 endpoint 1h 内只告 1 次"
+                )}},
             {"tag": "div", "text": {"tag": "lark_md",
                 "content": f"**Trace 末段**:\n```\n{trace[-400:] if trace else '(无)'}\n```"}},
         ],
@@ -55,7 +67,7 @@ async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
         # (退信/重复才给 Frankie+运营; 此处沿用原"防其他人误以为要处理"设计)。
         for name, oid in config.NOTIFY_USERS:
             if name.startswith("潘"):
-                try: await feishu.send_card_message("open_id", oid, card, biz="AUDIT")
+                try: await feishu.send_card_message("open_id", oid, card, biz="AUDIT", level=level)
                 except Exception: pass
     except Exception as e:
         print(f"[_alert_endpoint_failure] {endpoint} self-alert fail: {e}")
@@ -591,6 +603,34 @@ async def run_draft_duplicate_audit(authorization: str = Header(default=""),
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/draft-duplicate-audit/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/kol-audit/digest/run")
+async def run_kol_audit_digest(authorization: str = Header(default=""),
+                               dry_run: bool = False,
+                               auto_fix: bool = True,
+                               notify: bool = True,
+                               notify_clean: bool = False,
+                               notify_report_only: bool = False,
+                               sample_limit: int = 5):
+    """KOL 发信链统一审计摘要.
+
+    同时跑草稿状态一致性 + 重复草稿审计。默认只在有异常/自动修复/写入失败时发一张卡；
+    无异常静默。不会触发邮件发送。
+    """
+    _check_auth(authorization)
+    try:
+        return {"ok": True, **(await kol_audit_digest.run(
+            dry_run=dry_run,
+            auto_fix=auto_fix,
+            notify=notify,
+            notify_clean=notify_clean,
+            notify_report_only=notify_report_only,
+            sample_limit=sample_limit))}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/kol-audit/digest/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 
