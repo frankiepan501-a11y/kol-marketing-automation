@@ -343,6 +343,8 @@ CLASSIFY_PROMPT = """你是跨境电商(游戏配件 POWKONG/FUNLAB)客服分诊
 2. 供应商/B2B/合作/分销 询盘 → is_cs=false, route=B2B群.
 3. 营销推广/SEO外链/平台系统通知/纯垃圾 → is_cs=false, route=忽略.
 4. 纯寒暄/致谢/确认收到/无实际问题或诉求的对话碎片(尤其 Discord 闲聊) → is_cs=false, route=忽略.
+   Discord 降噪: 只有 "same issue" / "did anyone solve this" / "any update" / "thanks" 等跟帖碎片,
+   且没有订单号、产品型号、个人故障细节、明确售后诉求时, 不要单独建客服工单; 只有能看出独立客户诉求时才 is_cs=true.
 
 【公司售后政策 v1 (2026-06-26 Frankie 拍板) — draft_reply 必须严格遵守, 禁止"待确认/TBD/占位"】
 - 质保期: 统一 12 个月(霍尔摇杆款可称 18 个月)。

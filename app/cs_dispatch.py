@@ -41,7 +41,7 @@ NE_SMTP = os.environ.get("NETEASE_SMTP_HOST", "smtp.qiye.163.com")
 # 占位符黑名单 — 发送前扫描, 命中即拦截(防把"待确认/[TBD]"发给客户)
 _PLACEHOLDER_BLACKLIST = [
     "待确认", "待填", "占位", "tbd", "[carrier", "[tracking", "[address",
-    "[price", "[eta", "[quantity", "[xxx", "<placeholder",
+    "[price", "[eta", "[quantity", "[xxx", "[your name", "[link", "<placeholder",
 ]
 _PLACEHOLDER_RE = re.compile(r"[\[【][^\]】]{0,30}(待确认|待填|占位|tbd|placeholder)[^\]】]{0,30}[\]】]", re.I)
 # 销售平台→运营 的 open_id(聪哥1号 namespace); 兜底/待定 → 降级 Frankie
@@ -114,11 +114,97 @@ async def _send_card(union_id: str, card: dict) -> str:
     return d.get("data", {}).get("message_id", "") if d.get("code") == 0 else ""
 
 
+async def _update_card(message_id: str, card: dict) -> bool:
+    """Update a CS assistant card with the same app that sent it.
+
+    Card action feedback must be visible on the original card; toast alone is too
+    easy to miss when operators handle multiple tickets in one chat.
+    """
+    if not message_id:
+        return False
+    try:
+        tok = await _token()
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            r = await c.patch(f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}",
+                              headers={"Authorization": f"Bearer {tok}"},
+                              json={"content": json.dumps(card, ensure_ascii=False)})
+            d = r.json()
+        return d.get("code") == 0
+    except Exception as e:
+        print(f"[cs_dispatch._update_card] {message_id} fail: {e}")
+        return False
+
+
 def _x(f: dict, key: str) -> str:
     v = f.get(key)
     if isinstance(v, list) and v:
         return v[0].get("text", "") if isinstance(v[0], dict) else str(v[0])
     return v if isinstance(v, str) else ("" if v is None else str(v))
+
+
+def _short(s: str, n: int = 80) -> str:
+    s = re.sub(r"\s+", " ", (s or "").strip())
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def _ticket_id(f: dict, rid: str = "") -> str:
+    return _x(f, "工单ID") or rid or "未知工单"
+
+
+def _card_message_id(event: dict, f: dict) -> str:
+    """Best-effort extraction for card.action.trigger open message id.
+
+    n8n forwarding variants have appeared in different workflows, so keep this
+    defensive and fall back to the message id stored on the ticket row.
+    """
+    candidates = [
+        event.get("message_id"),
+        event.get("open_message_id"),
+        event.get("card_open_message_id"),
+        (event.get("message") or {}).get("message_id"),
+        (event.get("context") or {}).get("open_message_id"),
+        (event.get("context") or {}).get("message_id"),
+        _x(f, "卡片消息ID"),
+    ]
+    for mid in candidates:
+        if isinstance(mid, str) and mid.strip():
+            return mid.strip()
+    return ""
+
+
+def _ticket_info_md(rid: str, f: dict, status_label: str = "待处理") -> str:
+    brand = _x(f, "品牌")
+    product = _x(f, "产品") or "未识别"
+    platform = _x(f, "销售平台")
+    channel = _x(f, "渠道")
+    customer = _x(f, "客户标识")
+    order = _x(f, "订单号")
+    operator = _x(f, "分配运营") or "未定"
+    ticket = _ticket_id(f, rid)
+    lines = [
+        f"**工单ID:** `{ticket}`  ·  **处理状态:** {status_label}",
+        f"**渠道:** {channel}  ·  **品牌:** {brand}  ·  **产品:** {product}  ·  **平台:** {platform}",
+        f"**客户:** {customer}" + (f"  ·  **订单:** {order}" if order else ""),
+        f"**当前负责人:** {operator}",
+    ]
+    return "\n".join(lines)
+
+
+def _build_result_card(rid: str, f: dict, template: str, status_label: str,
+                       title_prefix: str, result: str, detail: str = "") -> dict:
+    ticket = _ticket_id(f, rid)
+    customer = _short(_x(f, "客户标识"), 36)
+    content = _ticket_info_md(rid, f, status_label)
+    if result:
+        content += f"\n\n**处理结果:** {result}"
+    if detail:
+        content += f"\n**说明:** {detail}"
+    content += "\n\n_此卡片已更新，按钮已移除；同一工单不用重复处理。_"
+    return {"config": {"wide_screen_mode": True},
+            "header": {"template": template,
+                       "title": {"tag": "plain_text",
+                                 "content": f"{title_prefix} {ticket} · {customer}"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": content}}]}
 
 
 def _build_card(rid: str, f: dict) -> dict:
@@ -127,7 +213,9 @@ def _build_card(rid: str, f: dict) -> dict:
     summary = _x(f, "客诉摘要"); operator = _x(f, "分配运营") or "未定"
     conf = _x(f, "AI置信度"); ctype = _x(f, "客诉类型")
     draft = (_x(f, "AI草稿") or "(无 AI 草稿)")[:2000]
-    info = (f"**渠道:** {channel}  ·  **品牌:** {brand}  ·  **平台:** {platform}\n"
+    ticket = _ticket_id(f, rid)
+    info = (f"**工单ID:** `{ticket}`  ·  **处理状态:** 待处理\n"
+            f"**渠道:** {channel}  ·  **品牌:** {brand}  ·  **平台:** {platform}\n"
             f"**客户:** {customer}" + (f"  ·  **订单:** {order}" if order else "") + "\n"
             f"**类型:** {ctype or '-'}  ·  **置信度:** {conf}  ·  **建议派给:** {operator}\n"
             f"**客诉:** {summary}")
@@ -142,20 +230,22 @@ def _build_card(rid: str, f: dict) -> dict:
              "label": {"tag": "plain_text", "content": "✍️ 如需修改：输入最终回复（留空=用上方草稿）"},
              "placeholder": {"tag": "plain_text", "content": "留空则用上方 AI 草稿；要改就在此输入"}},
             {"tag": "button", "action_type": "form_submit", "name": "send", "type": "primary",
-             "text": {"tag": "plain_text", "content": "✅ 发送回复"},
+             "text": {"tag": "plain_text", "content": "✅ 发送回复给客户"},
              "value": {"act": "send_reply", "rid": rid}},
         ]},
         {"tag": "action", "actions": [
-            {"tag": "button", "text": {"tag": "plain_text", "content": "🔁 改派"},
+            {"tag": "button", "text": {"tag": "plain_text", "content": "🔁 改派给其他负责人"},
              "value": {"act": "reassign", "rid": rid}},
-            {"tag": "button", "text": {"tag": "plain_text", "content": "⬆️ 升级"},
+            {"tag": "button", "text": {"tag": "plain_text", "content": "⬆️ 升级给Frankie"},
              "value": {"act": "escalate", "rid": rid}},
         ]},
+        {"tag": "note", "elements": [{"tag": "plain_text",
+                                      "content": "按钮说明：发送=直接回客户；改派=通知负责人重新分配，不回客户；升级=红线/无法判断时交Frankie，不回客户。"}]},
     ]
     if CS_REPLY_DRY_RUN_TO:
         note = "🧪 DRY-RUN 验证中：点「发送回复」会改发测试邮箱（真客户/频道不会收到），用于核对内容完整"
     elif CS_REPLY_LIVE:
-        note = "✅ 点「发送回复」将直接回复到客户原渠道（邮箱串原 thread / Discord 回原频道）"
+        note = "✅ 点「发送回复」将直接回复到客户原渠道；提交后本卡会变成已提交/已回复状态，按钮消失"
     elif OBSERVE:
         note = "🔎 观察期：全部卡片暂发你一人；点按钮暂不真回客户，仅供你校准路由/草稿质量"
     else:
@@ -163,7 +253,8 @@ def _build_card(rid: str, f: dict) -> dict:
     elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
     return {"config": {"wide_screen_mode": True},
             "header": {"template": "orange",
-                       "title": {"tag": "plain_text", "content": f"🟠 [客服·待回] {brand} · {product} · {platform}"}},
+                       "title": {"tag": "plain_text",
+                                 "content": f"🟠 [客服·待回] {ticket} · {brand} · {product} · {platform}"}},
             "elements": elements}
 
 
@@ -384,23 +475,47 @@ def _spawn(coro):
     t.add_done_callback(_bg_tasks.discard)
 
 
-async def _escalate_async(rid: str, tag: str, summary: str):
+async def _escalate_async(rid: str, f: dict, tag: str, summary: str, msg_id: str = ""):
     try:
         await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                          {"fields": {"状态": "已升级"}}, which="notify")
         await _notify_frankie(f"⬆️ 工单升级\n{tag}\n{summary}")
+        await _update_card(msg_id, _build_result_card(
+            rid, f, "purple", "已升级",
+            "⬆️ [客服·已升级]",
+            "已通知 Frankie/负责人介入；当前负责人不用继续处理这张卡。",
+            "适用于退款 >$150、法律/A-to-z/差评威胁、疑似欺诈、政策未覆盖等红线。"
+        ))
     except Exception as e:
         print(f"[cs_dispatch._escalate_async] rid={rid} err={e}")
+        await _update_card(msg_id, _build_result_card(
+            rid, f, "red", "升级失败",
+            "❌ [客服·升级失败]",
+            f"升级通知失败：{str(e)[:120]}",
+            "请稍后重试，或手动联系 Frankie。"
+        ))
 
 
-async def _reassign_async(tag: str, op: str, summary: str):
+async def _reassign_async(rid: str, f: dict, tag: str, op: str, summary: str, msg_id: str = ""):
     try:
         await _notify_frankie(f"🔁 改派请求（原派 {op}）\n{tag}\n{summary}")
+        await _update_card(msg_id, _build_result_card(
+            rid, f, "blue", "已请求改派",
+            "🔁 [客服·已请求改派]",
+            "已通知 Frankie/负责人重新分配；当前负责人不用在这张卡上回客户。",
+            "改派只改变负责人，不会回复客户。"
+        ))
     except Exception as e:
         print(f"[cs_dispatch._reassign_async] err={e}")
+        await _update_card(msg_id, _build_result_card(
+            rid, f, "red", "改派失败",
+            "❌ [客服·改派失败]",
+            f"改派通知失败：{str(e)[:120]}",
+            "请稍后重试，或手动联系 Frankie。"
+        ))
 
 
-async def _send_async(rid: str, f: dict, reply: str, event: dict):
+async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = ""):
     """后台真发(不阻塞卡片回调, 防飞书 3s timeout)。成功回写工单台 + 保留 _recent 防重发;
     失败 → 清 _recent(放行重试) + IM 通知操作人+Frankie。"""
     op_union = ((event.get("operator", {}) or {}).get("union_id") or "")
@@ -409,17 +524,41 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict):
     try:
         ok, detail = await _dispatch_reply(f, reply)
         if not ok:
+            await _update_card(msg_id, _build_result_card(
+                rid, f, "red", "发送失败",
+                "❌ [客服·发送失败]",
+                f"未发给客户：{detail}",
+                "请修正后重试，或在原渠道手动回复。"
+            ))
             for u in {op_union, OBSERVE_UNION} - {""}:
                 await _notify_union(u, f"❌ 客服回复发送失败\n{tag}\n原因: {detail}\n请重试或在原渠道手动回复。")
             return
         success = True
         if CS_REPLY_DRY_RUN_TO:
+            await _update_card(msg_id, _build_result_card(
+                rid, f, "blue", "DRY-RUN已提交",
+                "🧪 [客服·DRY-RUN已提交]",
+                detail,
+                "真客户/Discord 频道未收到；工单状态保持不变，验证 raw 完整后再开 LIVE。"
+            ))
             return  # dry-run: 不改真工单状态(但保留 _recent 防 5min 内重复测试)
         await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                          {"fields": {"最终回复": reply[:5000], "状态": "已回复",
                                      "回复时间": int(time.time() * 1000),
                                      "回复人": _operator_label(event)}}, which="notify")
+        await _update_card(msg_id, _build_result_card(
+            rid, f, "green", "已回复",
+            "✅ [客服·已回复]",
+            f"已发送给客户：{detail}",
+            "不用再处理这张卡；重复点击会被系统拦截。"
+        ))
     except Exception as e:
+        await _update_card(msg_id, _build_result_card(
+            rid, f, "red", "发送异常",
+            "❌ [客服·发送异常]",
+            f"发送异常：{str(e)[:120]}",
+            "请重试或在原渠道手动回复。"
+        ))
         for u in {op_union, OBSERVE_UNION} - {""}:
             await _notify_union(u, f"❌ 客服回复发送异常\n{tag}\n{str(e)[:160]}\n请重试或在原渠道手动回复。")
     finally:
@@ -445,20 +584,45 @@ async def handle_callback(event: dict) -> dict:
     except Exception:
         f = {}
     tag = f"{_x(f, '品牌')}·{_x(f, '销售平台')}·{_x(f, '客户标识')}"
+    msg_id = _card_message_id(event, f)
 
     if act == "escalate":
         # 去重(防飞书回调 timeout 重试重复通知 Frankie): 已升级 / 5min 内已升过 → 拦下
         if _x(f, "状态") == "已升级" or _recent_seen(f"{rid}:esc"):
+            _spawn(_update_card(msg_id, _build_result_card(
+                rid, f, "purple", "已升级",
+                "⬆️ [客服·已升级]",
+                "该工单已升级过，无需重复点击。",
+                "当前负责人不用继续处理这张卡。"
+            )))
             return _toast("该工单已升级 ✓ 无需重复")
         _recent[f"{rid}:esc"] = time.time()
-        _spawn(_escalate_async(rid, tag, _x(f, "客诉摘要")))  # 异步, 立即返回防 timeout
-        return _toast("已升级给负责人 ✓")
+        _spawn(_update_card(msg_id, _build_result_card(
+            rid, f, "purple", "升级提交中",
+            "⬆️ [客服·升级提交中]",
+            "正在通知 Frankie/负责人；这张卡不用继续回客户。",
+            "升级不会回复客户。"
+        )))
+        _spawn(_escalate_async(rid, f, tag, _x(f, "客诉摘要"), msg_id))  # 异步, 立即返回防 timeout
+        return _toast("已升级给 Frankie/负责人 ✓")
 
     if act == "reassign":
         if _recent_seen(f"{rid}:rea"):
+            _spawn(_update_card(msg_id, _build_result_card(
+                rid, f, "blue", "已请求改派",
+                "🔁 [客服·已请求改派]",
+                "已提交过改派请求，无需重复点击。",
+                "改派不会回复客户，等待负责人重新分配。"
+            )))
             return _toast("已通知改派 ✓ 无需重复")
         _recent[f"{rid}:rea"] = time.time()
-        _spawn(_reassign_async(tag, _x(f, "分配运营"), _x(f, "客诉摘要")))
+        _spawn(_update_card(msg_id, _build_result_card(
+            rid, f, "blue", "改派提交中",
+            "🔁 [客服·改派提交中]",
+            "正在通知 Frankie/负责人重新分配；这张卡不用继续回客户。",
+            "改派不会回复客户。"
+        )))
+        _spawn(_reassign_async(rid, f, tag, _x(f, "分配运营"), _x(f, "客诉摘要"), msg_id))
         return _toast("已通知负责人改派 ✓")
 
     if act == "send_reply":
@@ -472,9 +636,22 @@ async def handle_callback(event: dict) -> dict:
             return _toast(f"回复含未替换占位符「{ph}」，请改完再发", "error")
         # 🚨 去重①(内存即时): 正在发送中 / 刚发完 5min 内(防 bitable 读后写延迟漏判) → 拦下
         if rid in _inflight or _recent_seen(rid):
+            _spawn(_update_card(msg_id, _build_result_card(
+                rid, f, "green", "已提交/处理中",
+                "✅ [客服·已提交]",
+                "该工单正在发送或刚已发送，请勿重复点击。",
+                "稍候查看工单台状态；成功后会显示已回复。"
+            )))
             return _toast("该回复正在发送或刚已发送，请勿重复点击")
         # 🚨 去重②(持久): 工单已终态(已回复/已解决/已升级) → 跨进程/重启/超 5min 兜底
         if _x(f, "状态") in ("已回复", "已解决", "已升级"):
+            _spawn(_update_card(msg_id, _build_result_card(
+                rid, f, "green" if _x(f, "状态") in ("已回复", "已解决") else "purple",
+                _x(f, "状态"),
+                f"✅ [客服·{_x(f, '状态')}]",
+                "该工单已经处理过，无需重复发送。",
+                "如果客户又有新消息，会生成新工单/新卡片。"
+            )))
             return _toast("该工单已处理 ✓ 无需重复发送")
 
         # 闭环未开 且 未开 DRY-RUN → 旧行为: 只记录(快, 同步)
@@ -482,12 +659,24 @@ async def handle_callback(event: dict) -> dict:
             _recent[rid] = time.time()
             await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                              {"fields": {"最终回复": reply[:5000], "状态": "已回复"}}, which="notify")
+            _spawn(_update_card(msg_id, _build_result_card(
+                rid, f, "green", "已记录回复",
+                "✅ [客服·已记录回复]",
+                "系统已记录最终回复。",
+                "当前未开启真实发送闭环，请按提示在原渠道手动回复客户。"
+            )))
             return _toast("已记录回复 ✓ 发送闭环灰度中，请暂在原渠道发给客户")
 
         # DRY-RUN 或 LIVE → 异步真发(立即返回 toast, 防飞书卡片回调 >3s timeout+重试导致重复发送)
         _inflight.add(rid)
         _recent[rid] = time.time()  # 立即标记, 防 bitable 读后写延迟下的重复
-        t = asyncio.create_task(_send_async(rid, f, reply, event))
+        _spawn(_update_card(msg_id, _build_result_card(
+            rid, f, "green", "发送提交中",
+            "✅ [客服·发送提交中]",
+            "已收到操作，正在发送给客户。",
+            "按钮已移除，防止同一工单重复处理。"
+        )))
+        t = asyncio.create_task(_send_async(rid, f, reply, event, msg_id))
         _bg_tasks.add(t)
         t.add_done_callback(_bg_tasks.discard)
         if CS_REPLY_DRY_RUN_TO:
