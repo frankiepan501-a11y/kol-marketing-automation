@@ -18,10 +18,15 @@ log = logging.getLogger("weekly_report")
 
 
 def _resolve_week(start_date=None, end_date=None):
-    """默认上一完整周 (上周一 ~ 上周日)."""
-    today = datetime.date.today()
+    """默认上一完整周 (上周一 ~ 上周日).
+
+    使用北京时间 (UTC+8) 而非服务端 UTC, 避免周一 00:00 BJ 触发时
+    服务端还在周日 → 算成两周前 (off-by-one).
+    """
     if end_date and start_date:
         return start_date, end_date
+    BJ = datetime.timezone(datetime.timedelta(hours=8))
+    today = datetime.datetime.now(BJ).date()
     last_sun = today - datetime.timedelta(days=today.weekday() + 1)  # 上周日
     last_mon = last_sun - datetime.timedelta(days=6)  # 上周一
     return last_mon, last_sun
