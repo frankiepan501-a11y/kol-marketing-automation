@@ -4,6 +4,7 @@
 import asyncio
 import os
 import time
+import uuid
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
@@ -18,6 +19,8 @@ app = FastAPI(title="KOL Marketing Automation", version="0.2")
 # Endpoint 失败告警 dedup: {endpoint: last_alert_ts} (60 min 内同 endpoint 只告 1 次)
 _alert_last = {}
 _ALERT_COOLDOWN = 3600
+_b2b_mail_jobs = {}
+_B2B_MAIL_JOB_TTL = 24 * 3600
 
 
 def _check_auth(auth: str):
@@ -74,6 +77,56 @@ async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
         print(f"[_alert_endpoint_failure] {endpoint} self-alert fail: {e}")
 
 
+def _cleanup_b2b_mail_jobs():
+    now = time.time()
+    for job_id in list(_b2b_mail_jobs.keys()):
+        started = _b2b_mail_jobs[job_id].get("started_ts", 0)
+        if started and now - started > _B2B_MAIL_JOB_TTL:
+            _b2b_mail_jobs.pop(job_id, None)
+
+
+def _running_b2b_mail_job():
+    _cleanup_b2b_mail_jobs()
+    for job_id, job in _b2b_mail_jobs.items():
+        if job.get("status") == "running":
+            return job_id, job
+    return "", None
+
+
+def _compact_b2b_result(result: dict) -> dict:
+    keep = [
+        "ok", "commit", "notify", "since", "accounts", "account_errors",
+        "events", "customer_groups_with_inbound", "unreplied_or_pending",
+        "risk_counts", "status_counts", "sync", "eligible_count",
+        "eligible_preview", "message_id", "wu_message_id", "notify_errors",
+        "marked_sent",
+    ]
+    return {k: result.get(k) for k in keep if k in result}
+
+
+async def _run_b2b_mail_job(job_id: str, commit: bool, notify: bool, limit: int, days: int):
+    try:
+        result = await b2b_mail_reminder.run(commit=commit, notify=notify, limit=limit, days=days)
+        _b2b_mail_jobs[job_id].update(
+            status="success",
+            finished_at=datetime_now_string(),
+            result=_compact_b2b_result({"ok": True, **result}),
+        )
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        _b2b_mail_jobs[job_id].update(
+            status="error",
+            finished_at=datetime_now_string(),
+            error=str(e),
+            trace=tr,
+        )
+        await _alert_endpoint_failure("/b2b-mail-reminder/run", str(e), tr)
+
+
+def datetime_now_string():
+    return time.strftime("%Y-%m-%d %H:%M:%S%z")
+
+
 @app.get("/")
 async def root():
     return {"service": "kol-marketing-automation", "status": "up"}
@@ -88,14 +141,35 @@ async def health():
 async def run_b2b_mail_reminder(authorization: str = Header(default=""),
                                 commit: bool = False,
                                 notify: bool = False,
+                                async_mode: bool = False,
                                 limit: int = 10,
                                 days: int = 30):
     """B2B 外贸邮箱跟进提醒.
 
     默认 dry-run 只扫描/计算不写表; n8n 生产定时使用
-    ?commit=true&notify=true 写 B2B 提醒表并向 B2B 群发 App3 交互卡。
+    ?commit=true&notify=true&async_mode=true 后台写 B2B 提醒表并向 B2B 群发 App3 交互卡。
     """
     _check_auth(authorization)
+    if async_mode:
+        running_id, running_job = _running_b2b_mail_job()
+        if running_job:
+            return {
+                "ok": True,
+                "accepted": True,
+                "already_running": True,
+                "job_id": running_id,
+                "status": running_job.get("status"),
+                "started_at": running_job.get("started_at"),
+            }
+        job_id = "b2bmail-" + uuid.uuid4().hex[:12]
+        _b2b_mail_jobs[job_id] = {
+            "status": "running",
+            "started_ts": time.time(),
+            "started_at": datetime_now_string(),
+            "params": {"commit": commit, "notify": notify, "limit": limit, "days": days},
+        }
+        asyncio.create_task(_run_b2b_mail_job(job_id, commit, notify, limit, days))
+        return {"ok": True, "accepted": True, "already_running": False, "job_id": job_id}
     try:
         result = await b2b_mail_reminder.run(commit=commit, notify=notify, limit=limit, days=days)
         return {"ok": True, **result}
@@ -103,6 +177,17 @@ async def run_b2b_mail_reminder(authorization: str = Header(default=""),
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/b2b-mail-reminder/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.get("/b2b-mail-reminder/jobs/{job_id}")
+async def get_b2b_mail_reminder_job(job_id: str, authorization: str = Header(default="")):
+    """B2B 邮件提醒后台 job 状态查询（进程内 24h 缓存）。"""
+    _check_auth(authorization)
+    _cleanup_b2b_mail_jobs()
+    job = _b2b_mail_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    return {"ok": True, "job_id": job_id, **job}
 
 
 @app.post("/reply-monitor/run")

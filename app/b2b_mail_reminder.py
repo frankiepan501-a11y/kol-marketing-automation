@@ -34,6 +34,7 @@ B2B_REMINDER_VIEW = os.environ.get("B2B_REMINDER_VIEW", "vew4j62x5G")
 B2B_MAIL_ACCOUNT_BASE = os.environ.get("B2B_MAIL_ACCOUNT_BASE", "NBM2bRFugaxLnjs8UUmc6iV0n8c")
 B2B_MAIL_ACCOUNT_TABLE = os.environ.get("B2B_MAIL_ACCOUNT_TABLE", "tblJKzaKAH2O3Rop")
 B2B_GROUP_CHAT_ID = os.environ.get("B2B_GROUP_CHAT_ID", "oc_2e878553984592d7396401fdd6a37d61")
+B2B_WU_NOTIFY_CHAT_ID = os.environ.get("B2B_WU_NOTIFY_CHAT_ID", "oc_19d06fe15e949a50d860c8b8c73cbd10")
 
 DEFAULT_TARGET_ACCOUNTS = {
     "silvia.wu@powkong.com": "吴晓丹",
@@ -1023,16 +1024,22 @@ def _build_row_elements(row: dict) -> list[dict]:
     ]
 
 
-def _build_card(rows: list[dict]) -> dict:
+def _build_card(rows: list[dict], *, escalation_copy: bool = False) -> dict:
     level = "P0" if any(r["status"] == "24h待升级" for r in rows) else "P1"
     emoji = {"P0": "🔴", "P1": "🟠"}[level]
-    title = f"{emoji} [CUS·{level}] B2B邮件跟进回执 · {len(rows)}条"
+    title_text = "B2B邮件24h升级确认" if escalation_copy else "B2B邮件跟进回执"
+    title = f"{emoji} [CUS·{level}] {title_text} · {len(rows)}条"
+    intro = (
+        "以下客户邮件已超过 24h 未见邮件回复，请与对应负责人确认；若已在微信/WhatsApp等渠道跟进，请在卡片填写回执。"
+        if escalation_copy
+        else "请在今天处理客户邮件；若已在微信/WhatsApp等渠道跟进，请在卡片填写回执，系统后续不再重复提醒。"
+    )
     elements = [
         {
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": "请在今天处理客户邮件；若已在微信/WhatsApp等渠道跟进，请在卡片填写回执，系统后续不再重复提醒。",
+                "content": intro,
             },
         }
     ]
@@ -1119,13 +1126,22 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
     sync = await _sync_rows(rows, existing, commit=commit)
 
     message_id = ""
+    wu_message_id = ""
     marked_sent = []
+    notify_errors = []
     eligible = []
     if commit:
         eligible = await _eligible_rows(limit)
         if notify and eligible:
             card = _build_card(eligible)
             message_id = await feishu.send_card_via_app3("chat_id", B2B_GROUP_CHAT_ID, card)
+            escalation_rows = [row for row in eligible if row["status"] == "24h待升级"]
+            if escalation_rows and B2B_WU_NOTIFY_CHAT_ID:
+                try:
+                    wu_card = _build_card(escalation_rows, escalation_copy=True)
+                    wu_message_id = await feishu.send_card_via_app3("chat_id", B2B_WU_NOTIFY_CHAT_ID, wu_card)
+                except Exception as exc:
+                    notify_errors.append(f"吴晓丹升级抄送失败: {type(exc).__name__}: {str(exc)[:200]}")
             marked_sent = await _mark_card_sent(eligible)
 
     summary = {
@@ -1154,6 +1170,8 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
             for r in eligible[:10]
         ],
         "message_id": message_id,
+        "wu_message_id": wu_message_id,
+        "notify_errors": notify_errors,
         "marked_sent": marked_sent,
     }
     return summary
