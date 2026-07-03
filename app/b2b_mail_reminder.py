@@ -34,7 +34,8 @@ B2B_REMINDER_VIEW = os.environ.get("B2B_REMINDER_VIEW", "vew4j62x5G")
 B2B_MAIL_ACCOUNT_BASE = os.environ.get("B2B_MAIL_ACCOUNT_BASE", "NBM2bRFugaxLnjs8UUmc6iV0n8c")
 B2B_MAIL_ACCOUNT_TABLE = os.environ.get("B2B_MAIL_ACCOUNT_TABLE", "tblJKzaKAH2O3Rop")
 B2B_GROUP_CHAT_ID = os.environ.get("B2B_GROUP_CHAT_ID", "oc_2e878553984592d7396401fdd6a37d61")
-B2B_WU_NOTIFY_CHAT_ID = os.environ.get("B2B_WU_NOTIFY_CHAT_ID", "oc_19d06fe15e949a50d860c8b8c73cbd10")
+B2B_WU_NOTIFY_UNION_ID = os.environ.get("B2B_WU_NOTIFY_UNION_ID", "on_854142cacab1e17fe75cb5622ed5112d")
+B2B_WU_NOTIFY_CHAT_ID = os.environ.get("B2B_WU_NOTIFY_CHAT_ID", "")
 
 DEFAULT_TARGET_ACCOUNTS = {
     "silvia.wu@powkong.com": "吴晓丹",
@@ -1136,10 +1137,13 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
             card = _build_card(eligible)
             message_id = await feishu.send_card_via_app3("chat_id", B2B_GROUP_CHAT_ID, card)
             escalation_rows = [row for row in eligible if row["status"] == "24h待升级"]
-            if escalation_rows and B2B_WU_NOTIFY_CHAT_ID:
+            if escalation_rows and (B2B_WU_NOTIFY_UNION_ID or B2B_WU_NOTIFY_CHAT_ID):
                 try:
                     wu_card = _build_card(escalation_rows, escalation_copy=True)
-                    wu_message_id = await feishu.send_card_via_app3("chat_id", B2B_WU_NOTIFY_CHAT_ID, wu_card)
+                    if B2B_WU_NOTIFY_UNION_ID:
+                        wu_message_id = await feishu.send_card_via_app3("union_id", B2B_WU_NOTIFY_UNION_ID, wu_card)
+                    else:
+                        wu_message_id = await feishu.send_card_via_app3("chat_id", B2B_WU_NOTIFY_CHAT_ID, wu_card)
                 except Exception as exc:
                     notify_errors.append(f"吴晓丹升级抄送失败: {type(exc).__name__}: {str(exc)[:200]}")
             marked_sent = await _mark_card_sent(eligible)
