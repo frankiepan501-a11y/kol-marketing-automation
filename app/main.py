@@ -13,8 +13,10 @@ from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
 from . import b2b_mail_reminder  # B2B 外贸邮箱跟进提醒(日 10:00, App3 回执卡)
+from . import invest  # 投资助手: X 帖子抓取 → A股观察映射 → 投资助手 App 推送
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
+app.include_router(invest.router)
 
 # Endpoint 失败告警 dedup: {endpoint: last_alert_ts} (60 min 内同 endpoint 只告 1 次)
 _alert_last = {}
