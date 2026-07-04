@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlparse
 
-from . import feishu
+from . import b2b_outreach_email, feishu
 
 BJ = timezone(timedelta(hours=8))
 
@@ -606,6 +606,7 @@ async def _handle_linkedin_receipt(payload: dict) -> dict:
     old_fields = rec.get("fields") or {}
     company = _text(old_fields.get("公司名称") or company_hint) or record_id
     old_note = _text(old_fields.get("备注"))
+    queue_result = None
     action_map = {
         "linkedin_connected": {
             "开发状态": "已加人",
@@ -621,10 +622,11 @@ async def _handle_linkedin_receipt(payload: dict) -> dict:
             "下一步行动": "3-5天未回复则转Email/官网表单；有回复则回执“已回复”。",
         },
         "linkedin_to_email": {
-            "开发状态": "已转Email",
-            "触达状态": "已发邮件",
+            "开发状态": "已转Email待发送",
+            "触达状态": "待发邮件",
             "触达渠道": ["LinkedIn", "Email"],
-            "下一步行动": "进入B2B邮件跟进提醒体系，等待邮件回复。",
+            "触达验证结果": "待验证",
+            "下一步行动": "已创建待发开发信任务；先 dry-run 给 Frankie 审核，确认后再真发。",
         },
         "linkedin_replied": {
             "开发状态": "已回复",
@@ -645,8 +647,16 @@ async def _handle_linkedin_receipt(payload: dict) -> dict:
     if not update:
         reply = "未知 LinkedIn 回执动作：" + action
         return {"ok": False, "reply": reply, "reply_result": await _send_reply(payload, reply)}
+    if action == "linkedin_to_email":
+        queue_result = await b2b_outreach_email.enqueue_from_linkedin(record_id, old_fields, actor=actor, note=note)
+        if queue_result.get("status") != "待发送":
+            update["下一步行动"] = (
+                "已创建开发信队列，但暂不能发送："
+                + (queue_result.get("error") or queue_result.get("status") or "待人工检查")
+            )
     update["最近LinkedIn动作时间"] = _now_ms()
-    update["最近触达时间"] = _now_ms()
+    if action != "linkedin_to_email":
+        update["最近触达时间"] = _now_ms()
     if not _text(old_fields.get("跟进人")):
         update["跟进人"] = actor
     line = f"{_now_text()} {actor}：{update['开发状态']}"
@@ -654,14 +664,20 @@ async def _handle_linkedin_receipt(payload: dict) -> dict:
         line += f"；{note}"
     update["备注"] = (old_note + "\n" + line).strip() if old_note else line
     await _update_record(B2B_LINKEDIN_TABLE, record_id, update)
+    queue_line = ""
+    if queue_result:
+        queue_line = (
+            f"\n开发信队列：{queue_result.get('status')} "
+            f"{queue_result.get('queue_url') or ''}"
+        )
     reply = (
         "LinkedIn回执已写入\n"
         f"公司：{company}\n"
         f"状态：{update['开发状态']}\n"
-        f"下一步：{update.get('下一步行动')}\n"
+        f"下一步：{update.get('下一步行动')}{queue_line}\n"
         f"记录：{_record_url(B2B_LINKEDIN_TABLE, record_id, B2B_LINKEDIN_VIEW)}"
     )
-    return {"ok": True, "record_id": record_id, "action": action, "fields": update, "reply": reply, "reply_result": await _send_reply(payload, reply)}
+    return {"ok": True, "record_id": record_id, "action": action, "fields": update, "queue": queue_result, "reply": reply, "reply_result": await _send_reply(payload, reply)}
 
 
 async def handle_event(payload: dict) -> dict:
