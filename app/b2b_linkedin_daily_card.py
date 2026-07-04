@@ -7,9 +7,13 @@ app.b2b_assistant.
 """
 import json
 import os
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 from . import feishu
+
+BJ = timezone(timedelta(hours=8))
 
 B2B_APP_TOKEN = os.environ.get("B2B_CUSTOMER_APP_TOKEN", "E1kkbx1tVaJvQGsKf94cJG88nzb")
 B2B_LINKEDIN_TABLE = os.environ.get("B2B_LINKEDIN_TABLE", "tblN8XszEatuTJgP")
@@ -46,6 +50,35 @@ LINKEDIN_FIELD_NAMES = [
     "CRM匹配状态",
     "邮箱",
     "邮箱验真状态",
+    "备注",
+]
+
+SUMMARY_FIELD_NAMES = [
+    "线索名称",
+    "公司名称",
+    "线索来源",
+    "开发状态",
+    "触达状态",
+    "公司官网",
+    "LinkedIn公司页",
+    "LinkedIn联系人页",
+    "联系人姓名",
+    "职位",
+    "国家/地区",
+    "公司类型",
+    "主力渠道",
+    "代理竞品",
+    "主营类目",
+    "AI开发评分",
+    "ICP匹配",
+    "AI建议等级",
+    "AI开发理由",
+    "跟进人",
+    "CRM匹配状态",
+    "邮箱",
+    "邮箱验真状态",
+    "创建批次",
+    "Snov查询状态",
     "备注",
 ]
 
@@ -101,14 +134,15 @@ def _card_action(record_id: str, action: str, company: str) -> dict:
     }
 
 
-async def _list_records(*, field_names: list[str] | None = None) -> list[dict]:
+async def _list_records(*, field_names: list[str] | None = None, automatic_fields: bool = False) -> list[dict]:
     items: list[dict] = []
     page_token = ""
     encoded_fields = ""
     if field_names:
         encoded_fields = "&field_names=" + quote(json.dumps(field_names, ensure_ascii=False), safe="")
+    auto = "&automatic_fields=true" if automatic_fields else ""
     while True:
-        path = f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{B2B_LINKEDIN_TABLE}/records?page_size=500{encoded_fields}"
+        path = f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{B2B_LINKEDIN_TABLE}/records?page_size=500{auto}{encoded_fields}"
         if page_token:
             path += "&page_token=" + quote(page_token, safe="")
         resp = await feishu.api("GET", path, which="bitable")
@@ -168,8 +202,11 @@ def _row_from_record(rec: dict) -> dict:
         "crm_match": _text(fields.get("CRM匹配状态")),
         "email": _text(fields.get("邮箱")),
         "email_status": _text(fields.get("邮箱验真状态")),
+        "batch": _text(fields.get("创建批次")),
+        "snov_status": _text(fields.get("Snov查询状态")),
         "note": _text(fields.get("备注")),
         "url": _record_url(record_id),
+        "created_time": int(rec.get("created_time") or 0),
     }
 
 
@@ -478,6 +515,154 @@ def _notify_target(owner: str, *, frankie_only: bool = False) -> tuple[str, str]
         except Exception as exc:
             print(f"[b2b_linkedin_daily_card] bad B2B_LINKEDIN_OWNER_NOTIFY_JSON: {exc}")
     return "chat_id", B2B_GROUP_CHAT_ID
+
+
+def _date_window_ms(day: str = "") -> tuple[int, int, str]:
+    if day:
+        base = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=BJ)
+    else:
+        now = datetime.now(BJ)
+        base = datetime(now.year, now.month, now.day, tzinfo=BJ)
+    end = base + timedelta(days=1)
+    return int(base.timestamp() * 1000), int(end.timestamp() * 1000), base.strftime("%Y-%m-%d")
+
+
+def _company_key(row: dict) -> str:
+    return (row.get("company") or row.get("title") or row.get("record_id") or "").strip().lower()
+
+
+def _top_counter_lines(counter: Counter, *, limit: int = 8) -> str:
+    if not counter:
+        return "-"
+    parts = [f"{name or '未填'} {count}" for name, count in counter.most_common(limit)]
+    rest = sum(counter.values()) - sum(count for _, count in counter.most_common(limit))
+    if rest > 0:
+        parts.append(f"其他 {rest}")
+    return " / ".join(parts)
+
+
+def _today_rows(rows: list[dict], *, start_ms: int, end_ms: int) -> list[dict]:
+    return [row for row in rows if start_ms <= int(row.get("created_time") or 0) < end_ms]
+
+
+def _build_pool_summary_card(
+    *,
+    day: str,
+    today_rows: list[dict],
+    all_eligible_rows: list[dict],
+    per_owner_limit: int,
+) -> dict:
+    company_keys = {_company_key(row) for row in today_rows if _company_key(row)}
+    new_company_count = len(company_keys)
+    new_record_count = len(today_rows)
+    new_dispatchable = [
+        row for row in today_rows
+        if row["dev_status"] in {"", "待开发"}
+        and row["reach_status"] in {"", "待触达"}
+        and (not row["crm_match"] or row["crm_match"] == "新线索")
+        and row["icp"] != "否"
+    ]
+    country_counts = Counter(row["country"] or "未填" for row in today_rows)
+    grade_counts = Counter(row["grade"] or "未评级" for row in today_rows)
+    crm_counts = Counter(row["crm_match"] or "未查重" for row in today_rows)
+    icp_counts = Counter(row["icp"] or "未判断" for row in today_rows)
+    batch_counts = Counter(row["batch"] or "未填批次" for row in today_rows)
+
+    grouped, queued, _stats = _assign_rows(all_eligible_rows, limit_per_owner=per_owner_limit)
+    queue_total = len(all_eligible_rows)
+    today_capacity = len(_dispatch_owners()) * per_owner_limit
+    today_dispatch = sum(len(rows) for rows in grouped.values())
+
+    top_samples = sorted(today_rows, key=lambda r: (-r["score"], r["company"]))[:10]
+    sample_lines = []
+    for row in top_samples:
+        sample_lines.append(
+            f"- {row['company']} · {row['country'] or '未填'} · {row['company_type'] or '类型待补'} · "
+            f"{row['grade'] or '未评级'} {row['score']:.0f}分"
+        )
+    samples = "\n".join(sample_lines) if sample_lines else "- 今日暂无新增入池"
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "green" if new_record_count else "grey",
+            "title": {"tag": "plain_text", "content": f"📥 LinkedIn线索入池日报 · {day}"},
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "fields": [
+                    _field("新增公司", str(new_company_count)),
+                    _field("新增线索", str(new_record_count)),
+                    _field("新增可派发", str(len(new_dispatchable))),
+                    _field("当前待派队列", str(queue_total)),
+                    _field("今日派发上限", f"{today_capacity} 条（{len(_dispatch_owners())}人×{per_owner_limit}）"),
+                    _field("今日预计派发", str(today_dispatch)),
+                ],
+            },
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "🌍 **国家/地区分布**\n" + _top_counter_lines(country_counts)}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "🏷 **AI等级分布**\n" + _top_counter_lines(grade_counts)}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "🔎 **查重 / ICP**\nCRM: " + _top_counter_lines(crm_counts, limit=5) + "\nICP: " + _top_counter_lines(icp_counts, limit=5)}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "🧾 **入池批次**\n" + _top_counter_lines(batch_counts, limit=5)}},
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "📌 **新增样例（按AI评分取前10）**\n" + samples}},
+            {
+                "tag": "note",
+                "elements": [
+                    {
+                        "tag": "plain_text",
+                        "content": "入池日报只汇报新增线索与队列情况，不代表已在 LinkedIn 加人或私信；业务执行以每日开发卡回执为准。",
+                    }
+                ],
+            },
+        ],
+    }
+
+
+async def run_pool_summary(
+    *,
+    commit: bool = False,
+    notify: bool = False,
+    day: str = "",
+    per_owner_limit: int = 5,
+    frankie_only: bool = False,
+) -> dict:
+    if notify and not commit:
+        raise ValueError("notify=true requires commit=true")
+    per_owner_limit = max(1, min(int(per_owner_limit or 5), 10))
+    start_ms, end_ms, day_label = _date_window_ms(day)
+    all_rows = [_row_from_record(rec) for rec in await _list_records(field_names=SUMMARY_FIELD_NAMES, automatic_fields=True)]
+    today = _today_rows(all_rows, start_ms=start_ms, end_ms=end_ms)
+    all_eligible = [row for row in all_rows if _eligible(row, include_test=False)]
+    card = _build_pool_summary_card(
+        day=day_label,
+        today_rows=today,
+        all_eligible_rows=all_eligible,
+        per_owner_limit=per_owner_limit,
+    )
+    message_id = ""
+    send_error = ""
+    if notify:
+        receive_type, receive_id = ("email", B2B_LINKEDIN_FRANKIE_EMAIL) if frankie_only else ("chat_id", B2B_GROUP_CHAT_ID)
+        try:
+            message_id = await feishu.send_card_via_b2b_assistant(receive_type, receive_id, card)
+        except Exception as exc:
+            send_error = f"{type(exc).__name__}: {str(exc)[:240]}"
+    country_counts = Counter(row["country"] or "未填" for row in today)
+    grade_counts = Counter(row["grade"] or "未评级" for row in today)
+    return {
+        "commit": commit,
+        "notify": notify,
+        "day": day_label,
+        "new_records": len(today),
+        "new_companies": len({_company_key(row) for row in today if _company_key(row)}),
+        "country_counts": dict(country_counts),
+        "grade_counts": dict(grade_counts),
+        "current_queue_total": len(all_eligible),
+        "message_id": message_id,
+        "send_error": send_error,
+    }
 
 
 async def run(

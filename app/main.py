@@ -246,6 +246,34 @@ async def run_b2b_linkedin_daily_card(authorization: str = Header(default=""),
         return {"ok": False, "error": str(e), "trace": tr}
 
 
+@app.post("/b2b-linkedin-pool-summary/run")
+async def run_b2b_linkedin_pool_summary(authorization: str = Header(default=""),
+                                        commit: bool = False,
+                                        notify: bool = False,
+                                        day: str = "",
+                                        per_owner_limit: int = 5,
+                                        frankie_only: bool = False):
+    """B2B LinkedIn 线索入池日报.
+
+    默认 dry-run 只返回当日新增统计; n8n 生产定时使用
+    ?commit=true&notify=true 发外贸群日报卡。
+    """
+    _check_auth(authorization)
+    try:
+        result = await b2b_linkedin_daily_card.run_pool_summary(
+            commit=commit,
+            notify=notify,
+            day=day,
+            per_owner_limit=per_owner_limit,
+            frankie_only=frankie_only,
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/b2b-linkedin-pool-summary/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
 @app.post("/reply-monitor/run")
 async def run_reply_monitor(authorization: str = Header(default="")):
     """扫 partner@ 收件箱新回复 → DeepSeek 分类 → 更新数据库 → 飞书通知 + 生成回复草稿"""
