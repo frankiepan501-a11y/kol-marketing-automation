@@ -176,21 +176,40 @@ class InvestAssistantTest(unittest.TestCase):
                 "reason": "先进封装映射。",
                 "risks": ["量产不确定"],
                 "pe_display": "108.09",
+                "price_display": "¥43.38",
+                "change_pct_display": "-8.46%",
+                "quote_as_of": "2026-07-04 13:31",
             }],
             "follow_up": ["跟踪TGV订单"],
         }
         card = invest._format_post_card(post, analysis, candidate_target=5, lookback_hours=30)
         text = str(card)
         self.assertIn("Alea单帖分析", text)
+        self.assertIn("📌", text)
+        self.assertIn("📈", text)
         self.assertIn("https://x.com/aleabitoreddit/status/456", text)
-        self.assertIn("PE(TTM) 108.09", text)
+        self.assertIn("¥43.38", text)
+        self.assertIn("-8.46%", text)
+        self.assertIn("PE(动) 108.09", text)
         self.assertIn("候选补全说明", text)
         self.assertIn("非投资建议", text)
 
     def test_format_pe_from_eastmoney_scaled_value(self):
         self.assertEqual("54.26", invest._format_pe(5426))
+        self.assertEqual("-95.42（亏损/为负）", invest._format_pe(-9542))
         self.assertEqual("", invest._format_pe(0))
         self.assertEqual("", invest._format_pe(None))
+
+    def test_market_quote_formatters(self):
+        self.assertEqual("¥43.38", invest._format_price(4338))
+        self.assertEqual("+0.96%", invest._format_pct(96))
+        self.assertEqual("-8.46%", invest._format_pct(-846))
+        self.assertEqual("¥43.38", invest._format_price_decimal("43.38"))
+        self.assertEqual("-2.36%", invest._format_pct_decimal("-2.36"))
+        self.assertEqual("54.26", invest._format_pe_decimal("54.26"))
+        self.assertEqual("-95.42（亏损/为负）", invest._format_pe_decimal("-95.42"))
+        self.assertEqual("sh600519", invest._tencent_symbol("600519"))
+        self.assertEqual("sz300308", invest._tencent_symbol("300308"))
 
 
 if __name__ == "__main__":

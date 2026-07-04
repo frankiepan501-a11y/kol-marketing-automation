@@ -177,43 +177,162 @@ def _eastmoney_secid(code: str) -> str:
     return f"0.{code}"
 
 
+def _scaled_float(raw: Any, *, scale: float = 100.0) -> float | None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value / scale
+
+
+def _format_price(raw: Any) -> str:
+    value = _scaled_float(raw)
+    if value is None or value <= 0:
+        return ""
+    return f"¥{value:.2f}"
+
+
+def _format_pct(raw: Any) -> str:
+    value = _scaled_float(raw)
+    if value is None:
+        return ""
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.2f}%"
+
+
 def _format_pe(raw: Any) -> str:
+    value = _scaled_float(raw)
+    if value is None or value == 0:
+        return ""
+    if value < 0:
+        return f"{value:.2f}（亏损/为负）"
+    return f"{value:.2f}"
+
+
+def _format_pe_decimal(raw: Any) -> str:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return ""
+    if value == 0:
+        return ""
+    if value < 0:
+        return f"{value:.2f}（亏损/为负）"
+    return f"{value:.2f}"
+
+
+def _format_price_decimal(raw: Any) -> str:
     try:
         value = float(raw)
     except (TypeError, ValueError):
         return ""
     if value <= 0:
         return ""
-    return f"{value / 100:.2f}"
+    return f"¥{value:.2f}"
 
 
-async def _fetch_one_pe(client: httpx.AsyncClient, code: str) -> tuple[str, dict[str, str]]:
+def _format_pct_decimal(raw: Any) -> str:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return ""
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.2f}%"
+
+
+def _format_quote_time(raw: Any) -> str:
+    try:
+        ts = int(raw)
+    except (TypeError, ValueError):
+        return ""
+    if ts <= 0:
+        return ""
+    try:
+        return datetime.fromtimestamp(ts, UTC).astimezone(BJ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return ""
+
+
+def _tencent_symbol(code: str) -> str:
+    code = (code or "").strip()
+    if code.startswith(("6", "9")):
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def _format_tencent_time(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if len(text) < 14:
+        return ""
+    try:
+        dt = datetime.strptime(text[:14], "%Y%m%d%H%M%S").replace(tzinfo=BJ)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return ""
+
+
+async def _fetch_one_tencent_quote(client: httpx.AsyncClient, code: str) -> tuple[str, dict[str, str]]:
     if not A_SHARE_CODE_RE.fullmatch(code or ""):
-        return code, {"pe": "", "name": "", "source": ""}
-    url = "https://push2.eastmoney.com/api/qt/stock/get"
+        return code, {"pe": "", "name": "", "price": "", "change_pct": "", "quote_time": "", "source": ""}
+    url = "https://qt.gtimg.cn/q=" + _tencent_symbol(code)
+    try:
+        r = await client.get(url)
+        if r.status_code >= 400:
+            return code, {"pe": "", "name": "", "price": "", "change_pct": "", "quote_time": "", "source": "tencent_error"}
+        text = r.content.decode("gbk", errors="ignore")
+        match = re.search(r'="(.*)"', text)
+        parts = match.group(1).split("~") if match else []
+        if len(parts) < 53:
+            return code, {"pe": "", "name": "", "price": "", "change_pct": "", "quote_time": "", "source": "tencent_error"}
+    except Exception:
+        return code, {"pe": "", "name": "", "price": "", "change_pct": "", "quote_time": "", "source": "tencent_error"}
+    return code, {
+        "pe": _format_pe_decimal(parts[52]),
+        "name": parts[1].strip(),
+        "price": _format_price_decimal(parts[3]),
+        "change_pct": _format_pct_decimal(parts[32]),
+        "quote_time": _format_tencent_time(parts[30]),
+        "source": "tencent_quote",
+    }
+
+
+async def _fetch_one_quote(client: httpx.AsyncClient, code: str) -> tuple[str, dict[str, str]]:
+    if not A_SHARE_CODE_RE.fullmatch(code or ""):
+        return code, {"pe": "", "name": "", "price": "", "change_pct": "", "quote_time": "", "source": ""}
+    url = "http://push2.eastmoney.com/api/qt/stock/get"
     params = {
         "secid": _eastmoney_secid(code),
-        "fields": "f57,f58,f162",
+        "fields": "f43,f57,f58,f86,f162,f170",
     }
     try:
         r = await client.get(url, params=params)
         if r.status_code >= 400:
-            return code, {"pe": "", "name": "", "source": "eastmoney_error"}
+            return await _fetch_one_tencent_quote(client, code)
         data = (r.json().get("data") or {})
     except Exception:
-        return code, {"pe": "", "name": "", "source": "eastmoney_error"}
+        return await _fetch_one_tencent_quote(client, code)
+    if not data:
+        return await _fetch_one_tencent_quote(client, code)
     return code, {
         "pe": _format_pe(data.get("f162")),
         "name": str(data.get("f58") or "").strip(),
-        "source": "eastmoney_f162",
+        "price": _format_price(data.get("f43")),
+        "change_pct": _format_pct(data.get("f170")),
+        "quote_time": _format_quote_time(data.get("f86")),
+        "source": "eastmoney_realtime",
     }
 
 
 async def enrich_candidates_with_pe(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     codes = sorted({str(c.get("code") or "").strip() for c in candidates if str(c.get("code") or "").strip()})
     pe_map: dict[str, dict[str, str]] = {}
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        results = await asyncio.gather(*(_fetch_one_pe(client, code) for code in codes), return_exceptions=True)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+        "Referer": "https://quote.eastmoney.com/",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    async with httpx.AsyncClient(timeout=15.0, headers=headers, trust_env=False) as client:
+        results = await asyncio.gather(*(_fetch_one_quote(client, code) for code in codes), return_exceptions=True)
     for item in results:
         if isinstance(item, Exception):
             continue
@@ -225,10 +344,14 @@ async def enrich_candidates_with_pe(candidates: list[dict[str, Any]]) -> list[di
         c = dict(raw)
         code = str(c.get("code") or "").strip()
         info = pe_map.get(code, {})
-        c["pe_ttm"] = info.get("pe") or ""
-        c["pe_display"] = c["pe_ttm"] or "PE待核对"
-        c["pe_source"] = info.get("source") or ""
-        c["pe_as_of"] = now_bj if c["pe_ttm"] else ""
+        c["pe_dynamic"] = info.get("pe") or ""
+        c["pe_display"] = c["pe_dynamic"] or "PE暂无"
+        c["latest_price"] = info.get("price") or ""
+        c["price_display"] = c["latest_price"] or "现价暂无"
+        c["change_pct"] = info.get("change_pct") or ""
+        c["change_pct_display"] = c["change_pct"] or "涨跌暂无"
+        c["market_source"] = info.get("source") or ""
+        c["quote_as_of"] = info.get("quote_time") or (now_bj if info.get("price") or info.get("pe") else "")
         if info.get("name") and not c.get("name"):
             c["name"] = info["name"]
         enriched.append(c)
@@ -506,6 +629,15 @@ def _bj_time_from_iso(value: str) -> str:
         return value
 
 
+def _action_icon(action: Any) -> str:
+    text = str(action or "")
+    if "加入" in text:
+        return "⭐"
+    if "暂不" in text:
+        return "⏸️"
+    return "👀"
+
+
 def _format_post_card(post: dict[str, Any], analysis: dict[str, Any], *,
                       candidate_target: int, lookback_hours: int) -> dict[str, Any]:
     post_time = _bj_time_from_iso(str(post.get("created_at") or ""))
@@ -515,15 +647,13 @@ def _format_post_card(post: dict[str, Any], analysis: dict[str, Any], *,
     theme_title = _safe_text(themes[0] if themes else "单帖分析", 18)
     title = f"🟡 [INVEST·P2] Alea单帖分析 · {theme_title} · {post_time}"
 
-    parts = [
-        f"**原帖**: [{post.get('id')}]({post.get('url')}) · {post_time}",
-        f"**目标账号**: [{TARGET_LABEL}]({TARGET_PROFILE_URL}) · **窗口**: 过去 {lookback_hours} 小时",
-        "",
-        f"**原帖摘要**: {_safe_text(analysis.get('post_summary') or analysis.get('summary'), 700)}",
-        f"**产业链推导**: {_safe_text(analysis.get('industry_chain'), 700)}",
+    meta_parts = [
+        f"🧵 **原帖**: [{post.get('id')}]({post.get('url')}) · {post_time}",
+        f"👤 **账号**: [{TARGET_LABEL}]({TARGET_PROFILE_URL})",
+        f"🕘 **窗口**: 过去 {lookback_hours} 小时",
     ]
     if themes:
-        parts.append("**主题**: " + " / ".join(_safe_text(x, 40) for x in themes[:6]))
+        meta_parts.append("🏷️ **主题**: " + " / ".join(_safe_text(x, 40) for x in themes[:6]))
     if us_tickers:
         tickers = []
         for item in us_tickers[:8]:
@@ -532,10 +662,18 @@ def _format_post_card(post: dict[str, Any], analysis: dict[str, Any], *,
             else:
                 tickers.append(str(item))
         if [x for x in tickers if x]:
-            parts.append("**涉及美股/海外标的**: " + ", ".join([x for x in tickers if x]))
-    parts.extend(["", f"**原帖摘录**: {_safe_text(post.get('text'), 500)}"])
+            meta_parts.append("🌎 **海外标的**: " + ", ".join([x for x in tickers if x]))
 
-    elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(parts)}}]
+    summary = _safe_text(analysis.get("post_summary") or analysis.get("summary"), 700)
+    chain = _safe_text(analysis.get("industry_chain"), 700)
+    quote = _safe_text(post.get("text"), 500)
+    elements = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(meta_parts)}},
+        {"tag": "hr"},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"📌 **原帖摘要**\n{summary}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"🧭 **产业链推导**\n{chain or '待补充'}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"📝 **原文摘录**\n{quote}"}},
+    ]
 
     if candidates:
         lines = []
@@ -544,35 +682,40 @@ def _format_post_card(post: dict[str, Any], analysis: dict[str, Any], *,
             name = c.get("name") or "公司待核对"
             action = c.get("action") or "观察"
             conf = c.get("confidence", "")
-            pe = c.get("pe_display") or c.get("pe_ttm") or "PE待核对"
+            price = c.get("price_display") or c.get("latest_price") or "现价暂无"
+            change = c.get("change_pct_display") or c.get("change_pct") or "涨跌暂无"
+            pe = c.get("pe_display") or c.get("pe_dynamic") or "PE暂无"
             reason = _safe_text(c.get("reason"), 260)
             risks = c.get("risks") or []
             risk_text = "；".join(_safe_text(x, 70) for x in risks[:3])
+            action_icon = _action_icon(action)
             lines.append(
-                f"{idx}. **{code} {name}** · PE(TTM) {pe} · {action} · 置信度 {conf}\n"
-                f"   - 逻辑: {reason}\n"
-                f"   - 风险: {risk_text or '待补充'}"
+                f"{idx}. {action_icon} **{code} {name}**｜{price}｜{change}｜PE(动) {pe}｜置信度 {conf}\n"
+                f"   - 🧠 逻辑: {reason}\n"
+                f"   - ⚠️ 风险: {risk_text or '待补充'}"
             )
         if len(candidates) < candidate_target:
             gap = analysis.get("candidate_gap") or f"本帖可验证候选不足 {candidate_target} 个，未强行补齐。"
-            lines.append(f"\n候选补全说明: {_safe_text(gap, 160)}")
+            lines.append(f"\n🧩 候选补全说明: {_safe_text(gap, 160)}")
         elements.extend([
             {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md", "content": "**A股候选观察（单帖）**\n" + "\n".join(lines)}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"📈 **A股候选观察（单帖，目标 {candidate_target} 只）**\n" + "\n".join(lines)}},
         ])
     else:
         elements.extend([
             {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md", "content": "**A股候选观察（单帖）**\n本帖没有足够明确的A股映射，建议不强行追。"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "📈 **A股候选观察（单帖）**\n本帖没有足够明确的A股映射，建议不强行追。"}},
         ])
 
     follow_up = analysis.get("follow_up") or []
     if follow_up:
         elements.append({
             "tag": "div",
-            "text": {"tag": "lark_md", "content": "**后续跟踪**\n" + "\n".join(f"- {_safe_text(x, 120)}" for x in follow_up[:6])},
+            "text": {"tag": "lark_md", "content": "🔎 **后续跟踪**\n" + "\n".join(f"- {_safe_text(x, 120)}" for x in follow_up[:6])},
         })
-    elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": "非投资建议，仅供研究观察；PE来自行情接口，代码与公司映射需盘前/盘后人工复核。"}]})
+    quote_times = sorted({str(c.get("quote_as_of") or "") for c in candidates if c.get("quote_as_of")})
+    quote_note = f"行情时间: {quote_times[-1]}；" if quote_times else ""
+    elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": f"{quote_note}股价/涨跌幅/PE(动)来自东方财富/腾讯实时行情。非投资建议，仅供研究观察；代码与公司映射需盘前/盘后人工复核。"}]})
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "yellow", "title": {"tag": "plain_text", "content": title}},
