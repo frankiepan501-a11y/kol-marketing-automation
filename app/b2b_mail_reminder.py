@@ -5,7 +5,7 @@ Daily cloud job:
 2. Scan inbox/sent/drafts/junk/trash for the last N days.
 3. Compare latest customer inbound mail with sent/draft follow-up.
 4. Sync the B2B reminder Bitable.
-5. Optionally send one Feishu App3 interactive receipt card to the B2B group.
+5. Optionally send one B2B Assistant interactive receipt card to the B2B group.
 
 All customer feedback/suppression state lives in the reminder table, not in repo
 JSON files. This keeps business data in Bitable and lets card callbacks suppress
@@ -1135,15 +1135,15 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
         eligible = await _eligible_rows(limit)
         if notify and eligible:
             card = _build_card(eligible)
-            message_id = await feishu.send_card_via_app3("chat_id", B2B_GROUP_CHAT_ID, card)
+            message_id = await feishu.send_card_via_b2b_assistant("chat_id", B2B_GROUP_CHAT_ID, card)
             escalation_rows = [row for row in eligible if row["status"] == "24h待升级"]
             if escalation_rows and (B2B_WU_NOTIFY_UNION_ID or B2B_WU_NOTIFY_CHAT_ID):
                 try:
                     wu_card = _build_card(escalation_rows, escalation_copy=True)
                     if B2B_WU_NOTIFY_UNION_ID:
-                        wu_message_id = await feishu.send_card_via_app3("union_id", B2B_WU_NOTIFY_UNION_ID, wu_card)
+                        wu_message_id = await feishu.send_card_via_b2b_assistant("union_id", B2B_WU_NOTIFY_UNION_ID, wu_card)
                     else:
-                        wu_message_id = await feishu.send_card_via_app3("chat_id", B2B_WU_NOTIFY_CHAT_ID, wu_card)
+                        wu_message_id = await feishu.send_card_via_b2b_assistant("chat_id", B2B_WU_NOTIFY_CHAT_ID, wu_card)
                 except Exception as exc:
                     notify_errors.append(f"吴晓丹升级抄送失败: {type(exc).__name__}: {str(exc)[:200]}")
             marked_sent = await _mark_card_sent(eligible)

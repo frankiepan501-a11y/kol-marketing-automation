@@ -30,6 +30,9 @@ FEISHU_NOTIFY_APP_SECRET = env("FEISHU_NOTIFY_APP_SECRET", required=True)
 # ⚠️ repo 公开, secret 只能走 env, 不硬编码默认值.
 FEISHU_APP3_ID = env("FEISHU_APP3_ID", required=True)
 FEISHU_APP3_SECRET = env("FEISHU_APP3_SECRET", required=True)
+# 外贸助手 App (B2B 客户/邮件/LinkedIn 回执卡; 回调回到 b2b-assistant-event)
+FEISHU_B2B_ASSISTANT_APP_ID = env("FEISHU_B2B_ASSISTANT_APP_ID", required=True)
+FEISHU_B2B_ASSISTANT_APP_SECRET = env("FEISHU_B2B_ASSISTANT_APP_SECRET", required=True)
 
 FEISHU_APP_TOKEN = env("FEISHU_APP_TOKEN", required=True)  # Bitable app token
 

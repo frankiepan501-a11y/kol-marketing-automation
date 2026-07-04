@@ -11,6 +11,8 @@ async def _refresh_token(which: str):
         aid, sec = config.FEISHU_BITABLE_APP_ID, config.FEISHU_BITABLE_APP_SECRET
     elif which == "app3":
         aid, sec = config.FEISHU_APP3_ID, config.FEISHU_APP3_SECRET
+    elif which == "b2b_assistant":
+        aid, sec = config.FEISHU_B2B_ASSISTANT_APP_ID, config.FEISHU_B2B_ASSISTANT_APP_SECRET
     else:
         aid, sec = config.FEISHU_NOTIFY_APP_ID, config.FEISHU_NOTIFY_APP_SECRET
     async with httpx.AsyncClient() as cli:
@@ -341,6 +343,22 @@ async def send_card_via_app3(receive_type: str, receive_id: str, card: dict) -> 
         "content": json.dumps(card, ensure_ascii=False),
     }
     resp = await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="app3")
+    return (resp.get("data") or {}).get("message_id") or ""
+
+
+async def send_card_via_b2b_assistant(receive_type: str, receive_id: str, card: dict) -> str:
+    """用外贸助手发 B2B 交互卡.
+
+    card.action.trigger 只回到发卡 App，所以外贸客户/邮件/LinkedIn 的新卡必须走
+    外贸助手，对应 n8n webhook path 为 b2b-assistant-event。
+    """
+    import json
+    body = {
+        "receive_id": receive_id,
+        "msg_type": "interactive",
+        "content": json.dumps(card, ensure_ascii=False),
+    }
+    resp = await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="b2b_assistant")
     return (resp.get("data") or {}).get("message_id") or ""
 
 
