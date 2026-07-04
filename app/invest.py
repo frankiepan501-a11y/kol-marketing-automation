@@ -27,6 +27,7 @@ TARGET_LABEL = os.environ.get("INVEST_X_LABEL", "Serenity / @aleabitoreddit").st
 TARGET_PROFILE_URL = os.environ.get("INVEST_X_PROFILE_URL", "https://x.com/aleabitoreddit").strip()
 DEFAULT_NOTIFY_UNION = "on_6e85dd60606f76f2d5af892785ac1dfe"
 A_SHARE_CODE_RE = re.compile(r"^\d{6}$")
+DEFAULT_CANDIDATES_PER_POST = 5
 
 router = APIRouter(prefix="/invest", tags=["invest"])
 _x_user_cache: dict[str, Any] = {"username": "", "id": "", "ts": 0.0}
@@ -118,7 +119,8 @@ def _running_job() -> tuple[str, dict[str, Any] | None]:
 def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
     keep = [
         "ok", "dry_run", "notify", "sent", "message_id", "target", "start_time",
-        "post_count", "newest_post_id", "candidate_count", "analysis",
+        "post_count", "newest_post_id", "candidate_count", "card_count",
+        "message_ids", "analyses", "analysis",
     ]
     return {k: result.get(k) for k in keep if k in result}
 
@@ -166,6 +168,71 @@ async def _x_get(path: str, params: dict[str, Any] | None = None) -> dict[str, A
     if r.status_code >= 400:
         raise RuntimeError(f"X API {path} -> {r.status_code}: {r.text[:300]}")
     return r.json()
+
+
+def _eastmoney_secid(code: str) -> str:
+    code = (code or "").strip()
+    if code.startswith(("6", "9")):
+        return f"1.{code}"
+    return f"0.{code}"
+
+
+def _format_pe(raw: Any) -> str:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    return f"{value / 100:.2f}"
+
+
+async def _fetch_one_pe(client: httpx.AsyncClient, code: str) -> tuple[str, dict[str, str]]:
+    if not A_SHARE_CODE_RE.fullmatch(code or ""):
+        return code, {"pe": "", "name": "", "source": ""}
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    params = {
+        "secid": _eastmoney_secid(code),
+        "fields": "f57,f58,f162",
+    }
+    try:
+        r = await client.get(url, params=params)
+        if r.status_code >= 400:
+            return code, {"pe": "", "name": "", "source": "eastmoney_error"}
+        data = (r.json().get("data") or {})
+    except Exception:
+        return code, {"pe": "", "name": "", "source": "eastmoney_error"}
+    return code, {
+        "pe": _format_pe(data.get("f162")),
+        "name": str(data.get("f58") or "").strip(),
+        "source": "eastmoney_f162",
+    }
+
+
+async def enrich_candidates_with_pe(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    codes = sorted({str(c.get("code") or "").strip() for c in candidates if str(c.get("code") or "").strip()})
+    pe_map: dict[str, dict[str, str]] = {}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        results = await asyncio.gather(*(_fetch_one_pe(client, code) for code in codes), return_exceptions=True)
+    for item in results:
+        if isinstance(item, Exception):
+            continue
+        code, pe = item
+        pe_map[code] = pe
+    now_bj = datetime.now(BJ).strftime("%Y-%m-%d %H:%M")
+    enriched = []
+    for raw in candidates:
+        c = dict(raw)
+        code = str(c.get("code") or "").strip()
+        info = pe_map.get(code, {})
+        c["pe_ttm"] = info.get("pe") or ""
+        c["pe_display"] = c["pe_ttm"] or "PE待核对"
+        c["pe_source"] = info.get("source") or ""
+        c["pe_as_of"] = now_bj if c["pe_ttm"] else ""
+        if info.get("name") and not c.get("name"):
+            c["name"] = info["name"]
+        enriched.append(c)
+    return enriched
 
 
 async def _x_user_id(username: str = TARGET_USERNAME) -> str:
@@ -272,18 +339,19 @@ def _extract_json(text: str) -> dict[str, Any]:
     }
 
 
-async def analyze_posts(posts: list[dict[str, Any]]) -> dict[str, Any]:
-    if not posts:
+async def analyze_post(post: dict[str, Any], *, candidate_target: int = DEFAULT_CANDIDATES_PER_POST) -> dict[str, Any]:
+    if not post:
         return {
-            "summary": "过去窗口内未抓到新原创帖子。",
+            "post_summary": "空帖子。",
             "themes": [],
             "us_tickers": [],
             "a_share_candidates": [],
             "risks": [],
         }
+    candidate_target = max(1, min(8, int(candidate_target or DEFAULT_CANDIDATES_PER_POST)))
     system_prompt = """你是A股研究助理，只做研究观察，不给确定性买卖指令。
-任务：阅读海外投资分析师关于AI、半导体、云、算力、能源、供应链等帖子，
-提取可映射到中国A股的产业链线索，并给出观察型建议。
+任务：逐篇阅读海外投资分析师关于AI、半导体、云、算力、能源、供应链等单条帖子，
+提取这条帖子可映射到中国A股的产业链线索，并给出观察型候选。
 
 硬规则：
 1. 输出必须是JSON对象，不能有markdown包裹。
@@ -291,21 +359,15 @@ async def analyze_posts(posts: list[dict[str, Any]]) -> dict[str, Any]:
 3. action只能是：观察、加入候选、暂不建议追。
 4. 每个候选必须有reason、risks、confidence(0-100)。
 5. 明确区分：原帖说了什么、你推导了什么。
-6. 全文必须带“非投资建议，仅供研究观察”的风控表述。"""
-    post_lines = []
-    for p in posts[:20]:
-        metrics = p.get("metrics") or {}
-        post_lines.append(
-            "\n".join([
-                f"ID: {p.get('id')}",
-                f"Time: {p.get('created_at')}",
-                f"URL: {p.get('url')}",
-                f"Metrics: {json.dumps(metrics, ensure_ascii=False)}",
-                f"Text: {p.get('text')}",
-            ])
-        )
+6. 不要输出市盈率PE，PE由后端行情接口补齐。
+7. 尽量输出足量A股候选；如果无法补足，也不要编造，并在candidate_gap说明缺口。
+8. 全文必须带“非投资建议，仅供研究观察”的风控表述。"""
+    metrics = post.get("metrics") or {}
     schema = {
-        "summary": "中文总摘要",
+        "post_id": post.get("id") or "",
+        "post_url": post.get("url") or "",
+        "post_summary": "这篇帖子的中文摘要",
+        "industry_chain": "从原帖推导出的产业链逻辑",
         "themes": ["主题1", "主题2"],
         "us_tickers": [{"ticker": "NVDA", "reason": "原帖或推导理由"}],
         "a_share_candidates": [
@@ -320,22 +382,43 @@ async def analyze_posts(posts: list[dict[str, Any]]) -> dict[str, Any]:
                 "source_post_ids": ["post id"],
             }
         ],
+        "candidate_gap": "",
         "follow_up": ["明天/盘后需要跟踪什么"],
         "disclaimer": "非投资建议，仅供研究观察。",
     }
     user_prompt = (
         f"目标账号：{TARGET_LABEL}\n"
-        f"抓取帖子数：{len(posts)}\n\n"
+        f"本帖希望输出A股候选数量：{candidate_target}个，最多8个。请优先补齐{candidate_target}个真实A股候选。\n\n"
         "请按以下JSON schema输出，不要输出schema以外解释：\n"
         f"{json.dumps(schema, ensure_ascii=False)}\n\n"
         "帖子内容：\n"
-        + "\n\n---\n\n".join(post_lines)
+        + "\n".join([
+            f"ID: {post.get('id')}",
+            f"Time: {post.get('created_at')}",
+            f"URL: {post.get('url')}",
+            f"Metrics: {json.dumps(metrics, ensure_ascii=False)}",
+            f"Text: {post.get('text')}",
+        ])
     )
     raw = await _call_deepseek(system_prompt, user_prompt)
     analysis = _extract_json(raw)
     analysis = _normalize_analysis(analysis)
+    analysis["a_share_candidates"] = await enrich_candidates_with_pe(analysis.get("a_share_candidates") or [])
     analysis["_raw_model_chars"] = len(raw)
     return analysis
+
+
+async def analyze_posts(posts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Legacy aggregate helper kept for tests and manual calls."""
+    if not posts:
+        return {
+            "summary": "过去窗口内未抓到新原创帖子。",
+            "themes": [],
+            "us_tickers": [],
+            "a_share_candidates": [],
+            "risks": [],
+        }
+    return await analyze_post(posts[0], candidate_target=DEFAULT_CANDIDATES_PER_POST)
 
 
 def _format_card(posts: list[dict[str, Any]], analysis: dict[str, Any], *, lookback_hours: int) -> dict[str, Any]:
@@ -413,6 +496,90 @@ def _format_card(posts: list[dict[str, Any]], analysis: dict[str, Any], *, lookb
     }
 
 
+def _bj_time_from_iso(value: str) -> str:
+    if not value:
+        return "时间待核对"
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(BJ)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return value
+
+
+def _format_post_card(post: dict[str, Any], analysis: dict[str, Any], *,
+                      candidate_target: int, lookback_hours: int) -> dict[str, Any]:
+    post_time = _bj_time_from_iso(str(post.get("created_at") or ""))
+    themes = analysis.get("themes") or []
+    candidates = analysis.get("a_share_candidates") or []
+    us_tickers = analysis.get("us_tickers") or []
+    theme_title = _safe_text(themes[0] if themes else "单帖分析", 18)
+    title = f"🟡 [INVEST·P2] Alea单帖分析 · {theme_title} · {post_time}"
+
+    parts = [
+        f"**原帖**: [{post.get('id')}]({post.get('url')}) · {post_time}",
+        f"**目标账号**: [{TARGET_LABEL}]({TARGET_PROFILE_URL}) · **窗口**: 过去 {lookback_hours} 小时",
+        "",
+        f"**原帖摘要**: {_safe_text(analysis.get('post_summary') or analysis.get('summary'), 700)}",
+        f"**产业链推导**: {_safe_text(analysis.get('industry_chain'), 700)}",
+    ]
+    if themes:
+        parts.append("**主题**: " + " / ".join(_safe_text(x, 40) for x in themes[:6]))
+    if us_tickers:
+        tickers = []
+        for item in us_tickers[:8]:
+            if isinstance(item, dict):
+                tickers.append(item.get("ticker") or item.get("symbol") or "")
+            else:
+                tickers.append(str(item))
+        if [x for x in tickers if x]:
+            parts.append("**涉及美股/海外标的**: " + ", ".join([x for x in tickers if x]))
+    parts.extend(["", f"**原帖摘录**: {_safe_text(post.get('text'), 500)}"])
+
+    elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(parts)}}]
+
+    if candidates:
+        lines = []
+        for idx, c in enumerate(candidates[:8], 1):
+            code = c.get("code") or "代码待核对"
+            name = c.get("name") or "公司待核对"
+            action = c.get("action") or "观察"
+            conf = c.get("confidence", "")
+            pe = c.get("pe_display") or c.get("pe_ttm") or "PE待核对"
+            reason = _safe_text(c.get("reason"), 260)
+            risks = c.get("risks") or []
+            risk_text = "；".join(_safe_text(x, 70) for x in risks[:3])
+            lines.append(
+                f"{idx}. **{code} {name}** · PE(TTM) {pe} · {action} · 置信度 {conf}\n"
+                f"   - 逻辑: {reason}\n"
+                f"   - 风险: {risk_text or '待补充'}"
+            )
+        if len(candidates) < candidate_target:
+            gap = analysis.get("candidate_gap") or f"本帖可验证候选不足 {candidate_target} 个，未强行补齐。"
+            lines.append(f"\n候选补全说明: {_safe_text(gap, 160)}")
+        elements.extend([
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "**A股候选观察（单帖）**\n" + "\n".join(lines)}},
+        ])
+    else:
+        elements.extend([
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "**A股候选观察（单帖）**\n本帖没有足够明确的A股映射，建议不强行追。"}},
+        ])
+
+    follow_up = analysis.get("follow_up") or []
+    if follow_up:
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "**后续跟踪**\n" + "\n".join(f"- {_safe_text(x, 120)}" for x in follow_up[:6])},
+        })
+    elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": "非投资建议，仅供研究观察；PE来自行情接口，代码与公司映射需盘前/盘后人工复核。"}]})
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "yellow", "title": {"tag": "plain_text", "content": title}},
+        "elements": elements,
+    }
+
+
 async def _invest_feishu_token() -> str:
     app_id = os.environ.get("FEISHU_INVEST_ASSISTANT_APP_ID", "").strip()
     secret = os.environ.get("FEISHU_INVEST_ASSISTANT_APP_SECRET", "").strip()
@@ -462,26 +629,41 @@ async def run_daily(*, notify: bool = False, dry_run: bool = True,
                     limit: int | None = None, lookback_hours: int | None = None) -> dict[str, Any]:
     limit = limit or _int_env("INVEST_X_MAX_POSTS", 12, 5, 100)
     lookback_hours = lookback_hours or _int_env("INVEST_X_LOOKBACK_HOURS", 30, 1, 168)
+    candidate_target = _int_env("INVEST_CANDIDATES_PER_POST", DEFAULT_CANDIDATES_PER_POST, 1, 8)
     fetched = await fetch_posts(limit=limit, lookback_hours=lookback_hours)
     posts = fetched["posts"]
-    analysis = await analyze_posts(posts)
-    card = _format_card(posts, analysis, lookback_hours=lookback_hours)
-    message_id = ""
+    analyses = []
+    cards = []
+    message_ids = []
+    for post in posts:
+        analysis = await analyze_post(post, candidate_target=candidate_target)
+        analyses.append({"post_id": post.get("id"), "post_url": post.get("url"), **analysis})
+        cards.append(_format_post_card(
+            post,
+            analysis,
+            candidate_target=candidate_target,
+            lookback_hours=lookback_hours,
+        ))
     if notify and not dry_run:
-        message_id = await _send_invest_card(card)
+        for card in cards:
+            message_ids.append(await _send_invest_card(card))
+            await asyncio.sleep(0.2)
     return {
         "ok": True,
         "dry_run": dry_run,
         "notify": notify,
-        "sent": bool(message_id),
-        "message_id": message_id,
+        "sent": bool(message_ids),
+        "message_id": message_ids[0] if message_ids else "",
+        "message_ids": message_ids,
         "target": {"username": TARGET_USERNAME, "user_id": fetched.get("user_id")},
         "start_time": fetched.get("start_time"),
         "post_count": len(posts),
         "newest_post_id": posts[0]["id"] if posts else "",
-        "candidate_count": len(analysis.get("a_share_candidates") or []),
-        "analysis": analysis,
-        "card_preview": card if dry_run or _bool_env("INVEST_RETURN_CARD_PREVIEW", False) else None,
+        "candidate_count": sum(len(a.get("a_share_candidates") or []) for a in analyses),
+        "card_count": len(cards),
+        "analyses": analyses,
+        "analysis": {"per_post": analyses},
+        "card_preview": cards if dry_run or _bool_env("INVEST_RETURN_CARD_PREVIEW", False) else None,
     }
 
 

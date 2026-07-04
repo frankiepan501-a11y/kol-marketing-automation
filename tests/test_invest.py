@@ -156,6 +156,42 @@ class InvestAssistantTest(unittest.TestCase):
         self.assertNotIn("688XXX", text)
         self.assertIn("代码待核对", text)
 
+    def test_post_card_contains_pe_and_single_post_context(self):
+        post = {
+            "id": "456",
+            "created_at": "2026-07-04T00:07:23Z",
+            "url": "https://x.com/aleabitoreddit/status/456",
+            "text": "Glass substrate supply chain acceleration",
+            "metrics": {},
+        }
+        analysis = {
+            "post_summary": "玻璃基板供应链加速。",
+            "industry_chain": "TGV设备和先进封装受益。",
+            "themes": ["玻璃基板"],
+            "a_share_candidates": [{
+                "code": "603005",
+                "name": "晶方科技",
+                "action": "观察",
+                "confidence": 70,
+                "reason": "先进封装映射。",
+                "risks": ["量产不确定"],
+                "pe_display": "108.09",
+            }],
+            "follow_up": ["跟踪TGV订单"],
+        }
+        card = invest._format_post_card(post, analysis, candidate_target=5, lookback_hours=30)
+        text = str(card)
+        self.assertIn("Alea单帖分析", text)
+        self.assertIn("https://x.com/aleabitoreddit/status/456", text)
+        self.assertIn("PE(TTM) 108.09", text)
+        self.assertIn("候选补全说明", text)
+        self.assertIn("非投资建议", text)
+
+    def test_format_pe_from_eastmoney_scaled_value(self):
+        self.assertEqual("54.26", invest._format_pe(5426))
+        self.assertEqual("", invest._format_pe(0))
+        self.assertEqual("", invest._format_pe(None))
+
 
 if __name__ == "__main__":
     unittest.main()
