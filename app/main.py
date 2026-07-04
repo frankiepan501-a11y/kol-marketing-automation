@@ -220,7 +220,7 @@ async def handle_b2b_assistant_event(request: Request, authorization: str = Head
 async def run_b2b_linkedin_daily_card(authorization: str = Header(default=""),
                                       commit: bool = False,
                                       notify: bool = False,
-                                      limit: int = 8,
+                                      limit: int = 5,
                                       owner: str = "",
                                       include_test: bool = False,
                                       frankie_only: bool = False):

@@ -7,7 +7,6 @@ app.b2b_assistant.
 """
 import json
 import os
-from collections import defaultdict
 from urllib.parse import quote
 
 from . import feishu
@@ -17,6 +16,7 @@ B2B_LINKEDIN_TABLE = os.environ.get("B2B_LINKEDIN_TABLE", "tblN8XszEatuTJgP")
 B2B_LINKEDIN_VIEW = os.environ.get("B2B_LINKEDIN_VIEW", "vew9f7zQ7s")
 B2B_GROUP_CHAT_ID = os.environ.get("B2B_GROUP_CHAT_ID", "oc_2e878553984592d7396401fdd6a37d61")
 B2B_LINKEDIN_FRANKIE_EMAIL = os.environ.get("B2B_LINKEDIN_FRANKIE_EMAIL", "398459272@qq.com")
+DEFAULT_DISPATCH_OWNERS = ["吴晓丹", "冼浩华", "李桐欣"]
 
 LINKEDIN_FIELD_NAMES = [
     "线索名称",
@@ -122,6 +122,15 @@ async def _list_records(*, field_names: list[str] | None = None) -> list[dict]:
     return items
 
 
+async def _update_record(record_id: str, fields: dict) -> None:
+    await feishu.api(
+        "PUT",
+        f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{B2B_LINKEDIN_TABLE}/records/{record_id}",
+        {"fields": fields},
+        which="bitable",
+    )
+
+
 def _row_from_record(rec: dict) -> dict:
     fields = rec.get("fields") or {}
     record_id = rec.get("record_id") or ""
@@ -169,9 +178,7 @@ def _is_test_row(row: dict) -> bool:
     return "样张测试" in probe or "__test__" in probe.lower()
 
 
-def _eligible(row: dict, *, owner: str = "", include_test: bool = False) -> bool:
-    if owner and row["owner"] != owner:
-        return False
+def _eligible(row: dict, *, include_test: bool = False) -> bool:
     if not include_test and _is_test_row(row):
         return False
     if row["dev_status"] not in {"", "待开发"}:
@@ -193,11 +200,109 @@ def _grade_rank(value: str) -> int:
     return 9
 
 
-async def _eligible_rows(*, owner: str = "", include_test: bool = False) -> list[dict]:
+async def _eligible_rows(*, include_test: bool = False) -> list[dict]:
     rows = [_row_from_record(rec) for rec in await _list_records(field_names=LINKEDIN_FIELD_NAMES)]
-    rows = [row for row in rows if _eligible(row, owner=owner, include_test=include_test)]
+    rows = [row for row in rows if _eligible(row, include_test=include_test)]
     rows.sort(key=lambda r: (_grade_rank(r["grade"]), -r["score"], r["owner"], r["company"]))
     return rows
+
+
+def _dispatch_owners() -> list[str]:
+    raw = os.environ.get("B2B_LINKEDIN_DISPATCH_OWNERS", "").strip()
+    if not raw:
+        return list(DEFAULT_DISPATCH_OWNERS)
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            owners = [str(x).strip() for x in parsed if str(x).strip()]
+            return owners or list(DEFAULT_DISPATCH_OWNERS)
+    except Exception:
+        pass
+    owners = [x.strip() for x in raw.split(",") if x.strip()]
+    return owners or list(DEFAULT_DISPATCH_OWNERS)
+
+
+def _country_rule_owner(country: str) -> tuple[str, str]:
+    compact = (country or "").lower().replace(" ", "").replace("　", "")
+    if any(token in compact for token in ["台湾", "台灣", "taiwan", "taiwan,china", "tw"]):
+        return "冼浩华", "台湾/泰国规则"
+    if any(token in compact for token in ["泰国", "thailand", "thai"]):
+        return "冼浩华", "台湾/泰国规则"
+    if any(token in compact for token in ["日本", "japan", "jp"]):
+        return "李桐欣", "日本规则"
+    return "", ""
+
+
+def _with_assignment(row: dict, owner: str, reason: str) -> dict:
+    out = dict(row)
+    out["original_owner"] = row.get("owner") or "未分配"
+    out["owner"] = owner
+    out["assignment_reason"] = reason
+    return out
+
+
+def _assign_rows(rows: list[dict], *, limit_per_owner: int, owner_filter: str = "") -> tuple[dict[str, list[dict]], list[dict], dict]:
+    owners = _dispatch_owners()
+    buckets: dict[str, list[dict]] = {owner: [] for owner in owners}
+    queued: list[dict] = []
+    stats = {"country_rule": 0, "balanced": 0, "queued_capacity": 0}
+
+    forced_rows = []
+    balanced_rows = []
+    for row in rows:
+        forced_owner, reason = _country_rule_owner(row.get("country") or "")
+        if forced_owner:
+            forced_rows.append((row, forced_owner, reason))
+        else:
+            balanced_rows.append(row)
+
+    for row, forced_owner, reason in forced_rows:
+        if forced_owner not in buckets:
+            buckets[forced_owner] = []
+            owners.append(forced_owner)
+        if len(buckets[forced_owner]) < limit_per_owner:
+            buckets[forced_owner].append(_with_assignment(row, forced_owner, reason))
+            stats["country_rule"] += 1
+        else:
+            queued.append(_with_assignment(row, forced_owner, reason + "，今日名额已满"))
+            stats["queued_capacity"] += 1
+
+    for row in balanced_rows:
+        candidates = [owner for owner in owners if len(buckets.get(owner, [])) < limit_per_owner]
+        if not candidates:
+            queued.append(_with_assignment(row, row.get("owner") or "未分配", "排队：今日三人名额已满"))
+            stats["queued_capacity"] += 1
+            continue
+        chosen = sorted(candidates, key=lambda name: (len(buckets.get(name, [])), owners.index(name)))[0]
+        buckets[chosen].append(_with_assignment(row, chosen, "非指定国家平均派发"))
+        stats["balanced"] += 1
+
+    if owner_filter:
+        buckets = {name: owner_rows for name, owner_rows in buckets.items() if name == owner_filter}
+    buckets = {name: owner_rows for name, owner_rows in buckets.items() if owner_rows}
+    return buckets, queued, stats
+
+
+async def _sync_assignments(grouped: dict[str, list[dict]], *, commit: bool) -> list[dict]:
+    if not commit:
+        return []
+    updates = []
+    for owner_rows in grouped.values():
+        for row in owner_rows:
+            original_owner = row.get("original_owner") or "未分配"
+            if original_owner == row["owner"]:
+                continue
+            await _update_record(row["record_id"], {"跟进人": row["owner"]})
+            updates.append(
+                {
+                    "record_id": row["record_id"],
+                    "company": row["company"],
+                    "from": original_owner,
+                    "to": row["owner"],
+                    "reason": row.get("assignment_reason", ""),
+                }
+            )
+    return updates
 
 
 def _field(label: str, value: str) -> dict:
@@ -232,6 +337,7 @@ def _row_elements(row: dict, index: int, total: int) -> list[dict]:
         _field("国家/类型", " / ".join(x for x in [row["country"], row["company_type"]] if x)),
         _field("AI等级", f"{row['grade'] or '-'} · {row['score']:.0f}分"),
         _field("当前状态", f"{row['dev_status'] or '待开发'} / {row['reach_status'] or '待触达'}"),
+        _field("派发规则", row.get("assignment_reason", "") or "-"),
     ]
 
     link_actions = []
@@ -378,7 +484,7 @@ async def run(
     *,
     commit: bool = False,
     notify: bool = False,
-    limit: int = 8,
+    limit: int = 5,
     owner: str = "",
     include_test: bool = False,
     frankie_only: bool = False,
@@ -389,12 +495,10 @@ async def run(
     """
     if notify and not commit:
         raise ValueError("notify=true requires commit=true")
-    limit = max(1, min(int(limit or 8), 10))
-    rows = await _eligible_rows(owner=owner, include_test=include_test)
-    grouped: dict[str, list[dict]] = defaultdict(list)
-    for row in rows:
-        grouped[row["owner"] or "未分配"].append(row)
-    grouped = {name: owner_rows[:limit] for name, owner_rows in grouped.items() if owner_rows[:limit]}
+    limit = max(1, min(int(limit or 5), 10))
+    rows = await _eligible_rows(include_test=include_test)
+    grouped, queued, assignment_stats = _assign_rows(rows, limit_per_owner=limit, owner_filter=owner)
+    assignment_updates = await _sync_assignments(grouped, commit=commit)
 
     message_ids = []
     send_errors = []
@@ -433,6 +537,21 @@ async def run(
         "eligible_total": len(rows),
         "group_count": len(grouped),
         "groups": {name: len(owner_rows) for name, owner_rows in grouped.items()},
+        "dispatch_owners": _dispatch_owners(),
+        "assignment_stats": assignment_stats,
+        "assignment_updates": assignment_updates,
+        "queued_total": len(queued),
+        "queued_preview": [
+            {
+                "record_id": row["record_id"],
+                "company": row["company"],
+                "country": row["country"],
+                "assigned_owner": row["owner"],
+                "reason": row.get("assignment_reason", ""),
+                "url": row["url"],
+            }
+            for row in queued[:20]
+        ],
         "preview": preview,
         "message_ids": message_ids,
         "send_errors": send_errors,
