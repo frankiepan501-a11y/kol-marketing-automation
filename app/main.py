@@ -192,6 +192,15 @@ async def get_b2b_mail_reminder_job(job_id: str, authorization: str = Header(def
     return {"ok": True, "job_id": job_id, **job}
 
 
+@app.post("/b2b-mail-reminder/receipt")
+async def handle_b2b_mail_receipt(request: Request, authorization: str = Header(default="")):
+    """外贸助手卡片回执写回 B2B 邮件提醒表."""
+    _check_auth(authorization)
+    payload = await request.json()
+    result = await b2b_mail_reminder.handle_receipt(payload)
+    return {"ok": bool(result.get("ok")), **result}
+
+
 @app.post("/reply-monitor/run")
 async def run_reply_monitor(authorization: str = Header(default="")):
     """扫 partner@ 收件箱新回复 → DeepSeek 分类 → 更新数据库 → 飞书通知 + 生成回复草稿"""

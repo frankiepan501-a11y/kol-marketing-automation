@@ -14,6 +14,7 @@ future reminders without code changes.
 import asyncio
 import email
 import imaplib
+import json
 import os
 import re
 from collections import Counter, defaultdict
@@ -1077,6 +1078,163 @@ async def _mark_card_sent(rows: list[dict]) -> list[dict]:
         await _upsert_reminder(fields, {"record_id": row["record_id"]})
         updates.append({"record_id": row["record_id"], **fields})
     return updates
+
+
+def _first_form_value(form_value: dict, keys: list[str]) -> str:
+    for key in keys:
+        value = form_value.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            value = "、".join(str(x).strip() for x in value if str(x).strip())
+        elif isinstance(value, dict):
+            value = value.get("text") or value.get("value") or ""
+        else:
+            value = str(value)
+        value = value.strip()
+        if value:
+            return value
+    return ""
+
+
+def _channel_values(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw = value
+    else:
+        raw = [value]
+    out = []
+    for item in raw:
+        if isinstance(item, dict):
+            item = item.get("value") or item.get("text") or ""
+        item = str(item).strip()
+        if item and item in CHANNEL_OPTIONS:
+            out.append(item)
+    return out
+
+
+async def _b2b_operator_name(open_id: str) -> str:
+    if not open_id:
+        return ""
+    try:
+        resp = await feishu.api("GET", f"/contact/v3/users/{open_id}?user_id_type=open_id", which="b2b_assistant")
+        return _text(((resp.get("data") or {}).get("user") or {}).get("name"))
+    except Exception as exc:
+        print(f"[b2b_mail_receipt] resolve operator failed: {type(exc).__name__}: {str(exc)[:120]}")
+        return ""
+
+
+async def _send_b2b_receipt_reply(payload: dict, text: str) -> dict:
+    chat_id = _text(payload.get("chat_id"))
+    sender_open_id = _text(payload.get("sender_open_id"))
+    if chat_id:
+        receive_type, receive_id = "chat_id", chat_id
+    elif sender_open_id:
+        receive_type, receive_id = "open_id", sender_open_id
+    else:
+        return {"sent": False, "error": "missing chat_id/sender_open_id"}
+    body = {
+        "receive_id": receive_id,
+        "msg_type": "text",
+        "content": json.dumps({"text": text}, ensure_ascii=False),
+    }
+    try:
+        resp = await feishu.api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="b2b_assistant")
+        return {"sent": (resp.get("code", 0) == 0), "message_id": ((resp.get("data") or {}).get("message_id") or "")}
+    except Exception as exc:
+        return {"sent": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+
+async def handle_receipt(payload: dict) -> dict:
+    """Write B2B mail reminder card receipts back to the reminder table.
+
+    Payload is the parsed n8n card action JSON. Business data remains in Feishu
+    Bitable; this endpoint only mutates the reminder row indicated by record_id.
+    """
+    card_action = payload.get("card_action") or payload.get("fields") or {}
+    form_value = payload.get("card_form_value") or {}
+    action = _text(card_action.get("action"))
+    record_id = _text(card_action.get("record_id"))
+    app_token = _text(card_action.get("app_token")) or B2B_CUSTOMER_APP_TOKEN
+    table_id = _text(card_action.get("table_id")) or B2B_REMINDER_TABLE
+
+    actor = await _b2b_operator_name(_text(payload.get("sender_open_id")))
+    if not actor:
+        actor = _text(payload.get("sender_open_id")) or "卡片回执"
+
+    note = _first_form_value(
+        form_value,
+        [
+            f"b2b_note_{record_id}",
+            f"b2b_note_{record_id}_no",
+            f"b2b_note_{record_id}_handoff",
+        ],
+    )
+    channels = _channel_values(form_value.get(f"b2b_channel_{record_id}"))
+
+    fields = {"回执人": actor, "回执时间": int(datetime.now(BJ).timestamp() * 1000), "是否已回执免提醒": True}
+    reply = ""
+    if not record_id:
+        reply = "B2B邮件回执失败：卡片缺少 record_id"
+    elif action == "b2b_mail_replied":
+        fields["提醒状态"] = "已邮件回复"
+        fields["回执类型"] = "已邮件回复"
+        if note:
+            fields["回执原因"] = note
+    elif action == "b2b_mail_other_channel":
+        fields["提醒状态"] = "其他渠道已跟进"
+        fields["回执类型"] = "其他渠道已跟进"
+        fields["其他渠道"] = channels or ["其他"]
+        fields["回执原因"] = note or "卡片确认：其他渠道已跟进"
+        fields["审计抑制"] = False
+    elif action == "b2b_mail_no_reply":
+        fields["提醒状态"] = "无需回复"
+        fields["回执类型"] = "无需回复"
+        fields["回执原因"] = note or "卡片确认：无需回复"
+        fields["审计抑制"] = True
+        fields["抑制原因"] = note or "卡片确认：无需回复"
+    elif action == "b2b_mail_handoff":
+        fields["提醒状态"] = "转交他人处理"
+        fields["回执类型"] = "转交他人处理"
+        fields["回执原因"] = note or "卡片确认：已转交他人处理"
+        fields["审计抑制"] = True
+        fields["抑制原因"] = note or "卡片确认：已转交他人处理"
+    else:
+        reply = "未知 B2B 邮件回执动作：" + (action or "(empty)")
+
+    ok = False
+    write_error = ""
+    if not reply:
+        try:
+            resp = await feishu.api(
+                "PUT",
+                f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
+                {"fields": fields},
+                which="bitable",
+            )
+            ok = resp.get("code", 0) == 0
+            if ok:
+                label = fields.get("回执类型") or fields.get("提醒状态")
+                target = _text(card_action.get("customer")) or _text(card_action.get("thread_key")) or record_id
+                reply = f"B2B邮件回执已写入：{label} · {target} · by {actor}"
+            else:
+                write_error = f"code={resp.get('code')} msg={resp.get('msg') or ''}"
+                reply = "B2B邮件回执写入失败 " + write_error
+        except Exception as exc:
+            write_error = f"{type(exc).__name__}: {str(exc)[:240]}"
+            reply = "B2B邮件回执写入异常：" + write_error
+
+    reply_result = await _send_b2b_receipt_reply(payload, reply)
+    return {
+        "ok": ok,
+        "action": action,
+        "record_id": record_id,
+        "fields": fields,
+        "reply": reply,
+        "reply_result": reply_result,
+        "write_error": write_error,
+    }
 
 
 async def _collect_mail_events(accounts: list[dict], since_imap: str):
