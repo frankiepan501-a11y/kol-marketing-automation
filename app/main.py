@@ -13,6 +13,7 @@ from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
 from . import b2b_mail_reminder  # B2B 外贸邮箱跟进提醒(日 10:00, 外贸助手回执卡)
+from . import b2b_assistant  # 外贸助手: 客户指令 + LinkedIn 回执
 from . import invest  # 投资助手: X 帖子抓取 → A股观察映射 → 投资助手 App 推送
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
@@ -198,6 +199,19 @@ async def handle_b2b_mail_receipt(request: Request, authorization: str = Header(
     _check_auth(authorization)
     payload = await request.json()
     result = await b2b_mail_reminder.handle_receipt(payload)
+    return {"ok": bool(result.get("ok")), **result}
+
+
+@app.post("/b2b-assistant/event")
+async def handle_b2b_assistant_event(request: Request, authorization: str = Header(default="")):
+    """外贸助手统一业务入口.
+
+    n8n 只负责接收 Feishu event 并标准化 payload；客户入库/跟进/查询/统计
+    和 LinkedIn 回执写回在这里确定性执行。
+    """
+    _check_auth(authorization)
+    payload = await request.json()
+    result = await b2b_assistant.handle_event(payload)
     return {"ok": bool(result.get("ok")), **result}
 
 
