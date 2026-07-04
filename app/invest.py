@@ -26,6 +26,7 @@ TARGET_USERNAME = os.environ.get("INVEST_X_USERNAME", "aleabitoreddit").strip().
 TARGET_LABEL = os.environ.get("INVEST_X_LABEL", "Serenity / @aleabitoreddit").strip()
 TARGET_PROFILE_URL = os.environ.get("INVEST_X_PROFILE_URL", "https://x.com/aleabitoreddit").strip()
 DEFAULT_NOTIFY_UNION = "on_6e85dd60606f76f2d5af892785ac1dfe"
+A_SHARE_CODE_RE = re.compile(r"^\d{6}$")
 
 router = APIRouter(prefix="/invest", tags=["invest"])
 _x_user_cache: dict[str, Any] = {"username": "", "id": "", "ts": 0.0}
@@ -61,6 +62,38 @@ def _safe_text(value: Any, limit: int = 500) -> str:
     text = "" if value is None else str(value)
     text = re.sub(r"\s+", " ", text).strip()
     return text if len(text) <= limit else text[: limit - 1] + "..."
+
+
+def _normalize_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
+    """Keep AI output display-safe before it reaches Feishu."""
+    candidates = analysis.get("a_share_candidates")
+    if not isinstance(candidates, list):
+        analysis["a_share_candidates"] = []
+        return analysis
+
+    cleaned = []
+    for raw in candidates:
+        if not isinstance(raw, dict):
+            continue
+        c = dict(raw)
+        code = str(c.get("code") or "").strip()
+        if code and not A_SHARE_CODE_RE.fullmatch(code):
+            c["code"] = ""
+            risks = c.get("risks")
+            if not isinstance(risks, list):
+                risks = [str(risks)] if risks else []
+            risks.append("原模型输出了非标准A股代码，已清空，需人工核对代码")
+            c["risks"] = risks
+        action = str(c.get("action") or "观察").strip()
+        if action not in ("观察", "加入候选", "暂不建议追"):
+            c["action"] = "观察"
+        try:
+            c["confidence"] = max(0, min(100, int(c.get("confidence") or 0)))
+        except (TypeError, ValueError):
+            c["confidence"] = 0
+        cleaned.append(c)
+    analysis["a_share_candidates"] = cleaned
+    return analysis
 
 
 def _now_string() -> str:
@@ -254,7 +287,7 @@ async def analyze_posts(posts: list[dict[str, Any]]) -> dict[str, Any]:
 
 硬规则：
 1. 输出必须是JSON对象，不能有markdown包裹。
-2. 不确定具体A股代码时，code留空，不要编造。
+2. A股代码必须是6位数字；不确定具体A股代码时，code留空，不要编造；严禁输出300XXX、688XXX、002XXX等占位代码。
 3. action只能是：观察、加入候选、暂不建议追。
 4. 每个候选必须有reason、risks、confidence(0-100)。
 5. 明确区分：原帖说了什么、你推导了什么。
@@ -277,7 +310,7 @@ async def analyze_posts(posts: list[dict[str, Any]]) -> dict[str, Any]:
         "us_tickers": [{"ticker": "NVDA", "reason": "原帖或推导理由"}],
         "a_share_candidates": [
             {
-                "code": "300XXX",
+                "code": "",
                 "name": "公司名",
                 "theme": "对应主题",
                 "action": "观察",
@@ -300,6 +333,7 @@ async def analyze_posts(posts: list[dict[str, Any]]) -> dict[str, Any]:
     )
     raw = await _call_deepseek(system_prompt, user_prompt)
     analysis = _extract_json(raw)
+    analysis = _normalize_analysis(analysis)
     analysis["_raw_model_chars"] = len(raw)
     return analysis
 

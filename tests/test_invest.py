@@ -130,6 +130,32 @@ class InvestAssistantTest(unittest.TestCase):
         self.assertIn("非投资建议", text)
         self.assertIn("https://x.com/aleabitoreddit/status/123", text)
 
+    def test_invalid_placeholder_code_is_removed(self):
+        analysis = {
+            "a_share_candidates": [{
+                "code": "688XXX",
+                "name": "占位代码公司",
+                "action": "加入候选",
+                "confidence": 80,
+                "risks": [],
+            }],
+        }
+        cleaned = invest._normalize_analysis(analysis)
+        candidate = cleaned["a_share_candidates"][0]
+        self.assertEqual("", candidate["code"])
+        self.assertIn("需人工核对代码", "；".join(candidate["risks"]))
+
+        card = invest._format_card([{
+            "id": "123",
+            "created_at": "2026-07-03T00:00:00Z",
+            "url": "https://x.com/aleabitoreddit/status/123",
+            "text": "test",
+            "metrics": {},
+        }], cleaned, lookback_hours=30)
+        text = str(card)
+        self.assertNotIn("688XXX", text)
+        self.assertIn("代码待核对", text)
+
 
 if __name__ == "__main__":
     unittest.main()
