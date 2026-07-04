@@ -1,0 +1,439 @@
+"""B2B LinkedIn daily development card.
+
+This module only prepares and sends Feishu interactive cards. It does not
+operate LinkedIn pages, send connection requests, or send private messages.
+Those steps remain manual and are confirmed by card receipts handled by
+app.b2b_assistant.
+"""
+import json
+import os
+from collections import defaultdict
+from urllib.parse import quote
+
+from . import feishu
+
+B2B_APP_TOKEN = os.environ.get("B2B_CUSTOMER_APP_TOKEN", "E1kkbx1tVaJvQGsKf94cJG88nzb")
+B2B_LINKEDIN_TABLE = os.environ.get("B2B_LINKEDIN_TABLE", "tblN8XszEatuTJgP")
+B2B_LINKEDIN_VIEW = os.environ.get("B2B_LINKEDIN_VIEW", "vew9f7zQ7s")
+B2B_GROUP_CHAT_ID = os.environ.get("B2B_GROUP_CHAT_ID", "oc_2e878553984592d7396401fdd6a37d61")
+B2B_LINKEDIN_FRANKIE_EMAIL = os.environ.get("B2B_LINKEDIN_FRANKIE_EMAIL", "398459272@qq.com")
+
+LINKEDIN_FIELD_NAMES = [
+    "线索名称",
+    "公司名称",
+    "线索来源",
+    "开发状态",
+    "触达状态",
+    "公司官网",
+    "LinkedIn公司页",
+    "LinkedIn联系人页",
+    "联系人姓名",
+    "职位",
+    "国家/地区",
+    "公司类型",
+    "主力渠道",
+    "代理竞品",
+    "主营类目",
+    "AI开发评分",
+    "ICP匹配",
+    "AI建议等级",
+    "AI开发理由",
+    "推荐连接语",
+    "推荐私信",
+    "推荐开发信",
+    "跟进人",
+    "下一步行动",
+    "CRM匹配状态",
+    "邮箱",
+    "邮箱验真状态",
+    "备注",
+]
+
+GRADE_ORDER = {
+    "A-优先开发": 0,
+    "A": 0,
+    "B-可开发": 1,
+    "B": 1,
+    "C-低优先": 2,
+    "C": 2,
+}
+
+
+def _text(value) -> str:
+    return str(feishu.ext(value) or "").strip()
+
+
+def _url(value) -> str:
+    return str(feishu.ext_url(value) or "").strip()
+
+
+def _score(value) -> float:
+    try:
+        return float(value or 0)
+    except Exception:
+        try:
+            return float(_text(value) or 0)
+        except Exception:
+            return 0.0
+
+
+def _clip(value: str, limit: int = 360) -> str:
+    value = (value or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
+def _record_url(record_id: str) -> str:
+    return f"https://u1wpma3xuhr.feishu.cn/base/{B2B_APP_TOKEN}?table={B2B_LINKEDIN_TABLE}&view={B2B_LINKEDIN_VIEW}&record={record_id}"
+
+
+def _card_action(record_id: str, action: str, company: str) -> dict:
+    return {
+        "route": "linkedin_lead_receipt",
+        "action": action,
+        "record_id": record_id,
+        "lead_record_id": record_id,
+        "company": company,
+        "source": "linkedin_daily_card",
+        "app_token": B2B_APP_TOKEN,
+        "table_id": B2B_LINKEDIN_TABLE,
+    }
+
+
+async def _list_records(*, field_names: list[str] | None = None) -> list[dict]:
+    items: list[dict] = []
+    page_token = ""
+    encoded_fields = ""
+    if field_names:
+        encoded_fields = "&field_names=" + quote(json.dumps(field_names, ensure_ascii=False), safe="")
+    while True:
+        path = f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{B2B_LINKEDIN_TABLE}/records?page_size=500{encoded_fields}"
+        if page_token:
+            path += "&page_token=" + quote(page_token, safe="")
+        resp = await feishu.api("GET", path, which="bitable")
+        data = resp.get("data") or {}
+        items.extend(data.get("items") or [])
+        if not data.get("has_more"):
+            break
+        page_token = data.get("page_token") or ""
+        if not page_token:
+            break
+    return items
+
+
+def _row_from_record(rec: dict) -> dict:
+    fields = rec.get("fields") or {}
+    record_id = rec.get("record_id") or ""
+    company = _text(fields.get("公司名称"))
+    title = _text(fields.get("线索名称")) or company
+    linkedin_profile = _url(fields.get("LinkedIn联系人页"))
+    linkedin_company = _url(fields.get("LinkedIn公司页"))
+    return {
+        "record_id": record_id,
+        "title": title,
+        "company": company or title or record_id,
+        "source": _text(fields.get("线索来源")),
+        "dev_status": _text(fields.get("开发状态")),
+        "reach_status": _text(fields.get("触达状态")),
+        "website": _url(fields.get("公司官网")),
+        "linkedin": linkedin_profile or linkedin_company,
+        "linkedin_company": linkedin_company,
+        "linkedin_profile": linkedin_profile,
+        "contact": _text(fields.get("联系人姓名")),
+        "position": _text(fields.get("职位")),
+        "country": _text(fields.get("国家/地区")),
+        "company_type": _text(fields.get("公司类型")),
+        "channels": _text(fields.get("主力渠道")),
+        "competitors": _text(fields.get("代理竞品")),
+        "category": _text(fields.get("主营类目")),
+        "score": _score(fields.get("AI开发评分")),
+        "icp": _text(fields.get("ICP匹配")),
+        "grade": _text(fields.get("AI建议等级")),
+        "reason": _text(fields.get("AI开发理由")),
+        "connect_copy": _text(fields.get("推荐连接语")),
+        "message_copy": _text(fields.get("推荐私信")),
+        "email_copy": _text(fields.get("推荐开发信")),
+        "owner": _text(fields.get("跟进人")) or "未分配",
+        "next_action": _text(fields.get("下一步行动")),
+        "crm_match": _text(fields.get("CRM匹配状态")),
+        "email": _text(fields.get("邮箱")),
+        "email_status": _text(fields.get("邮箱验真状态")),
+        "note": _text(fields.get("备注")),
+        "url": _record_url(record_id),
+    }
+
+
+def _is_test_row(row: dict) -> bool:
+    probe = " ".join([row.get("title", ""), row.get("company", ""), row.get("note", "")])
+    return "样张测试" in probe or "__test__" in probe.lower()
+
+
+def _eligible(row: dict, *, owner: str = "", include_test: bool = False) -> bool:
+    if owner and row["owner"] != owner:
+        return False
+    if not include_test and _is_test_row(row):
+        return False
+    if row["dev_status"] not in {"", "待开发"}:
+        return False
+    if row["reach_status"] not in {"", "待触达"}:
+        return False
+    if row["crm_match"] and row["crm_match"] != "新线索":
+        return False
+    if row["icp"] == "否":
+        return False
+    return True
+
+
+def _grade_rank(value: str) -> int:
+    value = value or ""
+    for key, rank in GRADE_ORDER.items():
+        if key in value:
+            return rank
+    return 9
+
+
+async def _eligible_rows(*, owner: str = "", include_test: bool = False) -> list[dict]:
+    rows = [_row_from_record(rec) for rec in await _list_records(field_names=LINKEDIN_FIELD_NAMES)]
+    rows = [row for row in rows if _eligible(row, owner=owner, include_test=include_test)]
+    rows.sort(key=lambda r: (_grade_rank(r["grade"]), -r["score"], r["owner"], r["company"]))
+    return rows
+
+
+def _field(label: str, value: str) -> dict:
+    return {"is_short": True, "text": {"tag": "lark_md", "content": f"**{label}**: {value or '-'}"}}
+
+
+def _button(text: str, url: str | None = None, value: dict | None = None, style: str = "default") -> dict:
+    btn = {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": text},
+        "type": "default",
+    }
+    if style:
+        btn["type"] = style
+    if url:
+        btn["url"] = url
+    if value:
+        btn["value"] = value
+    return btn
+
+
+def _row_elements(row: dict, index: int, total: int) -> list[dict]:
+    record_id = row["record_id"]
+    company = row["company"]
+    contact_line = row["contact"] or "待补联系人"
+    if row["position"]:
+        contact_line += f" / {row['position']}"
+    facts = [
+        _field("任务", f"{index}/{total}"),
+        _field("客户", company),
+        _field("联系人", contact_line),
+        _field("国家/类型", " / ".join(x for x in [row["country"], row["company_type"]] if x)),
+        _field("AI等级", f"{row['grade'] or '-'} · {row['score']:.0f}分"),
+        _field("当前状态", f"{row['dev_status'] or '待开发'} / {row['reach_status'] or '待触达'}"),
+    ]
+
+    link_actions = []
+    if row["linkedin"]:
+        link_actions.append(_button("🔗 打开LinkedIn", url=row["linkedin"], style="primary"))
+    if row["website"]:
+        link_actions.append(_button("🌐 打开官网", url=row["website"]))
+    link_actions.append(_button("📋 打开线索记录", url=row["url"]))
+
+    receipt_1 = [
+        _button("✅ 已加人", value=_card_action(record_id, "linkedin_connected", company), style="primary"),
+        _button("💬 已发私信", value=_card_action(record_id, "linkedin_message_sent", company)),
+        _button("🎉 已回复", value=_card_action(record_id, "linkedin_replied", company)),
+    ]
+    receipt_2 = [
+        _button("📧 转Email", value=_card_action(record_id, "linkedin_to_email", company)),
+        _button("⛔ 不合适", value=_card_action(record_id, "linkedin_not_fit", company), style="danger"),
+    ]
+
+    return [
+        {"tag": "hr"},
+        {"tag": "div", "fields": facts},
+        {"tag": "action", "actions": link_actions},
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "💡 **为什么开发**\n" + (_clip(row["reason"], 320) or "暂无开发理由，请先核对官网和 LinkedIn。"),
+            },
+        },
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "🤝 **推荐连接语**\n" + (_clip(row["connect_copy"], 280) or "Hi, I noticed your company works in gaming accessories. Open to connect?"),
+            },
+        },
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "💬 **接受后的第一条私信**\n" + (_clip(row["message_copy"], 420) or "Thanks for connecting. Quick question: are you the right person for sourcing gaming accessories?"),
+            },
+        },
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    "⏱ **执行 / 降配规则**\n"
+                    "- 今日动作: 手动查看 profile, 发送连接邀请; 完成后点 **已加人**\n"
+                    "- 接受后动作: 发送上面的推荐私信; 完成后点 **已发私信**\n"
+                    "- 业务员 48h 内未点任何回执按钮: 系统判为 **未确认执行**, 次日降低该线索派发优先级, 并提醒跟进人补状态\n"
+                    "- 客户私信后 D+3 未回复: 转 Email / 官网表单\n"
+                    "- 客户 D+8 仍无回应: 低频跟进或暂停"
+                ),
+            },
+        },
+        {"tag": "action", "actions": receipt_1},
+        {"tag": "action", "actions": receipt_2},
+    ]
+
+
+def build_card(rows: list[dict], *, owner_name: str = "", preview: bool = False) -> dict:
+    owner_label = owner_name or "未分配"
+    title_prefix = "🧪 预览 · " if preview else "🔗 "
+    elements = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"**负责人**: {owner_label}    **今日任务**: {len(rows)} 条\n"
+                    "系统只给出客户判断和话术; LinkedIn 查看、加人、私信必须由业务员手动执行。"
+                ),
+            },
+        }
+    ]
+    total = len(rows)
+    for idx, row in enumerate(rows, start=1):
+        elements.extend(_row_elements(row, idx, total))
+    elements.append(
+        {
+            "tag": "note",
+            "elements": [
+                {
+                    "tag": "plain_text",
+                    "content": "按钮会写回 LinkedIn 线索池; 不会自动操作 LinkedIn。若按钮点错，在备注或群里补充说明。",
+                }
+            ],
+        }
+    )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": f"{title_prefix}LinkedIn每日开发卡 · {owner_label} · {len(rows)}条"},
+        },
+        "elements": elements,
+    }
+
+
+def _target_from_value(value: str) -> tuple[str, str]:
+    value = (value or "").strip()
+    if not value:
+        return "", ""
+    if ":" in value and value.split(":", 1)[0] in {"email", "open_id", "union_id", "chat_id"}:
+        receive_type, receive_id = value.split(":", 1)
+        return receive_type.strip(), receive_id.strip()
+    if "@" in value:
+        return "email", value
+    if value.startswith("ou_"):
+        return "open_id", value
+    if value.startswith("on_"):
+        return "union_id", value
+    if value.startswith("oc_"):
+        return "chat_id", value
+    return "chat_id", value
+
+
+def _notify_target(owner: str, *, frankie_only: bool = False) -> tuple[str, str]:
+    if frankie_only:
+        return "email", B2B_LINKEDIN_FRANKIE_EMAIL
+    raw = os.environ.get("B2B_LINKEDIN_OWNER_NOTIFY_JSON", "").strip()
+    if raw:
+        try:
+            mapping = json.loads(raw)
+            value = mapping.get(owner) or mapping.get("*")
+            if isinstance(value, dict):
+                receive_type = value.get("receive_type") or value.get("type") or ""
+                receive_id = value.get("receive_id") or value.get("id") or ""
+                if receive_type and receive_id:
+                    return receive_type, receive_id
+            if isinstance(value, str):
+                target = _target_from_value(value)
+                if target[0] and target[1]:
+                    return target
+        except Exception as exc:
+            print(f"[b2b_linkedin_daily_card] bad B2B_LINKEDIN_OWNER_NOTIFY_JSON: {exc}")
+    return "chat_id", B2B_GROUP_CHAT_ID
+
+
+async def run(
+    *,
+    commit: bool = False,
+    notify: bool = False,
+    limit: int = 8,
+    owner: str = "",
+    include_test: bool = False,
+    frankie_only: bool = False,
+) -> dict:
+    """Build and optionally send LinkedIn daily cards.
+
+    limit is applied per owner after grouping.
+    """
+    if notify and not commit:
+        raise ValueError("notify=true requires commit=true")
+    limit = max(1, min(int(limit or 8), 10))
+    rows = await _eligible_rows(owner=owner, include_test=include_test)
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        grouped[row["owner"] or "未分配"].append(row)
+    grouped = {name: owner_rows[:limit] for name, owner_rows in grouped.items() if owner_rows[:limit]}
+
+    message_ids = []
+    send_errors = []
+    if notify:
+        for owner_name, owner_rows in grouped.items():
+            card = build_card(owner_rows, owner_name=owner_name)
+            receive_type, receive_id = _notify_target(owner_name, frankie_only=frankie_only)
+            try:
+                message_id = await feishu.send_card_via_b2b_assistant(receive_type, receive_id, card)
+                message_ids.append({"owner": owner_name, "receive_type": receive_type, "receive_id": receive_id, "message_id": message_id})
+            except Exception as exc:
+                send_errors.append({"owner": owner_name, "receive_type": receive_type, "receive_id": receive_id, "error": f"{type(exc).__name__}: {str(exc)[:240]}"})
+
+    preview = {
+        owner_name: [
+            {
+                "record_id": row["record_id"],
+                "company": row["company"],
+                "contact": row["contact"],
+                "position": row["position"],
+                "score": row["score"],
+                "grade": row["grade"],
+                "url": row["url"],
+            }
+            for row in owner_rows
+        ]
+        for owner_name, owner_rows in grouped.items()
+    }
+    return {
+        "commit": commit,
+        "notify": notify,
+        "limit_per_owner": limit,
+        "owner_filter": owner,
+        "include_test": include_test,
+        "frankie_only": frankie_only,
+        "eligible_total": len(rows),
+        "group_count": len(grouped),
+        "groups": {name: len(owner_rows) for name, owner_rows in grouped.items()},
+        "preview": preview,
+        "message_ids": message_ids,
+        "send_errors": send_errors,
+    }
