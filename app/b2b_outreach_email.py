@@ -61,7 +61,7 @@ QUEUE_FIELD_NAMES = [
 
 ACTIVE_QUEUE_STATES = {"待发送", "Dry-run已发送", "已发送", "缺邮箱"}
 SENDABLE_STATES = {"待发送"}
-COMMIT_SENDABLE_STATES = {"待发送", "Dry-run已发送"}
+COMMIT_SENDABLE_STATES = {"Dry-run已发送"}
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _PLACEHOLDER_BLACKLIST = [
@@ -443,8 +443,8 @@ def _queue_row(rec: dict) -> dict:
 async def run(*, commit: bool = False, dry_run_to: str = "", limit: int = 1, record_id: str = "", owner: str = "") -> dict:
     """Send queued B2B outreach emails.
 
-    Default is dry-run only. Real sends require commit=true and
-    B2B_EMAIL_SEND_COMMIT=1 in the service environment.
+    Default is dry-run only. Real sends require commit=true,
+    B2B_EMAIL_SEND_COMMIT=1, and a prior Dry-run已发送 state.
     """
     limit = max(1, min(int(limit or 1), 10))
     dry_run_to = (dry_run_to or B2B_EMAIL_DRY_RUN_TO).strip()
@@ -466,6 +466,18 @@ async def run(*, commit: bool = False, dry_run_to: str = "", limit: int = 1, rec
             continue
         rows.append(row)
     rows = rows[:limit]
+    if commit and not rows:
+        return {
+            "ok": False,
+            "error": "No sendable records. Real send only accepts records already marked Dry-run已发送.",
+            "commit": commit,
+            "dry_run_to": "",
+            "batch_id": batch_id,
+            "selected": 0,
+            "sent": 0,
+            "failed": 0,
+            "results": [],
+        }
 
     results = []
     for row in rows:
