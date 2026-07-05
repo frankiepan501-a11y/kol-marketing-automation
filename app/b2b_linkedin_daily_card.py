@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-from . import feishu
+from . import b2b_linkedin_auto_pool, feishu
 
 BJ = timezone(timedelta(hours=8))
 
@@ -541,6 +541,19 @@ def _top_counter_lines(counter: Counter, *, limit: int = 8) -> str:
     return " / ".join(parts)
 
 
+def _upstream_status_lines() -> str:
+    last = b2b_linkedin_auto_pool.get_last_run()
+    if not last:
+        return "最近执行: 当前服务进程内暂无记录\n新增/计划: -\n过滤: -"
+    skips = last.get("skip_reasons") or {}
+    skip_text = _top_counter_lines(Counter(skips), limit=5) if skips else "-"
+    return (
+        f"最近执行: {last.get('started_at_bj') or '-'} / 批次 {last.get('batch') or '-'}\n"
+        f"候选域名: {last.get('selected_domains', 0)} / 计划入池: {last.get('planned_records', 0)} / 已新增: {last.get('created_records', 0)}\n"
+        f"过滤: {skip_text}"
+    )
+
+
 def _today_rows(rows: list[dict], *, start_ms: int, end_ms: int) -> list[dict]:
     return [row for row in rows if start_ms <= int(row.get("created_time") or 0) < end_ms]
 
@@ -605,6 +618,7 @@ def _build_pool_summary_card(
             {"tag": "div", "text": {"tag": "lark_md", "content": "🏷 **AI等级分布**\n" + _top_counter_lines(grade_counts)}},
             {"tag": "div", "text": {"tag": "lark_md", "content": "🔎 **查重 / ICP**\nCRM: " + _top_counter_lines(crm_counts, limit=5) + "\nICP: " + _top_counter_lines(icp_counts, limit=5)}},
             {"tag": "div", "text": {"tag": "lark_md", "content": "🧾 **入池批次**\n" + _top_counter_lines(batch_counts, limit=5)}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "⚙️ **上游自动入池任务**\n" + _upstream_status_lines()}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": "📌 **新增样例（按AI评分取前10）**\n" + samples}},
             {
