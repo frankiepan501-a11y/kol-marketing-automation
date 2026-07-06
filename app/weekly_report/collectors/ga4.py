@@ -38,6 +38,8 @@ import logging
 import os
 import json
 
+import httpx
+
 log = logging.getLogger("weekly_report.ga4")
 
 # Property IDs
@@ -77,7 +79,35 @@ def _run_report_sync(client, property_id: str, body: dict) -> dict:
     return client.properties().runReport(property=f"properties/{property_id}", body=body).execute()
 
 
+async def _run_report_via_proxy(property_id: str, body: dict) -> dict:
+    """Call GA4 through n8n's existing Google OAuth credential."""
+    proxy_url = os.environ.get("GA4_N8N_PROXY_URL", "").strip()
+    token = (
+        os.environ.get("GA4_N8N_PROXY_TOKEN")
+        or os.environ.get("GA4_PROXY_TOKEN")
+        or os.environ.get("INTERNAL_TOKEN", "")
+    ).strip()
+    if not proxy_url:
+        raise RuntimeError("GA4_N8N_PROXY_URL env 未设")
+    if not token:
+        raise RuntimeError("GA4 proxy token env 未设")
+
+    async with httpx.AsyncClient(timeout=90.0) as cli:
+        resp = await cli.post(
+            proxy_url,
+            headers={"Authorization": f"Bearer {token}"},
+            json={"property_id": property_id, "report_body": body},
+        )
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError(f"GA4 proxy error: {data['error']}")
+    return data
+
+
 async def _run_report(property_id: str, body: dict) -> dict:
+    if os.environ.get("GA4_N8N_PROXY_URL", "").strip():
+        return await _run_report_via_proxy(property_id, body)
     client = await asyncio.to_thread(_build_client)
     return await asyncio.to_thread(_run_report_sync, client, property_id, body)
 
