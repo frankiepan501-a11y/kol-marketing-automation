@@ -203,6 +203,22 @@ class B2BLinkedInAutoPoolTest(unittest.TestCase):
         self.assertEqual(1, result["candidate_pending_total"])
         self.assertEqual("Candidate Pool Co", result["planned_preview"][0]["company"])
 
+    def test_batch_create_table_records_parses_record_ids(self):
+        original_api = pool.feishu.api
+        try:
+            async def fake_api(method, path, body=None, which="bitable"):
+                self.assertEqual("POST", method)
+                self.assertIn("/records/batch_create", path)
+                self.assertEqual(2, len(body["records"]))
+                return {"data": {"records": [{"record_id": "rec1"}, {"record_id": "rec2"}]}}
+
+            pool.feishu.api = fake_api
+            ids = asyncio.run(pool._create_table_records("tblTest", [{"A": 1}, {"A": 2}]))
+        finally:
+            pool.feishu.api = original_api
+
+        self.assertEqual(["rec1", "rec2"], ids)
+
 
 async def _async_value(value):
     return value

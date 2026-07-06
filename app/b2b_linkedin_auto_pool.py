@@ -589,6 +589,32 @@ async def _create_table_record(table_id: str, fields: dict) -> str:
     return (((resp.get("data") or {}).get("record") or {}).get("record_id")) or ""
 
 
+async def _create_table_records(table_id: str, rows: list[dict]) -> list[str]:
+    if not rows:
+        return []
+    ids: list[str] = []
+    try:
+        for start in range(0, len(rows), 500):
+            chunk = rows[start:start + 500]
+            resp = await feishu.api(
+                "POST",
+                f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records/batch_create",
+                {"records": [{"fields": fields} for fields in chunk]},
+                which="bitable",
+            )
+            records = (resp.get("data") or {}).get("records") or []
+            ids.extend([(rec.get("record_id") or rec.get("id") or "") for rec in records])
+        if len(ids) == len(rows):
+            return ids
+        raise RuntimeError(f"batch_create returned {len(ids)} ids for {len(rows)} rows")
+    except Exception as exc:
+        print(f"[b2b_linkedin_auto_pool] candidate batch_create fallback: {exc}")
+        ids = []
+        for fields in rows:
+            ids.append(await _create_table_record(table_id, fields))
+        return ids
+
+
 async def _update_table_record(table_id: str, record_id: str, fields: dict) -> None:
     clean = {k: v for k, v in fields.items() if v not in (None, "", [])}
     if not record_id or not clean:
@@ -726,8 +752,8 @@ async def refill_candidates(*, commit: bool = False, limit: int = 200) -> dict:
         })
 
     if commit:
-        for row in planned:
-            record_id = await _create_table_record(B2B_LINKEDIN_CANDIDATE_TABLE, row["fields"])
+        record_ids = await _create_table_records(B2B_LINKEDIN_CANDIDATE_TABLE, [row["fields"] for row in planned])
+        for row, record_id in zip(planned, record_ids):
             created.append({
                 "record_id": record_id,
                 "company": row["company"],
