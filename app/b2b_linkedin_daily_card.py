@@ -378,8 +378,10 @@ def _row_elements(row: dict, index: int, total: int) -> list[dict]:
     ]
 
     link_actions = []
-    if row["linkedin"]:
-        link_actions.append(_button("🔗 打开LinkedIn", url=row["linkedin"], style="primary"))
+    if row["linkedin_company"]:
+        link_actions.append(_button("🏢 打开企业LinkedIn", url=row["linkedin_company"], style="primary"))
+    if row["linkedin_profile"]:
+        link_actions.append(_button("👤 打开联系人LinkedIn", url=row["linkedin_profile"]))
     if row["website"]:
         link_actions.append(_button("🌐 打开官网", url=row["website"]))
     link_actions.append(_button("📋 打开线索记录", url=row["url"]))
@@ -720,6 +722,8 @@ async def run(
                 "position": row["position"],
                 "score": row["score"],
                 "grade": row["grade"],
+                "linkedin_company": row["linkedin_company"],
+                "linkedin_profile": row["linkedin_profile"],
                 "url": row["url"],
             }
             for row in owner_rows
