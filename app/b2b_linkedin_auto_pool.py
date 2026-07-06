@@ -26,6 +26,22 @@ B2B_LINKEDIN_TABLE = os.environ.get("B2B_LINKEDIN_TABLE", "tblN8XszEatuTJgP")
 COMPANY_TYPE_OPTIONS = {"贸易商", "分销商", "品牌商", "批发商", "混合型", "游戏IP", "电商卖家", "电商平台", "行业协会", "零售商", "待判断"}
 CHANNEL_OPTIONS = {"线下连锁", "独立店", "本地电商", "海外众筹", "商超", "EBAY", "虾皮", "Amazon", "分销"}
 
+KNOWN_LINKEDIN_COMPANY_PAGES = {
+    "alsogroup": "https://www.linkedin.com/company/alsogroup",
+    "alza": "https://www.linkedin.com/company/alza-cz",
+    "alzacz": "https://www.linkedin.com/company/alza-cz",
+    "centresoft": "https://www.linkedin.com/company/centresoft-group-ltd",
+    "elgiganten": "https://www.linkedin.com/company/elgiganten",
+    "mightyape": "https://www.linkedin.com/company/mightyape",
+    "panvision": "https://www.linkedin.com/company/pan-vision",
+    "pccomponentes": "https://www.linkedin.com/company/pccomponentes",
+    "proshop": "https://www.linkedin.com/company/proshop-dk",
+    "saturn": "https://www.linkedin.com/company/saturn-deutschland",
+    "smythstoys": "https://www.linkedin.com/company/smyths-toys",
+    "xcite": "https://www.linkedin.com/company/xcitealghanim",
+    "xcitealghanim": "https://www.linkedin.com/company/xcitealghanim",
+}
+
 DEFAULT_SEEDS = [
     {"company": "Game Retail Limited", "domain": "game.co.uk", "country": "United Kingdom", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "video games and gaming accessories retail", "notes": "UK game retailer with console and accessory category"},
     {"company": "Smyths Toys", "domain": "smythstoys.com", "country": "Ireland", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "toys, video games, Nintendo Switch and console accessories", "notes": "EU/UK retail chain carrying Nintendo and gaming products"},
@@ -204,6 +220,81 @@ def _domain_of(value: str) -> str:
 
 def _text_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def _linkedin_company_key(value: str) -> str:
+    value = _domain_of(value) or (value or "")
+    value = re.sub(r"\.(com|co|net|org|io|dk|de|fr|es|pt|nl|cz|co\.uk|com\.au|co\.nz)$", "", value.lower())
+    return _text_key(value)
+
+
+def _linkedin_company_overrides() -> dict[str, str]:
+    raw = os.environ.get("B2B_LINKEDIN_COMPANY_URLS_JSON", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        print(f"[b2b_linkedin_auto_pool] bad B2B_LINKEDIN_COMPANY_URLS_JSON: {exc}")
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out = {}
+    for key, value in parsed.items():
+        url = _normalize_url(str(value or ""))
+        if "linkedin.com/company/" not in url.lower():
+            continue
+        out[_linkedin_company_key(str(key))] = url
+    return out
+
+
+def _resolve_linkedin_company(seed: dict, *, domain: str, company: str) -> dict:
+    explicit = _normalize_url(str(seed.get("linkedin_company") or ""))
+    if explicit:
+        return {
+            "url": explicit,
+            "status": "已确认",
+            "source": "seed",
+            "note": "LinkedIn公司页来自 seed 显式字段",
+        }
+
+    keys = [
+        _linkedin_company_key(domain),
+        _linkedin_company_key(company),
+        _text_key(company),
+    ]
+    overrides = _linkedin_company_overrides()
+    for key in keys:
+        if key and key in overrides:
+            return {
+                "url": overrides[key],
+                "status": "已确认",
+                "source": "env",
+                "note": "LinkedIn公司页来自 env 高置信映射",
+            }
+    for key in keys:
+        if key and key in KNOWN_LINKEDIN_COMPANY_PAGES:
+            return {
+                "url": KNOWN_LINKEDIN_COMPANY_PAGES[key],
+                "status": "已确认",
+                "source": "known_map",
+                "note": "LinkedIn公司页来自已核验高置信映射",
+            }
+
+    return {
+        "url": "",
+        "status": "待人工确认",
+        "source": "missing",
+        "note": "LinkedIn公司页待人工确认：未匹配到高置信企业主页，系统未自动写入",
+    }
+
+
+def _append_note(notes: str, extra: str) -> str:
+    notes = (notes or "").strip()
+    extra = (extra or "").strip()
+    if not extra or extra in notes:
+        return notes
+    return f"{notes}；{extra}" if notes else extra
 
 
 def _first_name(name: str) -> str:
@@ -521,16 +612,24 @@ def _prospect_to_lead(seed: dict, prospect: dict, *, email: str = "", email_stat
 def _seed_to_lead(seed: dict) -> dict:
     domain = str(seed.get("domain") or _domain_of(seed.get("website") or "")).strip().lower()
     website = _normalize_url(str(seed.get("website") or domain or ""))
+    company = str(seed.get("company") or "").strip()
+    linkedin_company = _resolve_linkedin_company(seed, domain=domain, company=company)
     company_type = str(seed.get("company_type") or "待判断").strip()
     if company_type not in COMPANY_TYPE_OPTIONS:
         company_type = "待判断"
+    notes = str(seed.get("notes") or "").strip()
+    if linkedin_company["status"] != "已确认":
+        notes = _append_note(notes, linkedin_company["note"])
     return {
-        "company": str(seed.get("company") or "").strip(),
+        "company": company,
         "contact": str(seed.get("contact") or "").strip(),
         "title": str(seed.get("title") or "").strip(),
         "website": website,
         "domain": domain,
-        "linkedin_company": _normalize_url(str(seed.get("linkedin_company") or "")),
+        "linkedin_company": linkedin_company["url"],
+        "linkedin_company_status": linkedin_company["status"],
+        "linkedin_company_source": linkedin_company["source"],
+        "linkedin_company_note": linkedin_company["note"],
         "linkedin_profile": _normalize_url(str(seed.get("linkedin_profile") or "")),
         "country": str(seed.get("country") or "").strip(),
         "company_type": company_type,
@@ -539,7 +638,7 @@ def _seed_to_lead(seed: dict) -> dict:
         "category": str(seed.get("category") or "").strip(),
         "owner": str(seed.get("owner") or "").strip(),
         "source": str(seed.get("source") or "LinkedIn-现有客户相似").strip(),
-        "notes": str(seed.get("notes") or "").strip(),
+        "notes": notes,
         "email": str(seed.get("email") or "").strip(),
         "email_status": str(seed.get("email_status") or "").strip(),
     }
@@ -554,6 +653,9 @@ def _lead_fields(lead: dict, score: dict, copy: dict, *, batch: str, snov_status
     name = lead.get("company") or lead.get("linkedin_profile") or lead.get("domain")
     if lead.get("contact"):
         name = f"{lead.get('company')} - {lead.get('contact')}"
+    next_action = "业务员手动核对 LinkedIn profile；合格则手动加人并发送推荐连接语"
+    if lead.get("linkedin_company_status") != "已确认":
+        next_action = "先人工确认企业LinkedIn公司页，再核对联系人 profile；合格则手动加人并发送推荐连接语"
     fields = {
         "线索名称": name,
         "公司名称": lead.get("company"),
@@ -581,7 +683,7 @@ def _lead_fields(lead: dict, score: dict, copy: dict, *, batch: str, snov_status
         "Snov来源": snov_source,
         "Snov原始摘要": snov_summary,
         "Snov最后查询时间": int(_now_bj().timestamp() * 1000),
-        "下一步行动": "业务员手动核对 LinkedIn profile；合格则手动加人并发送推荐连接语",
+        "下一步行动": next_action,
         "CRM匹配状态": "新线索",
         "去重Key": lead.get("domain") or _text_key(lead.get("company") or ""),
         "创建批次": batch,
@@ -675,7 +777,17 @@ async def run(
                 continue
             copy = _copy_for_lead(lead, score)
             fields = _lead_fields(lead, score, copy, batch=batch, snov_status=status, snov_source=source, snov_summary=summary)
-            planned.append({"company": lead.get("company"), "domain": lead.get("domain"), "contact": lead.get("contact"), "score": score["score"], "grade": score["grade"], "fields": fields})
+            planned.append({
+                "company": lead.get("company"),
+                "domain": lead.get("domain"),
+                "contact": lead.get("contact"),
+                "score": score["score"],
+                "grade": score["grade"],
+                "linkedin_company": lead.get("linkedin_company"),
+                "linkedin_company_status": lead.get("linkedin_company_status"),
+                "linkedin_company_source": lead.get("linkedin_company_source"),
+                "fields": fields,
+            })
 
     if commit:
         for row in planned:
@@ -701,9 +813,16 @@ async def run(
         "created_records": len(created),
         "created": created,
         "planned_preview": [
-            {k: row[k] for k in ["company", "domain", "contact", "score", "grade"]}
+            {k: row[k] for k in ["company", "domain", "contact", "score", "grade", "linkedin_company_status"]}
             for row in planned[:20]
         ],
+        "linkedin_company_resolved": sum(1 for row in planned if row.get("linkedin_company")),
+        "linkedin_company_pending": sum(1 for row in planned if not row.get("linkedin_company")),
+        "linkedin_company_pending_preview": [
+            {k: row[k] for k in ["company", "domain", "contact", "linkedin_company_status"]}
+            for row in planned
+            if not row.get("linkedin_company")
+        ][:20],
         "skip_reasons": dict(skip_reasons),
         "snov_errors": snov_errors[:10],
     }

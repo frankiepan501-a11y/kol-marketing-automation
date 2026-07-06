@@ -372,6 +372,7 @@ def _row_elements(row: dict, index: int, total: int) -> list[dict]:
         _field("客户", company),
         _field("联系人", contact_line),
         _field("国家/类型", " / ".join(x for x in [row["country"], row["company_type"]] if x)),
+        _field("企业页", "已补齐" if row["linkedin_company"] else "待人工确认"),
         _field("AI等级", f"{row['grade'] or '-'} · {row['score']:.0f}分"),
         _field("当前状态", f"{row['dev_status'] or '待开发'} / {row['reach_status'] or '待触达'}"),
         _field("派发规则", row.get("assignment_reason", "") or "-"),

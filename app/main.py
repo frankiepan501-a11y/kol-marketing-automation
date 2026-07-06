@@ -152,7 +152,9 @@ def _compact_b2b_auto_pool_result(result: dict) -> dict:
         "ok", "commit", "started_at_bj", "batch", "seed_total",
         "domain_limit", "record_limit", "selected_domains",
         "planned_records", "created_records", "created",
-        "planned_preview", "skip_reasons", "snov_errors",
+        "planned_preview", "linkedin_company_resolved",
+        "linkedin_company_pending", "linkedin_company_pending_preview",
+        "skip_reasons", "snov_errors",
     ]
     return {k: result.get(k) for k in keep if k in result}
 
