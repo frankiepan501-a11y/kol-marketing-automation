@@ -30,6 +30,8 @@ _b2b_mail_jobs = {}
 _B2B_MAIL_JOB_TTL = 24 * 3600
 _b2b_auto_pool_jobs = {}
 _B2B_AUTO_POOL_JOB_TTL = 24 * 3600
+_b2b_discovery_jobs = {}
+_B2B_DISCOVERY_JOB_TTL = 24 * 3600
 
 
 def _check_auth(auth: str):
@@ -194,6 +196,68 @@ async def _run_b2b_auto_pool_job(
             trace=tr,
         )
         await _alert_endpoint_failure("/b2b-linkedin-auto-pool/run", str(e), tr)
+
+
+def _cleanup_b2b_discovery_jobs():
+    now = time.time()
+    for job_id in list(_b2b_discovery_jobs.keys()):
+        started = _b2b_discovery_jobs[job_id].get("started_ts", 0)
+        if started and now - started > _B2B_DISCOVERY_JOB_TTL:
+            _b2b_discovery_jobs.pop(job_id, None)
+
+
+def _running_b2b_discovery_job():
+    _cleanup_b2b_discovery_jobs()
+    for job_id, job in _b2b_discovery_jobs.items():
+        if job.get("status") == "running":
+            return job_id, job
+    return "", None
+
+
+def _compact_b2b_discovery_result(result: dict) -> dict:
+    keep = [
+        "ok", "commit", "provider", "search_provider", "started_at_bj",
+        "batch", "market", "pending_target", "low_water_alert",
+        "candidate_pending_total", "waterline_status", "raw_results",
+        "normalized_domains", "planned_candidates", "created_candidates",
+        "snov_available_candidates", "created", "planned_preview",
+        "skip_reasons", "provider_errors",
+    ]
+    return {k: result.get(k) for k in keep if k in result}
+
+
+async def _run_b2b_discovery_job(
+    job_id: str,
+    commit: bool,
+    provider: str,
+    limit: int,
+    pending_target: int,
+    market: str,
+    min_score: int,
+):
+    try:
+        result = await b2b_linkedin_discovery.run(
+            commit=commit,
+            provider=provider,
+            limit=limit,
+            pending_target=pending_target,
+            market=market,
+            min_score=min_score,
+        )
+        _b2b_discovery_jobs[job_id].update(
+            status="success",
+            finished_at=datetime_now_string(),
+            result=_compact_b2b_discovery_result({"ok": True, **result}),
+        )
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        _b2b_discovery_jobs[job_id].update(
+            status="error",
+            finished_at=datetime_now_string(),
+            error=str(e),
+            trace=tr,
+        )
+        await _alert_endpoint_failure("/b2b-linkedin-discovery/run", str(e), tr)
 
 
 def datetime_now_string():
@@ -412,6 +476,7 @@ async def run_b2b_linkedin_candidate_refill(authorization: str = Header(default=
 @app.post("/b2b-linkedin-discovery/run")
 async def run_b2b_linkedin_discovery(authorization: str = Header(default=""),
                                      commit: bool = False,
+                                     async_mode: bool = False,
                                      provider: str = "all",
                                      limit: int = 0,
                                      pending_target: int = 0,
@@ -423,6 +488,41 @@ async def run_b2b_linkedin_discovery(authorization: str = Header(default=""),
     lead-pool records, send cards, touch LinkedIn, or write CRM customers.
     """
     _check_auth(authorization)
+    if async_mode:
+        running_id, running_job = _running_b2b_discovery_job()
+        if running_job:
+            return {
+                "ok": True,
+                "accepted": True,
+                "already_running": True,
+                "job_id": running_id,
+                "status": running_job.get("status"),
+                "started_at": running_job.get("started_at"),
+            }
+        job_id = "b2bdisc-" + uuid.uuid4().hex[:12]
+        _b2b_discovery_jobs[job_id] = {
+            "status": "running",
+            "started_ts": time.time(),
+            "started_at": datetime_now_string(),
+            "params": {
+                "commit": commit,
+                "provider": provider,
+                "limit": limit,
+                "pending_target": pending_target,
+                "market": market,
+                "min_score": min_score,
+            },
+        }
+        asyncio.create_task(_run_b2b_discovery_job(
+            job_id,
+            commit,
+            provider,
+            limit,
+            pending_target,
+            market,
+            min_score,
+        ))
+        return {"ok": True, "accepted": True, "already_running": False, "job_id": job_id}
     try:
         result = await b2b_linkedin_discovery.run(
             commit=commit,
@@ -437,6 +537,17 @@ async def run_b2b_linkedin_discovery(authorization: str = Header(default=""),
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/b2b-linkedin-discovery/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.get("/b2b-linkedin-discovery/jobs/{job_id}")
+async def get_b2b_linkedin_discovery_job(job_id: str, authorization: str = Header(default="")):
+    """B2B 外部发现补给后台 job 状态查询（进程内 24h 缓存）。"""
+    _check_auth(authorization)
+    _cleanup_b2b_discovery_jobs()
+    job = _b2b_discovery_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    return {"ok": True, "job_id": job_id, **job}
 
 
 @app.post("/b2b-linkedin-auto-pool/run")
