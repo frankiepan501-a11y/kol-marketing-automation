@@ -17,6 +17,7 @@ from . import b2b_assistant  # 外贸助手: 客户指令 + LinkedIn 回执
 from . import b2b_linkedin_daily_card  # B2B LinkedIn 每日开发卡派发
 from . import b2b_linkedin_auto_pool  # B2B LinkedIn/Snov 每日自动入池
 from . import b2b_linkedin_discovery  # B2B 外部搜索/Snov 候选公司补给
+from . import b2b_linkedin_async_audit  # B2B n8n async ACK 后台 job 产出巡检
 from . import b2b_outreach_email  # B2B LinkedIn 转 Email 开发信队列 + dry-run sender
 from . import invest  # 投资助手: X 帖子抓取 → A股观察映射 → 投资助手 App 推送
 
@@ -548,6 +549,30 @@ async def get_b2b_linkedin_discovery_job(job_id: str, authorization: str = Heade
     if not job:
         raise HTTPException(404, "job not found")
     return {"ok": True, "job_id": job_id, **job}
+
+
+@app.post("/b2b-linkedin-async-audit/run")
+async def run_b2b_linkedin_async_audit(authorization: str = Header(default=""),
+                                       notify: bool = False,
+                                       workflow: str = "all",
+                                       lookback_hours: int = 30):
+    """Audit n8n async ACK workflows against backend job output.
+
+    This detects the failure mode where n8n execution is success because the
+    HTTP node received a job_id, but the actual background job later failed or
+    produced zero candidates/leads.
+    """
+    _check_auth(authorization)
+    try:
+        return await b2b_linkedin_async_audit.run(
+            notify=notify,
+            workflow=workflow,
+            lookback_hours=lookback_hours,
+        )
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/b2b-linkedin-async-audit/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
 
 
 @app.post("/b2b-linkedin-auto-pool/run")
