@@ -1218,11 +1218,23 @@ async def run_manual_send_recon(authorization: str = Header(default=""), dry_run
 
 
 @app.post("/completion-report/run")
-async def run_completion_report(authorization: str = Header(default=""), dry_run: bool = False):
+async def run_completion_report(authorization: str = Header(default=""), dry_run: bool = False,
+                                async_mode: bool = True):
     """KOL 任务完成情况周报: 漏斗转化 + 5 类终态分布 + 卡点清单 → 飞书运营群 + Frankie 私聊.
-    终态: 成功=已上稿/无回应=末次发信+14d/寄样未产出=签收+60d。纯读不发邮件不写主表。?dry_run=true 只算不发卡。"""
+    终态: 成功=已上稿/无回应=末次发信+14d/寄样未产出=签收+60d。纯读不发邮件不写主表。
+    ?dry_run=true 只算不发卡; ?async_mode=true 默认后台跑, 避开 Zeabur 网关超时。"""
     _check_auth(authorization)
     from . import completion_report
+    if async_mode and not dry_run:
+        async def _job():
+            try:
+                await completion_report.run(dry_run=False)
+            except Exception as e:
+                import traceback
+                await _alert_endpoint_failure("/completion-report/run", str(e), traceback.format_exc()[-1200:])
+        asyncio.create_task(_job())
+        return {"ok": True, "started": "background",
+                "msg": "completion report run started, will push to feishu when done"}
     try:
         return {"ok": True, **(await completion_report.run(dry_run=dry_run))}
     except Exception as e:
@@ -1321,11 +1333,23 @@ async def resend_from_button(draft_rid: str = "", secret: str = ""):
 
 @app.post("/upload-task-report/run")
 async def run_upload_task_report(authorization: str = Header(default=""), dry_run: bool = False,
-                                 notify: bool = True, frankie_only: bool = False):
+                                 notify: bool = True, frankie_only: bool = False,
+                                 async_mode: bool = True):
     """KOL 上稿×任务进度 周报(按产品): 飞书卡片 digest + 写留档表.
-    ?dry_run=true 不写留档表; ?notify=false 不发卡; ?frankie_only=true 卡只发 Frankie 不进群(审格式用)."""
+    ?dry_run=true 不写留档表; ?notify=false 不发卡; ?frankie_only=true 卡只发 Frankie 不进群(审格式用);
+    ?async_mode=true 默认后台跑, 避开 Zeabur 网关超时。"""
     _check_auth(authorization)
     from . import upload_task_report
+    if async_mode and not dry_run:
+        async def _job():
+            try:
+                await upload_task_report.run(dry_run=False, notify=notify, frankie_only=frankie_only)
+            except Exception as e:
+                import traceback
+                await _alert_endpoint_failure("/upload-task-report/run", str(e), traceback.format_exc()[-1200:])
+        asyncio.create_task(_job())
+        return {"ok": True, "started": "background",
+                "msg": "upload task report run started, will push to feishu when done"}
     try:
         return await upload_task_report.run(dry_run=dry_run, notify=notify, frankie_only=frankie_only)
     except Exception as e:
