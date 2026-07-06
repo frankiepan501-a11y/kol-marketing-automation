@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-from . import b2b_linkedin_auto_pool, feishu
+from . import b2b_linkedin_auto_pool, b2b_linkedin_discovery, feishu
 
 BJ = timezone(timedelta(hours=8))
 
@@ -559,6 +559,27 @@ def _upstream_status_lines() -> str:
     )
 
 
+def _discovery_status_lines() -> str:
+    last = b2b_linkedin_discovery.get_last_run()
+    if not last:
+        return "最近执行: 当前服务进程内暂无记录\n搜索结果/候选: -\nSnov可用: -\n过滤: -"
+    skips = last.get("skip_reasons") or {}
+    errors = last.get("provider_errors") or []
+    skip_text = _top_counter_lines(Counter(skips), limit=5) if skips else "-"
+    error_text = "-"
+    if errors:
+        first = errors[0] or {}
+        error_text = f"{first.get('provider') or '-'}: {(first.get('error') or '')[:120]}"
+    return (
+        f"最近执行: {last.get('started_at_bj') or '-'} / 批次 {last.get('batch') or '-'}\n"
+        f"水位: {last.get('candidate_pending_total', 0)}/{last.get('pending_target', 0)} / 状态 {last.get('waterline_status') or '-'}\n"
+        f"搜索结果: {last.get('raw_results', 0)} / 归一域名: {last.get('normalized_domains', 0)} / 计划候选: {last.get('planned_candidates', 0)} / 已新增: {last.get('created_candidates', 0)}\n"
+        f"Snov可用: {last.get('snov_available_candidates', 0)} / 搜索源: {last.get('google_search_provider') or '-'}\n"
+        f"过滤: {skip_text}\n"
+        f"错误: {error_text}"
+    )
+
+
 def _today_rows(rows: list[dict], *, start_ms: int, end_ms: int) -> list[dict]:
     return [row for row in rows if start_ms <= int(row.get("created_time") or 0) < end_ms]
 
@@ -623,6 +644,7 @@ def _build_pool_summary_card(
             {"tag": "div", "text": {"tag": "lark_md", "content": "🏷 **AI等级分布**\n" + _top_counter_lines(grade_counts)}},
             {"tag": "div", "text": {"tag": "lark_md", "content": "🔎 **查重 / ICP**\nCRM: " + _top_counter_lines(crm_counts, limit=5) + "\nICP: " + _top_counter_lines(icp_counts, limit=5)}},
             {"tag": "div", "text": {"tag": "lark_md", "content": "🧾 **入池批次**\n" + _top_counter_lines(batch_counts, limit=5)}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "🧭 **外部发现补给**\n" + _discovery_status_lines()}},
             {"tag": "div", "text": {"tag": "lark_md", "content": "⚙️ **上游自动入池任务**\n" + _upstream_status_lines()}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": "📌 **新增样例（按AI评分取前10）**\n" + samples}},
