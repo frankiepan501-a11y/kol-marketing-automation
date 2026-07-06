@@ -22,9 +22,18 @@ BJ = timezone(timedelta(hours=8))
 B2B_APP_TOKEN = os.environ.get("B2B_CUSTOMER_APP_TOKEN", "E1kkbx1tVaJvQGsKf94cJG88nzb")
 B2B_CRM_TABLE = os.environ.get("B2B_CUSTOMER_TABLE", "tbl2OoqVb7Uf1pWd")
 B2B_LINKEDIN_TABLE = os.environ.get("B2B_LINKEDIN_TABLE", "tblN8XszEatuTJgP")
+B2B_LINKEDIN_CANDIDATE_TABLE = os.environ.get("B2B_LINKEDIN_CANDIDATE_TABLE", "tblcfwhNPkgu0TZE")
 
 COMPANY_TYPE_OPTIONS = {"贸易商", "分销商", "品牌商", "批发商", "混合型", "游戏IP", "电商卖家", "电商平台", "行业协会", "零售商", "待判断"}
 CHANNEL_OPTIONS = {"线下连锁", "独立店", "本地电商", "海外众筹", "商超", "EBAY", "虾皮", "Amazon", "分销"}
+CANDIDATE_SOURCE_OPTIONS = {"系统种子", "搜索补给", "人工导入", "现有客户相似", "展会补充"}
+CANDIDATE_PENDING_STATUSES = {"", "待入池"}
+CANDIDATE_FIELD_NAMES = [
+    "公司名称", "公司官网", "域名", "国家/地区", "公司类型", "主力渠道", "主营类目",
+    "候选状态", "优先级分", "来源", "补给批次", "入池批次", "LinkedIn线索记录ID",
+    "最近补给时间", "最近入池尝试时间", "查询次数", "Snov查询状态", "Snov原始摘要",
+    "去重Key", "备注",
+]
 
 KNOWN_LINKEDIN_COMPANY_PAGES = {
     "alsogroup": "https://www.linkedin.com/company/alsogroup",
@@ -421,13 +430,122 @@ def _clean_channels(values) -> list[str]:
     return out
 
 
+def _field_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [x.strip() for x in re.split(r"[,;；、/]", value) if x.strip()]
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            if isinstance(item, dict):
+                text = str(item.get("text") or item.get("name") or item.get("link") or "").strip()
+            else:
+                text = str(item or "").strip()
+            if text and text not in out:
+                out.append(text)
+        return out
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _field_int(value, default: int = 0) -> int:
+    try:
+        return int(float(_text(value) or value or default))
+    except Exception:
+        return default
+
+
+def _timestamp_ms() -> int:
+    return int(_now_bj().timestamp() * 1000)
+
+
+def _seed_key(seed: dict) -> str:
+    return _domain_of(str(seed.get("domain") or seed.get("website") or "")) or _text_key(str(seed.get("company") or ""))
+
+
+def _candidate_source(seed: dict) -> str:
+    raw = str(seed.get("candidate_source") or seed.get("source") or "").strip()
+    if raw in CANDIDATE_SOURCE_OPTIONS:
+        return raw
+    if "展会" in raw:
+        return "展会补充"
+    if "相似" in raw:
+        return "现有客户相似"
+    if "搜索" in raw or "Google" in raw or "Snov" in raw:
+        return "搜索补给"
+    if "人工" in raw:
+        return "人工导入"
+    return "系统种子"
+
+
+def _candidate_key_from_fields(fields: dict) -> str:
+    return (
+        _domain_of(_text(fields.get("去重Key")))
+        or _domain_of(_text(fields.get("域名")))
+        or _domain_of(_url(fields.get("公司官网")))
+        or _text_key(_text(fields.get("公司名称")))
+    )
+
+
+def _candidate_record_to_seed(rec: dict) -> dict:
+    fields = rec.get("fields") or {}
+    domain = (
+        _domain_of(_text(fields.get("域名")))
+        or _domain_of(_text(fields.get("去重Key")))
+        or _domain_of(_url(fields.get("公司官网")))
+    )
+    website = _url(fields.get("公司官网")) or domain
+    company_type = _text(fields.get("公司类型")) or "待判断"
+    if company_type not in COMPANY_TYPE_OPTIONS:
+        company_type = "待判断"
+    return {
+        "company": _text(fields.get("公司名称")),
+        "domain": domain,
+        "website": website,
+        "country": _text(fields.get("国家/地区")),
+        "company_type": company_type,
+        "channels": _clean_channels(_field_list(fields.get("主力渠道"))),
+        "category": _text(fields.get("主营类目")),
+        "source": "LinkedIn-现有客户相似",
+        "notes": _text(fields.get("备注")),
+        "_candidate_record_id": rec.get("record_id") or rec.get("id") or "",
+        "_candidate_query_count": _field_int(fields.get("查询次数"), 0),
+        "_priority_score": _field_int(fields.get("优先级分"), 0),
+    }
+
+
+def _candidate_fields_for_seed(seed: dict, lead: dict, score: dict, *, batch: str) -> dict:
+    domain = lead.get("domain") or _domain_of(lead.get("website") or "")
+    fields = {
+        "公司名称": lead.get("company"),
+        "域名": domain,
+        "国家/地区": lead.get("country"),
+        "公司类型": lead.get("company_type") or "待判断",
+        "主力渠道": lead.get("channels") or [],
+        "主营类目": lead.get("category"),
+        "候选状态": "待入池",
+        "优先级分": int(score.get("score") or 0),
+        "来源": _candidate_source(seed),
+        "补给批次": batch,
+        "最近补给时间": _timestamp_ms(),
+        "查询次数": 0,
+        "Snov查询状态": "未查询",
+        "去重Key": domain or _text_key(lead.get("company") or ""),
+        "备注": lead.get("notes"),
+    }
+    website = _url_cell(lead.get("website") or domain or "")
+    if website:
+        fields["公司官网"] = website
+    return {k: v for k, v in fields.items() if v not in (None, "", [])}
+
+
 def _dedupe_seeds(seeds: list[dict]) -> list[dict]:
     out = []
     seen = set()
     for seed in seeds:
         if not isinstance(seed, dict):
             continue
-        key = _domain_of(str(seed.get("domain") or seed.get("website") or "")) or _text_key(str(seed.get("company") or ""))
+        key = _seed_key(seed)
         if not key or key in seen:
             continue
         seen.add(key)
@@ -466,6 +584,40 @@ async def _list_records(table_id: str, *, field_names: list[str]) -> list[dict]:
     return items
 
 
+async def _create_table_record(table_id: str, fields: dict) -> str:
+    resp = await feishu.api("POST", f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records", {"fields": fields}, which="bitable")
+    return (((resp.get("data") or {}).get("record") or {}).get("record_id")) or ""
+
+
+async def _update_table_record(table_id: str, record_id: str, fields: dict) -> None:
+    clean = {k: v for k, v in fields.items() if v not in (None, "", [])}
+    if not record_id or not clean:
+        return
+    await feishu.api("PUT", f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records/{record_id}", {"fields": clean}, which="bitable")
+
+
+async def _list_candidate_records() -> list[dict]:
+    return await _list_records(B2B_LINKEDIN_CANDIDATE_TABLE, field_names=CANDIDATE_FIELD_NAMES)
+
+
+async def _load_pending_candidate_seeds() -> tuple[list[dict], Counter]:
+    seeds = []
+    status_counts = Counter()
+    for rec in await _list_candidate_records():
+        fields = rec.get("fields") or {}
+        status = _text(fields.get("候选状态"))
+        status_counts[status or "空"] += 1
+        if status not in CANDIDATE_PENDING_STATUSES:
+            continue
+        seed = _candidate_record_to_seed(rec)
+        if _seed_key(seed):
+            seeds.append(seed)
+        else:
+            status_counts["missing_domain_company"] += 1
+    seeds.sort(key=lambda x: (-_field_int(x.get("_priority_score"), 0), x.get("company") or ""))
+    return seeds, status_counts
+
+
 async def _load_existing_keys() -> tuple[set[str], set[str], set[str], set[str]]:
     lead_domains = set()
     lead_company_keys = set()
@@ -494,6 +646,112 @@ async def _load_existing_keys() -> tuple[set[str], set[str], set[str], set[str]]
             crm_company_keys.add(company_key)
 
     return lead_domains, lead_company_keys, crm_domains | lead_domains, crm_company_keys | lead_company_keys
+
+
+async def refill_candidates(*, commit: bool = False, limit: int = 200) -> dict:
+    """Top up the candidate-company pool from maintained seed sources.
+
+    This is intentionally separate from Snov enrichment. Refill builds inventory;
+    the daily auto-pool job consumes that inventory and writes qualified leads.
+    """
+    limit = max(1, min(int(limit or 200), 1000))
+    batch = "candidate-refill-" + _now_bj().strftime("%Y%m%d-%H%M")
+    started_at = _now_bj().strftime("%Y-%m-%d %H:%M:%S")
+    seeds = _load_seeds()
+    lead_domains, lead_company_keys, all_domains, all_company_keys = await _load_existing_keys()
+
+    candidate_domains = set()
+    candidate_company_keys = set()
+    candidate_status_counts = Counter()
+    for rec in await _list_candidate_records():
+        fields = rec.get("fields") or {}
+        status = _text(fields.get("候选状态")) or "空"
+        candidate_status_counts[status] += 1
+        key = _candidate_key_from_fields(fields)
+        domain = _domain_of(key)
+        if domain:
+            candidate_domains.add(domain)
+        company_key = _text_key(_text(fields.get("公司名称")))
+        if company_key:
+            candidate_company_keys.add(company_key)
+        if key and not domain:
+            candidate_company_keys.add(key)
+
+    skip_reasons = Counter()
+    planned = []
+    created = []
+    seen_this_run = set()
+
+    for seed in seeds:
+        if len(planned) >= limit:
+            break
+        lead = _seed_to_lead(seed)
+        domain = lead.get("domain")
+        company_key = _text_key(lead.get("company") or "")
+        key = domain or company_key
+        if not key:
+            skip_reasons["missing_domain_company"] += 1
+            continue
+        if key in seen_this_run:
+            skip_reasons["duplicate_seed_this_run"] += 1
+            continue
+        seen_this_run.add(key)
+        if domain and domain in candidate_domains:
+            skip_reasons["duplicate_candidate_domain"] += 1
+            continue
+        if company_key and company_key in candidate_company_keys:
+            skip_reasons["duplicate_candidate_company"] += 1
+            continue
+        if domain and domain in lead_domains:
+            skip_reasons["duplicate_lead_pool_domain"] += 1
+            continue
+        if company_key and company_key in lead_company_keys:
+            skip_reasons["duplicate_lead_pool_company"] += 1
+            continue
+        if domain and domain in all_domains:
+            skip_reasons["duplicate_crm_domain"] += 1
+            continue
+        if company_key and company_key in all_company_keys:
+            skip_reasons["duplicate_crm_company"] += 1
+            continue
+
+        score = _score_lead(lead)
+        fields = _candidate_fields_for_seed(seed, lead, score, batch=batch)
+        planned.append({
+            "company": lead.get("company"),
+            "domain": domain,
+            "score": score["score"],
+            "source": fields.get("来源"),
+            "fields": fields,
+        })
+
+    if commit:
+        for row in planned:
+            record_id = await _create_table_record(B2B_LINKEDIN_CANDIDATE_TABLE, row["fields"])
+            created.append({
+                "record_id": record_id,
+                "company": row["company"],
+                "domain": row["domain"],
+                "score": row["score"],
+            })
+
+    return {
+        "commit": commit,
+        "started_at_bj": started_at,
+        "batch": batch,
+        "seed_total": len(seeds),
+        "candidate_table": B2B_LINKEDIN_CANDIDATE_TABLE,
+        "existing_candidate_status_counts": dict(candidate_status_counts),
+        "limit": limit,
+        "planned_candidates": len(planned),
+        "created_candidates": len(created),
+        "created": created,
+        "planned_preview": [
+            {k: row[k] for k in ["company", "domain", "score", "source"]}
+            for row in planned[:30]
+        ],
+        "skip_reasons": dict(skip_reasons),
+    }
 
 
 async def _snov_token() -> str:
@@ -649,8 +907,7 @@ def _seed_to_lead(seed: dict) -> dict:
 
 
 async def _create_record(fields: dict) -> str:
-    resp = await feishu.api("POST", f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{B2B_LINKEDIN_TABLE}/records", {"fields": fields}, which="bitable")
-    return (((resp.get("data") or {}).get("record") or {}).get("record_id")) or ""
+    return await _create_table_record(B2B_LINKEDIN_TABLE, fields)
 
 
 def _lead_fields(lead: dict, score: dict, copy: dict, *, batch: str, snov_status: str, snov_source: str, snov_summary: str) -> dict:
@@ -714,13 +971,33 @@ async def run(
     batch = "auto-linkedin-" + _now_bj().strftime("%Y%m%d-%H%M")
     started_at = _now_bj().strftime("%Y-%m-%d %H:%M:%S")
 
-    seeds = _load_seeds()
+    seed_bank = _load_seeds()
+    candidate_seeds, candidate_status_counts = await _load_pending_candidate_seeds()
+    if candidate_seeds:
+        seeds = candidate_seeds
+        candidate_source = "candidate_pool"
+    else:
+        seeds = seed_bank
+        candidate_source = "seed_fallback"
     lead_domains, lead_company_keys, all_domains, all_company_keys = await _load_existing_keys()
     skip_reasons = Counter()
     created = []
     planned = []
     selected_domains = 0
     snov_errors = []
+
+    async def mark_candidate(seed: dict, status: str, extra: dict | None = None):
+        record_id = seed.get("_candidate_record_id") or ""
+        if not commit or not record_id:
+            return
+        fields = {
+            "候选状态": status,
+            "最近入池尝试时间": _timestamp_ms(),
+            "入池批次": batch,
+        }
+        if extra:
+            fields.update(extra)
+        await _update_table_record(B2B_LINKEDIN_CANDIDATE_TABLE, record_id, fields)
 
     for seed in seeds:
         if selected_domains >= domain_limit or len(planned) >= record_limit:
@@ -730,21 +1007,27 @@ async def run(
         company_key = _text_key(base_lead.get("company") or "")
         if not domain and not company_key:
             skip_reasons["missing_domain_company"] += 1
+            await mark_candidate(seed, "查询失败", {"备注": _append_note(seed.get("notes") or "", "入池跳过：缺公司域名和公司名")})
             continue
         if domain and domain in lead_domains:
             skip_reasons["duplicate_lead_pool_domain"] += 1
+            await mark_candidate(seed, "跳过-重复", {"备注": _append_note(seed.get("notes") or "", "入池跳过：LinkedIn线索池域名重复")})
             continue
         if company_key and company_key in lead_company_keys:
             skip_reasons["duplicate_lead_pool_company"] += 1
+            await mark_candidate(seed, "跳过-重复", {"备注": _append_note(seed.get("notes") or "", "入池跳过：LinkedIn线索池公司名重复")})
             continue
         if domain and domain in all_domains:
             skip_reasons["duplicate_crm_domain"] += 1
+            await mark_candidate(seed, "跳过-重复", {"备注": _append_note(seed.get("notes") or "", "入池跳过：CRM域名重复")})
             continue
         if company_key and company_key in all_company_keys:
             skip_reasons["duplicate_crm_company"] += 1
+            await mark_candidate(seed, "跳过-重复", {"备注": _append_note(seed.get("notes") or "", "入池跳过：CRM公司名重复")})
             continue
 
         selected_domains += 1
+        query_count = int(seed.get("_candidate_query_count") or 0) + 1
         prospects = []
         snov_summary = ""
         snov_status = "未查询"
@@ -772,15 +1055,19 @@ async def run(
         if not candidate_leads and allow_company_fallback:
             candidate_leads.append((base_lead, "无结果", "Company seed fallback", snov_summary or f"{domain or base_lead.get('company')} 无联系人，保留公司级线索待人工核对"))
 
+        seed_planned = 0
+        best_score = 0
         for lead, status, source, summary in candidate_leads:
             if len(planned) >= record_limit:
                 break
             score = _score_lead(lead)
+            best_score = max(best_score, int(score["score"]))
             if score["score"] < min_score or score["icp"] == "否":
                 skip_reasons["low_icp"] += 1
                 continue
             copy = _copy_for_lead(lead, score)
             fields = _lead_fields(lead, score, copy, batch=batch, snov_status=status, snov_source=source, snov_summary=summary)
+            seed_planned += 1
             planned.append({
                 "company": lead.get("company"),
                 "domain": lead.get("domain"),
@@ -790,26 +1077,65 @@ async def run(
                 "linkedin_company": lead.get("linkedin_company"),
                 "linkedin_company_status": lead.get("linkedin_company_status"),
                 "linkedin_company_source": lead.get("linkedin_company_source"),
+                "candidate_record_id": seed.get("_candidate_record_id") or "",
+                "candidate_query_count": query_count,
+                "snov_status": status,
+                "snov_summary": summary,
                 "fields": fields,
             })
 
+        if seed.get("_candidate_record_id") and seed_planned == 0:
+            if snov_status == "查询失败":
+                await mark_candidate(seed, "查询失败", {
+                    "查询次数": query_count,
+                    "Snov查询状态": snov_status,
+                    "Snov原始摘要": snov_summary,
+                    "优先级分": best_score,
+                })
+            else:
+                await mark_candidate(seed, "跳过-低评分", {
+                    "查询次数": query_count,
+                    "Snov查询状态": snov_status,
+                    "Snov原始摘要": snov_summary,
+                    "优先级分": best_score,
+                })
+
     if commit:
+        created_by_candidate: dict[str, list[dict]] = {}
         for row in planned:
             record_id = await _create_record(row["fields"])
-            created.append({
+            item = {
                 "record_id": record_id,
                 "company": row["company"],
                 "domain": row["domain"],
                 "contact": row["contact"],
                 "score": row["score"],
                 "grade": row["grade"],
+            }
+            created.append(item)
+            if row.get("candidate_record_id"):
+                created_by_candidate.setdefault(row["candidate_record_id"], []).append({**item, **row})
+        for candidate_record_id, rows in created_by_candidate.items():
+            await _update_table_record(B2B_LINKEDIN_CANDIDATE_TABLE, candidate_record_id, {
+                "候选状态": "已入池",
+                "入池批次": batch,
+                "LinkedIn线索记录ID": ",".join([x["record_id"] for x in rows if x.get("record_id")]),
+                "最近入池尝试时间": _timestamp_ms(),
+                "查询次数": max(int(x.get("candidate_query_count") or 0) for x in rows),
+                "Snov查询状态": rows[0].get("snov_status") or "",
+                "Snov原始摘要": rows[0].get("snov_summary") or "",
+                "优先级分": max(int(x.get("score") or 0) for x in rows),
             })
 
     result = {
         "commit": commit,
         "started_at_bj": started_at,
         "batch": batch,
-        "seed_total": len(seeds),
+        "seed_total": len(seed_bank),
+        "candidate_source": candidate_source,
+        "candidate_pending_total": len(candidate_seeds),
+        "candidate_status_counts": dict(candidate_status_counts),
+        "candidate_table": B2B_LINKEDIN_CANDIDATE_TABLE,
         "domain_limit": domain_limit,
         "record_limit": record_limit,
         "selected_domains": selected_domains,

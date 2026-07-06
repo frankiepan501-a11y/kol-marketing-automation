@@ -550,8 +550,10 @@ def _upstream_status_lines() -> str:
         return "最近执行: 当前服务进程内暂无记录\n新增/计划: -\n过滤: -"
     skips = last.get("skip_reasons") or {}
     skip_text = _top_counter_lines(Counter(skips), limit=5) if skips else "-"
+    source = "候选池" if last.get("candidate_source") == "candidate_pool" else "种子兜底"
     return (
         f"最近执行: {last.get('started_at_bj') or '-'} / 批次 {last.get('batch') or '-'}\n"
+        f"来源: {source} / 待入池候选库存: {last.get('candidate_pending_total', 0)}\n"
         f"候选域名: {last.get('selected_domains', 0)} / 计划入池: {last.get('planned_records', 0)} / 已新增: {last.get('created_records', 0)}\n"
         f"过滤: {skip_text}"
     )

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import unittest
+from collections import Counter
 
 from app import b2b_linkedin_auto_pool as pool
 
@@ -76,6 +77,7 @@ class B2BLinkedInAutoPoolTest(unittest.TestCase):
         original_load_seeds = pool._load_seeds
         original_load_existing = pool._load_existing_keys
         original_snov = pool._snov_prospects
+        original_load_candidates = pool._load_pending_candidate_seeds
         try:
             pool._load_seeds = lambda: [
                 {
@@ -104,17 +106,106 @@ class B2BLinkedInAutoPoolTest(unittest.TestCase):
 
             pool._load_existing_keys = fake_existing
             pool._snov_prospects = fake_snov
+            pool._load_pending_candidate_seeds = lambda: _async_value(([], Counter()))
 
             result = asyncio.run(pool.run(commit=False, domain_limit=2, record_limit=2))
         finally:
             pool._load_seeds = original_load_seeds
             pool._load_existing_keys = original_load_existing
             pool._snov_prospects = original_snov
+            pool._load_pending_candidate_seeds = original_load_candidates
 
         self.assertEqual(2, result["planned_records"])
         self.assertEqual(1, result["linkedin_company_resolved"])
         self.assertEqual(1, result["linkedin_company_pending"])
         self.assertEqual("Unknown Games Retailer", result["linkedin_company_pending_preview"][0]["company"])
+        self.assertEqual("seed_fallback", result["candidate_source"])
+
+    def test_refill_candidates_plans_new_candidate_inventory(self):
+        original_load_seeds = pool._load_seeds
+        original_load_existing = pool._load_existing_keys
+        original_list_candidates = pool._list_candidate_records
+        try:
+            pool._load_seeds = lambda: [{
+                "company": "Example Games Distributor",
+                "domain": "example-distributor.com",
+                "country": "United States",
+                "company_type": "分销商",
+                "channels": ["分销"],
+                "category": "gaming accessories distributor",
+            }]
+
+            async def fake_existing():
+                return set(), set(), set(), set()
+
+            pool._load_existing_keys = fake_existing
+            pool._list_candidate_records = lambda: _async_value([])
+
+            result = asyncio.run(pool.refill_candidates(commit=False, limit=10))
+        finally:
+            pool._load_seeds = original_load_seeds
+            pool._load_existing_keys = original_load_existing
+            pool._list_candidate_records = original_list_candidates
+
+        self.assertEqual(1, result["planned_candidates"])
+        self.assertEqual(0, result["created_candidates"])
+        self.assertEqual("Example Games Distributor", result["planned_preview"][0]["company"])
+        self.assertEqual("系统种子", result["planned_preview"][0]["source"])
+
+    def test_run_uses_candidate_pool_before_seed_fallback(self):
+        original_load_seeds = pool._load_seeds
+        original_load_existing = pool._load_existing_keys
+        original_snov = pool._snov_prospects
+        original_load_candidates = pool._load_pending_candidate_seeds
+        try:
+            pool._load_seeds = lambda: [{
+                "company": "Should Not Be Used",
+                "domain": "unused.example",
+                "country": "United States",
+                "company_type": "分销商",
+                "channels": ["分销"],
+                "category": "gaming accessories",
+            }]
+
+            async def fake_existing():
+                return set(), set(), set(), set()
+
+            async def fake_snov(domain, *, max_prospects):
+                return [], "{}"
+
+            async def fake_candidates():
+                return ([{
+                    "company": "Candidate Pool Co",
+                    "domain": "candidatepool.example",
+                    "country": "United States",
+                    "company_type": "分销商",
+                    "channels": ["分销"],
+                    "category": "gaming accessories distributor",
+                    "source": "LinkedIn-现有客户相似",
+                    "notes": "",
+                    "_candidate_record_id": "recCandidate",
+                    "_candidate_query_count": 0,
+                    "_priority_score": 90,
+                }], Counter({"待入池": 1}))
+
+            pool._load_existing_keys = fake_existing
+            pool._snov_prospects = fake_snov
+            pool._load_pending_candidate_seeds = fake_candidates
+
+            result = asyncio.run(pool.run(commit=False, domain_limit=1, record_limit=1))
+        finally:
+            pool._load_seeds = original_load_seeds
+            pool._load_existing_keys = original_load_existing
+            pool._snov_prospects = original_snov
+            pool._load_pending_candidate_seeds = original_load_candidates
+
+        self.assertEqual("candidate_pool", result["candidate_source"])
+        self.assertEqual(1, result["candidate_pending_total"])
+        self.assertEqual("Candidate Pool Co", result["planned_preview"][0]["company"])
+
+
+async def _async_value(value):
+    return value
 
 
 if __name__ == "__main__":

@@ -150,6 +150,8 @@ def _running_b2b_auto_pool_job():
 def _compact_b2b_auto_pool_result(result: dict) -> dict:
     keep = [
         "ok", "commit", "started_at_bj", "batch", "seed_total",
+        "candidate_source", "candidate_pending_total",
+        "candidate_status_counts", "candidate_table",
         "domain_limit", "record_limit", "selected_domains",
         "planned_records", "created_records", "created",
         "planned_preview", "linkedin_company_resolved",
@@ -384,6 +386,25 @@ async def sync_b2b_email_outreach_crm(authorization: str = Header(default=""),
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/b2b-email-outreach/sync-crm", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/b2b-linkedin-candidate-refill/run")
+async def run_b2b_linkedin_candidate_refill(authorization: str = Header(default=""),
+                                            commit: bool = False,
+                                            limit: int = 200):
+    """B2B LinkedIn candidate-company pool refill.
+
+    This only tops up the candidate company table. It does not call Snov, write
+    lead-pool records, send cards, or touch LinkedIn.
+    """
+    _check_auth(authorization)
+    try:
+        result = await b2b_linkedin_auto_pool.refill_candidates(commit=commit, limit=limit)
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/b2b-linkedin-candidate-refill/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 
