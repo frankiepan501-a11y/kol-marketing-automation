@@ -16,7 +16,7 @@ from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from urllib.parse import quote
 
-from . import b2b_mail_reminder, feishu
+from . import b2b_crm_sync, b2b_mail_reminder, feishu
 
 BJ = timezone(timedelta(hours=8))
 
@@ -264,6 +264,15 @@ async def _update_record(table_id: str, record_id: str, fields: dict) -> None:
     )
 
 
+async def _get_record(table_id: str, record_id: str) -> dict:
+    resp = await feishu.api(
+        "GET",
+        f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records/{record_id}",
+        which="bitable",
+    )
+    return (resp.get("data") or {}).get("record") or {}
+
+
 async def _existing_queue_for_lead(lead_record_id: str) -> dict | None:
     if not lead_record_id:
         return None
@@ -430,13 +439,95 @@ def _queue_row(rec: dict) -> dict:
     return {
         "record_id": rec.get("record_id") or "",
         "lead_record_id": _text(fields.get("线索记录ID")),
+        "crm_record_id": _text(fields.get("CRM记录ID")),
+        "crm_link": fields.get("关联CRM客户"),
         "company": _text(fields.get("公司名称")),
+        "contact": _text(fields.get("联系人姓名")),
+        "title": _text(fields.get("职位")),
         "email": _text(fields.get("邮箱")),
         "owner": _text(fields.get("跟进人")),
         "sender": _text(fields.get("发送邮箱")),
         "subject": _text(fields.get("邮件主题")),
         "body": _text(fields.get("邮件正文")),
         "status": _text(fields.get("发送状态")),
+        "message_id": _text(fields.get("Zoho Message ID")),
+        "batch_id": _text(fields.get("发送批次")),
+        "sent_at_ms": _field_ms(fields.get("发送时间")),
+    }
+
+
+async def _sync_sent_row_to_crm(row: dict) -> dict:
+    if row["status"] != "已发送":
+        return {"ok": True, "skipped": "not_sent", "queue_record_id": row["record_id"], "status": row["status"]}
+    if not row.get("message_id"):
+        return {"ok": False, "queue_record_id": row["record_id"], "error": "已发送队列缺少 Zoho Message ID，无法幂等回填 CRM"}
+    lead_fields = {}
+    if row.get("lead_record_id"):
+        try:
+            lead_rec = await _get_record(B2B_LINKEDIN_TABLE, row["lead_record_id"])
+            lead_fields = lead_rec.get("fields") or {}
+        except Exception as exc:
+            print(f"[b2b_outreach_email] sync_crm load lead failed {row['lead_record_id']}: {type(exc).__name__}: {str(exc)[:160]}")
+    crm_sync = await b2b_crm_sync.sync_outreach_sent(
+        row,
+        lead_fields,
+        message_id=row["message_id"],
+        batch_id=row.get("batch_id") or "b2b-email-existing-sent",
+        sent_at_ms=row.get("sent_at_ms") or _now_ms(),
+    )
+    crm_id = crm_sync.get("customer_record_id") or ""
+    if crm_id:
+        await _update_record(
+            B2B_EMAIL_QUEUE_TABLE,
+            row["record_id"],
+            {"CRM记录ID": crm_id, "关联CRM客户": [crm_id], "最近处理时间": _now_ms()},
+        )
+        if row.get("lead_record_id"):
+            await _update_record(
+                B2B_LINKEDIN_TABLE,
+                row["lead_record_id"],
+                {
+                    "CRM记录ID": crm_id,
+                    "关联CRM客户": [crm_id],
+                    "开发状态": "已转Email",
+                    "触达状态": "已发邮件",
+                    "触达渠道": ["LinkedIn", "Email"],
+                    "触达验证结果": "送达",
+                    "下一步行动": "等待客户邮件回复；进入B2B邮件提醒扫描。",
+                },
+            )
+    return {"ok": True, "queue_record_id": row["record_id"], "crm_sync": crm_sync}
+
+
+async def sync_sent_to_crm(*, record_id: str = "", limit: int = 20) -> dict:
+    """Backfill CRM linkage for already-sent B2B outreach queue rows.
+
+    This endpoint does not send email. It only mirrors sent queue state into
+    the CRM master/follow-up tables and writes the CRM relation back.
+    """
+    limit = max(1, min(int(limit or 20), 100))
+    selected = []
+    for rec in await _list_records(B2B_EMAIL_QUEUE_TABLE, field_names=QUEUE_FIELD_NAMES):
+        row = _queue_row(rec)
+        if record_id and row["record_id"] != record_id:
+            continue
+        if row["status"] != "已发送":
+            continue
+        selected.append(row)
+        if len(selected) >= limit:
+            break
+    results = []
+    for row in selected:
+        try:
+            results.append(await _sync_sent_row_to_crm(row))
+        except Exception as exc:
+            results.append({"ok": False, "queue_record_id": row["record_id"], "error": f"{type(exc).__name__}: {str(exc)[:500]}"})
+    return {
+        "ok": all(r.get("ok") for r in results),
+        "selected": len(selected),
+        "synced": sum(1 for r in results if r.get("ok") and not r.get("skipped")),
+        "failed": sum(1 for r in results if not r.get("ok")),
+        "results": results,
     }
 
 
@@ -506,15 +597,42 @@ async def run(*, commit: bool = False, dry_run_to: str = "", limit: int = 1, rec
                 body = _dry_run_body(row["body"], email, dry_run_to)
                 real_to = email
             msg_id = await _send_smtp(account["account"], account["password"], to_addr, subject, body, real_to=real_to)
+            sent_at_ms = _now_ms()
+            lead_fields = {}
+            if row["lead_record_id"]:
+                try:
+                    lead_rec = await _get_record(B2B_LINKEDIN_TABLE, row["lead_record_id"])
+                    lead_fields = lead_rec.get("fields") or {}
+                except Exception as exc:
+                    lead_fields = {}
+                    print(f"[b2b_outreach_email] load lead for CRM sync failed {row['lead_record_id']}: {type(exc).__name__}: {str(exc)[:160]}")
+            crm_sync = {}
+            crm_warning = ""
+            if commit:
+                try:
+                    crm_sync = await b2b_crm_sync.sync_outreach_sent(
+                        row,
+                        lead_fields,
+                        message_id=msg_id,
+                        batch_id=batch_id,
+                        sent_at_ms=sent_at_ms,
+                    )
+                except Exception as exc:
+                    crm_warning = f"CRM同步失败但邮件已发出: {type(exc).__name__}: {str(exc)[:500]}"
+                    print(f"[b2b_outreach_email] {crm_warning}")
             update = {
                 "发送状态": "已发送" if commit else "Dry-run已发送",
-                "发送时间": _now_ms(),
+                "发送时间": sent_at_ms,
                 "最近处理时间": _now_ms(),
                 "Zoho Message ID": msg_id,
                 "Dry-run收件人": dry_run_to if not commit else "",
                 "发送批次": batch_id,
-                "错误信息": "",
+                "错误信息": crm_warning,
             }
+            crm_id = (crm_sync or {}).get("customer_record_id") or ""
+            if crm_id:
+                update["CRM记录ID"] = crm_id
+                update["关联CRM客户"] = [crm_id]
             await _update_record(B2B_EMAIL_QUEUE_TABLE, qid, update)
             if row["lead_record_id"]:
                 lead_update = {
@@ -525,8 +643,20 @@ async def run(*, commit: bool = False, dry_run_to: str = "", limit: int = 1, rec
                     "下一步行动": "等待客户邮件回复；进入B2B邮件提醒扫描。" if commit else "开发信 dry-run 已发送给 Frankie，待确认后再真发。",
                     "最近触达时间": _now_ms() if commit else None,
                 }
+                if crm_id:
+                    lead_update["CRM记录ID"] = crm_id
+                    lead_update["关联CRM客户"] = [crm_id]
                 await _update_record(B2B_LINKEDIN_TABLE, row["lead_record_id"], lead_update)
-            results.append({"ok": True, "queue_record_id": qid, "company": row["company"], "to": to_addr, "real_to": email, "message_id": msg_id})
+            results.append({
+                "ok": True,
+                "queue_record_id": qid,
+                "company": row["company"],
+                "to": to_addr,
+                "real_to": email,
+                "message_id": msg_id,
+                "crm_sync": crm_sync,
+                "crm_warning": crm_warning,
+            })
         except Exception as exc:
             error = str(exc)[:1000]
             await _update_record(

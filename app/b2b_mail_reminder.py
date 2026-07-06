@@ -24,7 +24,7 @@ from email.header import decode_header, make_header
 from email.utils import getaddresses, parsedate_to_datetime
 from urllib.parse import urlparse
 
-from . import feishu
+from . import b2b_crm_sync, feishu
 
 BJ = timezone(timedelta(hours=8))
 
@@ -836,11 +836,23 @@ async def _upsert_reminder(fields: dict, existing_rec: dict | None = None):
         raise exc
 
 
+async def _get_reminder_record(record_id: str, app_token: str = "", table_id: str = "") -> dict:
+    app_token = app_token or B2B_CUSTOMER_APP_TOKEN
+    table_id = table_id or B2B_REMINDER_TABLE
+    resp = await feishu.api(
+        "GET",
+        f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
+        which="bitable",
+    )
+    return (resp.get("data") or {}).get("record") or {}
+
+
 async def _sync_rows(rows: list[dict], existing: dict, *, commit: bool) -> dict:
     batch_id = "b2b-mail-reminder-cloud-" + datetime.now(BJ).strftime("%Y%m%d-%H%M%S")
     scan_time = _now_bj_string()
     payloads = [_row_to_fields(row, batch_id, scan_time) for row in rows]
     results = []
+    crm_syncs = []
     for fields in payloads:
         existing_rec = existing.get(fields["线程Key"])
         action = "update" if existing_rec else "create"
@@ -849,6 +861,19 @@ async def _sync_rows(rows: list[dict], existing: dict, *, commit: bool) -> dict:
             response = await _upsert_reminder(fields, existing_rec)
             record = ((response.get("data") or {}).get("record") or {})
             rid = record.get("record_id") or record.get("recordId") or rid
+            source_row = next((row for row in rows if _thread_key(row) == fields["线程Key"]), None)
+            if source_row:
+                try:
+                    crm_sync = await b2b_crm_sync.sync_inbound_reply(source_row, existing_rec)
+                except Exception as exc:
+                    crm_sync = {
+                        "ok": False,
+                        "thread_key": fields["线程Key"],
+                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    }
+                if not crm_sync.get("skipped"):
+                    crm_sync["thread_key"] = fields["线程Key"]
+                    crm_syncs.append(crm_sync)
         results.append({"action": action, "record_id": rid, "thread_key": fields["线程Key"], "status": fields.get("提醒状态", "")})
     return {
         "batch_id": batch_id,
@@ -857,6 +882,7 @@ async def _sync_rows(rows: list[dict], existing: dict, *, commit: bool) -> dict:
         "creates": sum(1 for r in results if r["action"] == "create"),
         "updates": sum(1 for r in results if r["action"] == "update"),
         "status_counts": dict(Counter(r["status"] for r in results)),
+        "crm_syncs": crm_syncs[:50],
         "results": results[:50],
     }
 
@@ -1172,6 +1198,12 @@ async def handle_receipt(payload: dict) -> dict:
         ],
     )
     channels = _channel_values(form_value.get(f"b2b_channel_{record_id}"))
+    reminder_record = {}
+    if record_id:
+        try:
+            reminder_record = await _get_reminder_record(record_id, app_token, table_id)
+        except Exception as exc:
+            print(f"[b2b_mail_receipt] load reminder for CRM sync failed {record_id}: {type(exc).__name__}: {str(exc)[:160]}")
 
     fields = {"回执人": actor, "回执时间": int(datetime.now(BJ).timestamp() * 1000), "是否已回执免提醒": True}
     reply = ""
@@ -1205,6 +1237,7 @@ async def handle_receipt(payload: dict) -> dict:
 
     ok = False
     write_error = ""
+    crm_sync = {}
     if not reply:
         try:
             resp = await feishu.api(
@@ -1217,6 +1250,16 @@ async def handle_receipt(payload: dict) -> dict:
             if ok:
                 label = fields.get("回执类型") or fields.get("提醒状态")
                 target = _text(card_action.get("customer")) or _text(card_action.get("thread_key")) or record_id
+                try:
+                    crm_sync = await b2b_crm_sync.sync_mail_receipt_to_customer(
+                        reminder_record,
+                        receipt_type=label,
+                        actor=actor,
+                        note=note,
+                        channels=channels,
+                    )
+                except Exception as exc:
+                    crm_sync = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
                 reply = f"B2B邮件回执已写入：{label} · {target} · by {actor}"
             else:
                 write_error = f"code={resp.get('code')} msg={resp.get('msg') or ''}"
@@ -1231,6 +1274,7 @@ async def handle_receipt(payload: dict) -> dict:
         "action": action,
         "record_id": record_id,
         "fields": fields,
+        "crm_sync": crm_sync,
         "reply": reply,
         "reply_result": reply_result,
         "write_error": write_error,

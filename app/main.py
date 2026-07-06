@@ -368,6 +368,25 @@ async def run_b2b_email_outreach(authorization: str = Header(default=""),
         return {"ok": False, "error": str(e), "trace": tr}
 
 
+@app.post("/b2b-email-outreach/sync-crm")
+async def sync_b2b_email_outreach_crm(authorization: str = Header(default=""),
+                                      record_id: str = "",
+                                      limit: int = 20):
+    """Backfill CRM linkage for sent B2B outreach queue rows.
+
+    Does not send email. Intended for rows sent before CRM write-back existed
+    or for manual repair after a transient CRM sync warning.
+    """
+    _check_auth(authorization)
+    try:
+        result = await b2b_outreach_email.sync_sent_to_crm(record_id=record_id, limit=limit)
+        return {"ok": bool(result.get("ok")), **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/b2b-email-outreach/sync-crm", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
 @app.post("/b2b-linkedin-auto-pool/run")
 async def run_b2b_linkedin_auto_pool(authorization: str = Header(default=""),
                                      commit: bool = False,
