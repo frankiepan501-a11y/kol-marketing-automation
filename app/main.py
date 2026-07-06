@@ -27,6 +27,8 @@ _alert_last = {}
 _ALERT_COOLDOWN = 3600
 _b2b_mail_jobs = {}
 _B2B_MAIL_JOB_TTL = 24 * 3600
+_b2b_auto_pool_jobs = {}
+_B2B_AUTO_POOL_JOB_TTL = 24 * 3600
 
 
 def _check_auth(auth: str):
@@ -127,6 +129,66 @@ async def _run_b2b_mail_job(job_id: str, commit: bool, notify: bool, limit: int,
             trace=tr,
         )
         await _alert_endpoint_failure("/b2b-mail-reminder/run", str(e), tr)
+
+
+def _cleanup_b2b_auto_pool_jobs():
+    now = time.time()
+    for job_id in list(_b2b_auto_pool_jobs.keys()):
+        started = _b2b_auto_pool_jobs[job_id].get("started_ts", 0)
+        if started and now - started > _B2B_AUTO_POOL_JOB_TTL:
+            _b2b_auto_pool_jobs.pop(job_id, None)
+
+
+def _running_b2b_auto_pool_job():
+    _cleanup_b2b_auto_pool_jobs()
+    for job_id, job in _b2b_auto_pool_jobs.items():
+        if job.get("status") == "running":
+            return job_id, job
+    return "", None
+
+
+def _compact_b2b_auto_pool_result(result: dict) -> dict:
+    keep = [
+        "ok", "commit", "started_at_bj", "batch", "seed_total",
+        "domain_limit", "record_limit", "selected_domains",
+        "planned_records", "created_records", "created",
+        "planned_preview", "skip_reasons", "snov_errors",
+    ]
+    return {k: result.get(k) for k in keep if k in result}
+
+
+async def _run_b2b_auto_pool_job(
+    job_id: str,
+    commit: bool,
+    domain_limit: int,
+    record_limit: int,
+    max_prospects_per_domain: int,
+    min_score: int,
+    allow_company_fallback: bool,
+):
+    try:
+        result = await b2b_linkedin_auto_pool.run(
+            commit=commit,
+            domain_limit=domain_limit,
+            record_limit=record_limit,
+            max_prospects_per_domain=max_prospects_per_domain,
+            min_score=min_score,
+            allow_company_fallback=allow_company_fallback,
+        )
+        _b2b_auto_pool_jobs[job_id].update(
+            status="success",
+            finished_at=datetime_now_string(),
+            result=_compact_b2b_auto_pool_result({"ok": True, **result}),
+        )
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        _b2b_auto_pool_jobs[job_id].update(
+            status="error",
+            finished_at=datetime_now_string(),
+            error=str(e),
+            trace=tr,
+        )
+        await _alert_endpoint_failure("/b2b-linkedin-auto-pool/run", str(e), tr)
 
 
 def datetime_now_string():
@@ -307,6 +369,7 @@ async def run_b2b_email_outreach(authorization: str = Header(default=""),
 @app.post("/b2b-linkedin-auto-pool/run")
 async def run_b2b_linkedin_auto_pool(authorization: str = Header(default=""),
                                      commit: bool = False,
+                                     async_mode: bool = False,
                                      domain_limit: int = 10,
                                      record_limit: int = 10,
                                      max_prospects_per_domain: int = 3,
@@ -314,11 +377,46 @@ async def run_b2b_linkedin_auto_pool(authorization: str = Header(default=""),
                                      allow_company_fallback: bool = True):
     """B2B LinkedIn/Snov upstream lead-pool intake.
 
-    Default is dry-run. n8n production cron uses commit=true; each run returns
-    created IDs and skip reasons so the daily summary can explain why the pool
-    grew or stayed flat.
+    Default is synchronous dry-run. n8n production cron should use
+    async_mode=true&commit=true so Snov enrichment can run past the n8n/Zeabur
+    request window while this endpoint immediately returns a job_id.
     """
     _check_auth(authorization)
+    if async_mode:
+        running_id, running_job = _running_b2b_auto_pool_job()
+        if running_job:
+            return {
+                "ok": True,
+                "accepted": True,
+                "already_running": True,
+                "job_id": running_id,
+                "status": running_job.get("status"),
+                "started_at": running_job.get("started_at"),
+            }
+        job_id = "b2bpool-" + uuid.uuid4().hex[:12]
+        _b2b_auto_pool_jobs[job_id] = {
+            "status": "running",
+            "started_ts": time.time(),
+            "started_at": datetime_now_string(),
+            "params": {
+                "commit": commit,
+                "domain_limit": domain_limit,
+                "record_limit": record_limit,
+                "max_prospects_per_domain": max_prospects_per_domain,
+                "min_score": min_score,
+                "allow_company_fallback": allow_company_fallback,
+            },
+        }
+        asyncio.create_task(_run_b2b_auto_pool_job(
+            job_id,
+            commit,
+            domain_limit,
+            record_limit,
+            max_prospects_per_domain,
+            min_score,
+            allow_company_fallback,
+        ))
+        return {"ok": True, "accepted": True, "already_running": False, "job_id": job_id}
     try:
         result = await b2b_linkedin_auto_pool.run(
             commit=commit,
@@ -333,6 +431,17 @@ async def run_b2b_linkedin_auto_pool(authorization: str = Header(default=""),
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/b2b-linkedin-auto-pool/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.get("/b2b-linkedin-auto-pool/jobs/{job_id}")
+async def get_b2b_linkedin_auto_pool_job(job_id: str, authorization: str = Header(default="")):
+    """B2B LinkedIn/Snov 自动入池后台 job 状态查询（进程内 24h 缓存）。"""
+    _check_auth(authorization)
+    _cleanup_b2b_auto_pool_jobs()
+    job = _b2b_auto_pool_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    return {"ok": True, "job_id": job_id, **job}
 
 
 @app.post("/reply-monitor/run")
