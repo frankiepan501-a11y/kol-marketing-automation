@@ -59,6 +59,100 @@ DEFAULT_SEEDS = [
     {"company": "Maxsoft", "domain": "maxsoftonline.com", "country": "Singapore", "company_type": "分销商", "channels": ["分销", "本地电商"], "category": "Nintendo and video game distribution", "notes": "Singapore game distributor adjacency"},
 ]
 
+EXTRA_DEFAULT_SEEDS = [
+    {"company": "GameStop", "domain": "gamestop.com", "country": "United States", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "video games, consoles, controllers and gaming accessories", "notes": "US game specialty retailer"},
+    {"company": "Best Buy", "domain": "bestbuy.com", "country": "United States", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics, console games and accessories", "notes": "US electronics retailer with gaming category"},
+    {"company": "Micro Center", "domain": "microcenter.com", "country": "United States", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "gaming, computers, console and PC accessories", "notes": "US computer and gaming retailer"},
+    {"company": "Newegg", "domain": "newegg.com", "country": "United States", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, gaming hardware and accessories", "notes": "US ecommerce marketplace with gaming hardware category"},
+    {"company": "B&H Photo Video", "domain": "bhphotovideo.com", "country": "United States", "company_type": "电商卖家", "channels": ["本地电商"], "category": "consumer electronics and gaming accessories", "notes": "US electronics ecommerce retailer"},
+    {"company": "Adorama", "domain": "adorama.com", "country": "United States", "company_type": "电商卖家", "channels": ["本地电商"], "category": "consumer electronics and gaming accessories", "notes": "US electronics retailer"},
+    {"company": "Walmart", "domain": "walmart.com", "country": "United States", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "mass retail, video games, console accessories", "notes": "US mass retailer with gaming category"},
+    {"company": "Target", "domain": "target.com", "country": "United States", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "mass retail, video games and accessories", "notes": "US mass retailer with gaming category"},
+    {"company": "GameStop Canada", "domain": "gamestop.ca", "country": "Canada", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "video games and gaming accessories", "notes": "Canada game specialty retailer"},
+    {"company": "Best Buy Canada", "domain": "bestbuy.ca", "country": "Canada", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics, gaming and console accessories", "notes": "Canada electronics retailer"},
+    {"company": "Canada Computers", "domain": "canadacomputers.com", "country": "Canada", "company_type": "电商卖家", "channels": ["本地电商", "线下连锁"], "category": "computers, gaming hardware and accessories", "notes": "Canada computer and gaming retailer"},
+    {"company": "London Drugs", "domain": "londondrugs.com", "country": "Canada", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "electronics, video games and accessories", "notes": "Western Canada retailer with electronics category"},
+    {"company": "Currys", "domain": "currys.co.uk", "country": "United Kingdom", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics, gaming and console accessories", "notes": "UK electronics retailer"},
+    {"company": "Argos", "domain": "argos.co.uk", "country": "United Kingdom", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "general retail, video games and accessories", "notes": "UK general retailer with gaming category"},
+    {"company": "Very", "domain": "very.co.uk", "country": "United Kingdom", "company_type": "电商卖家", "channels": ["本地电商"], "category": "ecommerce, gaming consoles and accessories", "notes": "UK ecommerce retailer"},
+    {"company": "Scan Computers", "domain": "scan.co.uk", "country": "United Kingdom", "company_type": "电商卖家", "channels": ["本地电商"], "category": "gaming hardware, PC and console accessories", "notes": "UK computer and gaming retailer"},
+    {"company": "Ebuyer", "domain": "ebuyer.com", "country": "United Kingdom", "company_type": "电商卖家", "channels": ["本地电商"], "category": "computers, gaming and accessories", "notes": "UK ecommerce retailer"},
+    {"company": "Box", "domain": "box.co.uk", "country": "United Kingdom", "company_type": "电商卖家", "channels": ["本地电商"], "category": "computing, gaming and accessories", "notes": "UK electronics ecommerce retailer"},
+    {"company": "ShopTo", "domain": "shopto.net", "country": "United Kingdom", "company_type": "电商卖家", "channels": ["本地电商"], "category": "video games, consoles and accessories", "notes": "UK gaming specialist ecommerce"},
+    {"company": "The Game Collection", "domain": "thegamecollection.net", "country": "United Kingdom", "company_type": "电商卖家", "channels": ["本地电商"], "category": "video games and console accessories", "notes": "UK game ecommerce retailer"},
+    {"company": "Micromania Zing", "domain": "micromania.fr", "country": "France", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "video games, consoles and accessories", "notes": "France game specialty retailer"},
+    {"company": "Boulanger", "domain": "boulanger.com", "country": "France", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics, gaming and console accessories", "notes": "France electronics retailer"},
+    {"company": "Materiel.net", "domain": "materiel.net", "country": "France", "company_type": "电商卖家", "channels": ["本地电商"], "category": "computer hardware, gaming and accessories", "notes": "France computer and gaming ecommerce"},
+    {"company": "Rue du Commerce", "domain": "rueducommerce.fr", "country": "France", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, electronics and gaming accessories", "notes": "France ecommerce marketplace"},
+    {"company": "Carrefour France", "domain": "carrefour.fr", "country": "France", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "mass retail, electronics, games and accessories", "notes": "France mass retail chain"},
+    {"company": "Otto", "domain": "otto.de", "country": "Germany", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, consumer electronics and gaming accessories", "notes": "Germany ecommerce marketplace"},
+    {"company": "Conrad Electronic", "domain": "conrad.de", "country": "Germany", "company_type": "电商卖家", "channels": ["本地电商"], "category": "consumer electronics and accessories", "notes": "Germany electronics retailer"},
+    {"company": "Notebooksbilliger", "domain": "notebooksbilliger.de", "country": "Germany", "company_type": "电商卖家", "channels": ["本地电商"], "category": "computers, gaming hardware and accessories", "notes": "Germany computer ecommerce retailer"},
+    {"company": "Expert", "domain": "expert.de", "country": "Germany", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics and gaming accessories", "notes": "Germany electronics retailer network"},
+    {"company": "Mindfactory", "domain": "mindfactory.de", "country": "Germany", "company_type": "电商卖家", "channels": ["本地电商"], "category": "computer hardware, gaming and accessories", "notes": "Germany computer hardware ecommerce"},
+    {"company": "El Corte Ingles", "domain": "elcorteingles.es", "country": "Spain", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "department store, video games and accessories", "notes": "Spain department store with gaming category"},
+    {"company": "GAME Spain", "domain": "game.es", "country": "Spain", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "video games and gaming accessories", "notes": "Spain game specialty retailer"},
+    {"company": "Carrefour Spain", "domain": "carrefour.es", "country": "Spain", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "mass retail, games and accessories", "notes": "Spain mass retailer"},
+    {"company": "Komplett", "domain": "komplett.no", "country": "Norway", "company_type": "电商卖家", "channels": ["本地电商"], "category": "consumer electronics, gaming and accessories", "notes": "Nordic electronics ecommerce"},
+    {"company": "Elkjop", "domain": "elkjop.no", "country": "Norway", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "electronics, gaming and console accessories", "notes": "Norway electronics retailer"},
+    {"company": "Power Norway", "domain": "power.no", "country": "Norway", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics and gaming accessories", "notes": "Nordic electronics retailer"},
+    {"company": "Gigantti", "domain": "gigantti.fi", "country": "Finland", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics, gaming and console accessories", "notes": "Finland electronics retailer"},
+    {"company": "Verkkokauppa", "domain": "verkkokauppa.com", "country": "Finland", "company_type": "电商卖家", "channels": ["本地电商"], "category": "consumer electronics, gaming and accessories", "notes": "Finland ecommerce retailer"},
+    {"company": "Power Finland", "domain": "power.fi", "country": "Finland", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics and gaming accessories", "notes": "Finland electronics retailer"},
+    {"company": "Inet", "domain": "inet.se", "country": "Sweden", "company_type": "电商卖家", "channels": ["本地电商"], "category": "computers, gaming hardware and accessories", "notes": "Sweden computer and gaming retailer"},
+    {"company": "Coolshop", "domain": "coolshop.dk", "country": "Denmark", "company_type": "电商卖家", "channels": ["本地电商"], "category": "games, toys, electronics and accessories", "notes": "Nordic ecommerce retailer"},
+    {"company": "Megekko", "domain": "megekko.nl", "country": "Netherlands", "company_type": "电商卖家", "channels": ["本地电商"], "category": "computer hardware, gaming and accessories", "notes": "Netherlands computer ecommerce retailer"},
+    {"company": "Bax Shop", "domain": "bax-shop.nl", "country": "Netherlands", "company_type": "电商卖家", "channels": ["本地电商"], "category": "electronics, audio and gaming adjacent accessories", "notes": "Benelux ecommerce retailer"},
+    {"company": "MediaMarkt Spain", "domain": "mediamarkt.es", "country": "Spain", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics, gaming and console accessories", "notes": "Spain electronics retailer"},
+    {"company": "MediaMarkt Netherlands", "domain": "mediamarkt.nl", "country": "Netherlands", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics, gaming and console accessories", "notes": "Netherlands electronics retailer"},
+    {"company": "MediaMarkt Switzerland", "domain": "mediamarkt.ch", "country": "Switzerland", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics, gaming and console accessories", "notes": "Switzerland electronics retailer"},
+    {"company": "Digitec", "domain": "digitec.ch", "country": "Switzerland", "company_type": "电商平台", "channels": ["本地电商"], "category": "consumer electronics, gaming and console accessories", "notes": "Swiss ecommerce retailer"},
+    {"company": "PB Tech", "domain": "pbtech.co.nz", "country": "New Zealand", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "computers, gaming and accessories", "notes": "New Zealand electronics and computer retailer"},
+    {"company": "Mighty Ape", "domain": "mightyape.co.nz", "country": "New Zealand", "company_type": "电商卖家", "channels": ["本地电商"], "category": "games, toys and console accessories", "notes": "New Zealand ecommerce retailer"},
+    {"company": "Noel Leeming", "domain": "noelleeming.co.nz", "country": "New Zealand", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics and gaming accessories", "notes": "New Zealand electronics retailer"},
+    {"company": "The Warehouse", "domain": "thewarehouse.co.nz", "country": "New Zealand", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "mass retail, games and electronics", "notes": "New Zealand mass retailer"},
+    {"company": "EB Games Australia", "domain": "ebgames.com.au", "country": "Australia", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "video games and gaming accessories", "notes": "Australia game specialty retailer"},
+    {"company": "Kogan", "domain": "kogan.com", "country": "Australia", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, electronics and gaming accessories", "notes": "Australia ecommerce marketplace"},
+    {"company": "Catch", "domain": "catch.com.au", "country": "Australia", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, consumer electronics and accessories", "notes": "Australia ecommerce marketplace"},
+    {"company": "Officeworks", "domain": "officeworks.com.au", "country": "Australia", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "electronics and computer accessories", "notes": "Australia office and electronics retailer"},
+    {"company": "Big W", "domain": "bigw.com.au", "country": "Australia", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "mass retail, video games and accessories", "notes": "Australia mass retailer"},
+    {"company": "Noon", "domain": "noon.com", "country": "United Arab Emirates", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, electronics and gaming accessories", "notes": "Middle East ecommerce marketplace"},
+    {"company": "Extra Stores", "domain": "extra.com", "country": "Saudi Arabia", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "electronics, gaming and console accessories", "notes": "Saudi electronics retailer"},
+    {"company": "Carrefour UAE", "domain": "carrefouruae.com", "country": "United Arab Emirates", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "mass retail, electronics and games", "notes": "UAE mass retailer"},
+    {"company": "Lulu Hypermarket", "domain": "luluhypermarket.com", "country": "United Arab Emirates", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "mass retail, electronics and accessories", "notes": "Middle East hypermarket chain"},
+    {"company": "Falabella", "domain": "falabella.com", "country": "Chile", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "department store, electronics and gaming accessories", "notes": "Latin America retailer and marketplace"},
+    {"company": "Ripley", "domain": "ripley.cl", "country": "Chile", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "department store, electronics and games", "notes": "Chile retail chain"},
+    {"company": "Paris", "domain": "paris.cl", "country": "Chile", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "department store, electronics and games", "notes": "Chile retail chain"},
+    {"company": "PC Factory", "domain": "pcfactory.cl", "country": "Chile", "company_type": "电商卖家", "channels": ["本地电商"], "category": "computers, gaming and accessories", "notes": "Chile computer and electronics retailer"},
+    {"company": "SP Digital", "domain": "spdigital.cl", "country": "Chile", "company_type": "电商卖家", "channels": ["本地电商"], "category": "computers, gaming and accessories", "notes": "Chile electronics ecommerce retailer"},
+    {"company": "KaBuM", "domain": "kabum.com.br", "country": "Brazil", "company_type": "电商卖家", "channels": ["本地电商"], "category": "computer hardware, gaming and accessories", "notes": "Brazil gaming and electronics ecommerce"},
+    {"company": "Magazine Luiza", "domain": "magazineluiza.com.br", "country": "Brazil", "company_type": "电商平台", "channels": ["本地电商", "线下连锁"], "category": "marketplace, electronics and gaming accessories", "notes": "Brazil retailer and marketplace"},
+    {"company": "Americanas", "domain": "americanas.com.br", "country": "Brazil", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, electronics, games and accessories", "notes": "Brazil ecommerce marketplace"},
+    {"company": "Casas Bahia", "domain": "casasbahia.com.br", "country": "Brazil", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "retail, electronics and games", "notes": "Brazil retail chain"},
+    {"company": "Liverpool", "domain": "liverpool.com.mx", "country": "Mexico", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "department store, electronics and games", "notes": "Mexico department store"},
+    {"company": "Elektra", "domain": "elektra.mx", "country": "Mexico", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "retail, electronics and accessories", "notes": "Mexico electronics retailer"},
+    {"company": "Sears Mexico", "domain": "sears.com.mx", "country": "Mexico", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "department store, electronics and games", "notes": "Mexico department store"},
+    {"company": "Cyberpuerta", "domain": "cyberpuerta.mx", "country": "Mexico", "company_type": "电商卖家", "channels": ["本地电商"], "category": "computers, gaming hardware and accessories", "notes": "Mexico ecommerce retailer"},
+    {"company": "Gameplanet", "domain": "gameplanet.com", "country": "Mexico", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "video games, consoles and accessories", "notes": "Mexico game specialty retailer"},
+    {"company": "DataBlitz", "domain": "datablitz.com.ph", "country": "Philippines", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "video games, consoles and accessories", "notes": "Philippines game specialty retailer"},
+    {"company": "GameXtreme", "domain": "gamextreme.ph", "country": "Philippines", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "video games and gaming accessories", "notes": "Philippines gaming retailer"},
+    {"company": "Challenger", "domain": "challenger.sg", "country": "Singapore", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics, gaming and accessories", "notes": "Singapore electronics retailer"},
+    {"company": "Courts Singapore", "domain": "courts.com.sg", "country": "Singapore", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics, gaming and accessories", "notes": "Singapore electronics retailer"},
+    {"company": "Harvey Norman Singapore", "domain": "harveynorman.com.sg", "country": "Singapore", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics and gaming accessories", "notes": "Singapore electronics retailer"},
+    {"company": "Senheng", "domain": "senheng.com.my", "country": "Malaysia", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics and gaming accessories", "notes": "Malaysia electronics retailer"},
+    {"company": "Harvey Norman Malaysia", "domain": "harveynorman.com.my", "country": "Malaysia", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics and gaming accessories", "notes": "Malaysia electronics retailer"},
+    {"company": "Power Buy", "domain": "powerbuy.co.th", "country": "Thailand", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics, gaming and accessories", "notes": "Thailand electronics retailer"},
+    {"company": "JIB", "domain": "jib.co.th", "country": "Thailand", "company_type": "电商卖家", "channels": ["本地电商", "线下连锁"], "category": "computers, gaming and accessories", "notes": "Thailand computer retailer"},
+    {"company": "Advice", "domain": "advice.co.th", "country": "Thailand", "company_type": "电商卖家", "channels": ["本地电商", "线下连锁"], "category": "computers, gaming and accessories", "notes": "Thailand computer retailer"},
+    {"company": "PChome", "domain": "pchome.com.tw", "country": "Taiwan", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, electronics and gaming accessories", "notes": "Taiwan ecommerce marketplace"},
+    {"company": "Momo", "domain": "momo.com.tw", "country": "Taiwan", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, electronics and gaming accessories", "notes": "Taiwan ecommerce marketplace"},
+    {"company": "Tokopedia", "domain": "tokopedia.com", "country": "Indonesia", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, gaming and electronics accessories", "notes": "Indonesia ecommerce marketplace"},
+    {"company": "Blibli", "domain": "blibli.com", "country": "Indonesia", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, electronics and gaming accessories", "notes": "Indonesia ecommerce marketplace"},
+    {"company": "Tiki", "domain": "tiki.vn", "country": "Vietnam", "company_type": "电商平台", "channels": ["本地电商"], "category": "marketplace, electronics and gaming accessories", "notes": "Vietnam ecommerce marketplace"},
+    {"company": "CellphoneS", "domain": "cellphones.com.vn", "country": "Vietnam", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics and accessories", "notes": "Vietnam electronics retailer"},
+    {"company": "Dien May Xanh", "domain": "dienmayxanh.com", "country": "Vietnam", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics and accessories", "notes": "Vietnam electronics retailer"},
+]
+
 ROLE_TERMS = [
     "purchase", "purchasing", "buyer", "procurement", "sourcing", "achats", "acheteur",
     "compras", "zakup", "category", "product manager", "chef de produit", "product owner",
@@ -232,16 +326,30 @@ def _clean_channels(values) -> list[str]:
     return out
 
 
+def _dedupe_seeds(seeds: list[dict]) -> list[dict]:
+    out = []
+    seen = set()
+    for seed in seeds:
+        if not isinstance(seed, dict):
+            continue
+        key = _domain_of(str(seed.get("domain") or seed.get("website") or "")) or _text_key(str(seed.get("company") or ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(seed)
+    return out
+
+
 def _load_seeds() -> list[dict]:
     raw = os.environ.get("B2B_LINKEDIN_AUTO_SEEDS_JSON", "").strip()
     if raw:
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, list):
-                return [x for x in parsed if isinstance(x, dict)]
+                return _dedupe_seeds([x for x in parsed if isinstance(x, dict)])
         except Exception as exc:
             print(f"[b2b_linkedin_auto_pool] bad B2B_LINKEDIN_AUTO_SEEDS_JSON: {exc}")
-    return list(DEFAULT_SEEDS)
+    return _dedupe_seeds(DEFAULT_SEEDS + EXTRA_DEFAULT_SEEDS)
 
 
 async def _list_records(table_id: str, *, field_names: list[str]) -> list[dict]:
