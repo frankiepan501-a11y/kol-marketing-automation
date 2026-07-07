@@ -13,6 +13,7 @@ from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
 from . import cs_resources  # 客服官方资源真相源: 固件/手册/视频 URL 解析与发送闸
+from . import amz_review_audit  # 亚马逊差评/Feedback 审计: 提醒卡 + T+7 复检公开升级
 from . import b2b_mail_reminder  # B2B 外贸邮箱跟进提醒(日 10:00, 外贸助手回执卡)
 from . import b2b_assistant  # 外贸助手: 客户指令 + LinkedIn 回执
 from . import b2b_linkedin_daily_card  # B2B LinkedIn 每日开发卡派发
@@ -874,6 +875,31 @@ async def run_cs_resources_index(authorization: str = Header(default=""), commit
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/cs/resources/index", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/cs/amz-review-audit/run")
+async def run_amz_review_audit(authorization: str = Header(default=""),
+                               kind: str = "all",
+                               mode: str = "dry_run",
+                               notify: bool = False,
+                               limit: int = 50,
+                               sample: bool = False):
+    """亚马逊 Listing 差评/Feedback 审计.
+
+    kind=delta|daily|recheck|all:
+    - delta: 新增差评/Feedback 归一化并发提醒卡
+    - daily: 按负责人生成首页差评巡检卡
+    - recheck: T+7 复检, 未改善公开升级, 改善发一次恭喜卡
+    mode=dry_run 默认只返回预览; commit 才写审计表/发卡. notify=true 才发飞书卡.
+    """
+    _check_auth(authorization)
+    try:
+        result = await amz_review_audit.run(kind=kind, mode=mode, notify=notify, limit=limit, sample=sample)
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/amz-review-audit/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 

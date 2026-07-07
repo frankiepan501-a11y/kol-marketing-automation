@@ -588,6 +588,9 @@ async def handle_callback(event: dict) -> dict:
     action = event.get("action", {}) or {}
     val = action.get("value", {}) or {}
     act = val.get("act") or val.get("action")
+    if isinstance(act, str) and act.startswith("amz_issue_"):
+        from . import amz_review_audit
+        return await amz_review_audit.handle_callback(event)
     act = {
         "cs_send_reply": "send_reply",
         "cs_reassign": "reassign",
