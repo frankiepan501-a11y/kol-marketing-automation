@@ -126,6 +126,24 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
   - issue card: `om_x100b6be4b5a2f8a0c1c0112204f0bbf`
   - Change: primary action is form multi-select + confirm submit; customer-service sync and supervisor escalation are auxiliary actions, not four mutually exclusive buttons.
 
+### 2026-07-07 deployment recovery audit
+
+- Code-side checks passed after V3:
+  - `python -m unittest tests.test_amz_review_audit` passed 9 tests.
+  - `python -m unittest discover -s tests` passed 78 tests.
+  - Local uvicorn with Zeabur production env loaded returned `/health` 200.
+- Zeabur build status:
+  - Deployment `6a4d0fe36ec90535ce43fd39` for commit `9ec2d8e` is `FAILED`, but build logs end with `DONE build completed, see runtime logs for your application output`.
+  - Runtime logs query fails with Zeabur internal timeout: `Failed to query runtime logs`.
+  - `redeployService` failed with traceID `85606131f7a56219a8cc86bb1ee3c223`.
+  - Empty commit `34873a7 ci: retrigger kol automation deploy` was pushed, but Zeabur did not create a new deployment within 7 minutes; latest deployment stayed at `9ec2d8e FAILED`.
+  - `restartService` failed with traceID `3e65658262b9d148e86003a78f02f0af`.
+  - Server query shows `自用服务器-东京` has `status.isOnline=false` while `vmStatus=RUNNING`; `kol-auto.zeabur.app`, `frankiepan501.zeabur.app`, and `fb-ig-social-publish.zeabur.app` health probes all timeout.
+- Current conclusion:
+  - AMZ card code is not the blocker; Zeabur server/control-plane/runtime-log layer is unhealthy.
+  - Do not enable owner/group routing or import/activate n8n crons until `kol-auto.zeabur.app/health` returns 200 and deployment commit `9ec2d8e` or later is `RUNNING`.
+  - Whole-server recovery may affect all services on `自用服务器-东京`; get explicit confirmation before rebooting the Zeabur server from dashboard/API.
+
 ## 合规边界
 
 卡片不写“刷好评 / 买好评 / 要求删差评”。操作选项用合规措辞：
