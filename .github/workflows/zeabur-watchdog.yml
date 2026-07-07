@@ -62,6 +62,13 @@ jobs:
           FEISHU_NOTIFY_CHAT_ID: ${{ secrets.FEISHU_NOTIFY_CHAT_ID }}
           WATCHDOG_STATE_FILE: .watchdog-state/zeabur_watchdog_state.json
           WATCHDOG_AUTO_RESTART_SERVICES: "true"
+          WATCHDOG_CHECK_DEPLOYMENTS: "true"
+          WATCHDOG_DEPLOYMENTS_PER_SERVICE: "10"
+          WATCHDOG_DEPLOYMENT_LOOKBACK_MINUTES: "360"
+          WATCHDOG_DEPLOYMENT_FAILURE_STATUSES: "FAILED"
+          WATCHDOG_INCLUDE_BUILD_LOGS: "true"
+          WATCHDOG_ZEABUR_API_RETRIES: "3"
+          WATCHDOG_HEALTH_RETRIES: "2"
           WATCHDOG_ALERT_COOLDOWN_MINUTES: "60"
           WATCHDOG_RESTART_COOLDOWN_MINUTES: "60"
           WATCHDOG_FAIL_ON_ISSUE: ${{ github.event_name == 'workflow_dispatch' && inputs.fail_on_issue || 'true' }}

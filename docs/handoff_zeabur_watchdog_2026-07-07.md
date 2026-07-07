@@ -18,6 +18,10 @@ It monitors:
 - Health endpoints:
   - `https://frankiepan501.zeabur.app/healthz`
   - `https://kol-auto.zeabur.app/health`
+- Every service in project `n8n-aments`, for recent Zeabur deployment failures.
+  - Default deployment window: last 6 hours.
+  - Default page size: latest 10 deployments per service.
+  - Default failure statuses: `FAILED`.
 
 ## Implementation
 
@@ -32,9 +36,14 @@ Files:
   - Queries Zeabur GraphQL:
     - `servers { status { isOnline vmStatus totalCPU usedCPU totalMemory usedMemory totalDisk usedDisk } }`
     - `project(_id) { services { _id name status suspendedAt domains { domain } } }`
+    - `deployments(serviceID, environmentID, perPage)` for every project service.
+    - `buildLogs(deploymentID)` for failed deployments when build-log summaries are enabled.
   - Probes public health URLs.
   - Sends direct Feishu IM alerts when configured.
   - Auto-restarts `n8n-hual` and `kol-automation` only when the server itself is online but a service status/health probe fails.
+  - Alerts on unseen recent `FAILED` deployments for any project service. The alert includes service name, deployment id, status, timestamp, commit short SHA, commit message, and the first useful build-log error line when available.
+  - Stores seen failed deployment ids in `.watchdog-state/` so the same failed build does not alert every 10 minutes.
+  - Retries transient Zeabur GraphQL and health probe failures to avoid noisy false positives from short network glitches.
   - Does not attempt full server reboot. The official Zeabur docs describe server reboot as a Dashboard operation for OOM/Server Offline recovery, and a reboot mutation was not confirmed.
 - `tests/test_zeabur_watchdog.py`
   - Covers resource thresholds, offline handling, service restart selection, cooldown, and missing Feishu config.
@@ -67,9 +76,11 @@ Without Feishu secrets, the workflow can still fail visibly in GitHub Actions, b
 - Server offline or `vmStatus != RUNNING`: alert only. Service-level restart is skipped because the server is not available.
 - Memory/CPU/disk high: alert only. The official OOM recovery path says to reboot carefully and avoid auto-starting all services if K3s is unhealthy.
 - Service status not `RUNNING` or health endpoint fails while the server is online: call `restartService(serviceID, environmentID)`.
+- Deployment status `FAILED` for any project service: alert only. Do not auto-redeploy or restart because a failed build usually needs source/log diagnosis, not runtime recovery.
 - Cooldowns:
   - Alerts: 60 minutes per issue fingerprint.
   - Service restarts: 60 minutes per service.
+  - Seen deployment ids: retained for 7 days.
 
 ## Verification
 
@@ -78,6 +89,8 @@ Local tests:
 ```powershell
 & C:\Users\Administrator\kol-marketing-automation-invest\.venv\Scripts\python.exe -m unittest tests.test_zeabur_watchdog
 ```
+
+Current coverage includes server resource thresholds, server-offline handling, service restart selection, Feishu fan-out, Zeabur GraphQL retry, health retry, deployment failure detection, and build-log summary inclusion.
 
 Manual dry-run smoke:
 
@@ -97,9 +110,12 @@ Production GitHub Actions verification:
   - Once `ZEABUR_API_KEY` is configured, the schedule/push/manual runs execute the watchdog normally.
 - Push run #2 (`676b9ed`) completed successfully.
 - Latest Zeabur deployment after the watchdog commits was `RUNNING`.
+- 2026-07-07 deployment-failure dry-run caught the real Gmail-reported `ml-sync` failed deployment `6a4c92356ec90535ce43bdc3`. Zeabur build logs reported a GitHub source-code download timeout, so the new check covers the "any service build failed" class even when the runtime service is currently running.
 
 ## Remaining Risk
 
 Full server reboot is still not automated because the safe public mutation was not confirmed. If Zeabur exposes and documents a server reboot API, add it behind a separate explicit flag, with a longer cooldown and a no-auto-start policy for K3s/OOM incidents.
 
 The watchdog is code-complete but not guaranteed to be live until GitHub repository secrets are configured. Minimum required secret: `ZEABUR_API_KEY`. Feishu alerts additionally require `FEISHU_NOTIFY_APP_ID`, `FEISHU_NOTIFY_APP_SECRET`, and at least one target in `FEISHU_NOTIFY_OPEN_ID` or `FEISHU_NOTIFY_CHAT_ID`.
+
+First production run after enabling deployment checks may send alerts for failed deployments still inside the 6-hour lookback window. After those deployment ids are recorded in the cache, only new failed deployments should alert.
