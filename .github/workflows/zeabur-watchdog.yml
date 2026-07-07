@@ -45,7 +45,7 @@ jobs:
 
       - name: Restore watchdog state
         if: steps.preflight.outputs.ready == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .watchdog-state
           key: zeabur-watchdog-state-${{ github.run_id }}
@@ -61,6 +61,7 @@ jobs:
           FEISHU_NOTIFY_OPEN_ID: ${{ secrets.FEISHU_NOTIFY_OPEN_ID }}
           FEISHU_NOTIFY_CHAT_ID: ${{ secrets.FEISHU_NOTIFY_CHAT_ID }}
           WATCHDOG_STATE_FILE: .watchdog-state/zeabur_watchdog_state.json
+          WATCHDOG_SUMMARY_FILE: .watchdog-state/zeabur_watchdog_summary.json
           WATCHDOG_AUTO_RESTART_SERVICES: "true"
           WATCHDOG_CHECK_DEPLOYMENTS: "true"
           WATCHDOG_DEPLOYMENTS_PER_SERVICE: "10"
@@ -71,6 +72,38 @@ jobs:
           WATCHDOG_HEALTH_RETRIES: "2"
           WATCHDOG_ALERT_COOLDOWN_MINUTES: "60"
           WATCHDOG_RESTART_COOLDOWN_MINUTES: "60"
-          WATCHDOG_FAIL_ON_ISSUE: ${{ github.event_name == 'workflow_dispatch' && inputs.fail_on_issue || 'true' }}
+          WATCHDOG_FAIL_ON_ISSUE: "false"
           WATCHDOG_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: python scripts/zeabur_watchdog.py
+
+      - name: Save watchdog state
+        if: steps.preflight.outputs.ready == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .watchdog-state
+          key: zeabur-watchdog-state-${{ github.run_id }}
+
+      - name: Evaluate watchdog result
+        if: steps.preflight.outputs.ready == 'true'
+        env:
+          WATCHDOG_FAIL_ON_ISSUE: ${{ github.event_name == 'workflow_dispatch' && inputs.fail_on_issue || 'true' }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+
+          path = ".watchdog-state/zeabur_watchdog_summary.json"
+          if not os.path.exists(path):
+              print("watchdog summary missing")
+              sys.exit(2)
+
+          with open(path, "r", encoding="utf-8") as fh:
+              summary = json.load(fh)
+
+          if not summary.get("ok", False) and os.getenv("WATCHDOG_FAIL_ON_ISSUE", "true").lower() == "true":
+              print(f"watchdog found {summary.get('issue_count', 0)} issue(s)")
+              sys.exit(2)
+
+          print("watchdog result accepted")
+          PY

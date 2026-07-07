@@ -31,6 +31,7 @@ Files:
   - Runs every 10 minutes on GitHub-hosted runners.
   - Also supports manual `workflow_dispatch`.
   - Restores `.watchdog-state/` via GitHub Actions cache for alert/restart cooldown.
+  - Saves `.watchdog-state/` explicitly before failing the job for detected issues, so deployment-failure dedup state is not lost when the workflow is red by design.
 - `scripts/zeabur_watchdog.py`
   - Uses only Python stdlib.
   - Queries Zeabur GraphQL:
@@ -44,6 +45,7 @@ Files:
   - Alerts on unseen recent `FAILED` deployments for any project service. The alert includes service name, deployment id, status, timestamp, commit short SHA, commit message, and the first useful build-log error line when available.
   - Stores seen failed deployment ids in `.watchdog-state/` so the same failed build does not alert every 10 minutes.
   - Retries transient Zeabur GraphQL and health probe failures to avoid noisy false positives from short network glitches.
+  - Can write `WATCHDOG_SUMMARY_FILE` for GitHub Actions to fail the job after state has been persisted.
   - Does not attempt full server reboot. The official Zeabur docs describe server reboot as a Dashboard operation for OOM/Server Offline recovery, and a reboot mutation was not confirmed.
 - `tests/test_zeabur_watchdog.py`
   - Covers resource thresholds, offline handling, service restart selection, cooldown, and missing Feishu config.
@@ -118,4 +120,4 @@ Full server reboot is still not automated because the safe public mutation was n
 
 The watchdog is code-complete but not guaranteed to be live until GitHub repository secrets are configured. Minimum required secret: `ZEABUR_API_KEY`. Feishu alerts additionally require `FEISHU_NOTIFY_APP_ID`, `FEISHU_NOTIFY_APP_SECRET`, and at least one target in `FEISHU_NOTIFY_OPEN_ID` or `FEISHU_NOTIFY_CHAT_ID`.
 
-First production run after enabling deployment checks may send alerts for failed deployments still inside the 6-hour lookback window. After those deployment ids are recorded in the cache, only new failed deployments should alert.
+First production run after enabling deployment checks may send alerts for failed deployments still inside the 6-hour lookback window. The workflow saves the state cache before marking the job failed, so after those deployment ids are recorded, only new failed deployments should alert.

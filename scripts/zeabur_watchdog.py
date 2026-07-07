@@ -704,6 +704,10 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
         "deployment_issue_count": len(deployment_issues),
         "probes": {name: probe.__dict__ for name, probe in probes.items()},
     }
+    if getattr(args, "summary_file", ""):
+        os.makedirs(os.path.dirname(args.summary_file) or ".", exist_ok=True)
+        with open(args.summary_file, "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, ensure_ascii=False, indent=2, sort_keys=True)
     safe_print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return summary
 
@@ -717,6 +721,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--state-file",
         default=os.getenv("WATCHDOG_STATE_FILE", ".watchdog-state/zeabur_watchdog_state.json"),
     )
+    parser.add_argument("--summary-file", default=os.getenv("WATCHDOG_SUMMARY_FILE", ""))
     parser.add_argument("--health-timeout", type=int, default=env_int("WATCHDOG_HEALTH_TIMEOUT", 15))
     parser.add_argument("--alert-cooldown", type=int, default=env_int("WATCHDOG_ALERT_COOLDOWN_MINUTES", 60))
     parser.add_argument(
