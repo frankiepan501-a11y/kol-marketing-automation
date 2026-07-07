@@ -33,6 +33,8 @@ _b2b_auto_pool_jobs = {}
 _B2B_AUTO_POOL_JOB_TTL = 24 * 3600
 _b2b_discovery_jobs = {}
 _B2B_DISCOVERY_JOB_TTL = 24 * 3600
+_draft_regen_jobs = {}
+_DRAFT_REGEN_JOB_TTL = 6 * 3600
 
 
 def _check_auth(auth: str):
@@ -259,6 +261,48 @@ async def _run_b2b_discovery_job(
             trace=tr,
         )
         await _alert_endpoint_failure("/b2b-linkedin-discovery/run", str(e), tr)
+
+
+def _cleanup_draft_regen_jobs():
+    now = time.time()
+    for job_id in list(_draft_regen_jobs.keys()):
+        started = _draft_regen_jobs[job_id].get("started_ts", 0)
+        if started and now - started > _DRAFT_REGEN_JOB_TTL:
+            _draft_regen_jobs.pop(job_id, None)
+
+
+def _running_draft_regen_job(record_id: str):
+    _cleanup_draft_regen_jobs()
+    for job_id, job in _draft_regen_jobs.items():
+        if job.get("status") == "running" and job.get("record_id") == record_id:
+            return job_id, job
+    return "", None
+
+
+def _compact_draft_regen_result(result: dict) -> dict:
+    keep = [
+        "ok", "old_rid", "new_rid", "retries", "route", "skip", "error",
+    ]
+    return {k: result.get(k) for k in keep if k in result}
+
+
+async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str):
+    try:
+        result = await draft_regen.regen_draft(record_id, feedback=feedback or "")
+        _draft_regen_jobs[job_id].update(
+            status="success" if result.get("ok") else "done_with_issue",
+            finished_at=datetime_now_string(),
+            result=_compact_draft_regen_result(result),
+        )
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        _draft_regen_jobs[job_id].update(
+            status="error",
+            finished_at=datetime_now_string(),
+            error=str(e),
+            trace=tr,
+        )
+        await _alert_endpoint_failure("/draft/regen", str(e), tr)
 
 
 def datetime_now_string():
@@ -714,16 +758,54 @@ async def run_talking_points(authorization: str = Header(default=""),
 
 @app.post("/draft/regen")
 async def run_draft_regen(record_id: str = Query(...), feedback: str = Query(""),
+                          async_mode: bool = Query(True),
                           authorization: str = Header(default="")):
     """退回重生 方案A: 给指定草稿真重生一版(3信号: 上一版+评分理由 / 运营方向feedback / 当前阶段),
-    旧草稿置已否决, 新草稿强制人审重新走卡。n8n 卡片「退回重生」按钮调此端点。"""
+    旧草稿置已否决, 新草稿强制人审重新走卡。n8n 卡片「退回重生」按钮调此端点。
+
+    默认 async_mode=true: 飞书卡片回调必须快速 ACK, 真重生后台跑, 避免客户端 200341 超时。
+    人工调试需要同步结果时可传 async_mode=false。
+    """
     _check_auth(authorization)
+    if async_mode:
+        running_id, running_job = _running_draft_regen_job(record_id)
+        if running_job:
+            return {
+                "ok": True,
+                "accepted": True,
+                "already_running": True,
+                "job_id": running_id,
+                "status": running_job.get("status"),
+                "started_at": running_job.get("started_at"),
+                "record_id": record_id,
+            }
+        job_id = "draftregen-" + uuid.uuid4().hex[:12]
+        _draft_regen_jobs[job_id] = {
+            "status": "running",
+            "started_ts": time.time(),
+            "started_at": datetime_now_string(),
+            "record_id": record_id,
+            "params": {"feedback_present": bool((feedback or "").strip())},
+        }
+        asyncio.create_task(_run_draft_regen_job(job_id, record_id, feedback or ""))
+        return {"ok": True, "accepted": True, "already_running": False,
+                "job_id": job_id, "record_id": record_id}
     try:
         result = await draft_regen.regen_draft(record_id, feedback=feedback or "")
         return {"ok": True, **result}
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.get("/draft/regen/jobs/{job_id}")
+async def get_draft_regen_job(job_id: str, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    _cleanup_draft_regen_jobs()
+    job = _draft_regen_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "job not found or expired")
+    return {"ok": True, "job_id": job_id, **job}
 
 
 @app.post("/draft/regen-scan/run")
