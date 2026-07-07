@@ -108,12 +108,14 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
 - P0 done: Feishu Base `J2fibLgBZaLGTNsQOPHcQXLonZe` has table `亚马逊差评审计状态表` / `tbltzQqIeEIPtJ2l` with 26 audit fields.
 - P1 done: Zeabur `kol-automation` env has the AMZ audit table, observe union, Amazon group, Lingxing proxy, and `AMZ_REVIEW_AUDIT_OBSERVE=1`.
 - P1 done: `kol-auto.zeabur.app/health` and `frankiepan501.zeabur.app/healthz` returned 200 after the Tokyo server recovered.
-- P1 done: deployment `6a4d47ab6ec90535ce4413a6` is `RUNNING` on commit `c337a08e73c47e97c71cd2ec5bb42b780a5ada9f`.
+- P1 done: deployment `6a4d49a66ec90535ce441427` is `RUNNING` on commit `90202d04180104bc33a0a108366b5547b71bf8d6`.
 - P1 done: online sample smoke passed with `sample=true&mode=dry_run&notify=false`, returning 2 eligible sample issues, 2 daily owner cards, and T+7 sample split as 1 failed / 1 passed.
-- P2 done: three n8n workflows were imported inactive for grey release:
-  - `ZcxVGSRV6ujhHn8m` - `AMZ - 差评/Feedback新增提醒 observe`
-  - `eKTyrlsU0JPDTD6F` - `AMZ - Listing首页差评每日巡检 observe`
-  - `R8kXoqn0LAOkAFXI` - `AMZ - 差评T+7复检公开升级 observe`
+- P1 done: real `delta` run with `mode=commit&notify=false` succeeded; current source returned 0 rows, so no records/cards were created.
+- P1 done: real `all` run with `mode=commit&notify=true` succeeded in observe mode; current source returned 0 issues and `recheck_sent_group=0`.
+- P2 done: three n8n workflows are active for Frankie observe grey release:
+  - `ZcxVGSRV6ujhHn8m` - `AMZ - 差评/Feedback新增提醒 observe` - active, triggerCount=1, every 60 minutes.
+  - `eKTyrlsU0JPDTD6F` - `AMZ - Listing首页差评每日巡检 observe` - active, triggerCount=1, daily 09:30 BJ.
+  - `R8kXoqn0LAOkAFXI` - `AMZ - 差评T+7复检公开升级 observe` - active, triggerCount=1, daily 10:10 BJ.
 - P2 safety: n8n production env does not currently expose `INTERNAL_TOKEN` / `KOL_AUTO_URL`, so the imported runtime workflows contain the Bearer token inside n8n only. Repo JSON files keep the env-template form and do not store secrets.
 - P2 safety: T+7 group escalation is suppressed while `AMZ_REVIEW_AUDIT_OBSERVE=1`; observe mode sends to Frankie only, even if `AMZ_OPS_GROUP_CHAT_ID` exists.
 - Card preview sent to Frankie via CS Assistant App on 2026-07-07:
@@ -133,7 +135,7 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
 ### 2026-07-08 recovery audit
 
 - Previous Zeabur blocker is resolved. Server events show the Tokyo server rebooted and completed a spec update; `status.isOnline=true`, `vmStatus=RUNNING`, `provisioningStatus=READY`.
-- Zeabur redeploy completed and the service is serving the AMZ audit endpoint from commit `c337a08` or later.
+- Zeabur redeploy completed and the service is serving the AMZ audit endpoint from commit `90202d0`.
 - Local verification after the observe group-send guard:
   - `.venv\Scripts\python.exe -m unittest tests.test_amz_review_audit` passed 10 tests.
   - `.venv\Scripts\python.exe -m unittest discover -s tests` passed 79 tests.
@@ -149,8 +151,7 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
 
 ## 剩余上线步骤
 
-1. `mode=commit&notify=false` 跑一次真实数据，只写审计表不发卡。
-2. `notify=true` + `AMZ_REVIEW_AUDIT_OBSERVE=1` 只发 Frankie observe。
-3. 卡片确认后灰度 1-2 名负责人，再把 `AMZ_REVIEW_AUDIT_OBSERVE=0` 放开负责人私聊。
-4. 7 天后再启用公开 T+7 群提醒，避免历史数据误伤。
-5. 长期优化：把 n8n 的 `INTERNAL_TOKEN` / `KOL_AUTO_URL` 改成服务环境变量或 credential，避免 token 固化在 workflow definition。
+1. 观察第 1 天 Frankie observe 卡片是否符合运营使用习惯。
+2. 卡片确认后灰度 1-2 名负责人，再把 `AMZ_REVIEW_AUDIT_OBSERVE=0` 放开负责人私聊。
+3. 7 天后再允许公开 T+7 群提醒，避免历史数据误伤。
+4. 长期优化：把 n8n 的 `INTERNAL_TOKEN` / `KOL_AUTO_URL` 改成服务环境变量或 credential，避免 token 固化在 workflow definition。
