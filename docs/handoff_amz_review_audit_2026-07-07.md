@@ -116,6 +116,11 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
   - daily card: `om_x100b6be4e8d6d8a0c06dcfb9695c833`
   - recheck failed card: `om_x100b6be4e8ee68a4c4397de94262a9c`
   - success card: `om_x100b6be4e8e1b0a4c1e171c90d20c52`
+- V2 visual preview sent after card-design review:
+  - issue card: `om_x100b6be497b04ca4c3bd592c53d22cd`
+  - daily card: `om_x100b6be497453100c451663cd56edb4`
+  - recheck failed card: `om_x100b6be4975c70acc05406f76b3d513`
+  - success card: `om_x100b6be49757e0a8c37d47dd444dbcc`
 
 ## 合规边界
 

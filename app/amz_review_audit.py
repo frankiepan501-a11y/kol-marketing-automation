@@ -92,6 +92,12 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _fmt_ms(ts_ms: int | None) -> str:
+    if not ts_ms:
+        return "-"
+    return datetime.fromtimestamp(int(ts_ms) / 1000, BJ).strftime("%Y-%m-%d")
+
+
 def _text(value: Any) -> str:
     if value is None:
         return ""
@@ -375,6 +381,31 @@ def _button(text: str, value: dict, typ: str = "default") -> dict:
     return {"tag": "button", "text": {"tag": "plain_text", "content": text}, "type": typ, "value": value}
 
 
+def _url_button(text: str, url: str, typ: str = "default") -> dict:
+    return {"tag": "button", "text": {"tag": "plain_text", "content": text}, "type": typ, "url": url}
+
+
+def _field_md(label: str, value: str) -> dict:
+    return {"is_short": True, "text": {"tag": "lark_md", "content": f"**{label}**\n{value or '-'}"}}
+
+
+def _issue_fact_fields(issue: dict, include_status: bool = False) -> list[dict]:
+    url = issue.get("listing_url") or amazon_listing_url(issue.get("site", ""), issue.get("asin", ""))
+    asin = f"[{issue.get('asin')}]({url})" if url else issue.get("asin", "-")
+    fields = [
+        _field_md("店铺 / 站点", f"{issue.get('store_name') or '-'} / {issue.get('site') or '-'}"),
+        _field_md("负责人", issue.get("owner") or "未分配"),
+        _field_md("ERP品名", issue.get("erp_name") or "-"),
+        _field_md("ASIN", asin),
+        _field_md("来源 / 星级", f"{issue.get('source_type') or '-'} / {issue.get('rating') or '-'}星"),
+        _field_md("级别 / 首次发现", f"{issue.get('severity') or 'P2'} / {_fmt_ms(issue.get('first_seen_ms'))}"),
+    ]
+    if include_status:
+        fields.append(_field_md("当前状态", issue.get("status") or STATE_NEW))
+        fields.append(_field_md("首页差评数", str(issue.get("homepage_negative_count") or 0)))
+    return fields
+
+
 def _payload(action: str, issue: dict) -> dict:
     return {
         "source": "amz_review_audit",
@@ -392,14 +423,27 @@ def _payload(action: str, issue: dict) -> dict:
 
 
 def build_issue_card(issue: dict) -> dict:
-    template = "red" if issue.get("severity") == "P0" else "orange"
-    title = f"🟠 [AMZ·{issue.get('severity', 'P1')}] 新增差评/Feedback待处理 · {issue.get('erp_name') or issue.get('asin')}"
+    level = issue.get("severity", "P1")
+    priority_emoji = "🔴" if level == "P0" else "🟠"
+    template = "red" if level == "P0" else "orange"
+    source_label = "Feedback" if issue.get("source_type") == "feedback" else "差评"
+    title = f"{priority_emoji} [AMZ·{level}] 新增{source_label}待处理 · {issue.get('erp_name') or issue.get('asin')}"
     rid = issue.get("record_id") or re.sub(r"[^A-Za-z0-9]", "_", issue.get("issue_key", "issue"))[:40]
+    url = issue.get("listing_url") or amazon_listing_url(issue.get("site", ""), issue.get("asin", ""))
+    summary_lines = []
+    if issue.get("title"):
+        summary_lines.append(f"**标题:** {issue['title']}")
+    if issue.get("summary"):
+        summary_lines.append(f"**摘要:** {_short(issue['summary'], 260)}")
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": template, "title": {"tag": "plain_text", "content": title}},
         "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": _issue_md(issue)}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"🚨 **处理要求**\n该{source_label}已进入审计闭环：提交处理不等于关闭，系统会在 T+7 自动复检 Listing 首页。"}},
+            {"tag": "div", "fields": _issue_fact_fields(issue)},
+            *([{"tag": "action", "actions": [_url_button("打开Listing前台", url, "primary")]}] if url else []),
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "📝 **差评 / Feedback 摘要**\n" + ("\n".join(summary_lines) if summary_lines else "-")}},
             {"tag": "hr"},
             {"tag": "form", "name": f"amz_actions_f_{rid}", "elements": [
                 {
@@ -429,20 +473,23 @@ def build_issue_card(issue: dict) -> dict:
                 _button("申请观察", _payload("amz_issue_request_observation", issue)),
                 _button("升级红线", _payload("amz_issue_escalate", issue), "danger"),
             ]},
-            {"tag": "note", "elements": [{"tag": "plain_text", "content": "提交处理只进入 T+7 复检，不代表关闭；关闭以首页无差评或上级确认观察为准。"}]},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": "合规提醒：只记录合规处理动作。提交后进入 T+7 复检；关闭条件是首页无差评或上级确认观察。"}]},
         ],
     }
 
 
 def build_daily_digest_card(owner: str, issues: list[dict], today_label: str = "") -> dict:
     today_label = today_label or datetime.now(BJ).strftime("%Y-%m-%d")
-    lines = [f"**负责人:** {owner}  ·  **日期:** {today_label}", f"**首页差评Listing数:** {len(issues)}"]
+    lines = [
+        f"📌 **今日需要处理:** {len(issues)} 个 Listing 首页仍有差评",
+        f"**负责人:** {owner}  ·  **日期:** {today_label}",
+    ]
     for idx, issue in enumerate(issues[:8], 1):
         url = issue.get("listing_url") or amazon_listing_url(issue.get("site", ""), issue.get("asin", ""))
         asin = f"[{issue.get('asin')}]({url})" if url else issue.get("asin", "-")
         lines.append(
-            f"{idx}. {issue.get('store_name') or '-'} / {issue.get('site') or '-'} / "
-            f"{issue.get('erp_name') or '-'} / {asin} / {issue.get('rating') or '-'}星"
+            f"**{idx}. {issue.get('erp_name') or '-'}**\n"
+            f"店铺/站点: {issue.get('store_name') or '-'} / {issue.get('site') or '-'}  ·  ASIN: {asin}  ·  星级: {issue.get('rating') or '-'}星"
         )
     if len(issues) > 8:
         lines.append(f"... 另有 {len(issues) - 8} 条，请打开日看板处理。")
@@ -451,15 +498,21 @@ def build_daily_digest_card(owner: str, issues: list[dict], today_label: str = "
         "header": {"template": "orange", "title": {"tag": "plain_text", "content": f"🟠 [AMZ·P1] Listing首页差评巡检 · {owner} · {today_label}"}},
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
-            {"tag": "note", "elements": [{"tag": "plain_text", "content": "卡片只展示核心项；逐条处理请以新增提醒卡或日看板为准。"}]},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": "这是每日巡检卡：卡片只展示核心项；逐条处理请以新增提醒卡或日看板为准。"}]},
         ],
     }
 
 
 def build_recheck_failed_card(owner: str, issues: list[dict], day14: bool = False) -> dict:
     level = "P0" if day14 else "P1"
+    priority_emoji = "🔴" if day14 else "🟠"
     template = "red" if day14 else "orange"
-    lines = [f"**负责人:** {owner}  ·  **复检失败:** {len(issues)} 条", "**问题:** 运营已提交处理，但 T+7 后首页仍有差评。"]
+    lines = [
+        "🚨 **公开升级原因**",
+        f"负责人 **{owner}** 已提交处理，但复检发现 Listing 首页差评仍未改善。",
+        f"**复检失败:** {len(issues)} 条  ·  **升级级别:** {level}",
+        "**审计口径:** 点过“已处理”不会静默关闭；只有首页无差评或上级确认观察才关闭。",
+    ]
     for idx, issue in enumerate(issues[:10], 1):
         first_days = _days_since(issue.get("first_seen_ms"))
         handled_days = _days_since(issue.get("handled_at_ms"))
@@ -467,26 +520,31 @@ def build_recheck_failed_card(owner: str, issues: list[dict], day14: bool = Fals
         asin = f"[{issue.get('asin')}]({url})" if url else issue.get("asin", "-")
         actions = "、".join(issue.get("handled_actions") or []) or "-"
         lines.append(
-            f"{idx}. {issue.get('store_name') or '-'} / {issue.get('site') or '-'} / {issue.get('erp_name') or '-'} / {asin}\n"
-            f"   星级={issue.get('rating') or '-'}；首次发现后 {first_days} 天；标记处理后 {handled_days} 天；处理方式={actions}"
+            f"⚠️ **{idx}. {issue.get('erp_name') or '-'}**\n"
+            f"店铺/站点: {issue.get('store_name') or '-'} / {issue.get('site') or '-'}  ·  ASIN: {asin}\n"
+            f"星级: {issue.get('rating') or '-'}星  ·  首次发现后 {first_days} 天  ·  标记处理后 {handled_days} 天\n"
+            f"当时处理方式: {actions}"
         )
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"template": template, "title": {"tag": "plain_text", "content": f"🟠 [AMZ·{level}] 差评处理复检失败 · {owner} · {len(issues)}条"}},
+        "header": {"template": template, "title": {"tag": "plain_text", "content": f"{priority_emoji} [AMZ·{level}] 差评处理复检失败 · {owner} · {len(issues)}条"}},
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
-            {"tag": "note", "elements": [{"tag": "plain_text", "content": "这是公开审计卡：点过处理但结果未改善，不再静默关闭。"}]},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": "这是公开审计卡：负责人私聊 + 亚马逊群可见，用于防止“标记已处理但结果未改善”。"}]},
         ],
     }
 
 
 def build_success_card(issue: dict) -> dict:
+    url = issue.get("listing_url") or amazon_listing_url(issue.get("site", ""), issue.get("asin", ""))
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "green", "title": {"tag": "plain_text", "content": f"🟢 [AMZ·P3] Listing首页已无差评 · {issue.get('erp_name') or issue.get('asin')}"}},
         "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": _issue_md(issue, include_status=False)}},
-            {"tag": "note", "elements": [{"tag": "plain_text", "content": "该恢复卡每轮只发一次；未来出现新差评会重新进入审计。"}]},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "🎉 **恭喜恢复**\n系统复检确认：该 Listing 首页当前已无差评，本轮审计关闭。"}},
+            {"tag": "div", "fields": _issue_fact_fields(issue, include_status=False)},
+            *([{"tag": "action", "actions": [_url_button("查看Listing前台", url, "primary")]}] if url else []),
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": "该恭喜卡每轮只发一次；未来出现新差评会重新进入审计。"}]},
         ],
     }
 

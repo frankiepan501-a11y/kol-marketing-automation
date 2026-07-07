@@ -59,6 +59,29 @@ class AmzReviewAuditPureTests(unittest.TestCase):
         self.assertIn("amz_issue_create_cs_ticket", rendered)
         self.assertIn("B0FB000001", rendered)
         self.assertIn("https://www.amazon.ca/dp/B0FB000001", rendered)
+        self.assertIn("🚨 **处理要求**", rendered)
+        self.assertIn("打开Listing前台", rendered)
+
+    def test_recheck_failed_and_success_cards_have_clear_visual_tone(self):
+        issue = audit.normalize_issue({
+            "source_type": "review",
+            "review_id": "rv-tone",
+            "site": "US",
+            "asin": "B0TONE0001",
+            "erp_name": "FF Controller",
+            "rating": 1,
+            "review_text": "Still bad after handling.",
+        })
+        issue["handled_at_ms"] = audit.now_ms() - 8 * 86_400_000
+        issue["handled_actions"] = ["已投诉Amazon / 已开Case"]
+
+        failed = json.dumps(audit.build_recheck_failed_card("黄奕纯", [issue]), ensure_ascii=False)
+        success = json.dumps(audit.build_success_card(issue), ensure_ascii=False)
+
+        self.assertIn("🚨 **公开升级原因**", failed)
+        self.assertIn("点过“已处理”不会静默关闭", failed)
+        self.assertIn("🎉 **恭喜恢复**", success)
+        self.assertIn("本轮审计关闭", success)
 
     def test_audit_metrics_counts_failed_and_overdue(self):
         issues = [
