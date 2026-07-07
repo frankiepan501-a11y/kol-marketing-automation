@@ -20,7 +20,8 @@
 - 新增 `app/amz_review_audit.py`
   - 归一化 Review / Seller Feedback。
   - 生成三类卡片：新增提醒卡、每日巡检卡、T+7 复检失败公开升级卡。
-  - 支持多选处理方式表单和 `录入客服工单 / 申请观察 / 升级红线` 按钮。
+  - 支持多选处理方式表单；`客观无法移除，申请观察` 是表单选项，不再做独立按钮。
+  - 底部只保留辅助动作按钮：`同步到客服库（可选） / 异常升级主管`，两者不是处理方式，也不是必点。
   - 支持 T+7 复检、首页无差评恭喜卡、负责人审计指标。
   - 支持 `amz_issue_*` 卡片回调幂等处理。
 - 修改 `app/cs_dispatch.py`
@@ -121,6 +122,9 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
   - daily card: `om_x100b6be497453100c451663cd56edb4`
   - recheck failed card: `om_x100b6be4975c70acc05406f76b3d513`
   - success card: `om_x100b6be49757e0a8c37d47dd444dbcc`
+- V3 button-clarity preview sent after action semantics review:
+  - issue card: `om_x100b6be4b5a2f8a0c1c0112204f0bbf`
+  - Change: primary action is form multi-select + confirm submit; customer-service sync and supervisor escalation are auxiliary actions, not four mutually exclusive buttons.
 
 ## 合规边界
 

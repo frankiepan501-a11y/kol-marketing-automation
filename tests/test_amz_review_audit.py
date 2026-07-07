@@ -55,8 +55,14 @@ class AmzReviewAuditPureTests(unittest.TestCase):
 
         self.assertIn("multi_select_static", rendered)
         self.assertIn("已投诉Amazon / 已开Case", rendered)
+        self.assertIn("主动作：提交处理结果（可多选）", rendered)
+        self.assertIn("不是排他选择", rendered)
+        self.assertIn("辅助动作：不是处理方式，不是必点", rendered)
+        self.assertIn("同步到客服库（可选）", rendered)
+        self.assertIn("客观无法移除，申请观察", rendered)
         self.assertIn("amz_issue_submit_actions", rendered)
         self.assertIn("amz_issue_create_cs_ticket", rendered)
+        self.assertNotIn("amz_issue_request_observation", rendered)
         self.assertIn("B0FB000001", rendered)
         self.assertIn("https://www.amazon.ca/dp/B0FB000001", rendered)
         self.assertIn("🚨 **处理要求**", rendered)
@@ -163,6 +169,47 @@ class AmzReviewAuditAsyncTests(unittest.TestCase):
         rendered = json.dumps(calls[0][1], ensure_ascii=False)
         self.assertIn("T+7", rendered)
         self.assertIn("此卡片已处理", rendered)
+
+    def test_handle_observation_option_patches_observe_card(self):
+        original_update = audit.cs_dispatch._update_card
+        calls = []
+
+        async def fake_update(message_id, card):
+            calls.append((message_id, card))
+            return True
+
+        try:
+            audit.cs_dispatch._update_card = fake_update
+            event = {
+                "message_id": "om_observe",
+                "operator": {"union_id": "on_operator"},
+                "action": {
+                    "value": {
+                        "action": "amz_issue_submit_actions",
+                        "issue_id": "rec_observe",
+                        "source_type": "review",
+                        "source_id": "rv-observe",
+                        "site": "US",
+                        "asin": "B0OBSERVE",
+                        "rating": 1,
+                        "erp_name": "FF Controller",
+                    },
+                    "form_value": {
+                        "amz_actions_rec_observe": ["客观无法移除，申请观察"],
+                        "amz_note_rec_observe": "Competitor complaint, awaiting manager approval.",
+                    },
+                },
+            }
+            result = asyncio.run(audit.handle_callback(event))
+        finally:
+            audit.cs_dispatch._update_card = original_update
+
+        self.assertEqual("success", result["toast"]["type"])
+        self.assertIn("观察", result["toast"]["content"])
+        self.assertEqual(1, len(calls))
+        rendered = json.dumps(calls[0][1], ensure_ascii=False)
+        self.assertIn("观察申请已提交", rendered)
+        self.assertIn("上级确认", rendered)
 
 
 if __name__ == "__main__":

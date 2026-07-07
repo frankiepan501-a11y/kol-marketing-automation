@@ -445,11 +445,12 @@ def build_issue_card(issue: dict) -> dict:
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": "📝 **差评 / Feedback 摘要**\n" + ("\n".join(summary_lines) if summary_lines else "-")}},
             {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "✅ **主动作：提交处理结果（可多选）**\n下拉框不是四选一。运营可以同时选择多个已执行动作，例如“已开Case + 已完成Listing整改”。点确认后原卡会变灰，并进入复检或观察流程。"}},
             {"tag": "form", "name": f"amz_actions_f_{rid}", "elements": [
                 {
                     "tag": "multi_select_static",
                     "name": f"amz_actions_{rid}",
-                    "placeholder": {"tag": "plain_text", "content": "选择已采取的处理方式（可多选）"},
+                    "placeholder": {"tag": "plain_text", "content": "选择已执行动作（可多选，不是排他选择）"},
                     "options": [{"text": {"tag": "plain_text", "content": x}, "value": x} for x in ACTION_OPTIONS],
                 },
                 {
@@ -464,14 +465,15 @@ def build_issue_card(issue: dict) -> dict:
                     "action_type": "form_submit",
                     "name": f"amz_submit_{rid}",
                     "type": "primary",
-                    "text": {"tag": "plain_text", "content": "提交处理结果"},
+                    "text": {"tag": "plain_text", "content": "确认提交处理结果"},
                     "value": _payload("amz_issue_submit_actions", issue),
                 },
             ]},
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "🧩 **辅助动作：不是处理方式，不是必点**\n- **同步到客服库（可选）**：需要客服售后跟进时才点，和上方处理提交不互斥。\n- **异常升级主管**：账号风险、差评爆发、需要主管/Frankie 介入时才点。"}},
             {"tag": "action", "actions": [
-                _button("录入客服工单", _payload("amz_issue_create_cs_ticket", issue)),
-                _button("申请观察", _payload("amz_issue_request_observation", issue)),
-                _button("升级红线", _payload("amz_issue_escalate", issue), "danger"),
+                _button("同步到客服库（可选）", _payload("amz_issue_create_cs_ticket", issue)),
+                _button("异常升级主管", _payload("amz_issue_escalate", issue), "danger"),
             ]},
             {"tag": "note", "elements": [{"tag": "plain_text", "content": "合规提醒：只记录合规处理动作。提交后进入 T+7 复检；关闭条件是首页无差评或上级确认观察。"}]},
         ],
@@ -959,6 +961,33 @@ async def handle_callback(event: dict) -> dict:
         note = _text(_form_selection(form, issue["record_id"], "note"))
         if not actions:
             return {"toast": {"type": "error", "content": "请至少选择一种处理方式"}}
+        if any("客观无法移除" in x or "申请观察" in x for x in actions):
+            update = {
+                "状态": STATE_OBSERVE,
+                "处理方式": actions,
+                "处理备注": note,
+                "处理时间": now_ms(),
+                "处理人": actor,
+                "最近提醒时间": now_ms(),
+            }
+            if _audit_configured() and issue.get("record_id", "").startswith("rec"):
+                await _update_audit(issue["record_id"], update)
+            issue.update({
+                "status": STATE_OBSERVE,
+                "handled_actions": actions,
+                "handled_note": note,
+                "handled_at_ms": now_ms(),
+            })
+            await cs_dispatch._update_card(
+                msg_id,
+                build_processed_card(
+                    issue,
+                    "🟡 [AMZ·观察申请已提交]",
+                    f"已进入观察申请：{'、'.join(actions)}。关闭仍需上级确认，或后续复检首页无差评。",
+                    "yellow",
+                ),
+            )
+            return {"toast": {"type": "success", "content": "已提交观察申请"}}
         due = now_ms() + 7 * 86_400_000
         update = {"状态": STATE_SUBMITTED, "处理方式": actions, "处理备注": note, "处理时间": now_ms(), "处理人": actor, "T+7复检日期": due}
         if _audit_configured() and issue.get("record_id", "").startswith("rec"):
