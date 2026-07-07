@@ -81,6 +81,18 @@ $env:ZEABUR_API_KEY='<set locally>'
 & C:\Users\Administrator\kol-marketing-automation-invest\.venv\Scripts\python.exe scripts\zeabur_watchdog.py
 ```
 
+Production GitHub Actions verification:
+
+- Workflow `Zeabur Tokyo Watchdog` was recognized by GitHub and is `active`.
+- Push run #1 (`913f504`) failed with exit code 2. Public logs required sign-in, but local real dry-run passed and the repo had no locally detectable GitHub token for setting/checking secrets, so this was treated as likely missing `ZEABUR_API_KEY` secret.
+- Added workflow preflight in `676b9ed`:
+  - If `ZEABUR_API_KEY` is missing, the workflow exits successfully with a warning and skips the watchdog.
+  - Once `ZEABUR_API_KEY` is configured, the schedule/push/manual runs execute the watchdog normally.
+- Push run #2 (`676b9ed`) completed successfully.
+- Latest Zeabur deployment after the watchdog commits was `RUNNING`.
+
 ## Remaining Risk
 
 Full server reboot is still not automated because the safe public mutation was not confirmed. If Zeabur exposes and documents a server reboot API, add it behind a separate explicit flag, with a longer cooldown and a no-auto-start policy for K3s/OOM incidents.
+
+The watchdog is code-complete but not guaranteed to be live until GitHub repository secrets are configured. Minimum required secret: `ZEABUR_API_KEY`. Feishu alerts additionally require `FEISHU_NOTIFY_APP_ID`, `FEISHU_NOTIFY_APP_SECRET`, and one of `FEISHU_NOTIFY_OPEN_ID` or `FEISHU_NOTIFY_CHAT_ID`.
