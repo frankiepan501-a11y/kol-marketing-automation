@@ -1,0 +1,68 @@
+{
+  "name": "AMZ - 差评T+7复检公开升级 observe",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 10,
+              "triggerAtMinute": 10
+            }
+          ]
+        }
+      },
+      "id": "schedule",
+      "name": "每日10:10 BJ",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.KOL_AUTO_URL || 'https://kol-auto.zeabur.app'}}/cs/amz-review-audit/run?kind=recheck&mode=commit&notify=true&limit=200",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.INTERNAL_TOKEN}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "call",
+      "name": "触发T+7复检",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "每日10:10 BJ": {
+      "main": [
+        [
+          {
+            "node": "触发T+7复检",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

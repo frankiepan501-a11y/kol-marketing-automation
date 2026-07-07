@@ -90,17 +90,32 @@ Authorization: Bearer <INTERNAL_TOKEN>
 ## 配置
 
 ```env
-AMZ_REVIEW_AUDIT_APP_TOKEN=xxx
-AMZ_REVIEW_AUDIT_TABLE_ID=xxx
+AMZ_REVIEW_AUDIT_APP_TOKEN=J2fibLgBZaLGTNsQOPHcQXLonZe
+AMZ_REVIEW_AUDIT_TABLE_ID=tbltzQqIeEIPtJ2l
 AMZ_REVIEW_AUDIT_OBSERVE=1
 AMZ_REVIEW_OBSERVE_UNION=on_6e85dd60606f76f2d5af892785ac1dfe
-AMZ_OPS_GROUP_CHAT_ID=oc_xxx_amazon_ops
-AMZ_REVIEW_FRONTEND_CHECK_URL=https://example.com/amz/homepage-negative-check
+AMZ_OPS_GROUP_CHAT_ID=oc_26e58d95b78670ed10a8bf4373da81f1
+AMZ_REVIEW_FRONTEND_CHECK_URL=
 LINGXING_PROXY_URL=https://frankiepan501.zeabur.app/webhook/lingxing-proxy
-LINGXING_PROXY_TOKEN=xxx
+LINGXING_PROXY_TOKEN=<existing Zeabur env>
 ```
 
 默认 `AMZ_REVIEW_AUDIT_OBSERVE=1`，即使 `notify=true` 也只发 Frankie。灰度稳定后改为 `0` 才按负责人发。
+
+## P0-P2 rollout status
+
+- P0 done: Feishu Base `J2fibLgBZaLGTNsQOPHcQXLonZe` has table `亚马逊差评审计状态表` / `tbltzQqIeEIPtJ2l` with 26 audit fields.
+- P1 partial: Zeabur `kol-automation` env has the AMZ audit table, observe union, Amazon group, and Lingxing proxy variables. `AMZ_REVIEW_AUDIT_OBSERVE=1` remains on.
+- P1 blocked: after env restart, Zeabur control plane left the latest deployment `REMOVED`; `restartService` / `redeployService` currently return internal errors. Do not enable owner/group routing until `kol-auto.zeabur.app` is RUNNING again and `/cs/amz-review-audit/run` passes smoke.
+- P2 staged: n8n workflow import JSON files are in this folder:
+  - `n8n_amz_review_audit_delta.json`
+  - `n8n_amz_review_audit_daily.json`
+  - `n8n_amz_review_audit_recheck.json`
+- Card preview sent to Frankie via CS Assistant App on 2026-07-07:
+  - issue card: `om_x100b6be4e8df18acc2e972411bec1fa`
+  - daily card: `om_x100b6be4e8d6d8a0c06dcfb9695c833`
+  - recheck failed card: `om_x100b6be4e8ee68a4c4397de94262a9c`
+  - success card: `om_x100b6be4e8e1b0a4c1e171c90d20c52`
 
 ## 合规边界
 
@@ -112,10 +127,10 @@ LINGXING_PROXY_TOKEN=xxx
 
 ## 剩余上线步骤
 
-1. 在飞书 Base 创建“亚马逊差评审计状态表”，按上方字段建表。
-2. 配置 Zeabur env：审计表 token、Amazon 群 chat_id、Lingxing proxy、首页巡检服务。
-3. 调用 `sample=true&mode=dry_run` 验证三类卡片预览。
+1. 恢复 Zeabur `kol-automation` RUNNING 状态。
+2. 调用 `sample=true&mode=dry_run` 验证线上路由返回三类卡片预览。
+3. 导入 3 个 n8n workflow JSON，保持 inactive。
 4. `mode=commit&notify=false` 跑一次真实数据，只写审计表不发卡。
 5. `notify=true` + `AMZ_REVIEW_AUDIT_OBSERVE=1` 只发 Frankie observe。
-6. 灰度 1-2 名负责人后，把 `AMZ_REVIEW_AUDIT_OBSERVE=0` 放开负责人私聊。
-7. 7 天后再配置 `AMZ_OPS_GROUP_CHAT_ID` 开公开复检失败卡，避免历史数据误伤。
+6. 卡片确认后灰度 1-2 名负责人，再把 `AMZ_REVIEW_AUDIT_OBSERVE=0` 放开负责人私聊。
+7. 7 天后再启用公开 T+7 群提醒，避免历史数据误伤。
