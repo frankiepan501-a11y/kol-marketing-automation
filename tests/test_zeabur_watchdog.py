@@ -100,6 +100,39 @@ class ZeaburWatchdogTests(unittest.TestCase):
     def test_send_feishu_missing_config_returns_false(self):
         self.assertFalse(zw.send_feishu("hello", dry_run=False))
 
+    def test_split_targets_accepts_multiple_separators(self):
+        self.assertEqual(
+            zw.split_targets("ou_a, ou_b;ou_c\nou_d"),
+            ["ou_a", "ou_b", "ou_c", "ou_d"],
+        )
+
+    @mock.patch.dict(
+        os.environ,
+        {
+            "FEISHU_NOTIFY_APP_ID": "app",
+            "FEISHU_NOTIFY_APP_SECRET": "secret",
+            "FEISHU_NOTIFY_OPEN_ID": "ou_a,ou_b",
+            "FEISHU_NOTIFY_CHAT_ID": "oc_c",
+        },
+        clear=True,
+    )
+    @mock.patch("scripts.zeabur_watchdog.http_json")
+    @mock.patch("scripts.zeabur_watchdog.feishu_token", return_value="tenant-token")
+    def test_send_feishu_sends_to_all_users_and_chats(self, feishu_token, http_json):
+        self.assertTrue(zw.send_feishu("hello", dry_run=False))
+        self.assertEqual(http_json.call_count, 3)
+        urls = [call.args[0] for call in http_json.call_args_list]
+        payloads = [call.args[1] for call in http_json.call_args_list]
+        self.assertEqual(
+            urls,
+            [
+                "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+                "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+                "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+            ],
+        )
+        self.assertEqual([payload["receive_id"] for payload in payloads], ["ou_a", "ou_b", "oc_c"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -123,6 +124,12 @@ def load_json_env(name: str, default: Any) -> Any:
     if not value:
         return default
     return json.loads(value)
+
+
+def split_targets(value: str) -> list[str]:
+    if not value:
+        return []
+    return [part for part in re.split(r"[\s,;]+", value.strip()) if part]
 
 
 def http_json(
@@ -288,29 +295,31 @@ def feishu_token(app_id: str, app_secret: str) -> str:
 def send_feishu(text: str, dry_run: bool) -> bool:
     app_id = os.getenv("FEISHU_NOTIFY_APP_ID", "").strip()
     app_secret = os.getenv("FEISHU_NOTIFY_APP_SECRET", "").strip()
-    open_id = os.getenv("FEISHU_NOTIFY_OPEN_ID", "").strip()
-    chat_id = os.getenv("FEISHU_NOTIFY_CHAT_ID", "").strip()
+    open_ids = split_targets(os.getenv("FEISHU_NOTIFY_OPEN_ID", ""))
+    chat_ids = split_targets(os.getenv("FEISHU_NOTIFY_CHAT_ID", ""))
     if dry_run:
         print("DRY_RUN_FEISHU_ALERT:")
         print(text)
         return True
-    if not app_id or not app_secret or not (open_id or chat_id):
+    if not app_id or not app_secret or not (open_ids or chat_ids):
         print("Feishu notify skipped: missing FEISHU_NOTIFY_APP_ID/SECRET and target")
         return False
     token = feishu_token(app_id, app_secret)
-    receive_type = "open_id" if open_id else "chat_id"
-    receive_id = open_id or chat_id
-    http_json(
-        f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_type}",
-        {
-            "receive_id": receive_id,
-            "msg_type": "text",
-            "content": json.dumps({"text": text}, ensure_ascii=False),
-        },
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=20,
-    )
-    return True
+    sent = 0
+    for receive_type, receive_ids in (("open_id", open_ids), ("chat_id", chat_ids)):
+        for receive_id in receive_ids:
+            http_json(
+                f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_type}",
+                {
+                    "receive_id": receive_id,
+                    "msg_type": "text",
+                    "content": json.dumps({"text": text}, ensure_ascii=False),
+                },
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=20,
+            )
+            sent += 1
+    return sent > 0
 
 
 def format_alert(

@@ -49,9 +49,16 @@ Recommended for direct Feishu alerting:
 
 - `FEISHU_NOTIFY_APP_ID`
 - `FEISHU_NOTIFY_APP_SECRET`
-- One of:
+- One or both:
   - `FEISHU_NOTIFY_OPEN_ID`
   - `FEISHU_NOTIFY_CHAT_ID`
+
+`FEISHU_NOTIFY_OPEN_ID` and `FEISHU_NOTIFY_CHAT_ID` both support multiple targets separated by comma, semicolon, whitespace, or newline. If both are configured, the same alert is sent to every listed private user and every listed group chat. For example:
+
+```text
+FEISHU_NOTIFY_OPEN_ID=ou_xxx,ou_yyy
+FEISHU_NOTIFY_CHAT_ID=oc_xxx
+```
 
 Without Feishu secrets, the workflow can still fail visibly in GitHub Actions, but it will not send a Feishu alert.
 
@@ -95,4 +102,4 @@ Production GitHub Actions verification:
 
 Full server reboot is still not automated because the safe public mutation was not confirmed. If Zeabur exposes and documents a server reboot API, add it behind a separate explicit flag, with a longer cooldown and a no-auto-start policy for K3s/OOM incidents.
 
-The watchdog is code-complete but not guaranteed to be live until GitHub repository secrets are configured. Minimum required secret: `ZEABUR_API_KEY`. Feishu alerts additionally require `FEISHU_NOTIFY_APP_ID`, `FEISHU_NOTIFY_APP_SECRET`, and one of `FEISHU_NOTIFY_OPEN_ID` or `FEISHU_NOTIFY_CHAT_ID`.
+The watchdog is code-complete but not guaranteed to be live until GitHub repository secrets are configured. Minimum required secret: `ZEABUR_API_KEY`. Feishu alerts additionally require `FEISHU_NOTIFY_APP_ID`, `FEISHU_NOTIFY_APP_SECRET`, and at least one target in `FEISHU_NOTIFY_OPEN_ID` or `FEISHU_NOTIFY_CHAT_ID`.
