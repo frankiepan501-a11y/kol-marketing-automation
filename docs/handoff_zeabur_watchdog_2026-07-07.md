@@ -40,7 +40,11 @@ Files:
     - `deployments(serviceID, environmentID, perPage)` for every project service.
     - `buildLogs(deploymentID)` for failed deployments when build-log summaries are enabled.
   - Probes public health URLs.
-  - Sends direct Feishu IM alerts when configured.
+  - Sends direct Feishu IM alerts when configured. Alerts are Feishu `interactive` cards, not plain text blocks:
+    - Header shows `[AUDIT·P1] Zeabur 构建/运行告警`.
+    - Core facts use two-column `fields`.
+    - Long build logs are truncated and raw URLs are compacted to domains.
+    - Issues are split into short service-level sections, followed by health probes and any auto actions.
   - Auto-restarts `n8n-hual` and `kol-automation` only when the server itself is online but a service status/health probe fails.
   - Alerts on unseen recent `FAILED` deployments for any project service. The alert includes service name, deployment id, status, timestamp, commit short SHA, commit message, and the first useful build-log error line when available.
   - Stores seen failed deployment ids in `.watchdog-state/` so the same failed build does not alert every 10 minutes.

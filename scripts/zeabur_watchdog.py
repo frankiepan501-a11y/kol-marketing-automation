@@ -108,6 +108,8 @@ query WatchdogBuildLogs($deploymentID: ObjectID!) {
 
 DEFAULT_DEPLOYMENT_FAILURE_STATUSES = {"FAILED"}
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+URL_RE = re.compile(r"https?://[^\s\"<>]+")
+MAX_CARD_ISSUES = 6
 
 
 @dataclass
@@ -182,6 +184,15 @@ def parse_utc_ts(value: str | None) -> int | None:
 
 def strip_ansi(value: str) -> str:
     return ANSI_RE.sub("", value or "").strip()
+
+
+def trim_text(value: str, limit: int) -> str:
+    text = strip_ansi(value).replace("\r\n", "\n").replace("\r", "\n")
+    text = URL_RE.sub(lambda m: f"[{urllib.parse.urlparse(m.group(0)).netloc or 'link'}]", text)
+    text = re.sub(r"[ \t]+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
 
 
 def safe_print(value: Any, file: Any = None) -> None:
@@ -487,28 +498,30 @@ def feishu_token(app_id: str, app_secret: str) -> str:
     return token
 
 
-def send_feishu(text: str, dry_run: bool) -> bool:
+def send_feishu(text: str, dry_run: bool, card: dict[str, Any] | None = None) -> bool:
     app_id = os.getenv("FEISHU_NOTIFY_APP_ID", "").strip()
     app_secret = os.getenv("FEISHU_NOTIFY_APP_SECRET", "").strip()
     open_ids = split_targets(os.getenv("FEISHU_NOTIFY_OPEN_ID", ""))
     chat_ids = split_targets(os.getenv("FEISHU_NOTIFY_CHAT_ID", ""))
     if dry_run:
         safe_print("DRY_RUN_FEISHU_ALERT:")
-        safe_print(text)
+        safe_print(json.dumps(card, ensure_ascii=False, indent=2) if card else text)
         return True
     if not app_id or not app_secret or not (open_ids or chat_ids):
         print("Feishu notify skipped: missing FEISHU_NOTIFY_APP_ID/SECRET and target")
         return False
     token = feishu_token(app_id, app_secret)
     sent = 0
+    msg_type = "interactive" if card else "text"
+    content = card if card else {"text": text}
     for receive_type, receive_ids in (("open_id", open_ids), ("chat_id", chat_ids)):
         for receive_id in receive_ids:
             http_json(
                 f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_type}",
                 {
                     "receive_id": receive_id,
-                    "msg_type": "text",
-                    "content": json.dumps({"text": text}, ensure_ascii=False),
+                    "msg_type": msg_type,
+                    "content": json.dumps(content, ensure_ascii=False),
                 },
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=20,
@@ -561,6 +574,207 @@ def format_alert(
         for item in restarts:
             lines.append(f"- {item}")
     return "\n".join(lines)
+
+
+def issue_type_label(issue: Issue) -> str:
+    return issue.key.split(":", 1)[0].replace("_", " ")
+
+
+def extract_between(text: str, pattern: str) -> str:
+    match = re.search(pattern, text)
+    return match.group(1).strip() if match else ""
+
+
+def issue_to_card_markdown(issue: Issue) -> str:
+    if issue.key.startswith("deployment_failed:"):
+        deployment_id = issue.key.rsplit(":", 1)[-1]
+        status = extract_between(issue.message, r"status=([^ ]+)")
+        created = extract_between(issue.message, r" at ([^;]+);")
+        commit = extract_between(issue.message, r"commit=([^;]+)")
+        log_summary = extract_between(issue.message, r"; log=(.+)$")
+        lines = [
+            f"**{trim_text(issue.target or 'service', 40)}** · 构建失败",
+            f"状态: `{trim_text(status or issue.severity.upper(), 20)}`  部署: `{deployment_id[-8:]}`",
+        ]
+        if created:
+            lines.append(f"时间: {trim_text(created, 40)}")
+        if commit:
+            lines.append(f"提交: {trim_text(commit, 96)}")
+        if log_summary:
+            lines.append(f"日志: {trim_text(log_summary, 180)}")
+        return "\n".join(lines)
+
+    return (
+        f"**{trim_text(issue.target or issue_type_label(issue), 40)}** · "
+        f"{trim_text(issue_type_label(issue), 40)}\n"
+        f"{trim_text(issue.message, 220)}"
+    )
+
+
+def github_run_url() -> str:
+    server_url = os.getenv("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+    repository = os.getenv("GITHUB_REPOSITORY", "").strip()
+    run_id = os.getenv("GITHUB_RUN_ID", "").strip()
+    if not repository or not run_id:
+        return ""
+    return f"{server_url}/{repository}/actions/runs/{run_id}"
+
+
+def build_alert_card(
+    issues: list[Issue],
+    restarts: list[str],
+    server: dict[str, Any],
+    probes: dict[str, ProbeResult],
+) -> dict[str, Any]:
+    status = (server.get("status") or {}) if server else {}
+    cpu = pct(status.get("usedCPU"), status.get("totalCPU"))
+    mem = pct(status.get("usedMemory"), status.get("totalMemory"))
+    disk = pct(status.get("usedDisk"), status.get("totalDisk"))
+    critical_count = sum(1 for issue in issues if issue.severity == "critical")
+    deployment_count = sum(1 for issue in issues if issue.key.startswith("deployment_failed:"))
+    ok_probe_count = sum(1 for probe in probes.values() if probe.ok)
+    template = "red" if critical_count else "orange"
+    title = "[AUDIT·P1] Zeabur 构建/运行告警"
+
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "fields": [
+                {
+                    "is_short": True,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**服务器**\n{trim_text(server.get('name', 'unknown') if server else 'unknown', 40)}",
+                    },
+                },
+                {
+                    "is_short": True,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**状态**\nOnline={status.get('isOnline')} / {status.get('vmStatus')}",
+                    },
+                },
+                {
+                    "is_short": True,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**异常数**\n{len(issues)} 个，其中构建失败 {deployment_count} 个",
+                    },
+                },
+                {
+                    "is_short": True,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**健康探针**\n{ok_probe_count}/{len(probes)} OK",
+                    },
+                },
+                {
+                    "is_short": True,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**资源**\nCPU {cpu:.1f}%" if cpu is not None else "**资源**\nCPU n/a",
+                    },
+                },
+                {
+                    "is_short": True,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f"**内存/磁盘**\nMEM {mem:.1f}% / DISK {disk:.1f}%"
+                            if mem is not None and disk is not None
+                            else "**内存/磁盘**\nMEM/DISK n/a"
+                        ),
+                    },
+                },
+            ],
+        }
+    ]
+
+    actions: list[dict[str, Any]] = []
+    run_url = github_run_url()
+    if run_url:
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "查看 GitHub Run"},
+                "url": run_url,
+                "type": "primary",
+            }
+        )
+    zeabur_url = os.getenv("ZEABUR_DASHBOARD_URL", "").strip()
+    if zeabur_url:
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "打开 Zeabur"},
+                "url": zeabur_url,
+                "type": "default",
+            }
+        )
+    if actions:
+        elements.append({"tag": "action", "actions": actions})
+
+    elements.append({"tag": "hr"})
+    elements.append(
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "**本次需要处理**\n"
+                "优先打开 Zeabur 构建日志。若日志是 `failed to download source code` 或 `i/o timeout`，通常是 Zeabur 拉 GitHub 超时，可重试部署；若是 Docker/build/runtime error，按对应 commit 查代码。",
+            },
+        }
+    )
+    elements.append({"tag": "hr"})
+
+    for issue in issues[:MAX_CARD_ISSUES]:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": issue_to_card_markdown(issue)},
+            }
+        )
+    if len(issues) > MAX_CARD_ISSUES:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"还有 {len(issues) - MAX_CARD_ISSUES} 个异常未展开，请查看 GitHub Run summary。",
+                },
+            }
+        )
+
+    if probes:
+        probe_lines = []
+        for name, probe in probes.items():
+            status_text = f"OK {probe.status}" if probe.ok else f"FAIL {probe.error or probe.status}"
+            probe_lines.append(f"- {trim_text(name, 30)}: {status_text} ({probe.elapsed_ms}ms)")
+        elements.append({"tag": "hr"})
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": "**健康探针**\n" + "\n".join(probe_lines)},
+            }
+        )
+
+    if restarts:
+        elements.append({"tag": "hr"})
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "**自动处理**\n" + "\n".join(f"- {trim_text(item, 80)}" for item in restarts),
+                },
+            }
+        )
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": template, "title": {"tag": "plain_text", "content": title}},
+        "elements": elements,
+    }
 
 
 def service_status_map(services: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -681,7 +895,8 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
         alert_key = "|".join(sorted(issue.key for issue in issues))
         if should_fire(state.setdefault("alerts", {}), alert_key, args.alert_cooldown, now):
             alert_text = format_alert(issues, restart_actions, server, probes)
-            fired_alert = send_feishu(alert_text, dry_run=args.dry_run)
+            alert_card = build_alert_card(issues, restart_actions, server, probes)
+            fired_alert = send_feishu(alert_text, dry_run=args.dry_run, card=alert_card)
             mark_fired(state["alerts"], alert_key, now)
             if fired_alert:
                 mark_seen_deployment_failures(state.setdefault("deployments", {}), deployment_issues, now)

@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import tempfile
 import unittest
@@ -210,6 +211,11 @@ class ZeaburWatchdogTests(unittest.TestCase):
         self.assertEqual("deployment_failed:svc_ml:dep_fail", summary["issues"][0]["key"])
         self.assertIn("failed to download source code", summary["issues"][0]["message"])
         send_feishu.assert_called_once()
+        self.assertIn("card", send_feishu.call_args.kwargs)
+        self.assertEqual(
+            "[AUDIT·P1] Zeabur 构建/运行告警",
+            send_feishu.call_args.kwargs["card"]["header"]["title"]["content"],
+        )
         saved_state = save_state.call_args.args[1]
         self.assertIn("dep_fail", saved_state["deployments"])
 
@@ -263,6 +269,27 @@ class ZeaburWatchdogTests(unittest.TestCase):
         self.assertEqual(2, urlopen.call_count)
         sleep.assert_called_once()
 
+    def test_build_alert_card_compacts_deployment_details(self):
+        issue = zw.Issue(
+            "deployment_failed:svc_ml:dep_fail123456789",
+            "critical",
+            'ml-sync deployment dep_fail123456789 status=FAILED at 2026-07-07T05:44:21Z; commit=abcdef1 Fix close loop; log=ERROR failed to download source code err=fetch git ref: Get "https://github.com/frankiepan501-a11y/ml-data-sync.git/info/refs?service=git-upload-pack": dial tcp 20.205.243.166:443: i/o timeout',
+            "ml-sync",
+        )
+        card = zw.build_alert_card(
+            [issue],
+            [],
+            {"name": "tokyo", "status": {"isOnline": True, "vmStatus": "RUNNING"}},
+            {"kol-automation": zw.ProbeResult(True, 200, 50)},
+        )
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertEqual("interactive", "interactive")
+        self.assertIn("ml-sync", rendered)
+        self.assertIn("dep_fail123456789"[-8:], rendered)
+        self.assertIn("[github.com]", rendered)
+        self.assertNotIn("https://github.com", rendered)
+        self.assertIn("本次需要处理", rendered)
+
     @mock.patch.dict(
         os.environ,
         {
@@ -289,6 +316,24 @@ class ZeaburWatchdogTests(unittest.TestCase):
             ],
         )
         self.assertEqual([payload["receive_id"] for payload in payloads], ["ou_a", "ou_b", "oc_c"])
+
+    @mock.patch.dict(
+        os.environ,
+        {
+            "FEISHU_NOTIFY_APP_ID": "app",
+            "FEISHU_NOTIFY_APP_SECRET": "secret",
+            "FEISHU_NOTIFY_OPEN_ID": "ou_a",
+        },
+        clear=True,
+    )
+    @mock.patch("scripts.zeabur_watchdog.http_json")
+    @mock.patch("scripts.zeabur_watchdog.feishu_token", return_value="tenant-token")
+    def test_send_feishu_sends_interactive_card(self, feishu_token, http_json):
+        card = {"config": {"wide_screen_mode": True}, "elements": []}
+        self.assertTrue(zw.send_feishu("fallback text", dry_run=False, card=card))
+        payload = http_json.call_args.args[1]
+        self.assertEqual("interactive", payload["msg_type"])
+        self.assertEqual(card, json.loads(payload["content"]))
 
 
 if __name__ == "__main__":
