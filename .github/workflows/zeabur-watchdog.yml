@@ -3,6 +3,13 @@ name: Zeabur Tokyo Watchdog
 on:
   schedule:
     - cron: "*/10 * * * *"
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/zeabur-watchdog.yml"
+      - "scripts/zeabur_watchdog.py"
+      - "tests/test_zeabur_watchdog.py"
   workflow_dispatch:
     inputs:
       dry_run:
