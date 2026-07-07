@@ -812,7 +812,7 @@ async def recheck_due(mode: str = "dry_run", notify: bool = False, limit: int = 
             card = build_recheck_failed_card(owner, rows, day14=day14)
             if await _send_union(await _owner_union(owner), card):
                 sent_owner += 1
-            if AMZ_OPS_GROUP_CHAT_ID:
+            if AMZ_OPS_GROUP_CHAT_ID and not OBSERVE:
                 if await _send_group(AMZ_OPS_GROUP_CHAT_ID, card):
                     sent_group += 1
         for issue in passed:

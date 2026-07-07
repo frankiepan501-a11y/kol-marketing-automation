@@ -111,6 +111,65 @@ class AmzReviewAuditAsyncTests(unittest.TestCase):
         self.assertEqual(1, result["passed"])
         self.assertIn("7天复检失败数", result["metrics"])
 
+    def test_recheck_observe_mode_suppresses_group_send(self):
+        issue = audit.normalize_issue({
+            "source_type": "review",
+            "review_id": "rv-recheck-observe",
+            "site": "US",
+            "asin": "B0RECHECK01",
+            "owner": "黄奕纯",
+            "rating": 1,
+        })
+        fields = audit.issue_to_fields(issue, audit.STATE_SUBMITTED)
+        fields.update({
+            "处理时间": audit.now_ms() - 8 * 86_400_000,
+            "处理方式": ["已投诉Amazon / 已开Case"],
+            "T+7复检日期": audit.now_ms() - 86_400_000,
+        })
+
+        original_list_records = audit._list_audit_records
+        original_homepage_check = audit._homepage_check
+        original_send_group = audit._send_group
+        original_send_union = audit._send_union
+        original_group_id = audit.AMZ_OPS_GROUP_CHAT_ID
+        original_observe = audit.OBSERVE
+        group_calls = []
+        owner_calls = []
+
+        async def fake_list_records(statuses=None, limit=200):
+            return [{"record_id": "rec_recheck_observe", "fields": fields}]
+
+        async def fake_homepage_check(issue):
+            return {"ok": True, "has_negative": True, "negative_count": 1, "status": "首页仍有1条差评"}
+
+        async def fake_send_group(chat_id, card):
+            group_calls.append((chat_id, card))
+            return "om_group"
+
+        async def fake_send_union(union_id, card):
+            owner_calls.append((union_id, card))
+            return "om_owner"
+
+        try:
+            audit._list_audit_records = fake_list_records
+            audit._homepage_check = fake_homepage_check
+            audit._send_group = fake_send_group
+            audit._send_union = fake_send_union
+            audit.AMZ_OPS_GROUP_CHAT_ID = "oc_test"
+            audit.OBSERVE = True
+            result = asyncio.run(audit.recheck_due(mode="commit", notify=True))
+        finally:
+            audit._list_audit_records = original_list_records
+            audit._homepage_check = original_homepage_check
+            audit._send_group = original_send_group
+            audit._send_union = original_send_union
+            audit.AMZ_OPS_GROUP_CHAT_ID = original_group_id
+            audit.OBSERVE = original_observe
+
+        self.assertEqual(0, result["sent_group"])
+        self.assertEqual([], group_calls)
+        self.assertGreaterEqual(len(owner_calls), 1)
+
     def test_handle_submit_requires_selected_action(self):
         event = {
             "action": {
