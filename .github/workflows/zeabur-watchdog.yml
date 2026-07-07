@@ -1,0 +1,48 @@
+name: Zeabur Tokyo Watchdog
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log alerts and restart actions without sending or mutating"
+        required: false
+        default: "false"
+      fail_on_issue:
+        description: "Mark the workflow failed when issues are detected"
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore watchdog state
+        uses: actions/cache@v4
+        with:
+          path: .watchdog-state
+          key: zeabur-watchdog-state-${{ github.run_id }}
+          restore-keys: |
+            zeabur-watchdog-state-
+
+      - name: Run watchdog
+        env:
+          ZEABUR_API_KEY: ${{ secrets.ZEABUR_API_KEY }}
+          FEISHU_NOTIFY_APP_ID: ${{ secrets.FEISHU_NOTIFY_APP_ID }}
+          FEISHU_NOTIFY_APP_SECRET: ${{ secrets.FEISHU_NOTIFY_APP_SECRET }}
+          FEISHU_NOTIFY_OPEN_ID: ${{ secrets.FEISHU_NOTIFY_OPEN_ID }}
+          FEISHU_NOTIFY_CHAT_ID: ${{ secrets.FEISHU_NOTIFY_CHAT_ID }}
+          WATCHDOG_STATE_FILE: .watchdog-state/zeabur_watchdog_state.json
+          WATCHDOG_AUTO_RESTART_SERVICES: "true"
+          WATCHDOG_ALERT_COOLDOWN_MINUTES: "60"
+          WATCHDOG_RESTART_COOLDOWN_MINUTES: "60"
+          WATCHDOG_FAIL_ON_ISSUE: ${{ github.event_name == 'workflow_dispatch' && inputs.fail_on_issue || 'true' }}
+          WATCHDOG_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: python scripts/zeabur_watchdog.py
