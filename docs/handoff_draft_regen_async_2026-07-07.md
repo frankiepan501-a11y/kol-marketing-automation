@@ -46,12 +46,57 @@ Also ran:
 
 ## Deployment / n8n Follow-Up
 
-After deploy, verify the n8n event-hub `YjTXaoWAcy89xZpT` Draft Action Handler for `draft_regen`:
+Production follow-up completed after the Tokyo Zeabur server recovered:
 
-1. It should treat `POST /draft/regen` response `{accepted:true, job_id}` as success.
-2. The operator-facing reply should say the regeneration has started, not that it has already completed.
-3. If the handler currently parses `new_rid` synchronously, update it to use `job_id` or just ACK and let the newly routed review card appear after the background job finishes.
-4. Do a real Feishu click smoke test on one test draft and confirm the client no longer shows `200341`.
+- Zeabur service `kol-automation` redeployed successfully.
+  - Deployment id: `6a4c72c8c3ed30bb38a68628`
+  - Status: `RUNNING`
+  - Commit: `chore: trigger kol zeabur deploy`
+- `https://kol-auto.zeabur.app/health` returned `{"status":"ok"}`.
+- `https://kol-auto.zeabur.app/openapi.json` exposes:
+  - `POST /draft/regen` with `async_mode` defaulting to `true`.
+  - `GET /draft/regen/jobs/{job_id}`.
+- n8n event-hub `YjTXaoWAcy89xZpT` node `Draft Action Handler` was updated in production:
+  - The `draft_regen` HTTP call now explicitly appends `async_mode=true`.
+  - The request timeout was reduced from `90000` ms to `15000` ms.
+  - `{ok:true, accepted:true, job_id}` is treated as success.
+  - The reviewed card is patched with a "background regeneration accepted" message.
+- n8n read-back verification:
+  - Workflow is still `active=true`.
+  - `Draft Action Handler` contains `&async_mode=true`.
+  - It contains the `rr.accepted || rr.job_id` branch.
+  - It no longer contains `timeout: 90000`.
+- Low-risk smoke test with a fake record id:
+  - `POST /draft/regen?...&async_mode=true` returned `ok=true`, `accepted=true`, and a `job_id` in about 1.6s.
+  - The background job had no real Bitable record to mutate, so this only verified callback latency and API shape.
+
+Remaining manual validation:
+
+1. Do a real Feishu click smoke test on one test draft and confirm the client no longer shows `200341`.
+2. Confirm the follow-up review card for the newly generated draft arrives normally.
+
+## Zeabur Server Monitoring Notes
+
+No existing production workflow was found that monitors Zeabur Dedicated Server health and automatically reboots the server.
+
+Relevant current API findings:
+
+- `servers { _id name provider status { isOnline vmStatus totalCPU usedCPU totalMemory usedMemory totalDisk usedDisk } events { message time } }`
+- Current server:
+  - `_id`: `69856dfd2a96ae7705ff2930`
+  - `name`: `自用服务器-东京`
+  - `provider`: `TENCENT`
+  - `status.isOnline`: `true`
+  - `status.vmStatus`: `RUNNING`
+  - Last relevant event: `Server rebooted` at `2026-07-07T03:21:34.756Z`
+- Dashboard frontend uses the same fields to flag:
+  - server offline as critical.
+  - CPU and memory warning at 90%, critical at 95%.
+  - disk warning at 85%, critical at 95%.
+
+Important design constraint:
+
+Do not run a Tokyo-server health watchdog inside the same Tokyo n8n instance. If the server goes offline, the watchdog is offline too. Server-level monitoring should run outside this server, for example GitHub Actions, another cloud service, or a separate Zeabur/shared-cluster service.
 
 ## Residual Risk
 
