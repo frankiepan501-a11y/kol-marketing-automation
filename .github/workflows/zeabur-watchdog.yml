@@ -31,7 +31,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check required secrets
+        id: preflight
+        env:
+          ZEABUR_API_KEY: ${{ secrets.ZEABUR_API_KEY }}
+        run: |
+          if [ -z "$ZEABUR_API_KEY" ]; then
+            echo "::warning::ZEABUR_API_KEY secret is missing; watchdog skipped."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Restore watchdog state
+        if: steps.preflight.outputs.ready == 'true'
         uses: actions/cache@v4
         with:
           path: .watchdog-state
@@ -40,6 +53,7 @@ jobs:
             zeabur-watchdog-state-
 
       - name: Run watchdog
+        if: steps.preflight.outputs.ready == 'true'
         env:
           ZEABUR_API_KEY: ${{ secrets.ZEABUR_API_KEY }}
           FEISHU_NOTIFY_APP_ID: ${{ secrets.FEISHU_NOTIFY_APP_ID }}
