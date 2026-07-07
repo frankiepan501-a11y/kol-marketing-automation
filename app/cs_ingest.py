@@ -15,7 +15,7 @@ import os
 import re
 import time
 import httpx
-from . import deepseek, feishu
+from . import deepseek, feishu, cs_resources
 
 # ---- 资源 (非 secret, 可 env 覆盖) ----
 CS_APP_TOKEN = os.environ.get("CS_TICKET_APP_TOKEN", "J2fibLgBZaLGTNsQOPHcQXLonZe")
@@ -384,7 +384,7 @@ def _pick(v, opts, default=None):
     return v if v in opts else default
 
 
-def _to_fields(msg: dict, c: dict, amz_override=None) -> dict:
+def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = None) -> dict:
     order_no = (c.get("order_no") or "").strip()
     is_amazon = bool(c.get("is_amazon")) or bool(AMZ_ORDER_RE.search(order_no))
     is_cs = bool(c.get("is_cs"))
@@ -429,6 +429,12 @@ def _to_fields(msg: dict, c: dict, amz_override=None) -> dict:
     ct = _pick(c.get("complaint_type"), TYPE_OPTS, None)
     if ct:
         fields["客诉类型"] = ct
+    ctx = cs_resources.resolve_for_ticket(fields, resources=resources)
+    resource_reply = cs_resources.build_resource_reply(fields, ctx)
+    if resource_reply:
+        fields["AI草稿"] = resource_reply[:5000]
+    if cs_resources.WRITEBACK_TICKET_FIELDS:
+        fields.update(cs_resources.ticket_resource_fields(ctx))
     return fields
 
 
@@ -452,6 +458,10 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
         except Exception as e:
             src_err["discord"] = str(e)[:200]
 
+    try:
+        resources = await cs_resources.active_resources()
+    except Exception:
+        resources = cs_resources.builtin_resources()
     existing = await _existing_thread_ids()
     new_cnt, skip_cnt, err_cnt = 0, 0, 0
     samples = []
@@ -472,7 +482,7 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
                 p, op = await _lookup_amazon_route(mo.group(0))
                 if p:
                     amz_override = (p, op)
-        fields = _to_fields(m, c, amz_override)
+        fields = _to_fields(m, c, amz_override, resources=resources)
         if len(samples) < 14:
             samples.append({"渠道品牌": f"{fields['品牌']}", "from": m["frm"][:26],
                             "is_cs": c.get("is_cs"), "平台": fields["销售平台"],

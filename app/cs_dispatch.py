@@ -20,7 +20,7 @@ from email.utils import formataddr, formatdate, make_msgid, parseaddr
 
 import httpx
 
-from . import feishu
+from . import feishu, cs_resources
 from . import cs_ingest as _csi  # 复用采集侧 Zoho/网易/Discord 凭据与 token
 
 CS_APP = os.environ.get("CS_TICKET_APP_TOKEN", "J2fibLgBZaLGTNsQOPHcQXLonZe")
@@ -207,13 +207,16 @@ def _build_result_card(rid: str, f: dict, template: str, status_label: str,
             "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": content}}]}
 
 
-def _build_card(rid: str, f: dict) -> dict:
+def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
     brand = _x(f, "品牌"); product = _x(f, "产品") or "未识别"; platform = _x(f, "销售平台")
     channel = _x(f, "渠道"); customer = _x(f, "客户标识"); order = _x(f, "订单号")
     summary = _x(f, "客诉摘要"); operator = _x(f, "分配运营") or "未定"
     conf = _x(f, "AI置信度"); ctype = _x(f, "客诉类型")
     draft = (_x(f, "AI草稿") or "(无 AI 草稿)")[:2000]
     ticket = _ticket_id(f, rid)
+    resource_context = cs_resources.resolve_for_ticket(f, resources=resources)
+    resource_md = cs_resources.format_card_block(resource_context)
+    resource_keys = [r.get("resource_key") for r in resource_context.get("matches") or [] if r.get("resource_key")]
     info = (f"**工单ID:** `{ticket}`  ·  **处理状态:** 待处理\n"
             f"**渠道:** {channel}  ·  **品牌:** {brand}  ·  **平台:** {platform}\n"
             f"**客户:** {customer}" + (f"  ·  **订单:** {order}" if order else "") + "\n"
@@ -231,13 +234,15 @@ def _build_card(rid: str, f: dict) -> dict:
              "placeholder": {"tag": "plain_text", "content": "留空则用上方 AI 草稿；要改就在此输入"}},
             {"tag": "button", "action_type": "form_submit", "name": "send", "type": "primary",
              "text": {"tag": "plain_text", "content": "✅ 发送回复给客户"},
-             "value": {"act": "send_reply", "rid": rid}},
+             "value": {"act": "send_reply", "action": "cs_send_reply", "rid": rid,
+                       "resource_status": resource_context.get("status"),
+                       "resource_keys": resource_keys[:20]}},
         ]},
         {"tag": "action", "actions": [
             {"tag": "button", "text": {"tag": "plain_text", "content": "🔁 改派给其他负责人"},
-             "value": {"act": "reassign", "rid": rid}},
+             "value": {"act": "reassign", "action": "cs_reassign", "rid": rid}},
             {"tag": "button", "text": {"tag": "plain_text", "content": "⬆️ 升级给Frankie"},
-             "value": {"act": "escalate", "rid": rid}},
+             "value": {"act": "escalate", "action": "cs_escalate", "rid": rid}},
         ]},
         {"tag": "note", "elements": [{"tag": "plain_text",
                                       "content": "按钮说明：发送=直接回客户；改派=通知负责人重新分配，不回客户；升级=红线/无法判断时交Frankie，不回客户。"}]},
@@ -250,6 +255,11 @@ def _build_card(rid: str, f: dict) -> dict:
         note = "🔎 观察期：全部卡片暂发你一人；点按钮暂不真回客户，仅供你校准路由/草稿质量"
     else:
         note = "💬 一键回客户闭环灰度中：请先复制上方 AI 草稿，在原渠道(邮箱/Discord)回复客户；闭环验证完即开"
+    if resource_md:
+        elements[2:2] = [
+            {"tag": "div", "text": {"tag": "lark_md", "content": resource_md}},
+            {"tag": "hr"},
+        ]
     elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
     return {"config": {"wide_screen_mode": True},
             "header": {"template": "orange",
@@ -280,6 +290,10 @@ async def run(limit: int = 10, rids: str = "") -> dict:
         d = await feishu.api("POST", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/search",
                              body, which="notify")
         items = d.get("data", {}).get("items", [])
+    try:
+        resources = await cs_resources.active_resources()
+    except Exception:
+        resources = cs_resources.builtin_resources()
     sent, samples = 0, []
     for it in items:
         if sent >= limit:
@@ -290,7 +304,7 @@ async def run(limit: int = 10, rids: str = "") -> dict:
             continue
         # 观察期统一发 Frankie; 生产期按「分配运营」路由(兜底/待定/查不到 → 降级 Frankie)
         union = OBSERVE_UNION if OBSERVE else (await _resolve_union(_x(f, "分配运营")) or OBSERVE_UNION)
-        mid = await _send_card(union, _build_card(rid, f))
+        mid = await _send_card(union, _build_card(rid, f, resources=resources))
         if mid:
             await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                              {"fields": {"卡片消息ID": mid, "状态": "待回"}}, which="notify")
@@ -573,7 +587,12 @@ async def handle_callback(event: dict) -> dict:
     """飞书卡片按钮回调: 发送回复 / 改派 / 升级。返回 toast 给操作人即时反馈。"""
     action = event.get("action", {}) or {}
     val = action.get("value", {}) or {}
-    act = val.get("act")
+    act = val.get("act") or val.get("action")
+    act = {
+        "cs_send_reply": "send_reply",
+        "cs_reassign": "reassign",
+        "cs_escalate": "escalate",
+    }.get(act, act)
     rid = val.get("rid")
     if not rid:
         return _toast("缺少工单ID", "error")
@@ -634,6 +653,13 @@ async def handle_callback(event: dict) -> dict:
         ph = _placeholder_hit(reply)
         if ph:
             return _toast(f"回复含未替换占位符「{ph}」，请改完再发", "error")
+        try:
+            resources = await cs_resources.active_resources()
+        except Exception:
+            resources = cs_resources.builtin_resources()
+        resource_block = cs_resources.validate_reply_for_ticket(reply, f, resources=resources)
+        if resource_block:
+            return _toast(resource_block, "error")
         # 🚨 去重①(内存即时): 正在发送中 / 刚发完 5min 内(防 bitable 读后写延迟漏判) → 拦下
         if rid in _inflight or _recent_seen(rid):
             _spawn(_update_card(msg_id, _build_result_card(

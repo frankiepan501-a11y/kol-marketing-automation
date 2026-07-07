@@ -12,6 +12,7 @@ from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor,
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
+from . import cs_resources  # 客服官方资源真相源: 固件/手册/视频 URL 解析与发送闸
 from . import b2b_mail_reminder  # B2B 外贸邮箱跟进提醒(日 10:00, 外贸助手回执卡)
 from . import b2b_assistant  # 外贸助手: 客户指令 + LinkedIn 回执
 from . import b2b_linkedin_daily_card  # B2B LinkedIn 每日开发卡派发
@@ -860,6 +861,19 @@ async def run_cs_dispatch(authorization: str = Header(default=""), limit: int = 
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/cs/dispatch", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/cs/resources/index")
+async def run_cs_resources_index(authorization: str = Header(default=""), commit: bool = False):
+    """客服官方资源索引: 解析 FUNLAB 官网固件/手册/视频资源；commit=true 才写资源表。"""
+    _check_auth(authorization)
+    try:
+        result = await cs_resources.run_index(commit=commit)
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/resources/index", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 
