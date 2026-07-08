@@ -151,6 +151,60 @@ def _ticket_id(f: dict, rid: str = "") -> str:
     return _x(f, "工单ID") or rid or "未知工单"
 
 
+def _ticket_prefix(f: dict) -> str:
+    ticket = _ticket_id(f)
+    m = re.match(r"^([A-Z0-9]+)-", ticket or "")
+    return m.group(1) if m else "CS"
+
+
+def _ticket_label(f: dict, rid: str = "") -> str:
+    """Short, operator-safe ticket label for card rendering.
+
+    Email tickets use the raw Message-ID as the persisted 工单ID. That value is
+    useful for threading but too noisy for Feishu card titles.
+    """
+    prefix = _ticket_prefix(f)
+    if rid:
+        return f"{prefix} · {rid}"
+    ticket = _ticket_id(f)
+    if "<" in ticket or "@" in ticket or len(ticket) > 36:
+        return prefix
+    return ticket
+
+
+def _product_label(f: dict, n: int = 34) -> str:
+    return _short(_x(f, "产品") or "未识别产品", n)
+
+
+def _operator_needs_fallback(operator: str) -> bool:
+    op = (operator or "").strip()
+    return (not op) or ("待定" in op) or (op not in OP_OPENID)
+
+
+def _card_status_label(f: dict) -> str:
+    operator = _x(f, "分配运营") or ""
+    if not OBSERVE and _operator_needs_fallback(operator):
+        return "待判责"
+    return "待回"
+
+
+def _routing_notice_md(f: dict) -> str:
+    operator = _x(f, "分配运营") or "未定"
+    if OBSERVE:
+        return "**路由说明:** 观察期卡片统一发给 Frankie，不代表最终负责人。"
+    if _operator_needs_fallback(operator):
+        return (f"**路由说明:** 当前负责人为 `{operator}`，系统无法解析到具体运营，"
+                "所以兜底发给 Frankie 判定站点/负责人。")
+    return ""
+
+
+def _header_title(f: dict, rid: str = "") -> str:
+    brand = _x(f, "品牌") or "-"
+    platform = _x(f, "销售平台") or "未知"
+    status = _card_status_label(f)
+    return f"🟠 [客服·{status}] {brand} · {_product_label(f)} · {platform}"
+
+
 def _card_message_id(event: dict, f: dict) -> str:
     """Best-effort extraction for card.action.trigger open message id.
 
@@ -180,7 +234,7 @@ def _ticket_info_md(rid: str, f: dict, status_label: str = "待处理") -> str:
     customer = _x(f, "客户标识")
     order = _x(f, "订单号")
     operator = _x(f, "分配运营") or "未定"
-    ticket = _ticket_id(f, rid)
+    ticket = _ticket_label(f, rid)
     lines = [
         f"**工单ID:** `{ticket}`  ·  **处理状态:** {status_label}",
         f"**渠道:** {channel}  ·  **品牌:** {brand}  ·  **产品:** {product}  ·  **平台:** {platform}",
@@ -192,7 +246,7 @@ def _ticket_info_md(rid: str, f: dict, status_label: str = "待处理") -> str:
 
 def _build_result_card(rid: str, f: dict, template: str, status_label: str,
                        title_prefix: str, result: str, detail: str = "") -> dict:
-    ticket = _ticket_id(f, rid)
+    ticket = _ticket_label(f, rid)
     customer = _short(_x(f, "客户标识"), 36)
     content = _ticket_info_md(rid, f, status_label)
     if result:
@@ -213,15 +267,18 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
     summary = _x(f, "客诉摘要"); operator = _x(f, "分配运营") or "未定"
     conf = _x(f, "AI置信度"); ctype = _x(f, "客诉类型")
     draft = (_x(f, "AI草稿") or "(无 AI 草稿)")[:2000]
-    ticket = _ticket_id(f, rid)
+    ticket = _ticket_label(f, rid)
     resource_context = cs_resources.resolve_for_ticket(f, resources=resources)
     resource_md = cs_resources.format_card_block(resource_context)
     resource_keys = [r.get("resource_key") for r in resource_context.get("matches") or [] if r.get("resource_key")]
-    info = (f"**工单ID:** `{ticket}`  ·  **处理状态:** 待处理\n"
+    routing_notice = _routing_notice_md(f)
+    info = (f"**工单ID:** `{ticket}`  ·  **处理状态:** {_card_status_label(f)}\n"
             f"**渠道:** {channel}  ·  **品牌:** {brand}  ·  **平台:** {platform}\n"
             f"**客户:** {customer}" + (f"  ·  **订单:** {order}" if order else "") + "\n"
             f"**类型:** {ctype or '-'}  ·  **置信度:** {conf}  ·  **建议派给:** {operator}\n"
             f"**客诉:** {summary}")
+    if routing_notice:
+        info += f"\n{routing_notice}"
     elements = [
         {"tag": "div", "text": {"tag": "lark_md", "content": info}},
         {"tag": "hr"},
@@ -264,7 +321,7 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
     return {"config": {"wide_screen_mode": True},
             "header": {"template": "orange",
                        "title": {"tag": "plain_text",
-                                 "content": f"🟠 [客服·待回] {ticket} · {brand} · {product} · {platform}"}},
+                                 "content": _header_title(f, rid)}},
             "elements": elements}
 
 
