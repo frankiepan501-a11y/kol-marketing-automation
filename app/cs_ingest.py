@@ -15,6 +15,8 @@ import os
 import re
 import time
 import httpx
+from email.message import EmailMessage
+from email.utils import formataddr, formatdate, make_msgid, parseaddr
 from . import deepseek, feishu, cs_resources
 
 # ---- 资源 (非 secret, 可 env 覆盖) ----
@@ -34,6 +36,14 @@ ZREGION = os.environ.get("ZOHO_REGION", ".com")
 NE_USER = os.environ.get("NETEASE_FUNLAB_CS_USER", "")
 NE_CODE = os.environ.get("NETEASE_FUNLAB_CS_AUTHCODE", "")
 NE_IMAP = os.environ.get("NETEASE_IMAP_HOST", "imap.qiye.163.com")
+NE_SMTP = os.environ.get("NETEASE_SMTP_HOST", "smtp.qiye.163.com")
+ZOHO_CS_FROM = os.environ.get("ZOHO_POWKONG_CS_FROM", "support@powkong.com")
+
+# 自动补询客户信息。默认关闭真发，避免部署后采集 cron 立刻给真实客户发信。
+CS_INFO_REQUEST_LIVE = (os.environ.get("CS_INFO_REQUEST_LIVE", "0") or "0") == "1"
+CS_INFO_REQUEST_DRY_RUN_TO = (os.environ.get("CS_INFO_REQUEST_DRY_RUN_TO", "")
+                              or os.environ.get("CS_REPLY_DRY_RUN_TO", "") or "").strip()
+CS_INFO_REQUEST_MAX = int(os.environ.get("CS_INFO_REQUEST_MAX", "2") or "2")
 
 # ---- Discord FUN Bot (token=env secret; 频道 id 非 secret 给默认值) ----
 # v0 只接 FUNLAB 公开 #support-center (FUN Bot 可读)。私有工单(MEE6)待官号 2FA 授权后补。
@@ -48,6 +58,7 @@ TYPE_OPTS = ["物流", "产品", "退换货", "售后", "投诉升级"]
 LANG_OPTS = ["EN", "中文", "德", "法", "西", "葡", "日", "其他"]
 CONF_OPTS = ["AI直答", "AI起草人工审", "必须人工"]
 AMZ_ORDER_RE = re.compile(r"\d{3}-\d{7}-\d{7}")
+STATUS_WAIT_INFO = "待客户补充"
 
 # ---- 领星反查 (亚马逊订单号 → sid → 店铺 country → 运营) ----
 LX_PROXY_URL = os.environ.get("LINGXING_PROXY_URL", "")
@@ -72,6 +83,30 @@ _SELLER_TTL = 3600
 def _strip_html(s: str) -> str:
     s = re.sub(r"<[^>]+>", " ", s or "")
     return re.sub(r"\s+", " ", s.replace("&nbsp;", " ")).strip()
+
+
+def _field_text(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, (int, float)):
+        return str(int(v) if isinstance(v, float) and v.is_integer() else v)
+    if isinstance(v, list):
+        parts = []
+        for x in v:
+            if isinstance(x, dict):
+                parts.append(str(x.get("text") or x.get("name") or x.get("link") or ""))
+            else:
+                parts.append(str(x))
+        return " ".join(p for p in parts if p).strip()
+    if isinstance(v, dict):
+        return str(v.get("text") or v.get("name") or v.get("link") or "").strip()
+    return str(v).strip()
+
+
+def _customer_email(v: str) -> str:
+    return (parseaddr(v or "")[1] or v or "").strip().lower()
 
 
 # ===== 领星反查 (亚马逊订单号 → 站点/运营) =====
@@ -150,7 +185,10 @@ async def _fetch_powkong(limit: int) -> list:
             body = ""
         out.append({"id": mid, "id_prefix": "CSP", "frm": m.get("fromAddress", ""),
                     "subj": m.get("subject", ""), "received_ms": int(m.get("receivedTime") or 0),
-                    "body": body, "channel": "邮箱", "brand_default": "POWKONG"})
+                    "body": body, "channel": "邮箱", "brand_default": "POWKONG",
+                    "in_reply_to": m.get("inReplyTo") or m.get("inReplyToHeader") or "",
+                    "references": m.get("references") or "",
+                    "mail_thread_id": m.get("threadId") or ""})
     return out
 
 
@@ -216,7 +254,10 @@ def _fetch_funlab_sync(limit: int) -> list:
                 received_ms = 0
             out.append({"id": msgid, "id_prefix": "CSF", "frm": frm, "subj": subj,
                         "received_ms": received_ms, "body": _extract_body(msg)[:8000],
-                        "channel": "邮箱", "brand_default": "FUNLAB"})
+                        "channel": "邮箱", "brand_default": "FUNLAB",
+                        "in_reply_to": (msg.get("In-Reply-To", "") or "").strip(),
+                        "references": (msg.get("References", "") or "").strip(),
+                        "mail_thread_id": ""})
     finally:
         try:
             conn.logout()
@@ -332,11 +373,192 @@ async def _existing_thread_ids() -> set:
     return ids
 
 
+async def _waiting_info_tickets() -> list:
+    """Rows waiting for customer order/site supplement."""
+    body = {"filter": {"conjunction": "and", "conditions": [
+        {"field_name": "状态", "operator": "is", "value": [STATUS_WAIT_INFO]}]},
+        "page_size": 200}
+    d = await feishu.api("POST", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/search",
+                         body, which="notify")
+    return d.get("data", {}).get("items", []) or []
+
+
+def _message_tokens(msg: dict) -> set:
+    raw = " ".join([msg.get("id", ""), msg.get("in_reply_to", ""), msg.get("references", "")])
+    return {x.strip() for x in re.findall(r"<[^>]+>|[A-Za-z0-9_.+=/-]{8,}", raw) if x.strip()}
+
+
+def _ticket_tokens(f: dict) -> set:
+    vals = [_field_text(f.get("线程ID")), _field_text(f.get("最近出站Message-ID")),
+            _field_text(f.get("工单ID"))]
+    raw = " ".join(vals)
+    return {x.strip() for x in re.findall(r"<[^>]+>|[A-Za-z0-9_.+=/-]{8,}", raw) if x.strip()}
+
+
+def _seen_in_history(f: dict, msg_id: str) -> bool:
+    return bool(msg_id and msg_id in _field_text(f.get("沟通历史摘要")))
+
+
+def _match_waiting_info_ticket(msg: dict, waiting: list) -> dict | None:
+    """Find an existing wait-info ticket for a customer's later email reply."""
+    msg_tokens = _message_tokens(msg)
+    sender = _customer_email(msg.get("frm"))
+    same_sender = []
+    for row in waiting:
+        f = row.get("fields", {}) or {}
+        if msg_tokens and (msg_tokens & _ticket_tokens(f)):
+            return row
+        if sender and sender == _customer_email(_field_text(f.get("客户标识"))):
+            same_sender.append(row)
+    # If one customer has exactly one pending supplement ticket, treat the new
+    # email as the continuation even if the provider did not expose headers.
+    return same_sender[0] if len(same_sender) == 1 else None
+
+
+def _marketplace_hint(text: str):
+    t = (text or "").lower()
+    patterns = [
+        (r"\b(amazon\s*(us|usa)|usa|united states|amazon\.com|america)\b|美国", ("亚马逊-美国", "黄奕纯")),
+        (r"\b(amazon\s*mx|amazon\s*mexico|mexico|amazon\.com\.mx)\b|墨西哥", ("亚马逊-墨西哥", "陈翔宇")),
+        (r"\b(amazon\s*ca|amazon\s*canada|canada|amazon\.ca)\b|加拿大", ("亚马逊-加拿大", "陈翔宇")),
+        (r"\b(amazon\s*jp|amazon\s*japan|japan|amazon\.co\.jp)\b|日本", ("亚马逊-日本", "陈翔宇")),
+        (r"\b(amazon\s*uk|uk amazon|united kingdom|amazon\.co\.uk|britain)\b|英国", ("亚马逊-英国", "林明坚")),
+        (r"\b(amazon\s*eu|europe|germany|france|spain|italy|amazon\.de|amazon\.fr|amazon\.es|amazon\.it)\b|欧洲|德国|法国|西班牙|意大利",
+         ("亚马逊-欧洲", "林明坚")),
+    ]
+    for pat, route in patterns:
+        if re.search(pat, t, re.I):
+            return route
+    return None, None
+
+
+def _amazon_info_gaps(order_no: str, platform: str, route_basis: str = "") -> list:
+    gaps = []
+    if not order_no:
+        gaps.append("缺订单号")
+    if not platform or platform == "未知":
+        gaps.append("缺国家站点")
+    if order_no and (not platform or platform == "未知"):
+        gaps.append("领星未命中")
+    if route_basis == "site_hint" and not order_no:
+        gaps.append("订单号仍缺")
+    return list(dict.fromkeys(gaps))
+
+
+def _info_request_reply(f: dict, missing: str = "") -> str:
+    product = _field_text(f.get("产品")) or "controller"
+    first = "there"
+    customer = _field_text(f.get("客户标识"))
+    if customer and "@" not in customer:
+        first = customer.split()[0].strip(" ,") or first
+    return (
+        f"Dear {first},\n\n"
+        f"Thank you for reaching out, and I'm sorry for the trouble with your {product}.\n\n"
+        "To help us arrange the correct support as quickly as possible, could you please reply "
+        "with your order number and the Amazon marketplace/country where you purchased it, "
+        "such as Amazon US, Mexico, Canada, UK, EU, or Japan?\n\n"
+        "If you cannot find the order number, you can also send a screenshot of the order details "
+        "or let us know the purchase country/site.\n\n"
+        "Once we have this information, we'll route your case to the right support team and help "
+        "you with the next step.\n\n"
+        "Best regards,\n"
+        f"{_field_text(f.get('品牌')) or 'FUNLAB'} Support Team"
+    )
+
+
+def _info_request_is_safe(reply: str) -> str:
+    low = (reply or "").lower()
+    banned = ["free replacement", "refund", "ship a new", "we will replace", "we'll replace",
+              "attached", "[link]", "tbd", "待确认", "待填"]
+    for kw in banned:
+        if kw in low:
+            return kw
+    return ""
+
+
+def _to_html(body: str) -> str:
+    paras = [p.strip() for p in (body or "").split("\n\n") if p.strip()]
+    return "".join(f"<p>{p.replace(chr(10), '<br>')}</p>" for p in paras)
+
+
+def _orig_subject_from_msg(msg: dict) -> str:
+    subj = (msg.get("subj") or "your message").strip()
+    subj = re.sub(r"^\s*(re|fwd|fw)\s*:\s*", "", subj, flags=re.I).strip()
+    return "Re: " + (subj or "your message")
+
+
+async def _zoho_send_reply(to_addr: str, subject: str, html: str, reply_to_msgid: str = "") -> str:
+    tok = await _ztoken()
+    base = f"https://mail.zoho.com/api/accounts/{ZACC}/messages"
+    url = f"{base}/{reply_to_msgid}" if reply_to_msgid else base
+    payload = {"fromAddress": ZOHO_CS_FROM, "toAddress": to_addr, "subject": subject,
+               "content": html, "mailFormat": "html"}
+    if reply_to_msgid:
+        payload["action"] = "reply"
+    async with httpx.AsyncClient(timeout=45.0) as c:
+        r = await c.post(url, json=payload, headers={"Authorization": f"Zoho-oauthtoken {tok}"})
+        d = r.json()
+    if (d.get("status", {}) or {}).get("code") != 200:
+        raise Exception(f"Zoho info request send fail: {str(d)[:300]}")
+    return (d.get("data", {}) or {}).get("messageId", "")
+
+
+def _netease_send_sync(to_addr: str, subject: str, html: str, in_reply_to: str = "") -> str:
+    import smtplib, ssl
+    msg = EmailMessage()
+    msg_id = make_msgid(domain="funlabswitch.com")
+    msg["From"] = formataddr(("FUNLAB Support", NE_USER))
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = msg_id
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
+    plain = re.sub(r"<[^>]+>", "", html).replace("&nbsp;", " ").strip()
+    msg.set_content(plain or " ", subtype="plain", charset="utf-8")
+    msg.add_alternative(html, subtype="html", charset="utf-8")
+    with smtplib.SMTP_SSL(NE_SMTP, 465, context=ssl.create_default_context(), timeout=30) as s:
+        s.login(NE_USER, NE_CODE)
+        s.send_message(msg)
+    return msg_id
+
+
+async def _netease_send(to_addr: str, subject: str, html: str, in_reply_to: str = "") -> str:
+    return await asyncio.to_thread(_netease_send_sync, to_addr, subject, html, in_reply_to)
+
+
+async def _send_info_request(msg: dict, fields: dict, reply: str) -> tuple[str, str]:
+    """Send or dry-run the info request. Returns (mode, outbound_message_id)."""
+    hit = _info_request_is_safe(reply)
+    if hit:
+        raise ValueError(f"补询模板含禁止承诺/占位符: {hit}")
+    html = _to_html(reply)
+    subject = _orig_subject_from_msg(msg)
+    customer = _customer_email(fields.get("客户标识", ""))
+    prefix = msg.get("id_prefix")
+    if CS_INFO_REQUEST_DRY_RUN_TO:
+        target = f"{prefix}:{customer}"
+        banner = (f'<div style="background:#fff3cd;padding:8px;border:1px solid #ffc107;margin-bottom:12px">'
+                  f'<strong>CS INFO REQUEST DRY-RUN</strong> — 本应发往 <code>{target}</code>，真客户不会收到。</div>')
+        mid = await _zoho_send_reply(CS_INFO_REQUEST_DRY_RUN_TO,
+                                     f"[CS-INFO-DRY-RUN→{target}] {subject}", banner + html, "")
+        return "dry_run", mid
+    if not CS_INFO_REQUEST_LIVE:
+        return "disabled", ""
+    if prefix == "CSP":
+        return "live", await _zoho_send_reply(customer, subject, html, msg.get("id", ""))
+    if prefix == "CSF":
+        return "live", await _netease_send(customer, subject, html, msg.get("id", ""))
+    return "unsupported", ""
+
+
 # ===== 分类 =====
 CLASSIFY_PROMPT = """你是跨境电商(游戏配件 POWKONG/FUNLAB)客服分诊AI。判断这封邮件输出JSON。
 规则:
 1. 真实客户(客诉/咨询/售后)→is_cs=true:
    - 订单号是亚马逊格式(3位-7位-7位数字) → is_amazon=true(站点稍后由领星定);
+   - 明确提到 Amazon/亚马逊/差评/review 但没有订单号 → is_amazon=true, platform=未知, draft_reply 只请求订单号和国家站点;
    - 美客多订单 → platform=美客多;
    - 其余一切非亚马逊客诉(独立站如PK+数字, 或任何国家不在亚马逊运营范围) → platform=独立站(兜底);
    - 无订单号且分不清是客户还是分销商 → 默认当客户, platform=独立站.
@@ -389,6 +611,7 @@ def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = N
     is_amazon = bool(c.get("is_amazon")) or bool(AMZ_ORDER_RE.search(order_no))
     is_cs = bool(c.get("is_cs"))
     summary = (c.get("summary") or "").strip()
+    info_gaps, route_basis = [], ""
 
     if not is_cs:
         route = c.get("route") or "忽略"
@@ -398,10 +621,16 @@ def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = N
         status = "待派"
         if is_amazon:
             if amz_override and amz_override[0]:
-                platform, operator = amz_override  # 领星反查命中真实站点
+                platform, operator = amz_override[0], amz_override[1]  # 领星/文本命中真实站点
+                route_basis = amz_override[2] if len(amz_override) > 2 else "order_lookup"
             else:
                 platform, operator = "未知", "待定·领星反查站点"
-                summary = f"[亚马逊单·待领星定站点] {summary}"
+            info_gaps = _amazon_info_gaps(order_no, platform, route_basis)
+            if platform == "未知":
+                status = STATUS_WAIT_INFO
+                summary = f"[亚马逊单·需客户补订单号/站点] {summary}"
+            elif info_gaps:
+                summary = f"[亚马逊单·{'/'.join(info_gaps)}] {summary}"
         elif c.get("platform") == "美客多":
             platform, operator = "美客多", "梁俊辉"
         else:
@@ -426,16 +655,160 @@ def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = N
         "状态": status,
         "线程ID": msg["id"],
     }
+    if info_gaps:
+        fields["信息缺口"] = " / ".join(info_gaps)
+        fields["沟通历史摘要"] = (f"首封问题: {summary[:260]}\n"
+                            f"路由依据: {route_basis or '待客户补充'}\n"
+                            f"仍缺字段: {' / '.join(info_gaps)}")[:5000]
+    if status == STATUS_WAIT_INFO:
+        fields["AI草稿"] = _info_request_reply(fields, fields.get("信息缺口", ""))[:5000]
+        fields["补充信息次数"] = 0
     ct = _pick(c.get("complaint_type"), TYPE_OPTS, None)
     if ct:
         fields["客诉类型"] = ct
     ctx = cs_resources.resolve_for_ticket(fields, resources=resources)
     resource_reply = cs_resources.build_resource_reply(fields, ctx)
-    if resource_reply:
+    if resource_reply and status != STATUS_WAIT_INFO:
         fields["AI草稿"] = resource_reply[:5000]
     if cs_resources.WRITEBACK_TICKET_FIELDS:
         fields.update(cs_resources.ticket_resource_fields(ctx))
     return fields
+
+
+def _info_send_update(fields: dict, mode: str, outbound_msg_id: str = "") -> dict:
+    now = int(time.time() * 1000)
+    old_hist = _field_text(fields.get("沟通历史摘要"))
+    if mode == "live":
+        note = "系统补询: 已同线程发送给客户。"
+        count = int(float(_field_text(fields.get("补充信息次数")) or 0)) + 1
+    elif mode == "dry_run":
+        note = f"系统补询: DRY-RUN 已发测试邮箱 {CS_INFO_REQUEST_DRY_RUN_TO}，真客户未收到。"
+        count = int(float(_field_text(fields.get("补充信息次数")) or 0))
+    elif mode == "disabled":
+        note = "系统补询: CS_INFO_REQUEST_LIVE=0，未自动发给客户。"
+        count = int(float(_field_text(fields.get("补充信息次数")) or 0))
+    else:
+        note = f"系统补询: 未发送，mode={mode}。"
+        count = int(float(_field_text(fields.get("补充信息次数")) or 0))
+    update = {
+        "补充信息请求时间": now,
+        "补充信息次数": count,
+        "沟通历史摘要": (old_hist + "\n" + note).strip()[:5000],
+    }
+    if mode == "live" and outbound_msg_id:
+        update["最近出站Message-ID"] = outbound_msg_id[:1000]
+    return update
+
+
+async def _reroute_from_supplement(msg: dict, f: dict) -> tuple[str, str, str, str]:
+    text = "\n".join([msg.get("subj", ""), msg.get("body", ""), _field_text(f.get("最近客户补充"))])
+    order = _field_text(f.get("订单号"))
+    mo = AMZ_ORDER_RE.search(text)
+    if mo:
+        order = mo.group(0)
+    platform, operator, basis = "", "", ""
+    if order:
+        platform, operator = await _lookup_amazon_route(order)
+        basis = "order_lookup" if platform else ""
+    if not platform:
+        platform, operator = _marketplace_hint(text)
+        basis = "site_hint" if platform else basis
+    return order, platform or "", operator or "", basis
+
+
+async def _operator_draft_after_supplement(msg: dict, f: dict, order_no: str,
+                                           platform: str, resources: list | None) -> tuple[str, str]:
+    original = _field_text(f.get("原文"))
+    body = (original + "\n\n[Customer supplement]\n" + (msg.get("body") or ""))[:8000]
+    synth = {
+        "brand_default": _field_text(f.get("品牌")) or "FUNLAB",
+        "frm": _field_text(f.get("客户标识")) or msg.get("frm", ""),
+        "subj": _orig_subject_from_msg(msg),
+        "body": body,
+    }
+    try:
+        c = await _classify(synth)
+    except Exception:
+        c = {}
+    draft = (c.get("draft_reply") or _field_text(f.get("AI草稿")) or "").strip()
+    summary = (c.get("summary") or _field_text(f.get("客诉摘要")) or "").strip()
+    tmp = dict(f)
+    tmp.update({"订单号": order_no, "销售平台": platform, "AI草稿": draft, "客诉摘要": summary})
+    ctx = cs_resources.resolve_for_ticket(tmp, resources=resources)
+    resource_reply = cs_resources.build_resource_reply(tmp, ctx)
+    if resource_reply:
+        draft = resource_reply
+    return summary[:500], draft[:5000]
+
+
+async def _handle_waiting_info_reply(row: dict, msg: dict, resources: list | None,
+                                     dry_run: bool = False) -> dict:
+    rid = row.get("record_id")
+    f = row.get("fields", {}) or {}
+    if not rid:
+        return {"action": "wait_reply_skip", "reason": "missing_record_id"}
+    if _seen_in_history(f, msg.get("id", "")):
+        return {"action": "wait_reply_skip", "reason": "already_seen", "record_id": rid}
+
+    supplement = (msg.get("body") or "")[:3000]
+    old_hist = _field_text(f.get("沟通历史摘要"))
+    count = int(float(_field_text(f.get("补充信息次数")) or 0))
+    order_no, platform, operator, basis = await _reroute_from_supplement(msg, f)
+    gaps = _amazon_info_gaps(order_no, platform, basis)
+    common = {
+        "最近客户补充": supplement[:5000],
+        "沟通历史摘要": (old_hist + f"\n客户补充({msg.get('id','')[:120]}): {supplement[:800]}").strip()[:5000],
+    }
+
+    if platform and operator:
+        summary, draft = await _operator_draft_after_supplement(msg, f, order_no, platform, resources)
+        update = {
+            **common,
+            "订单号": order_no,
+            "销售平台": platform,
+            "分配运营": operator,
+            "状态": "待派",
+            "信息缺口": " / ".join(gaps),
+            "客诉摘要": summary or _field_text(f.get("客诉摘要")),
+            "AI草稿": draft or _field_text(f.get("AI草稿")),
+            "卡片消息ID": "",
+        }
+        update["沟通历史摘要"] = (update["沟通历史摘要"]
+                             + f"\n重路由: {platform} / {operator} / 依据={basis or 'unknown'}"
+                             + (f" / 仍缺: {' / '.join(gaps)}" if gaps else "")).strip()[:5000]
+        if not dry_run:
+            await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{rid}",
+                             {"fields": update}, which="notify")
+        return {"action": "wait_reply_rerouted", "record_id": rid, "platform": platform,
+                "operator": operator, "dry_run": dry_run}
+
+    if count < CS_INFO_REQUEST_MAX:
+        tmp = dict(f)
+        tmp.update(common)
+        reply = _info_request_reply(tmp, _field_text(f.get("信息缺口")))
+        update = {**common, "AI草稿": reply[:5000], "信息缺口": " / ".join(gaps or ["缺订单号", "缺国家站点"])}
+        if not dry_run:
+            mode, outbound = await _send_info_request(msg, tmp, reply)
+            update.update(_info_send_update(tmp, mode, outbound))
+            await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{rid}",
+                             {"fields": update}, which="notify")
+        return {"action": "wait_reply_asked_again", "record_id": rid, "dry_run": dry_run}
+
+    update = {
+        **common,
+        "订单号": order_no,
+        "销售平台": "未知",
+        "分配运营": "待定·客户补充仍不足",
+        "状态": "待派",
+        "信息缺口": " / ".join(gaps or ["缺订单号", "缺国家站点"]),
+        "卡片消息ID": "",
+    }
+    update["沟通历史摘要"] = (update["沟通历史摘要"]
+                         + "\n自动补询已达上限，仍无法判定站点/订单，转待判责卡。")[:5000]
+    if not dry_run:
+        await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{rid}",
+                         {"fields": update}, which="notify")
+    return {"action": "wait_reply_escalate_to_triage", "record_id": rid, "dry_run": dry_run}
 
 
 # ===== 主入口 =====
@@ -463,11 +836,23 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
     except Exception:
         resources = cs_resources.builtin_resources()
     existing = await _existing_thread_ids()
+    waiting = await _waiting_info_tickets()
     new_cnt, skip_cnt, err_cnt = 0, 0, 0
     samples = []
     for m in msgs:
         if not m.get("id") or m["id"] in existing:
             skip_cnt += 1
+            continue
+        waiting_match = _match_waiting_info_ticket(m, waiting)
+        if waiting_match:
+            try:
+                result = await _handle_waiting_info_reply(waiting_match, m, resources, dry_run=dry_run)
+                if len(samples) < 14:
+                    samples.append({"from": m["frm"][:26], "状态": "客户补充归并",
+                                    "动作": result.get("action"), "record": result.get("record_id", "")})
+                new_cnt += 1
+            except Exception:
+                err_cnt += 1
             continue
         try:
             c = await _classify(m)
@@ -481,8 +866,15 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
             if mo:
                 p, op = await _lookup_amazon_route(mo.group(0))
                 if p:
-                    amz_override = (p, op)
+                    amz_override = (p, op, "order_lookup")
+            if not amz_override and (c.get("is_amazon") or "amazon" in (m.get("body", "") + m.get("subj", "")).lower() or "亚马逊" in (m.get("body", "") + m.get("subj", ""))):
+                p, op = _marketplace_hint(m.get("body", "") + "\n" + m.get("subj", ""))
+                if p:
+                    amz_override = (p, op, "site_hint")
         fields = _to_fields(m, c, amz_override, resources=resources)
+        if fields.get("状态") == STATUS_WAIT_INFO and not dry_run:
+            mode, outbound = await _send_info_request(m, fields, fields.get("AI草稿", ""))
+            fields.update(_info_send_update(fields, mode, outbound))
         if len(samples) < 14:
             samples.append({"渠道品牌": f"{fields['品牌']}", "from": m["frm"][:26],
                             "is_cs": c.get("is_cs"), "平台": fields["销售平台"],

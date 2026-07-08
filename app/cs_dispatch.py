@@ -198,6 +198,25 @@ def _routing_notice_md(f: dict) -> str:
     return ""
 
 
+def _handoff_context_md(f: dict) -> str:
+    gaps = _x(f, "信息缺口")
+    history = _x(f, "沟通历史摘要")
+    supplement = _x(f, "最近客户补充")
+    outbound = _x(f, "最近出站Message-ID")
+    if not any([gaps, history, supplement, outbound]):
+        return ""
+    lines = ["**🧭 接手上下文**"]
+    if history:
+        lines.append(f"**历史:** {history[:900]}")
+    if supplement:
+        lines.append(f"**客户补充:** {supplement[:700]}")
+    if gaps:
+        lines.append(f"**仍缺字段:** {gaps}")
+    if outbound:
+        lines.append(f"**最近出站 Message-ID:** `{_short(outbound, 80)}`")
+    return "\n".join(lines)
+
+
 def _header_title(f: dict, rid: str = "") -> str:
     brand = _x(f, "品牌") or "-"
     platform = _x(f, "销售平台") or "未知"
@@ -272,6 +291,7 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
     resource_md = cs_resources.format_card_block(resource_context)
     resource_keys = [r.get("resource_key") for r in resource_context.get("matches") or [] if r.get("resource_key")]
     routing_notice = _routing_notice_md(f)
+    handoff_md = _handoff_context_md(f)
     info = (f"**工单ID:** `{ticket}`  ·  **处理状态:** {_card_status_label(f)}\n"
             f"**渠道:** {channel}  ·  **品牌:** {brand}  ·  **平台:** {platform}\n"
             f"**客户:** {customer}" + (f"  ·  **订单:** {order}" if order else "") + "\n"
@@ -282,6 +302,13 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
     elements = [
         {"tag": "div", "text": {"tag": "lark_md", "content": info}},
         {"tag": "hr"},
+    ]
+    if handoff_md:
+        elements.extend([
+            {"tag": "div", "text": {"tag": "lark_md", "content": handoff_md}},
+            {"tag": "hr"},
+        ])
+    elements.extend([
         {"tag": "div", "text": {"tag": "lark_md",
                                 "content": "**🤖 AI 建议回复全文**（可复制；满意直接发）：\n" + draft}},
         {"tag": "hr"},
@@ -303,7 +330,7 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
         ]},
         {"tag": "note", "elements": [{"tag": "plain_text",
                                       "content": "按钮说明：发送=直接回客户；改派=通知负责人重新分配，不回客户；升级=红线/无法判断时交Frankie，不回客户。"}]},
-    ]
+    ])
     if CS_REPLY_DRY_RUN_TO:
         note = "🧪 DRY-RUN 验证中：点「发送回复」会改发测试邮箱（真客户/频道不会收到），用于核对内容完整"
     elif CS_REPLY_LIVE:
