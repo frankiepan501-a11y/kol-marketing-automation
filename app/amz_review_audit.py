@@ -12,6 +12,7 @@ and public group notification are all gated by env/config and endpoint flags.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -86,6 +87,9 @@ _HIGH_RISK_RE = re.compile(
     r"(fire|burn|smoke|injur|danger|unsafe|lawsuit|legal|a-to-z|A-to-z|A2Z|explode|battery|触电|起火|受伤|法律|索赔)",
     re.I,
 )
+_ASIN_RE = re.compile(r"^[A-Z0-9]{10}$", re.I)
+_bg_tasks: set[asyncio.Task] = set()
+_recent_callbacks: dict[str, float] = {}
 
 
 def now_ms() -> int:
@@ -296,7 +300,8 @@ def rating_int(value: Any) -> int:
 
 
 def amazon_listing_url(site: str, asin: str) -> str:
-    if not asin:
+    asin = _text(asin).upper()
+    if not asin or not _ASIN_RE.match(asin):
         return ""
     site_text = _text(site).replace("亚马逊-", "")
     domain = _SITE_DOMAINS.get(site_text.upper()) or _SITE_DOMAINS.get(site_text) or "amazon.com"
@@ -1169,6 +1174,51 @@ def _operator_label(event: dict) -> str:
     return (op.get("union_id") or op.get("open_id") or "运营自助")[:80]
 
 
+def _toast(content: str, typ: str = "success") -> dict:
+    return {"toast": {"type": typ, "content": content}}
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+def _recent_seen(key: str, ttl_sec: int = 300) -> bool:
+    now = time.time()
+    for old_key, ts in list(_recent_callbacks.items()):
+        if now - ts > ttl_sec:
+            _recent_callbacks.pop(old_key, None)
+    return key in _recent_callbacks and now - _recent_callbacks[key] <= ttl_sec
+
+
+def _callback_key(action: str, issue_id: str, form: dict) -> str:
+    form_text = json.dumps(form or {}, ensure_ascii=False, sort_keys=True)
+    return f"{issue_id}:{action}:{hash(form_text)}"
+
+
+def _callback_ack(action: str) -> str:
+    if action == "amz_issue_submit_actions":
+        return "已收到处理结果，正在写入审计表并更新原卡"
+    if action == "amz_issue_create_cs_ticket":
+        return "已收到，正在同步到客服库"
+    if action == "amz_issue_request_observation":
+        return "已收到观察申请，正在更新原卡"
+    if action == "amz_issue_escalate":
+        return "已收到升级请求，正在通知负责人"
+    return "已收到，正在处理"
+
+
+async def _process_callback_background(event: dict, callback_key: str) -> None:
+    try:
+        result = await _process_callback(event)
+        if ((result.get("toast") or {}).get("type") or "") == "error":
+            _recent_callbacks.pop(callback_key, None)
+    except Exception as exc:
+        _recent_callbacks.pop(callback_key, None)
+        print(f"[amz_review_audit.callback_bg] {callback_key} fail: {exc}")
+
+
 def _extract_action(event: dict) -> tuple[str, dict, dict]:
     action = event.get("action", {}) or {}
     value = action.get("value", {}) or {}
@@ -1192,13 +1242,13 @@ def _form_selection(form: dict, issue_id: str, suffix: str) -> Any:
     return ""
 
 
-async def handle_callback(event: dict) -> dict:
+async def _process_callback(event: dict) -> dict:
     action, value, form = _extract_action(event)
     if not action.startswith("amz_issue_"):
-        return {"toast": {"type": "error", "content": "未知 Amazon 差评动作"}}
+        return _toast("未知 Amazon 差评动作", "error")
     issue_id = _text(value.get("issue_id") or value.get("issue_key"))
     if not issue_id:
-        return {"toast": {"type": "error", "content": "缺少 issue_id"}}
+        return _toast("缺少 issue_id", "error")
     record = None
     if _audit_configured() and issue_id.startswith("rec"):
         try:
@@ -1218,11 +1268,11 @@ async def handle_callback(event: dict) -> dict:
     if action == "amz_issue_submit_actions":
         if current_status in (STATE_SUBMITTED, STATE_RECHECK_PASS, STATE_OBSERVE, STATE_ESCALATED):
             await amz_assistant.update_card(msg_id, build_processed_card(issue, "✅ [AMZ·已处理]", "该差评已提交过处理结果，重复点击已拦截。"))
-            return {"toast": {"type": "success", "content": "该差评已处理过，无需重复提交"}}
+            return _toast("该差评已处理过，无需重复提交")
         actions = _list_values(_form_selection(form, issue["record_id"], "actions"))
         note = _text(_form_selection(form, issue["record_id"], "note"))
         if not actions:
-            return {"toast": {"type": "error", "content": "请至少选择一种处理方式"}}
+            return _toast("请至少选择一种处理方式", "error")
         if any("客观无法移除" in x or "申请观察" in x for x in actions):
             update = {
                 "状态": STATE_OBSERVE,
@@ -1249,32 +1299,32 @@ async def handle_callback(event: dict) -> dict:
                     "yellow",
                 ),
             )
-            return {"toast": {"type": "success", "content": "已提交观察申请"}}
+            return _toast("已提交观察申请")
         due = now_ms() + 7 * 86_400_000
         update = {"状态": STATE_SUBMITTED, "处理方式": actions, "处理备注": note, "处理时间": now_ms(), "处理人": actor, "T+7复检日期": due}
         if _audit_configured() and issue.get("record_id", "").startswith("rec"):
             await _update_audit(issue["record_id"], update)
         issue.update({"status": STATE_SUBMITTED, "handled_actions": actions, "handled_note": note, "handled_at_ms": now_ms(), "recheck_due_ms": due})
         await amz_assistant.update_card(msg_id, build_processed_card(issue, "✅ [AMZ·处理已提交]", f"已进入 T+7 复检：{'、'.join(actions)}"))
-        return {"toast": {"type": "success", "content": "已提交处理结果，7天后系统复检首页"}}
+        return _toast("已提交处理结果，7天后系统复检首页")
 
     if action == "amz_issue_create_cs_ticket":
         if issue.get("cs_ticket_id"):
             await amz_assistant.update_card(msg_id, build_processed_card(issue, "✅ [AMZ·客服工单已存在]", f"客服工单已存在：{issue['cs_ticket_id']}"))
-            return {"toast": {"type": "success", "content": "客服工单已存在"}}
+            return _toast("客服工单已存在")
         rid = await create_cs_ticket(issue, actor=actor)
         if _audit_configured() and issue.get("record_id", "").startswith("rec"):
             await _update_audit(issue["record_id"], {"客服工单ID": rid, "最近提醒时间": now_ms()})
         issue["cs_ticket_id"] = rid
         await amz_assistant.update_card(msg_id, build_processed_card(issue, "✅ [AMZ·已录入客服库]", f"已创建客服工单：{rid}"))
-        return {"toast": {"type": "success", "content": "已录入客服库"}}
+        return _toast("已录入客服库")
 
     if action == "amz_issue_request_observation":
         if _audit_configured() and issue.get("record_id", "").startswith("rec"):
             await _update_audit(issue["record_id"], {"状态": STATE_OBSERVE, "处理备注": "卡片申请观察", "处理时间": now_ms(), "处理人": actor})
         issue["status"] = STATE_OBSERVE
         await amz_assistant.update_card(msg_id, build_processed_card(issue, "🟡 [AMZ·已申请观察]", "已标记为客观无法移除/观察中；后续进入审计指标而非重复私聊。", "yellow"))
-        return {"toast": {"type": "success", "content": "已申请观察"}}
+        return _toast("已申请观察")
 
     if action == "amz_issue_escalate":
         if _audit_configured() and issue.get("record_id", "").startswith("rec"):
@@ -1282,9 +1332,31 @@ async def handle_callback(event: dict) -> dict:
         issue["status"] = STATE_ESCALATED
         await amz_assistant.notify_frankie(f"🔴 Amazon差评红线升级\n{issue.get('owner')} / {issue.get('site')} / {issue.get('asin')}\n{issue.get('summary')}")
         await amz_assistant.update_card(msg_id, build_processed_card(issue, "🔴 [AMZ·已升级红线]", "已通知 Frankie/上级介入；请不要在这张卡重复点击。", "red"))
-        return {"toast": {"type": "success", "content": "已升级红线"}}
+        return _toast("已升级红线")
 
-    return {"toast": {"type": "error", "content": "未知 Amazon 差评动作"}}
+    return _toast("未知 Amazon 差评动作", "error")
+
+
+async def handle_callback(event: dict) -> dict:
+    """Feishu card callback entrypoint.
+
+    Keep this fast. Feishu card callbacks can surface code 200341 when the app
+    waits for Bitable writes or message PATCHes before ACKing the click.
+    """
+    action, value, form = _extract_action(event)
+    if not action.startswith("amz_issue_"):
+        return _toast("未知 Amazon 差评动作", "error")
+    issue_id = _text(value.get("issue_id") or value.get("issue_key"))
+    if not issue_id:
+        return _toast("缺少 issue_id", "error")
+    if action == "amz_issue_submit_actions" and not _list_values(_form_selection(form, issue_id, "actions")):
+        return _toast("请至少选择一种处理方式", "error")
+    callback_key = _callback_key(action, issue_id, form)
+    if _recent_seen(callback_key):
+        return _toast("该操作已收到，正在处理或已处理，无需重复点击")
+    _recent_callbacks[callback_key] = time.time()
+    _spawn(_process_callback_background(event, callback_key))
+    return _toast(_callback_ack(action))
 
 
 async def run(kind: str = "all", mode: str = "dry_run", notify: bool = False, limit: int = 50, sample: bool = False) -> dict:

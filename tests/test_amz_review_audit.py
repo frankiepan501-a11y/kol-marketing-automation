@@ -27,6 +27,10 @@ class AmzReviewAuditPureTests(unittest.TestCase):
         self.assertEqual("https://www.amazon.com/dp/B0ABC12345", issue["listing_url"])
         self.assertIn("AMZ_REVIEW:US:B0ABC12345:rv-1", issue["issue_key"])
 
+    def test_listing_url_skips_invalid_sample_asin(self):
+        self.assertEqual("", audit.amazon_listing_url("US", "B0TEST001"))
+        self.assertEqual("https://www.amazon.ca/dp/B0ABC12345", audit.amazon_listing_url("CA", "B0ABC12345"))
+
     def test_alert_thresholds_follow_plan(self):
         review_2 = audit.normalize_issue({"source_type": "review", "review_id": "r2", "site": "US", "asin": "A", "rating": 2})
         review_3_plain = audit.normalize_issue({"source_type": "review", "review_id": "r3", "site": "US", "asin": "B", "rating": 3})
@@ -338,7 +342,7 @@ class AmzReviewAuditAsyncTests(unittest.TestCase):
                     },
                 },
             }
-            result = asyncio.run(audit.handle_callback(event))
+            result = asyncio.run(audit._process_callback(event))
         finally:
             audit.cs_dispatch._update_card = original_update
 
@@ -378,7 +382,7 @@ class AmzReviewAuditAsyncTests(unittest.TestCase):
                     },
                 },
             }
-            result = asyncio.run(audit.handle_callback(event))
+            result = asyncio.run(audit._process_callback(event))
         finally:
             audit.cs_dispatch._update_card = original_update
 
@@ -388,6 +392,45 @@ class AmzReviewAuditAsyncTests(unittest.TestCase):
         rendered = json.dumps(calls[0][1], ensure_ascii=False)
         self.assertIn("观察申请已提交", rendered)
         self.assertIn("上级确认", rendered)
+
+    def test_handle_submit_fast_ack_spawns_background(self):
+        original_spawn = audit._spawn
+        original_recent = dict(audit._recent_callbacks)
+        spawned = []
+
+        def fake_spawn(coro):
+            spawned.append(coro)
+            coro.close()
+
+        try:
+            audit._recent_callbacks.clear()
+            audit._spawn = fake_spawn
+            event = {
+                "message_id": "om_fast",
+                "action": {
+                    "value": {
+                        "action": "amz_issue_submit_actions",
+                        "issue_id": "rec_fast",
+                        "source_type": "review",
+                        "source_id": "rv-fast",
+                        "site": "US",
+                        "asin": "B0FAST0001",
+                        "rating": 1,
+                    },
+                    "form_value": {
+                        "amz_actions_rec_fast": ["已投诉Amazon / 已开Case"],
+                    },
+                },
+            }
+            result = asyncio.run(audit.handle_callback(event))
+        finally:
+            audit._spawn = original_spawn
+            audit._recent_callbacks.clear()
+            audit._recent_callbacks.update(original_recent)
+
+        self.assertEqual("success", result["toast"]["type"])
+        self.assertIn("已收到", result["toast"]["content"])
+        self.assertEqual(1, len(spawned))
 
 
 if __name__ == "__main__":
