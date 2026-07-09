@@ -150,6 +150,29 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
   - sample listing: `Fanlepu-CA / 加拿大 / switch2 砖块拓展坞 / parent B0GX9MY9WX`
   - local preview JSON: `C:/tmp/amz_parent_homepage_sample_card_20260709.json`
 
+### 2026-07-09 Amazon assistant app callback
+
+- New Feishu App: `亚马逊助手`, app id `cli_aac5d3d3e8f91cc6`; secret is stored only in Zeabur env.
+- Zeabur env added with single-variable mutations on `kol-automation`:
+  - `FEISHU_AMZ_ASSISTANT_APP_ID`
+  - `FEISHU_AMZ_ASSISTANT_APP_SECRET`
+- New code:
+  - `app/amz_assistant.py` owns AMZ card send/update helpers and Feishu callback parsing.
+  - `POST /amz/feishu/callback` handles Feishu URL verification and `card.action.trigger`.
+  - `GET /amz/feishu/callback` is a public health/config probe.
+  - AMZ cards now send/PATCH through `亚马逊助手` first, falling back to the old CS assistant only if AMZ app env is missing.
+- Deployment:
+  - commit `1de5688743c0130017ae7a35242436dea772e938`
+  - Zeabur deployment `6a4f721c019866a087e64d1a` is `RUNNING`.
+- Smoke:
+  - `GET https://kol-auto.zeabur.app/amz/feishu/callback` returned `{"ok":true,"service":"amz-feishu-callback","configured":true}`.
+  - URL verification simulation returned `{"challenge":"codex_amz_online_ok"}`.
+- Feishu console request URL:
+  - `https://kol-auto.zeabur.app/amz/feishu/callback`
+- Current setup note:
+  - Keep Feishu encryption disabled for now; this endpoint currently does not decrypt `encrypt` payloads.
+  - `FEISHU_AMZ_ASSISTANT_VERIFICATION_TOKEN` is not set yet because Frankie has not provided the token. After the console shows/provides the token, set that env and redeploy to enable strict token validation.
+
 ### 2026-07-08 recovery audit
 
 - Previous Zeabur blocker is resolved. Server events show the Tokyo server rebooted and completed a spec update; `status.isOnline=true`, `vmStatus=RUNNING`, `provisioningStatus=READY`.
