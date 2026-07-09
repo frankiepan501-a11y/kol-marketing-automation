@@ -208,6 +208,25 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
     - `msg_type=interactive`, `sender_type=app`, `updated=false`
     - message content does not contain `amazon.com/dp/TEST-ASIN`.
 
+### 2026-07-09 legacy card callback compatibility
+
+- Problem observed after the first fix:
+  - Clicking the new test card still showed `code: 200341`.
+  - The card did not patch to processed state and no visible toast appeared.
+- Likely root cause:
+  - Feishu console had both `card.action.trigger` and old `card.action.trigger_v1` callbacks enabled.
+  - The AMZ callback endpoint only accepted `card.action.trigger`; old `card.action.trigger_v1` events were returned as ignored and never reached `amz_review_audit.handle_callback()`.
+- Fix:
+  - `app/amz_assistant.py` now dispatches both `card.action.trigger` and `card.action.trigger_v1` to the AMZ handler.
+  - Added safe callback log line with event type, action, issue id, and message id. It does not log tokens or form content.
+- Verification:
+  - `.venv\Scripts\python.exe -m unittest tests.test_amz_review_audit` passed 17 tests.
+  - Online simulated `card.action.trigger_v1` returned success toast in `0.94s`.
+  - Zeabur deployment is `RUNNING` on commit `893b822b`.
+  - New Frankie-only test card:
+    - message `om_x100b6bccdadd40a8c44c40f1b0ffbff`
+    - title `🟢 [AMZ·P3] v1回调兼容测试卡 · 点这张`
+
 ### 2026-07-08 recovery audit
 
 - Previous Zeabur blocker is resolved. Server events show the Tokyo server rebooted and completed a spec update; `status.isOnline=true`, `vmStatus=RUNNING`, `provisioningStatus=READY`.
