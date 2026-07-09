@@ -132,6 +132,24 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
   - issue card: `om_x100b6be4b5a2f8a0c1c0112204f0bbf`
   - Change: primary action is form multi-select + confirm submit; customer-service sync and supervisor escalation are auxiliary actions, not four mutually exclusive buttons.
 
+### 2026-07-09 parent-level homepage audit P0/P1
+
+- P0 done: homepage-review issues now use parent-level grain by `site + parent_asin`.
+  - New issue key format: `AMZ_HOMEPAGE:{site}:{parent_asin}`.
+  - Same parent variation under the same site is not split into duplicate child-ASIN cards.
+  - The card still shows representative child ASIN and all active child ASINs for operator context.
+- P1 done: homepage review position context is now persisted and rendered.
+  - New audit fields added to Feishu Base `tbltzQqIeEIPtJ2l`: `父体ASIN`, `代表子体ASIN`, `在售子体ASIN`, `Listing标签`, `首页差评位置`, `最靠前差评位置`, `挤走难度`, `跨站点同ERP差评`.
+  - Existing `来源类型` option list now includes `Homepage`.
+  - Cards show `首页差评位置`, `最靠前位置`, `挤走难度`, and cross-site same-ERP negative-review context.
+- Test coverage added:
+  - Parent homepage issue uses parent key and exports new Base fields.
+  - Issue/daily/recheck cards render active children, positions, difficulty, and cross-site context.
+- Real sample card sent to Frankie via `lark-cli` bot for design confirmation:
+  - message: `om_x100b6bc2cecd54a0c4a90b8350d92c7`
+  - sample listing: `Fanlepu-CA / 加拿大 / switch2 砖块拓展坞 / parent B0GX9MY9WX`
+  - local preview JSON: `C:/tmp/amz_parent_homepage_sample_card_20260709.json`
+
 ### 2026-07-08 recovery audit
 
 - Previous Zeabur blocker is resolved. Server events show the Tokyo server rebooted and completed a spec update; `status.isOnline=true`, `vmStatus=RUNNING`, `provisioningStatus=READY`.

@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 
-from . import cs_dispatch, feishu
+from . import amz_assistant, cs_dispatch, feishu
 
 
 BJ = timezone(timedelta(hours=8))
@@ -131,6 +131,137 @@ def _short(value: Any, limit: int = 120) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _source_type(value: Any) -> str:
+    text = _text(value).lower().replace("-", "_").replace(" ", "_")
+    if text in ("feedback", "seller_feedback", "sellerfeedback"):
+        return "feedback"
+    if text in ("homepage", "homepage_review", "homepage_negative", "listing_homepage", "首页巡检", "首页差评"):
+        return "homepage"
+    return "review"
+
+
+def _source_label(issue: dict) -> str:
+    source_type = _text(issue.get("source_type")).lower()
+    if source_type == "feedback":
+        return "Feedback"
+    if source_type == "homepage":
+        return "首页差评"
+    return "差评"
+
+
+def _split_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                text = _text(item.get("text") or item.get("name") or item.get("value") or item.get("asin"))
+            else:
+                text = _text(item)
+            if text:
+                out.append(text)
+        return out
+    text = _text(value)
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            arr = json.loads(text)
+            return _split_values(arr)
+        except Exception:
+            pass
+    return [x.strip() for x in re.split(r"[\n;,，、]+", text) if x.strip()]
+
+
+def _normalize_listing_tags(raw: Any) -> list[str]:
+    mapping = {
+        "ERP在售": "ERP",
+        "ERP": "ERP",
+        "新品ASIN": "新品",
+        "新品": "新品",
+        "战略ASIN": "战略",
+        "战略": "战略",
+        "主力ASIN": "主力",
+        "主力": "主力",
+        "长尾ASIN": "长尾",
+        "长尾": "长尾",
+    }
+    out: list[str] = []
+    for item in _split_values(raw):
+        text = item.strip()
+        value = mapping.get(text, text)
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _normalize_negative_positions(raw: Any) -> list[dict]:
+    if raw is None or raw == "":
+        return []
+    rows = raw if isinstance(raw, list) else []
+    if not rows:
+        text = _text(raw)
+        if text.startswith("["):
+            try:
+                rows = json.loads(text)
+            except Exception:
+                rows = []
+        if not rows:
+            rows = []
+            for match in re.finditer(r"#?\s*(\d+)[^\d]{0,8}([1-5])\s*星?([^|;\n]*)", text):
+                rows.append({"position": match.group(1), "star": match.group(2), "title": match.group(3).strip()})
+    out: list[dict] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        pos = rating_int(row.get("position") or row.get("位置") or row.get("pos"))
+        star = rating_int(row.get("star") or row.get("星级") or row.get("rating"))
+        if not pos and not star:
+            continue
+        out.append(
+            {
+                "position": pos or None,
+                "star": star or None,
+                "review_id": _text(row.get("review_id") or row.get("reviewId") or row.get("评论ID")),
+                "title": _short(row.get("title") or row.get("标题"), 80),
+                "date": _text(row.get("date") or row.get("日期")),
+                "asin": _text(row.get("asin") or row.get("ASIN")),
+            }
+        )
+    return sorted(out, key=lambda x: (x.get("position") or 99, x.get("asin") or ""))
+
+
+def _min_negative_position(positions: list[dict]) -> int | None:
+    values = [int(p["position"]) for p in positions if p.get("position")]
+    return min(values) if values else None
+
+
+def _position_difficulty(position: int | None) -> str:
+    if not position:
+        return "位置待复核"
+    if position <= 2:
+        return "难：第1-2位，需要较多好评才能挤走"
+    if position <= 5:
+        return "中：第3-5位，需要连续好评拉升"
+    return "易：第6-8位，相对容易挤出首页"
+
+
+def _position_summary(issue: dict, limit: int = 6) -> str:
+    positions = issue.get("homepage_negative_positions") or []
+    if not positions:
+        return ""
+    parts = []
+    for row in positions[:limit]:
+        loc = f"#{row.get('position')}" if row.get("position") else "#?"
+        star = f"{row.get('star')}星" if row.get("star") else ""
+        asin = f"{row.get('asin')} " if row.get("asin") else ""
+        title = _short(row.get("title"), 42)
+        parts.append(" ".join(x for x in [asin + loc, star, title] if x).strip())
+    more = f"；另{len(positions) - limit}条" if len(positions) > limit else ""
+    return "；".join(parts) + more
+
+
 def parse_ms(value: Any) -> int | None:
     if value in (None, ""):
         return None
@@ -234,6 +365,10 @@ def should_alert_issue(issue: dict) -> bool:
 
 def issue_key(issue: dict) -> str:
     source_type = _text(issue.get("source_type")).upper() or "REVIEW"
+    if source_type == "HOMEPAGE":
+        site = _text(issue.get("site")) or "UNKNOWN"
+        parent = _text(issue.get("parent_asin")) or _text(issue.get("asin")) or "NOASIN"
+        return f"AMZ_HOMEPAGE:{site}:{parent}"
     source_id = _text(issue.get("source_id")) or _text(issue.get("review_id")) or _text(issue.get("feedback_id"))
     site = _text(issue.get("site")) or "UNKNOWN"
     asin = _text(issue.get("asin")) or "NOASIN"
@@ -244,44 +379,107 @@ def issue_key(issue: dict) -> str:
 
 
 def normalize_issue(raw: dict) -> dict:
-    source_type = _text(_field(raw, "source_type", "来源类型", "type"))
-    if not source_type:
+    source_type = _source_type(_field(raw, "source_type", "来源类型", "type"))
+    if not _field(raw, "source_type", "来源类型", "type"):
         source_type = "feedback" if _field(raw, "feedback_id", "seller_feedback_id") else "review"
-    source_type = "feedback" if source_type.lower() in ("feedback", "seller_feedback", "seller feedback") else "review"
-    asin = _text(_field(raw, "asin", "ASIN"))
+    raw_asin = _text(_field(raw, "asin", "ASIN", "representative_asin", "代表子体ASIN"))
+    parent_asin = _text(_field(raw, "parent_asin", "父体ASIN", "parent", "parentAsin"))
+    representative_asin = _text(_field(raw, "representative_asin", "代表子体ASIN", "child_asin", "子体ASIN")) or raw_asin
+    asin = parent_asin if source_type == "homepage" and parent_asin else raw_asin
     site = _text(_field(raw, "site", "站点", "country", "marketplace", "marketplace_name"))
     owner = _text(_field(raw, "owner", "负责人", "principal_name"))
     if not owner:
         principal = raw.get("principal_info")
         if isinstance(principal, list) and principal:
             owner = _text(principal[0].get("principal_name"))
+    positions = _normalize_negative_positions(
+        _field(raw, "homepage_negative_positions", "negative_positions", "positions", "首页差评位置", "差评位置明细")
+    )
+    min_position = _min_negative_position(positions)
     issue = {
         "source_type": source_type,
-        "source_id": _text(_field(raw, "source_id", "review_id", "feedback_id", "id", "reviewId")),
+        "source_id": _text(_field(raw, "source_id", "review_id", "feedback_id", "id", "reviewId")) or ("homepage" if source_type == "homepage" else ""),
         "store_name": _text(_field(raw, "store_name", "店铺名", "seller_name", "shop_name")),
         "site": site,
         "erp_name": _text(_field(raw, "erp_name", "ERP品名", "product_name", "item_name", "title_name")),
         "asin": asin,
-        "listing_url": _text(_field(raw, "listing_url", "ASIN链接")) or amazon_listing_url(site, asin),
+        "parent_asin": parent_asin or (asin if source_type == "homepage" else ""),
+        "representative_asin": representative_asin,
+        "child_asins": _split_values(_field(raw, "child_asins", "在售子体ASIN", "active_children", "旗下在售子体")),
+        "listing_tags": _normalize_listing_tags(_field(raw, "listing_tags", "Listing标签", "tags")),
+        "listing_url": _text(_field(raw, "listing_url", "ASIN链接", "parent_url")) or amazon_listing_url(site, representative_asin or asin),
         "owner": owner,
-        "rating": rating_int(_field(raw, "rating", "star", "stars", "星级", "review_rating")),
+        "rating": rating_int(_field(raw, "rating", "star", "stars", "星级", "review_rating")) or min((p.get("star") or 5 for p in positions), default=0),
         "title": _short(_field(raw, "title", "标题"), 120),
         "summary": _short(_field(raw, "summary", "摘要", "review_text", "feedback_text", "content", "body"), 500),
         "first_seen_ms": parse_ms(_field(raw, "first_seen_ms", "首次发现时间", "date", "created_at", "review_date")) or now_ms(),
         "homepage_visible": bool(raw.get("homepage_visible") or raw.get("首页可见")),
         "homepage_negative_count": raw.get("homepage_negative_count", raw.get("首页差评数")),
+        "homepage_negative_positions": positions,
+        "min_negative_position": rating_int(_field(raw, "min_negative_position", "最靠前差评位置")) or min_position,
+        "position_difficulty": _text(_field(raw, "position_difficulty", "挤走难度")) or _position_difficulty(min_position),
+        "cross_site_negative": _split_values(_field(raw, "cross_site_negative", "跨站点同ERP差评")),
     }
+    if source_type == "homepage" and issue.get("homepage_negative_count") in (None, ""):
+        issue["homepage_negative_count"] = len(positions)
+        issue["homepage_visible"] = bool(positions)
     issue["owner"] = owner_for_issue(issue)
     issue["severity"] = severity_for_issue(issue)
     issue["issue_key"] = issue_key(issue)
     return issue
 
 
+def normalize_homepage_group_issue(raw: dict) -> dict:
+    """Normalize a parent-level homepage scan group into one auditable issue.
+
+    Expected grain: one site/domain + one parent ASIN. Child ASINs are context,
+    not separate issues, so operators handle one parent card per site.
+    """
+    positions = raw.get("positions") or raw.get("homepage_negative_positions") or []
+    negative_count = raw.get("top8_negative_cards") or raw.get("homepage_negative_count") or len(positions)
+    representative_asin = _text(raw.get("representative_asin") or raw.get("representative_child_asin"))
+    if not representative_asin:
+        children = _split_values(raw.get("active_children") or raw.get("child_asins"))
+        representative_asin = _text(raw.get("asin")) or (children[0].split("(")[0] if children else "")
+    summary = raw.get("summary") or ""
+    if not summary:
+        pos_text = _position_summary({"homepage_negative_positions": positions}, limit=8)
+        summary = f"父体首页前8位差评：{pos_text or '位置待复核'}"
+    return normalize_issue(
+        {
+            "source_type": "homepage",
+            "source_id": raw.get("source_id") or "homepage",
+            "store_name": raw.get("store") or raw.get("store_name"),
+            "site": raw.get("site") or raw.get("country") or raw.get("domain"),
+            "erp_name": raw.get("erp_name"),
+            "asin": representative_asin or raw.get("parent_asin"),
+            "parent_asin": raw.get("parent_asin"),
+            "representative_asin": representative_asin,
+            "child_asins": raw.get("active_children") or raw.get("child_asins"),
+            "listing_tags": raw.get("tags") or raw.get("listing_tags"),
+            "listing_url": raw.get("parent_url") or raw.get("listing_url"),
+            "owner": raw.get("owner"),
+            "rating": raw.get("rating"),
+            "summary": summary,
+            "homepage_visible": True,
+            "homepage_negative_count": negative_count,
+            "homepage_negative_positions": positions,
+            "min_negative_position": raw.get("min_negative_position"),
+            "position_difficulty": raw.get("difficulty") or raw.get("position_difficulty"),
+            "cross_site_negative": raw.get("cross_site_negative"),
+        }
+    )
+
+
 def issue_to_fields(issue: dict, status: str = STATE_NEW) -> dict:
     url = issue.get("listing_url") or amazon_listing_url(issue.get("site", ""), issue.get("asin", ""))
-    return {
+    source_type = _text(issue.get("source_type")).lower()
+    source_field = "Feedback" if source_type == "feedback" else ("Homepage" if source_type == "homepage" else "Review")
+    child_asins = issue.get("child_asins") or []
+    positions_text = _position_summary(issue, limit=12)
+    fields = {
         "问题键": issue["issue_key"],
-        "来源类型": "Feedback" if issue.get("source_type") == "feedback" else "Review",
+        "来源类型": source_field,
         "来源ID": issue.get("source_id", ""),
         "状态": status,
         "店铺名": issue.get("store_name", ""),
@@ -299,21 +497,50 @@ def issue_to_fields(issue: dict, status: str = STATE_NEW) -> dict:
         "首页差评数": int(issue.get("homepage_negative_count") or 0),
         "最近提醒时间": now_ms(),
     }
+    if issue.get("parent_asin"):
+        fields["父体ASIN"] = issue.get("parent_asin", "")
+    if issue.get("representative_asin"):
+        fields["代表子体ASIN"] = issue.get("representative_asin", "")
+    if child_asins:
+        fields["在售子体ASIN"] = "\n".join(child_asins)
+    if issue.get("listing_tags"):
+        fields["Listing标签"] = issue.get("listing_tags") or []
+    if positions_text:
+        fields["首页差评位置"] = positions_text
+    if issue.get("min_negative_position"):
+        fields["最靠前差评位置"] = int(issue.get("min_negative_position") or 0)
+    if issue.get("position_difficulty"):
+        fields["挤走难度"] = issue.get("position_difficulty")
+    if issue.get("cross_site_negative"):
+        fields["跨站点同ERP差评"] = "\n".join(issue.get("cross_site_negative") or [])
+    return fields
 
 
 def fields_to_issue(record_id: str, fields: dict) -> dict:
     asin = _text(fields.get("ASIN"))
     site = _text(fields.get("站点"))
+    source_type_text = _text(fields.get("来源类型"))
+    source_type = "homepage" if source_type_text == "Homepage" else ("feedback" if "Feedback" in source_type_text else "review")
+    position_text = _text(fields.get("首页差评位置"))
+    positions = _normalize_negative_positions(position_text)
     return {
         "record_id": record_id,
         "issue_key": _text(fields.get("问题键")) or record_id,
-        "source_type": "feedback" if "Feedback" in _text(fields.get("来源类型")) else "review",
+        "source_type": source_type,
         "source_id": _text(fields.get("来源ID")),
         "store_name": _text(fields.get("店铺名")),
         "site": site,
         "erp_name": _text(fields.get("ERP品名")),
         "asin": asin,
         "listing_url": _url(fields.get("ASIN链接")) or amazon_listing_url(site, asin),
+        "parent_asin": _text(fields.get("父体ASIN")),
+        "representative_asin": _text(fields.get("代表子体ASIN")),
+        "child_asins": _split_values(fields.get("在售子体ASIN")),
+        "listing_tags": _normalize_listing_tags(fields.get("Listing标签")),
+        "homepage_negative_positions": positions,
+        "min_negative_position": rating_int(fields.get("最靠前差评位置")) or _min_negative_position(positions),
+        "position_difficulty": _text(fields.get("挤走难度")) or _position_difficulty(_min_negative_position(positions)),
+        "cross_site_negative": _split_values(fields.get("跨站点同ERP差评")),
         "owner": _text(fields.get("负责人")) or "未分配",
         "severity": _text(fields.get("严重级别")) or "P2",
         "rating": rating_int(fields.get("星级")),
@@ -362,12 +589,22 @@ def _issue_md(issue: dict, include_status: bool = True) -> str:
     asin = issue.get("asin") or "-"
     url = issue.get("listing_url") or amazon_listing_url(issue.get("site", ""), asin)
     asin_md = f"[{asin}]({url})" if url and asin != "-" else asin
+    parent_asin = issue.get("parent_asin") or ""
+    child_asins = issue.get("child_asins") or []
+    positions = _position_summary(issue)
     lines = [
         f"**店铺名:** {issue.get('store_name') or '-'}  ·  **站点:** {issue.get('site') or '-'}",
         f"**ERP品名:** {issue.get('erp_name') or '-'}",
         f"**ASIN:** {asin_md}  ·  **负责人:** {issue.get('owner') or '-'}",
         f"**来源:** {issue.get('source_type') or '-'}  ·  **星级:** {issue.get('rating') or '-'}  ·  **级别:** {issue.get('severity') or '-'}",
     ]
+    if parent_asin:
+        lines.append(f"**父体ASIN:** {parent_asin}  ·  **代表子体:** {issue.get('representative_asin') or '-'}")
+    if child_asins:
+        lines.append(f"**旗下在售子体:** {_short('、'.join(child_asins), 260)}")
+    if positions:
+        lines.append(f"**首页差评位置:** {positions}")
+        lines.append(f"**挤走难度:** {issue.get('position_difficulty') or _position_difficulty(issue.get('min_negative_position'))}")
     if include_status:
         lines.append(f"**当前状态:** {issue.get('status') or STATE_NEW}")
     if issue.get("title"):
@@ -391,13 +628,17 @@ def _field_md(label: str, value: str) -> dict:
 
 def _issue_fact_fields(issue: dict, include_status: bool = False) -> list[dict]:
     url = issue.get("listing_url") or amazon_listing_url(issue.get("site", ""), issue.get("asin", ""))
-    asin = f"[{issue.get('asin')}]({url})" if url else issue.get("asin", "-")
+    asin_label = issue.get("parent_asin") or issue.get("asin", "-")
+    asin = f"[{asin_label}]({url})" if url else asin_label
+    tags = " / ".join(issue.get("listing_tags") or []) or "-"
+    child_count = len(issue.get("child_asins") or [])
     fields = [
         _field_md("店铺 / 站点", f"{issue.get('store_name') or '-'} / {issue.get('site') or '-'}"),
         _field_md("负责人", issue.get("owner") or "未分配"),
         _field_md("ERP品名", issue.get("erp_name") or "-"),
-        _field_md("ASIN", asin),
-        _field_md("来源 / 星级", f"{issue.get('source_type') or '-'} / {issue.get('rating') or '-'}星"),
+        _field_md("父体 / 打开前台", asin),
+        _field_md("标签 / 子体数", f"{tags} / {child_count or '-'}"),
+        _field_md("来源 / 星级", f"{_source_label(issue)} / {issue.get('rating') or '-'}星"),
         _field_md("级别 / 首次发现", f"{issue.get('severity') or 'P2'} / {_fmt_ms(issue.get('first_seen_ms'))}"),
     ]
     if include_status:
@@ -415,6 +656,8 @@ def _payload(action: str, issue: dict) -> dict:
         "source_type": issue.get("source_type"),
         "source_id": issue.get("source_id"),
         "asin": issue.get("asin"),
+        "parent_asin": issue.get("parent_asin"),
+        "representative_asin": issue.get("representative_asin"),
         "site": issue.get("site"),
         "store_name": issue.get("store_name"),
         "owner": issue.get("owner"),
@@ -426,7 +669,7 @@ def build_issue_card(issue: dict) -> dict:
     level = issue.get("severity", "P1")
     priority_emoji = "🔴" if level == "P0" else "🟠"
     template = "red" if level == "P0" else "orange"
-    source_label = "Feedback" if issue.get("source_type") == "feedback" else "差评"
+    source_label = _source_label(issue)
     title = f"{priority_emoji} [AMZ·{level}] 新增{source_label}待处理 · {issue.get('erp_name') or issue.get('asin')}"
     rid = issue.get("record_id") or re.sub(r"[^A-Za-z0-9]", "_", issue.get("issue_key", "issue"))[:40]
     url = issue.get("listing_url") or amazon_listing_url(issue.get("site", ""), issue.get("asin", ""))
@@ -435,14 +678,35 @@ def build_issue_card(issue: dict) -> dict:
         summary_lines.append(f"**标题:** {issue['title']}")
     if issue.get("summary"):
         summary_lines.append(f"**摘要:** {_short(issue['summary'], 260)}")
+    child_asins = issue.get("child_asins") or []
+    position_summary = _position_summary(issue, limit=8)
+    cross_site = issue.get("cross_site_negative") or []
+    parent_block = []
+    if issue.get("parent_asin"):
+        parent_block.append(f"**父体ASIN:** `{issue.get('parent_asin')}`")
+    if issue.get("representative_asin"):
+        parent_block.append(f"**代表子体:** `{issue.get('representative_asin')}`")
+    if child_asins:
+        parent_block.append(f"**旗下在售子体:** {_short('、'.join(child_asins), 360)}")
+    if issue.get("listing_tags"):
+        parent_block.append(f"**Listing标签:** {' / '.join(issue.get('listing_tags') or [])}")
+    position_block = []
+    if position_summary:
+        position_block.append(f"**首页差评位置:** {position_summary}")
+    if issue.get("min_negative_position"):
+        position_block.append(f"**最靠前位置:** #{issue.get('min_negative_position')}  ·  **挤走难度:** {issue.get('position_difficulty') or _position_difficulty(issue.get('min_negative_position'))}")
+    if cross_site:
+        position_block.append("**跨站点同ERP差评:**\n" + "\n".join(f"- {x}" for x in cross_site[:6]))
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": template, "title": {"tag": "plain_text", "content": title}},
         "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"🚨 **处理要求**\n该{source_label}已进入审计闭环：提交处理不等于关闭，系统会在 T+7 自动复检 Listing 首页。"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"🚨 **处理要求**\n该{source_label}已进入审计闭环：本卡按“站点父体”追踪，同父体下在售子体不重复发卡；提交处理不等于关闭，系统会在 T+7 自动复检 Listing 首页。"}},
             {"tag": "div", "fields": _issue_fact_fields(issue)},
+            *([{"tag": "div", "text": {"tag": "lark_md", "content": "🧬 **父体 / 子体范围**\n" + "\n".join(parent_block)}}] if parent_block else []),
             *([{"tag": "action", "actions": [_url_button("打开Listing前台", url, "primary")]}] if url else []),
             {"tag": "hr"},
+            *([{"tag": "div", "text": {"tag": "lark_md", "content": "📍 **首页位置与难度**\n" + "\n".join(position_block)}}] if position_block else []),
             {"tag": "div", "text": {"tag": "lark_md", "content": "📝 **差评 / Feedback 摘要**\n" + ("\n".join(summary_lines) if summary_lines else "-")}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": "✅ **主动作：提交处理结果（可多选）**\n下拉框不是四选一。运营可以同时选择多个已执行动作，例如“已开Case + 已完成Listing整改”。点确认后原卡会变灰，并进入复检或观察流程。"}},
@@ -488,10 +752,13 @@ def build_daily_digest_card(owner: str, issues: list[dict], today_label: str = "
     ]
     for idx, issue in enumerate(issues[:8], 1):
         url = issue.get("listing_url") or amazon_listing_url(issue.get("site", ""), issue.get("asin", ""))
-        asin = f"[{issue.get('asin')}]({url})" if url else issue.get("asin", "-")
+        asin_label = issue.get("parent_asin") or issue.get("asin", "-")
+        asin = f"[{asin_label}]({url})" if url else asin_label
+        position = f" · 位置: {_position_summary(issue, limit=3)}" if _position_summary(issue, limit=3) else ""
+        tags = f" · 标签: {'/'.join(issue.get('listing_tags') or [])}" if issue.get("listing_tags") else ""
         lines.append(
             f"**{idx}. {issue.get('erp_name') or '-'}**\n"
-            f"店铺/站点: {issue.get('store_name') or '-'} / {issue.get('site') or '-'}  ·  ASIN: {asin}  ·  星级: {issue.get('rating') or '-'}星"
+            f"店铺/站点: {issue.get('store_name') or '-'} / {issue.get('site') or '-'}  ·  父体: {asin}  ·  星级: {issue.get('rating') or '-'}星{position}{tags}"
         )
     if len(issues) > 8:
         lines.append(f"... 另有 {len(issues) - 8} 条，请打开日看板处理。")
@@ -519,12 +786,15 @@ def build_recheck_failed_card(owner: str, issues: list[dict], day14: bool = Fals
         first_days = _days_since(issue.get("first_seen_ms"))
         handled_days = _days_since(issue.get("handled_at_ms"))
         url = issue.get("listing_url") or amazon_listing_url(issue.get("site", ""), issue.get("asin", ""))
-        asin = f"[{issue.get('asin')}]({url})" if url else issue.get("asin", "-")
+        asin_label = issue.get("parent_asin") or issue.get("asin", "-")
+        asin = f"[{asin_label}]({url})" if url else asin_label
         actions = "、".join(issue.get("handled_actions") or []) or "-"
+        position = _position_summary(issue, limit=3) or "-"
         lines.append(
             f"⚠️ **{idx}. {issue.get('erp_name') or '-'}**\n"
-            f"店铺/站点: {issue.get('store_name') or '-'} / {issue.get('site') or '-'}  ·  ASIN: {asin}\n"
+            f"店铺/站点: {issue.get('store_name') or '-'} / {issue.get('site') or '-'}  ·  父体: {asin}\n"
             f"星级: {issue.get('rating') or '-'}星  ·  首次发现后 {first_days} 天  ·  标记处理后 {handled_days} 天\n"
+            f"首页差评位置: {position}\n"
             f"当时处理方式: {actions}"
         )
     return {
@@ -605,19 +875,11 @@ async def _list_audit_records(statuses: list[str] | None = None, limit: int = 20
 
 
 async def _send_union(union_id: str, card: dict) -> str:
-    return await cs_dispatch._send_card(union_id, card)
+    return await amz_assistant.send_card_to_union(union_id, card)
 
 
 async def _send_group(chat_id: str, card: dict) -> str:
-    tok = await cs_dispatch._token()
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
-            headers={"Authorization": f"Bearer {tok}"},
-            json={"receive_id": chat_id, "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)},
-        )
-        data = resp.json()
-    return data.get("data", {}).get("message_id", "") if data.get("code") == 0 else ""
+    return await amz_assistant.send_card_to_chat(chat_id, card)
 
 
 async def _owner_union(owner: str) -> str:
@@ -955,7 +1217,7 @@ async def handle_callback(event: dict) -> dict:
 
     if action == "amz_issue_submit_actions":
         if current_status in (STATE_SUBMITTED, STATE_RECHECK_PASS, STATE_OBSERVE, STATE_ESCALATED):
-            await cs_dispatch._update_card(msg_id, build_processed_card(issue, "✅ [AMZ·已处理]", "该差评已提交过处理结果，重复点击已拦截。"))
+            await amz_assistant.update_card(msg_id, build_processed_card(issue, "✅ [AMZ·已处理]", "该差评已提交过处理结果，重复点击已拦截。"))
             return {"toast": {"type": "success", "content": "该差评已处理过，无需重复提交"}}
         actions = _list_values(_form_selection(form, issue["record_id"], "actions"))
         note = _text(_form_selection(form, issue["record_id"], "note"))
@@ -978,7 +1240,7 @@ async def handle_callback(event: dict) -> dict:
                 "handled_note": note,
                 "handled_at_ms": now_ms(),
             })
-            await cs_dispatch._update_card(
+            await amz_assistant.update_card(
                 msg_id,
                 build_processed_card(
                     issue,
@@ -993,33 +1255,33 @@ async def handle_callback(event: dict) -> dict:
         if _audit_configured() and issue.get("record_id", "").startswith("rec"):
             await _update_audit(issue["record_id"], update)
         issue.update({"status": STATE_SUBMITTED, "handled_actions": actions, "handled_note": note, "handled_at_ms": now_ms(), "recheck_due_ms": due})
-        await cs_dispatch._update_card(msg_id, build_processed_card(issue, "✅ [AMZ·处理已提交]", f"已进入 T+7 复检：{'、'.join(actions)}"))
+        await amz_assistant.update_card(msg_id, build_processed_card(issue, "✅ [AMZ·处理已提交]", f"已进入 T+7 复检：{'、'.join(actions)}"))
         return {"toast": {"type": "success", "content": "已提交处理结果，7天后系统复检首页"}}
 
     if action == "amz_issue_create_cs_ticket":
         if issue.get("cs_ticket_id"):
-            await cs_dispatch._update_card(msg_id, build_processed_card(issue, "✅ [AMZ·客服工单已存在]", f"客服工单已存在：{issue['cs_ticket_id']}"))
+            await amz_assistant.update_card(msg_id, build_processed_card(issue, "✅ [AMZ·客服工单已存在]", f"客服工单已存在：{issue['cs_ticket_id']}"))
             return {"toast": {"type": "success", "content": "客服工单已存在"}}
         rid = await create_cs_ticket(issue, actor=actor)
         if _audit_configured() and issue.get("record_id", "").startswith("rec"):
             await _update_audit(issue["record_id"], {"客服工单ID": rid, "最近提醒时间": now_ms()})
         issue["cs_ticket_id"] = rid
-        await cs_dispatch._update_card(msg_id, build_processed_card(issue, "✅ [AMZ·已录入客服库]", f"已创建客服工单：{rid}"))
+        await amz_assistant.update_card(msg_id, build_processed_card(issue, "✅ [AMZ·已录入客服库]", f"已创建客服工单：{rid}"))
         return {"toast": {"type": "success", "content": "已录入客服库"}}
 
     if action == "amz_issue_request_observation":
         if _audit_configured() and issue.get("record_id", "").startswith("rec"):
             await _update_audit(issue["record_id"], {"状态": STATE_OBSERVE, "处理备注": "卡片申请观察", "处理时间": now_ms(), "处理人": actor})
         issue["status"] = STATE_OBSERVE
-        await cs_dispatch._update_card(msg_id, build_processed_card(issue, "🟡 [AMZ·已申请观察]", "已标记为客观无法移除/观察中；后续进入审计指标而非重复私聊。", "yellow"))
+        await amz_assistant.update_card(msg_id, build_processed_card(issue, "🟡 [AMZ·已申请观察]", "已标记为客观无法移除/观察中；后续进入审计指标而非重复私聊。", "yellow"))
         return {"toast": {"type": "success", "content": "已申请观察"}}
 
     if action == "amz_issue_escalate":
         if _audit_configured() and issue.get("record_id", "").startswith("rec"):
             await _update_audit(issue["record_id"], {"状态": STATE_ESCALATED, "处理时间": now_ms(), "处理人": actor})
         issue["status"] = STATE_ESCALATED
-        await cs_dispatch._notify_frankie(f"🔴 Amazon差评红线升级\n{issue.get('owner')} / {issue.get('site')} / {issue.get('asin')}\n{issue.get('summary')}")
-        await cs_dispatch._update_card(msg_id, build_processed_card(issue, "🔴 [AMZ·已升级红线]", "已通知 Frankie/上级介入；请不要在这张卡重复点击。", "red"))
+        await amz_assistant.notify_frankie(f"🔴 Amazon差评红线升级\n{issue.get('owner')} / {issue.get('site')} / {issue.get('asin')}\n{issue.get('summary')}")
+        await amz_assistant.update_card(msg_id, build_processed_card(issue, "🔴 [AMZ·已升级红线]", "已通知 Frankie/上级介入；请不要在这张卡重复点击。", "red"))
         return {"toast": {"type": "success", "content": "已升级红线"}}
 
     return {"toast": {"type": "error", "content": "未知 Amazon 差评动作"}}

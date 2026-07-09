@@ -13,7 +13,7 @@ from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
 from . import cs_resources  # 客服官方资源真相源: 固件/手册/视频 URL 解析与发送闸
-from . import amz_review_audit  # 亚马逊差评/Feedback 审计: 提醒卡 + T+7 复检公开升级
+from . import amz_assistant, amz_review_audit  # 亚马逊差评/Feedback 审计: 提醒卡 + T+7 复检公开升级
 from . import b2b_mail_reminder  # B2B 外贸邮箱跟进提醒(日 10:00, 外贸助手回执卡)
 from . import b2b_assistant  # 外贸助手: 客户指令 + LinkedIn 回执
 from . import b2b_linkedin_daily_card  # B2B LinkedIn 每日开发卡派发
@@ -913,6 +913,27 @@ async def cs_callback(request: Request, authorization: str = Header(default=""))
         return await cs_dispatch.handle_callback(event)
     except Exception as e:
         return {"toast": {"type": "error", "content": "处理失败，请稍后重试"}}
+
+
+@app.get("/amz/feishu/callback")
+async def amz_feishu_callback_health():
+    """Public health probe for the Amazon assistant Feishu callback URL."""
+    return {"ok": True, "service": "amz-feishu-callback", "configured": amz_assistant.is_configured()}
+
+
+@app.post("/amz/feishu/callback")
+async def amz_feishu_callback(request: Request):
+    """Direct Feishu callback endpoint for 亚马逊助手.
+
+    Feishu URL verification and card.action.trigger do not carry our internal
+    Bearer token, so this endpoint validates the Feishu verification token
+    instead of using _check_auth().
+    """
+    try:
+        payload = await request.json()
+        return await amz_assistant.handle_feishu_callback(payload)
+    except Exception:
+        return {"toast": {"type": "error", "content": "AMZ卡片处理失败，请稍后重试"}}
 
 
 @app.post("/kol-discount/selftest")

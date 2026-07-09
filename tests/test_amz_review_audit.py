@@ -2,6 +2,7 @@ import asyncio
 import json
 import unittest
 
+from app import amz_assistant
 from app import amz_review_audit as audit
 
 
@@ -68,6 +69,80 @@ class AmzReviewAuditPureTests(unittest.TestCase):
         self.assertIn("🚨 **处理要求**", rendered)
         self.assertIn("打开Listing前台", rendered)
 
+    def test_homepage_group_uses_parent_issue_key_and_exports_position_fields(self):
+        issue = audit.normalize_homepage_group_issue({
+            "domain": "www.amazon.co.uk",
+            "country": "英国",
+            "store": "FunlabDirect-UK",
+            "owner": "林明坚",
+            "parent_asin": "B0PARENT01",
+            "erp_name": "FF Controller",
+            "tags": ["ERP", "战略"],
+            "active_children": ["B0CHILD001(FD-001-UK)", "B0CHILD002(FD-002-UK)"],
+            "representative_asin": "B0CHILD002",
+            "parent_url": "https://www.amazon.co.uk/dp/B0CHILD002",
+            "top8_negative_cards": 2,
+            "min_negative_position": 2,
+            "difficulty": "难：第1-2位，需要较多好评才能挤走",
+            "positions": [
+                {"asin": "B0CHILD002", "position": 2, "star": 1, "review_id": "rv-bad", "title": "Broken on arrival"},
+                {"asin": "B0CHILD001", "position": 6, "star": 2, "review_id": "rv-low", "title": "Disconnects"},
+            ],
+            "cross_site_negative": ["德国 www.amazon.de FunlabDirect-DE B0CROSS001 pos5 1条"],
+        })
+
+        self.assertEqual("homepage", issue["source_type"])
+        self.assertEqual("B0PARENT01", issue["asin"])
+        self.assertEqual("B0PARENT01", issue["parent_asin"])
+        self.assertEqual("B0CHILD002", issue["representative_asin"])
+        self.assertEqual("AMZ_HOMEPAGE:英国:B0PARENT01", issue["issue_key"])
+        self.assertEqual(2, issue["min_negative_position"])
+        self.assertEqual(["ERP", "战略"], issue["listing_tags"])
+
+        fields = audit.issue_to_fields(issue)
+        self.assertEqual("Homepage", fields["来源类型"])
+        self.assertEqual("B0PARENT01", fields["父体ASIN"])
+        self.assertEqual("B0CHILD002", fields["代表子体ASIN"])
+        self.assertIn("B0CHILD001", fields["在售子体ASIN"])
+        self.assertEqual(["ERP", "战略"], fields["Listing标签"])
+        self.assertIn("#2", fields["首页差评位置"])
+        self.assertEqual(2, fields["最靠前差评位置"])
+        self.assertIn("第1-2位", fields["挤走难度"])
+        self.assertIn("www.amazon.de", fields["跨站点同ERP差评"])
+
+    def test_homepage_parent_card_renders_children_positions_and_cross_site_context(self):
+        issue = audit.normalize_homepage_group_issue({
+            "domain": "www.amazon.ca",
+            "country": "加拿大",
+            "store": "BHANES-CA",
+            "owner": "陈翔宇",
+            "parent_asin": "B0PARENTCA",
+            "erp_name": "Switch 2 Dock",
+            "tags": ["ERP", "主力"],
+            "active_children": ["B0CA000001(BS-001-CA)", "B0CA000002(BS-002-CA)"],
+            "representative_asin": "B0CA000001",
+            "parent_url": "https://www.amazon.ca/dp/B0CA000001",
+            "min_negative_position": 1,
+            "positions": [{"asin": "B0CA000001", "position": 1, "star": 1, "review_id": "rv-ca", "title": "Stopped charging"}],
+            "cross_site_negative": ["美国 www.amazon.com BHANES-US B0US000001 pos4 1条"],
+        })
+        issue["record_id"] = "rec_homepage_parent"
+
+        issue_card = json.dumps(audit.build_issue_card(issue), ensure_ascii=False)
+        daily_card = json.dumps(audit.build_daily_digest_card("陈翔宇", [issue]), ensure_ascii=False)
+        failed_card = json.dumps(audit.build_recheck_failed_card("陈翔宇", [issue]), ensure_ascii=False)
+
+        self.assertIn("本卡按“站点父体”追踪", issue_card)
+        self.assertIn("父体 / 子体范围", issue_card)
+        self.assertIn("B0CA000002", issue_card)
+        self.assertIn("首页位置与难度", issue_card)
+        self.assertIn("#1", issue_card)
+        self.assertIn("跨站点同ERP差评", issue_card)
+        self.assertIn("www.amazon.com", issue_card)
+        self.assertIn("父体:", daily_card)
+        self.assertIn("位置:", daily_card)
+        self.assertIn("首页差评位置", failed_card)
+
     def test_recheck_failed_and_success_cards_have_clear_visual_tone(self):
         issue = audit.normalize_issue({
             "source_type": "review",
@@ -104,6 +179,50 @@ class AmzReviewAuditPureTests(unittest.TestCase):
 
 
 class AmzReviewAuditAsyncTests(unittest.TestCase):
+    def test_amz_assistant_url_verification_returns_challenge(self):
+        original_token = amz_assistant.VERIFICATION_TOKEN
+        try:
+            amz_assistant.VERIFICATION_TOKEN = "verify-token"
+            result = asyncio.run(amz_assistant.handle_feishu_callback({
+                "type": "url_verification",
+                "token": "verify-token",
+                "challenge": "challenge-ok",
+            }))
+        finally:
+            amz_assistant.VERIFICATION_TOKEN = original_token
+
+        self.assertEqual({"challenge": "challenge-ok"}, result)
+
+    def test_amz_assistant_card_event_dispatches_to_amz_handler(self):
+        original_token = amz_assistant.VERIFICATION_TOKEN
+        original_handler = audit.handle_callback
+        calls = []
+
+        async def fake_handle(event):
+            calls.append(event)
+            return {"toast": {"type": "success", "content": "ok"}}
+
+        try:
+            amz_assistant.VERIFICATION_TOKEN = "verify-token"
+            audit.handle_callback = fake_handle
+            result = asyncio.run(amz_assistant.handle_feishu_callback({
+                "schema": "2.0",
+                "header": {"event_type": "card.action.trigger", "token": "verify-token"},
+                "event": {
+                    "operator": {"union_id": "on_operator"},
+                    "context": {"open_message_id": "om_card"},
+                    "action": {"value": {"action": "amz_issue_submit_actions", "issue_id": "rec_1"}},
+                },
+            }))
+        finally:
+            amz_assistant.VERIFICATION_TOKEN = original_token
+            audit.handle_callback = original_handler
+
+        self.assertEqual("success", result["toast"]["type"])
+        self.assertEqual(1, len(calls))
+        self.assertEqual("om_card", calls[0]["context"]["open_message_id"])
+        self.assertEqual("card.action.trigger", calls[0]["_header"]["event_type"])
+
     def test_recheck_sample_splits_failed_and_passed(self):
         result = asyncio.run(audit.recheck_due(mode="dry_run", sample=True))
         self.assertEqual(2, result["due"])
