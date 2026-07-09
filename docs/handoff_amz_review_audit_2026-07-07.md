@@ -226,6 +226,11 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
   - New Frankie-only test card:
     - message `om_x100b6bccdadd40a8c44c40f1b0ffbff`
     - title `🟢 [AMZ·P3] v1回调兼容测试卡 · 点这张`
+- Frankie real-click validation:
+  - Feishu client no longer showed `code: 200341`.
+  - Toast displayed `已收到处理结果，正在写入审计表并更新原卡`.
+  - Original card patched to green processed state.
+  - API readback for message `om_x100b6bccdadd40a8c44c40f1b0ffbff` confirmed `msg_type=interactive`, `sender_type=app`, `updated=true`.
 
 ### 2026-07-08 recovery audit
 
