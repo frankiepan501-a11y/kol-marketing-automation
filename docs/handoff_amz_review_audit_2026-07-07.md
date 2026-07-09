@@ -186,6 +186,28 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
 - Note: the endpoint was invoked twice during smoke because the first result read used the wrong top-level response shape. Frankie may see two duplicate sample-card sets; use the latest timestamped set above for callback testing.
 - Remaining callback smoke: Frankie should click one latest card and submit actions; then verify original message `updated=true`, audit state becomes `T+7待复检` or `客观无法移除，观察中`, and original card is patched to processed state.
 
+### 2026-07-09 callback 200341 and fake-link fix
+
+- Problem observed by Frankie:
+  - Sample card `B0TEST001/B0TEST002` opened Amazon 404 pages because those ASINs were fake smoke-test values.
+  - First button click could show Feishu client error `code: 200341`, while the processed card still appeared afterwards.
+- Root cause:
+  - The sample card generated front-end URLs for any non-empty ASIN, including invalid smoke-test ASINs.
+  - AMZ callback waited for Bitable writes and original-card PATCH before returning Feishu toast. This can exceed Feishu card callback ACK timing, so the client reports `200341` even when the backend side effect finishes.
+- Fix:
+  - `amazon_listing_url()` now returns an empty URL unless ASIN matches a 10-character alphanumeric ASIN shape. Fake sample ASINs no longer render clickable Amazon front-end links.
+  - AMZ `handle_callback()` now validates only cheap inputs synchronously, returns toast immediately, and runs Bitable/PATCH work in a background task.
+  - Button payload now carries ERP name, rating, title, summary, and listing URL as fallback context if the audit table lookup fails.
+- Verification:
+  - `.venv\Scripts\python.exe -m unittest tests.test_amz_review_audit` passed 16 tests.
+  - `.venv\Scripts\python.exe -m py_compile app\amz_review_audit.py app\amz_assistant.py app\main.py` passed.
+  - Zeabur deployment `6a4f8616019866a087e65518` is `RUNNING` on commit `0a0cb1a3`.
+  - Online simulated card callback returned in `0.88s` with success toast.
+  - New Frankie-only test card sent by Amazon assistant:
+    - message `om_x100b6bcc2697c46cc31ed4b6f2617e4`
+    - `msg_type=interactive`, `sender_type=app`, `updated=false`
+    - message content does not contain `amazon.com/dp/TEST-ASIN`.
+
 ### 2026-07-08 recovery audit
 
 - Previous Zeabur blocker is resolved. Server events show the Tokyo server rebooted and completed a spec update; `status.isOnline=true`, `vmStatus=RUNNING`, `provisioningStatus=READY`.
