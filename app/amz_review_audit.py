@@ -665,6 +665,11 @@ def _payload(action: str, issue: dict) -> dict:
         "representative_asin": issue.get("representative_asin"),
         "site": issue.get("site"),
         "store_name": issue.get("store_name"),
+        "erp_name": issue.get("erp_name"),
+        "rating": issue.get("rating"),
+        "title": issue.get("title"),
+        "summary": issue.get("summary"),
+        "listing_url": issue.get("listing_url"),
         "owner": issue.get("owner"),
         "batch_id": issue.get("batch_id") or f"amzrev-{int(time.time())}",
     }
