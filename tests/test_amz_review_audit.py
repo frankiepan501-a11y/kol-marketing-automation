@@ -227,6 +227,36 @@ class AmzReviewAuditAsyncTests(unittest.TestCase):
         self.assertEqual("om_card", calls[0]["context"]["open_message_id"])
         self.assertEqual("card.action.trigger", calls[0]["_header"]["event_type"])
 
+    def test_amz_assistant_legacy_card_event_dispatches_to_amz_handler(self):
+        original_token = amz_assistant.VERIFICATION_TOKEN
+        original_handler = audit.handle_callback
+        calls = []
+
+        async def fake_handle(event):
+            calls.append(event)
+            return {"toast": {"type": "success", "content": "ok"}}
+
+        try:
+            amz_assistant.VERIFICATION_TOKEN = "verify-token"
+            audit.handle_callback = fake_handle
+            result = asyncio.run(amz_assistant.handle_feishu_callback({
+                "schema": "2.0",
+                "header": {"event_type": "card.action.trigger_v1", "token": "verify-token"},
+                "event": {
+                    "operator": {"union_id": "on_operator"},
+                    "context": {"open_message_id": "om_legacy_card"},
+                    "action": {"value": {"action": "amz_issue_submit_actions", "issue_id": "rec_legacy"}},
+                },
+            }))
+        finally:
+            amz_assistant.VERIFICATION_TOKEN = original_token
+            audit.handle_callback = original_handler
+
+        self.assertEqual("success", result["toast"]["type"])
+        self.assertEqual(1, len(calls))
+        self.assertEqual("om_legacy_card", calls[0]["context"]["open_message_id"])
+        self.assertEqual("card.action.trigger_v1", calls[0]["_header"]["event_type"])
+
     def test_recheck_sample_splits_failed_and_passed(self):
         result = asyncio.run(audit.recheck_due(mode="dry_run", sample=True))
         self.assertEqual(2, result["due"])

@@ -139,6 +139,24 @@ def _card_event(payload: dict) -> dict:
     return payload
 
 
+def _event_log_context(payload: dict) -> dict:
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else payload
+    action = (event.get("action") or {}) if isinstance(event, dict) else {}
+    value = action.get("value") if isinstance(action, dict) else {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = {}
+    context = (event.get("context") or {}) if isinstance(event, dict) else {}
+    return {
+        "event_type": _event_type(payload),
+        "action": value.get("action") or value.get("act") or "",
+        "issue_id": value.get("issue_id") or value.get("issue_key") or "",
+        "message_id": context.get("open_message_id") or context.get("message_id") or event.get("message_id") or event.get("open_message_id") or "",
+    }
+
+
 async def handle_feishu_callback(payload: dict[str, Any]) -> dict:
     if payload.get("encrypt"):
         return {"code": 400, "msg": "encrypted callbacks are not enabled for this endpoint yet"}
@@ -149,8 +167,9 @@ async def handle_feishu_callback(payload: dict[str, Any]) -> dict:
     if not _token_ok(payload):
         return {"toast": {"type": "error", "content": "无效的飞书回调 token"}}
     event_type = _event_type(payload)
-    if event_type and event_type != "card.action.trigger":
+    if event_type and event_type not in ("card.action.trigger", "card.action.trigger_v1"):
         return {"code": 0, "msg": "ignored"}
+    print(f"[amz_assistant.callback] {json.dumps(_event_log_context(payload), ensure_ascii=False)}")
     from . import amz_review_audit
 
     return await amz_review_audit.handle_callback(_card_event(payload))
