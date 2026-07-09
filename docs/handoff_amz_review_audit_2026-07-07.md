@@ -173,6 +173,19 @@ LINGXING_PROXY_TOKEN=<existing Zeabur env>
   - Keep Feishu encryption disabled for now; this endpoint currently does not decrypt `encrypt` payloads.
   - `FEISHU_AMZ_ASSISTANT_VERIFICATION_TOKEN` is not set yet because Frankie has not provided the token. After the console shows/provides the token, set that env and redeploy to enable strict token validation.
 
+### 2026-07-09 Amazon assistant real card smoke
+
+- Triggered online sample delta run with `kind=delta&mode=commit&notify=true&sample=true` while `AMZ_REVIEW_AUDIT_OBSERVE=1`, so cards were sent to Frankie only.
+- Latest sample audit records:
+  - `recvoS9OywRnL8` / `FF05A Luminex Controller` / message `om_x100b6bc3bd2bc8a0c29a2aeeda9a1e1`.
+  - `recvoS9Q5S43EQ` / `PK Docking Station` / message `om_x100b6bc3baf6f4a8c2c9030755155f1`.
+- Verified both latest messages via the Amazon assistant app token:
+  - `msg_type=interactive`
+  - `sender_type=app`
+  - `updated=false` before button processing
+- Note: the endpoint was invoked twice during smoke because the first result read used the wrong top-level response shape. Frankie may see two duplicate sample-card sets; use the latest timestamped set above for callback testing.
+- Remaining callback smoke: Frankie should click one latest card and submit actions; then verify original message `updated=true`, audit state becomes `T+7待复检` or `客观无法移除，观察中`, and original card is patched to processed state.
+
 ### 2026-07-08 recovery audit
 
 - Previous Zeabur blocker is resolved. Server events show the Tokyo server rebooted and completed a spec update; `status.isOnline=true`, `vmStatus=RUNNING`, `provisioningStatus=READY`.
