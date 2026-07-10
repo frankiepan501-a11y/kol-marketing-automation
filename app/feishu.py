@@ -362,20 +362,30 @@ async def send_card_via_b2b_assistant(receive_type: str, receive_id: str, card: 
     return (resp.get("data") or {}).get("message_id") or ""
 
 
-async def update_card_message(message_id: str, new_card: dict) -> bool:
-    """PATCH 互动卡片消息 (2026-05-17 A5 用, 标"已审" 重渲染卡片)
-    成功返 True, 失败返 False (静默 print, 不阻塞主流程)
-    """
+async def update_card_message_with_app(message_id: str, new_card: dict, *, which: str) -> bool:
+    """PATCH an interactive card with the same Feishu app that sent it."""
     import json
     if not message_id:
         return False
     try:
         body = {"content": json.dumps(new_card, ensure_ascii=False)}
-        await api("PATCH", f"/im/v1/messages/{message_id}", body, which="notify")
+        await api("PATCH", f"/im/v1/messages/{message_id}", body, which=which)
         return True
     except Exception as e:
-        print(f"[feishu.update_card_message] {message_id} fail: {e}")
+        print(f"[feishu.update_card_message_with_app] {which} {message_id} fail: {e}")
         return False
+
+
+async def update_card_message(message_id: str, new_card: dict) -> bool:
+    """PATCH 互动卡片消息 (2026-05-17 A5 用, 标"已审" 重渲染卡片)
+    成功返 True, 失败返 False (静默 print, 不阻塞主流程)
+    """
+    return await update_card_message_with_app(message_id, new_card, which="notify")
+
+
+async def update_b2b_assistant_card(message_id: str, new_card: dict) -> bool:
+    """PATCH an 外贸助手 card. Feishu card callbacks must use the sender app."""
+    return await update_card_message_with_app(message_id, new_card, which="b2b_assistant")
 
 
 async def mark_card_resolved(draft_rid: str, result_label: str, table_id: str = None):

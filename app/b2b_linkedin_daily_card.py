@@ -91,6 +91,19 @@ GRADE_ORDER = {
     "C": 2,
 }
 
+INITIAL_DEV_STATUSES = {"", "待开发"}
+INITIAL_REACH_STATUSES = {"", "待触达"}
+TERMINAL_DEV_STATUSES = {"联系人已离职", "不合适", "已回复"}
+
+ACTION_META = {
+    "linkedin_connected": ("✅ 已加人", "primary"),
+    "linkedin_message_sent": ("💬 已发私信", "default"),
+    "linkedin_replied": ("🎉 已回复", "default"),
+    "linkedin_to_email": ("📧 转Email", "default"),
+    "linkedin_contact_left": ("👤 联系人已离职", "default"),
+    "linkedin_not_fit": ("⛔ 不合适", "danger"),
+}
+
 
 def _text(value) -> str:
     return str(feishu.ext(value) or "").strip()
@@ -121,7 +134,16 @@ def _record_url(record_id: str) -> str:
     return f"https://u1wpma3xuhr.feishu.cn/base/{B2B_APP_TOKEN}?table={B2B_LINKEDIN_TABLE}&view={B2B_LINKEDIN_VIEW}&record={record_id}"
 
 
-def _card_action(record_id: str, action: str, company: str) -> dict:
+def _card_action(
+    record_id: str,
+    action: str,
+    company: str,
+    *,
+    card_record_ids: list[str] | None = None,
+    card_index: int = 0,
+    card_total: int = 0,
+    owner_name: str = "",
+) -> dict:
     return {
         "route": "linkedin_lead_receipt",
         "action": action,
@@ -131,6 +153,10 @@ def _card_action(record_id: str, action: str, company: str) -> dict:
         "source": "linkedin_daily_card",
         "app_token": B2B_APP_TOKEN,
         "table_id": B2B_LINKEDIN_TABLE,
+        "card_record_ids": card_record_ids or [record_id],
+        "card_index": card_index,
+        "card_total": card_total,
+        "owner_name": owner_name,
     }
 
 
@@ -370,15 +396,90 @@ def _button(text: str, url: str | None = None, value: dict | None = None, style:
     return btn
 
 
-def _row_elements(row: dict, index: int, total: int) -> list[dict]:
-    record_id = row["record_id"]
-    company = row["company"]
+def _row_operated(row: dict) -> bool:
+    return row.get("dev_status", "") not in INITIAL_DEV_STATUSES or row.get("reach_status", "") not in INITIAL_REACH_STATUSES
+
+
+def _row_terminal(row: dict) -> bool:
+    return row.get("dev_status", "") in TERMINAL_DEV_STATUSES
+
+
+def _last_note_line(row: dict) -> str:
+    lines = [line.strip() for line in (row.get("note") or "").splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+def _row_status_element(row: dict) -> dict | None:
+    if not _row_operated(row):
+        return None
+    status = row.get("dev_status") or "-"
+    reach = row.get("reach_status") or "-"
+    next_action = row.get("next_action") or "等待业务员判断下一步。"
+    note = _clip(_last_note_line(row), 180)
+    content = f"✅ **操作状态**: {status} / {reach}\n**下一步**: {next_action}"
+    if note:
+        content += f"\n**最近回执**: {note}"
+    if _row_terminal(row):
+        content += "\n_此线索当前动作已关闭，无需在本卡重复点击。_"
+    return {"tag": "div", "text": {"tag": "lark_md", "content": content}}
+
+
+def _receipt_actions_for(row: dict) -> list[str]:
+    dev_status = row.get("dev_status") or ""
+    if _row_terminal(row):
+        return []
+    if dev_status == "已加人":
+        return ["linkedin_message_sent", "linkedin_replied", "linkedin_contact_left", "linkedin_not_fit"]
+    if dev_status == "已发私信":
+        return ["linkedin_replied", "linkedin_to_email", "linkedin_contact_left", "linkedin_not_fit"]
+    if dev_status == "已转Email待发送":
+        return ["linkedin_replied", "linkedin_contact_left", "linkedin_not_fit"]
+    return [
+        "linkedin_connected",
+        "linkedin_message_sent",
+        "linkedin_replied",
+        "linkedin_to_email",
+        "linkedin_contact_left",
+        "linkedin_not_fit",
+    ]
+
+
+def _receipt_action_rows(
+    row: dict,
+    index: int,
+    total: int,
+    *,
+    card_record_ids: list[str],
+    owner_name: str,
+) -> list[dict]:
+    buttons = []
+    for action in _receipt_actions_for(row):
+        text, style = ACTION_META[action]
+        buttons.append(
+            _button(
+                text,
+                value=_card_action(
+                    row["record_id"],
+                    action,
+                    row["company"],
+                    card_record_ids=card_record_ids,
+                    card_index=index,
+                    card_total=total,
+                    owner_name=owner_name,
+                ),
+                style=style,
+            )
+        )
+    return [{"tag": "action", "actions": buttons[i:i + 3]} for i in range(0, len(buttons), 3)]
+
+
+def _row_elements(row: dict, index: int, total: int, *, card_record_ids: list[str], owner_name: str) -> list[dict]:
     contact_line = row["contact"] or "待补联系人"
     if row["position"]:
         contact_line += f" / {row['position']}"
     facts = [
         _field("任务", f"{index}/{total}"),
-        _field("客户", company),
+        _field("客户", row["company"]),
         _field("联系人", contact_line),
         _field("国家/类型", " / ".join(x for x in [row["country"], row["company_type"]] if x)),
         _field("企业页", "已补齐" if row["linkedin_company"] else "待人工确认"),
@@ -396,65 +497,73 @@ def _row_elements(row: dict, index: int, total: int) -> list[dict]:
         link_actions.append(_button("🌐 打开官网", url=row["website"]))
     link_actions.append(_button("📋 打开线索记录", url=row["url"]))
 
-    receipt_1 = [
-        _button("✅ 已加人", value=_card_action(record_id, "linkedin_connected", company), style="primary"),
-        _button("💬 已发私信", value=_card_action(record_id, "linkedin_message_sent", company)),
-        _button("🎉 已回复", value=_card_action(record_id, "linkedin_replied", company)),
-    ]
-    receipt_2 = [
-        _button("📧 转Email", value=_card_action(record_id, "linkedin_to_email", company)),
-        _button("👤 联系人已离职", value=_card_action(record_id, "linkedin_contact_left", company)),
-        _button("⛔ 不合适", value=_card_action(record_id, "linkedin_not_fit", company), style="danger"),
-    ]
-
-    return [
+    elements = [
         {"tag": "hr"},
         {"tag": "div", "fields": facts},
         {"tag": "action", "actions": link_actions},
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "💡 **为什么开发**\n" + (_clip(row["reason"], 320) or "暂无开发理由，请先核对官网和 LinkedIn。"),
-            },
-        },
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "🤝 **推荐连接语**\n" + (_clip(row["connect_copy"], 280) or "Hi, I noticed your company works in gaming accessories. Open to connect?"),
-            },
-        },
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "💬 **接受后的第一条私信**\n" + (_clip(row["message_copy"], 420) or "Thanks for connecting. Quick question: are you the right person for sourcing gaming accessories?"),
-            },
-        },
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": (
-                    "⏱ **执行 / 降配规则**\n"
-                    "- 今日动作: 手动查看 profile, 发送连接邀请; 完成后点 **已加人**\n"
-                    "- 若发现联系人已离职/不在该公司: 点 **联系人已离职**; 系统保留客户公司并要求重新找联系人\n"
-                    "- 接受后动作: 发送上面的推荐私信; 完成后点 **已发私信**\n"
-                    "- 业务员 48h 内未点任何回执按钮: 系统判为 **未确认执行**, 次日降低该线索派发优先级, 并提醒跟进人补状态\n"
-                    "- 客户私信后 D+3 未回复: 转 Email / 官网表单\n"
-                    "- 客户 D+8 仍无回应: 低频跟进或暂停"
-                ),
-            },
-        },
-        {"tag": "action", "actions": receipt_1},
-        {"tag": "action", "actions": receipt_2},
     ]
+    status_element = _row_status_element(row)
+    if status_element:
+        elements.append(status_element)
+    if not _row_terminal(row):
+        elements.extend([
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "💡 **为什么开发**\n" + (_clip(row["reason"], 320) or "暂无开发理由，请先核对官网和 LinkedIn。"),
+                },
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "🤝 **推荐连接语**\n" + (_clip(row["connect_copy"], 280) or "Hi, I noticed your company works in gaming accessories. Open to connect?"),
+                },
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "💬 **接受后的第一条私信**\n" + (_clip(row["message_copy"], 420) or "Thanks for connecting. Quick question: are you the right person for sourcing gaming accessories?"),
+                },
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        "⏱ **执行 / 降配规则**\n"
+                        "- 今日动作: 手动查看 profile, 发送连接邀请; 完成后点 **已加人**\n"
+                        "- 若发现联系人已离职/不在该公司: 点 **联系人已离职**; 系统保留客户公司并要求重新找联系人\n"
+                        "- 接受后动作: 发送上面的推荐私信; 完成后点 **已发私信**\n"
+                        "- 业务员 48h 内未点任何回执按钮: 系统判为 **未确认执行**, 次日降低该线索派发优先级, 并提醒跟进人补状态\n"
+                        "- 客户私信后 D+3 未回复: 转 Email / 官网表单\n"
+                        "- 客户 D+8 仍无回应: 低频跟进或暂停"
+                    ),
+                },
+            },
+        ])
+        elements.extend(_receipt_action_rows(row, index, total, card_record_ids=card_record_ids, owner_name=owner_name))
+    return elements
 
 
-def build_card(rows: list[dict], *, owner_name: str = "", preview: bool = False) -> dict:
+def build_card(rows: list[dict], *, owner_name: str = "", preview: bool = False, feedback: dict | None = None) -> dict:
     owner_label = owner_name or "未分配"
-    title_prefix = "🧪 预览 · " if preview else "🔗 "
+    operated_count = sum(1 for row in rows if _row_operated(row))
+    terminal_count = sum(1 for row in rows if _row_terminal(row))
+    if preview:
+        template = "blue"
+        title_prefix = "🧪 预览 · "
+    elif rows and terminal_count == len(rows):
+        template = "grey"
+        title_prefix = "✅ [LinkedIn·已处理] "
+    elif rows and operated_count == len(rows):
+        template = "green"
+        title_prefix = "✅ [LinkedIn·已操作] "
+    else:
+        template = "blue"
+        title_prefix = "🔗 "
     elements = [
         {
             "tag": "div",
@@ -467,16 +576,31 @@ def build_card(rows: list[dict], *, owner_name: str = "", preview: bool = False)
             },
         }
     ]
+    if feedback:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"✅ **本次回执已写入**: {feedback.get('status') or '-'}\n"
+                        f"**操作人**: {feedback.get('actor') or '-'}    "
+                        f"**时间**: {feedback.get('time') or '-'}"
+                    ),
+                },
+            }
+        )
     total = len(rows)
+    card_record_ids = [row["record_id"] for row in rows if row.get("record_id")]
     for idx, row in enumerate(rows, start=1):
-        elements.extend(_row_elements(row, idx, total))
+        elements.extend(_row_elements(row, idx, total, card_record_ids=card_record_ids, owner_name=owner_label))
     elements.append(
         {
             "tag": "note",
             "elements": [
                 {
                     "tag": "plain_text",
-                    "content": "按钮会写回 LinkedIn 线索池; 不会自动操作 LinkedIn。若按钮点错，在备注或群里补充说明。",
+                    "content": "按钮会写回 LinkedIn 线索池并自动更新本卡状态; 不会自动操作 LinkedIn。若按钮点错，在备注或群里补充说明。",
                 }
             ],
         }
@@ -484,7 +608,7 @@ def build_card(rows: list[dict], *, owner_name: str = "", preview: bool = False)
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "template": "blue",
+            "template": template,
             "title": {"tag": "plain_text", "content": f"{title_prefix}LinkedIn每日开发卡 · {owner_label} · {len(rows)}条"},
         },
         "elements": elements,

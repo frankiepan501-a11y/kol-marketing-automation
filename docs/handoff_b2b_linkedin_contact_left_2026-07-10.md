@@ -62,3 +62,28 @@
 - 保留 CRM 跟进记录：`recvoWeH9Bqqle`（actor=冼浩华）。
 - CRM客户 `recvoWeG387MQW` 的 `跟进日志` 已移除 `外贸助手 [LinkedIn]` 那条重复行，保留 `冼浩华 [LinkedIn]` 记录。
 - 删除后复核：`recvoWeGAOSagF` 返回 `RecordIdNotFound`，CRM日志中不再包含外贸助手重复行，仍包含阿华离职记录。
+
+## 2026-07-10 卡片状态闭环 P1
+
+问题：LinkedIn 每日开发卡点击回执后，Base/CRM 已写入，但原飞书卡片仍保持蓝色和可点击按钮。外贸同事无法从卡片本身判断“这个客户我已经操作过”，容易重复点击或在群里二次确认。
+
+根因：`/b2b-assistant/event` 的 LinkedIn 回执只做业务写回和文本回复，没有用外贸助手 App PATCH 原始 interactive card；旧按钮 payload 也没有携带整张卡的 `record_id` 列表，不能安全重建多客户卡片。
+
+修复：
+
+- `app/feishu.py` 新增 `update_b2b_assistant_card()`，确保用发卡的外贸助手 App PATCH 原卡。
+- `app/b2b_linkedin_daily_card.py` 的按钮 value 追加 `card_record_ids/card_index/card_total/owner_name`，用于点击后重建整张卡。
+- `build_card()` 支持已操作状态：
+  - 全部终态：灰色 `LinkedIn·已处理`。
+  - 全部已操作但仍有下一步：绿色 `LinkedIn·已操作`。
+  - 部分未操作：保持蓝色。
+- 单条线索终态（`联系人已离职 / 不合适 / 已回复`）后不再显示重复回执按钮。
+- 非终态保留下一步按钮：例如 `已加人` 后仍可点 `已发私信 / 已回复 / 联系人已离职 / 不合适`。
+- 如果缺 `message_id` 或 PATCH 失败，发送一张结果卡兜底；如果旧卡缺多行上下文，则退回原文本回复，避免误把多任务卡覆盖成单任务卡。
+
+验证：
+
+- `.venv\Scripts\python.exe -m py_compile app/b2b_assistant.py app/b2b_linkedin_daily_card.py app/feishu.py`
+- `.venv\Scripts\python.exe -m unittest tests.test_b2b_linkedin_contact_left`
+- `.venv\Scripts\python.exe -m unittest tests.test_b2b_crm_sync tests.test_b2b_linkedin_contact_left`
+- `.venv\Scripts\python.exe -m unittest tests.test_b2b_crm_sync tests.test_b2b_linkedin_async_audit tests.test_b2b_linkedin_auto_pool tests.test_b2b_linkedin_contact_left tests.test_b2b_linkedin_discovery`

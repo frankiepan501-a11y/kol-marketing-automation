@@ -287,6 +287,105 @@ async def _send_reply(payload: dict, text: str) -> dict:
         return {"sent": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
 
+def _message_id_from_payload(payload: dict) -> str:
+    candidates = [
+        payload,
+        payload.get("context") if isinstance(payload.get("context"), dict) else {},
+        payload.get("event") if isinstance(payload.get("event"), dict) else {},
+    ]
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    if isinstance(event.get("context"), dict):
+        candidates.append(event["context"])
+    for item in candidates:
+        for key in ("message_id", "open_message_id"):
+            value = _text(item.get(key))
+            if value:
+                return value
+    return ""
+
+
+def _card_record_ids(card_action: dict, record_id: str) -> list[str]:
+    raw = card_action.get("card_record_ids") or card_action.get("record_ids")
+    ids: list[str] = []
+    if isinstance(raw, list):
+        ids = [_text(x) for x in raw if _text(x)]
+    elif isinstance(raw, str):
+        ids = [x.strip() for x in re.split(r"[,;；、\s]+", raw) if x.strip()]
+    if not ids and _text(card_action.get("card_total")) == "1":
+        ids = [record_id]
+    out = []
+    for item in ids:
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+async def _send_linkedin_result_card(payload: dict, card: dict) -> dict:
+    chat_id = _text(payload.get("chat_id") or payload.get("open_chat_id"))
+    sender_open_id = _text(payload.get("sender_open_id"))
+    if chat_id:
+        receive_type, receive_id = "chat_id", chat_id
+    elif sender_open_id:
+        receive_type, receive_id = "open_id", sender_open_id
+    else:
+        return {"sent": False, "error": "missing chat_id/sender_open_id"}
+    try:
+        message_id = await feishu.send_card_via_b2b_assistant(receive_type, receive_id, card)
+        return {"sent": bool(message_id), "message_id": message_id, "receive_type": receive_type}
+    except Exception as exc:
+        return {"sent": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+
+async def _close_linkedin_card(
+    payload: dict,
+    *,
+    record_id: str,
+    old_fields: dict,
+    updated_fields: dict,
+    actor: str,
+) -> dict:
+    card_action = payload.get("card_action") or {}
+    message_id = _message_id_from_payload(payload)
+    record_ids = _card_record_ids(card_action, record_id)
+    result = {
+        "message_id": message_id,
+        "record_ids": record_ids,
+        "patched_original_card": False,
+        "fallback_card_sent": False,
+    }
+    if not record_ids:
+        result["skipped"] = "missing_card_record_ids"
+        return result
+
+    from . import b2b_linkedin_daily_card
+
+    rows = []
+    merged_fields = {**old_fields, **updated_fields}
+    for rid in record_ids:
+        if rid == record_id:
+            rec = {"record_id": record_id, "fields": merged_fields}
+        else:
+            rec = await _get_record(B2B_LINKEDIN_TABLE, rid)
+        if rec:
+            rows.append(b2b_linkedin_daily_card._row_from_record(rec))
+    if not rows:
+        result["skipped"] = "missing_rows"
+        return result
+
+    card = b2b_linkedin_daily_card.build_card(
+        rows,
+        owner_name=_text(card_action.get("owner_name")) or actor,
+        feedback={"status": updated_fields.get("开发状态"), "actor": actor, "time": _now_text()},
+    )
+    if message_id:
+        result["patched_original_card"] = await feishu.update_b2b_assistant_card(message_id, card)
+    if not result["patched_original_card"]:
+        fallback = await _send_linkedin_result_card(payload, card)
+        result["fallback_card"] = fallback
+        result["fallback_card_sent"] = bool(fallback.get("sent"))
+    return result
+
+
 def _customer_summary(rec: dict) -> str:
     fields = rec.get("fields") or {}
     company = _text(fields.get("公司名称")) or "(未命名)"
@@ -705,7 +804,29 @@ async def _handle_linkedin_receipt(payload: dict) -> dict:
         f"下一步：{update.get('下一步行动')}{queue_line}{crm_line}\n"
         f"记录：{_record_url(B2B_LINKEDIN_TABLE, record_id, B2B_LINKEDIN_VIEW)}"
     )
-    return {"ok": True, "record_id": record_id, "action": action, "fields": update, "queue": queue_result, "crm_sync": crm_sync, "crm_warning": crm_warning, "reply": reply, "reply_result": await _send_reply(payload, reply)}
+    card_feedback = await _close_linkedin_card(
+        payload,
+        record_id=record_id,
+        old_fields=old_fields,
+        updated_fields=update,
+        actor=actor,
+    )
+    if card_feedback.get("patched_original_card") or card_feedback.get("fallback_card_sent"):
+        reply_result = {"sent": False, "skipped": "card_feedback_sent"}
+    else:
+        reply_result = await _send_reply(payload, reply)
+    return {
+        "ok": True,
+        "record_id": record_id,
+        "action": action,
+        "fields": update,
+        "queue": queue_result,
+        "crm_sync": crm_sync,
+        "crm_warning": crm_warning,
+        "card_feedback": card_feedback,
+        "reply": reply,
+        "reply_result": reply_result,
+    }
 
 
 async def handle_event(payload: dict) -> dict:
