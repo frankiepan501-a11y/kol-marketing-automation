@@ -8,14 +8,22 @@ from app import b2b_linkedin_auto_pool as pool
 
 class B2BLinkedInAutoPoolTest(unittest.TestCase):
     def setUp(self):
-        self.old_env = os.environ.get("B2B_LINKEDIN_COMPANY_URLS_JSON")
+        self.old_env = {
+            key: os.environ.get(key)
+            for key in [
+                "B2B_LINKEDIN_COMPANY_URLS_JSON",
+                "B2B_LINKEDIN_PRIORITY_MARKETS",
+            ]
+        }
         os.environ.pop("B2B_LINKEDIN_COMPANY_URLS_JSON", None)
+        os.environ.pop("B2B_LINKEDIN_PRIORITY_MARKETS", None)
 
     def tearDown(self):
-        if self.old_env is None:
-            os.environ.pop("B2B_LINKEDIN_COMPANY_URLS_JSON", None)
-        else:
-            os.environ["B2B_LINKEDIN_COMPANY_URLS_JSON"] = self.old_env
+        for key, value in self.old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     def test_known_company_mapping_sets_linkedin_company(self):
         lead = pool._seed_to_lead({
@@ -43,6 +51,21 @@ class B2BLinkedInAutoPoolTest(unittest.TestCase):
         self.assertEqual("https://www.linkedin.com/company/example", lead["linkedin_company"])
         self.assertEqual("已确认", lead["linkedin_company_status"])
         self.assertEqual("env", lead["linkedin_company_source"])
+
+    def test_market_priority_sorts_thailand_japan_and_sea_first(self):
+        seeds = [
+            {"company": "US Retail", "domain": "us.example", "country": "United States", "_priority_score": 100},
+            {"company": "Japan Retail", "domain": "jp.example", "country": "Japan", "_priority_score": 60},
+            {"company": "Thailand Retail", "domain": "th.example", "country": "Thailand", "_priority_score": 50},
+            {"company": "Malaysia Retail", "domain": "my.example", "country": "Malaysia", "_priority_score": 40},
+        ]
+
+        sorted_seeds = pool._sort_seeds_by_market_priority(seeds)
+
+        self.assertEqual(
+            ["Thailand Retail", "Japan Retail", "Malaysia Retail", "US Retail"],
+            [seed["company"] for seed in sorted_seeds],
+        )
 
     def test_unknown_company_is_marked_for_manual_review_without_url(self):
         lead = pool._seed_to_lead({

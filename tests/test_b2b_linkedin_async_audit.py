@@ -85,6 +85,44 @@ class B2BLinkedInAsyncAuditTest(unittest.TestCase):
         self.assertIn("GOOGLE_SEARCH_API_KEY", readiness["missing"])
         self.assertIn("GOOGLE_SEARCH_ENGINE_ID", readiness["missing"])
 
+    def test_missing_search_provider_does_not_count_when_discovery_target_met(self):
+        readiness = {"provider": "custom_search", "ok": False, "missing": ["GOOGLE_SEARCH_API_KEY"]}
+        items = [{
+            "key": "discovery",
+            "health": "ok",
+            "job_result": {
+                "created": 0,
+                "planned": 0,
+                "waterline_status": "skip_target_met",
+            },
+        }]
+
+        self.assertFalse(audit._search_provider_issue_counts(readiness, items))
+
+    def test_missing_search_provider_counts_when_discovery_needs_refill(self):
+        readiness = {"provider": "custom_search", "ok": False, "missing": ["GOOGLE_SEARCH_API_KEY"]}
+        items = [{
+            "key": "discovery",
+            "health": "error",
+            "job_result": {
+                "created": 0,
+                "planned": 0,
+                "waterline_status": "refill_needed",
+            },
+        }]
+
+        self.assertTrue(audit._search_provider_issue_counts(readiness, items))
+
+    def test_missing_search_provider_ignored_for_auto_pool_only_audit(self):
+        readiness = {"provider": "custom_search", "ok": False, "missing": ["GOOGLE_SEARCH_API_KEY"]}
+        items = [{
+            "key": "auto_pool",
+            "health": "ok",
+            "job_result": {"created": 50, "planned": 50},
+        }]
+
+        self.assertFalse(audit._search_provider_issue_counts(readiness, items))
+
     def test_run_flags_n8n_success_backend_zero_output(self):
         original_execs = audit._fetch_executions
         original_detail = audit._fetch_execution_detail

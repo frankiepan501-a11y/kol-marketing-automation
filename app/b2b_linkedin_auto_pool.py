@@ -182,6 +182,17 @@ EXTRA_DEFAULT_SEEDS = [
     {"company": "Dien May Xanh", "domain": "dienmayxanh.com", "country": "Vietnam", "company_type": "零售商", "channels": ["本地电商", "线下连锁"], "category": "consumer electronics and accessories", "notes": "Vietnam electronics retailer"},
 ]
 
+DEFAULT_PRIORITY_MARKETS = [
+    "Thailand", "泰国",
+    "Japan", "日本",
+    "Singapore", "新加坡",
+    "Malaysia", "马来西亚",
+    "Vietnam", "越南",
+    "Indonesia", "印尼", "印度尼西亚",
+    "Philippines", "菲律宾",
+    "Southeast Asia", "东南亚", "ASEAN",
+]
+
 ROLE_TERMS = [
     "purchase", "purchasing", "buyer", "procurement", "sourcing", "achats", "acheteur",
     "compras", "zakup", "category", "product manager", "chef de produit", "product owner",
@@ -463,6 +474,41 @@ def _seed_key(seed: dict) -> str:
     return _domain_of(str(seed.get("domain") or seed.get("website") or "")) or _text_key(str(seed.get("company") or ""))
 
 
+def _priority_markets() -> list[str]:
+    raw = os.environ.get("B2B_LINKEDIN_PRIORITY_MARKETS", "").strip()
+    if not raw:
+        return list(DEFAULT_PRIORITY_MARKETS)
+    parts = [x.strip() for x in re.split(r"[,;；、\n]", raw) if x.strip()]
+    return parts or list(DEFAULT_PRIORITY_MARKETS)
+
+
+def _market_priority(seed: dict) -> int:
+    haystack = " ".join([
+        str(seed.get("country") or ""),
+        str(seed.get("market") or ""),
+        str(seed.get("notes") or ""),
+        str(seed.get("category") or ""),
+    ]).lower()
+    if not haystack.strip():
+        return 10_000
+    for idx, market in enumerate(_priority_markets()):
+        needle = market.lower().strip()
+        if needle and needle in haystack:
+            return idx
+    return 10_000
+
+
+def _sort_seeds_by_market_priority(seeds: list[dict]) -> list[dict]:
+    indexed = list(enumerate(seeds))
+    indexed.sort(key=lambda pair: (
+        _market_priority(pair[1]),
+        -_field_int(pair[1].get("_priority_score"), 0),
+        str(pair[1].get("company") or "").lower(),
+        pair[0],
+    ))
+    return [seed for _, seed in indexed]
+
+
 def _candidate_source(seed: dict) -> str:
     raw = str(seed.get("candidate_source") or seed.get("source") or "").strip()
     if raw in CANDIDATE_SOURCE_OPTIONS:
@@ -559,10 +605,10 @@ def _load_seeds() -> list[dict]:
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, list):
-                return _dedupe_seeds([x for x in parsed if isinstance(x, dict)])
+                return _sort_seeds_by_market_priority(_dedupe_seeds([x for x in parsed if isinstance(x, dict)]))
         except Exception as exc:
             print(f"[b2b_linkedin_auto_pool] bad B2B_LINKEDIN_AUTO_SEEDS_JSON: {exc}")
-    return _dedupe_seeds(DEFAULT_SEEDS + EXTRA_DEFAULT_SEEDS)
+    return _sort_seeds_by_market_priority(_dedupe_seeds(DEFAULT_SEEDS + EXTRA_DEFAULT_SEEDS))
 
 
 async def _list_records(table_id: str, *, field_names: list[str]) -> list[dict]:
@@ -640,7 +686,7 @@ async def _load_pending_candidate_seeds() -> tuple[list[dict], Counter]:
             seeds.append(seed)
         else:
             status_counts["missing_domain_company"] += 1
-    seeds.sort(key=lambda x: (-_field_int(x.get("_priority_score"), 0), x.get("company") or ""))
+    seeds = _sort_seeds_by_market_priority(seeds)
     return seeds, status_counts
 
 
@@ -746,6 +792,7 @@ async def refill_candidates(*, commit: bool = False, limit: int = 200) -> dict:
         planned.append({
             "company": lead.get("company"),
             "domain": domain,
+            "country": lead.get("country"),
             "score": score["score"],
             "source": fields.get("来源"),
             "fields": fields,
@@ -769,11 +816,12 @@ async def refill_candidates(*, commit: bool = False, limit: int = 200) -> dict:
         "candidate_table": B2B_LINKEDIN_CANDIDATE_TABLE,
         "existing_candidate_status_counts": dict(candidate_status_counts),
         "limit": limit,
+        "priority_markets": _priority_markets(),
         "planned_candidates": len(planned),
         "created_candidates": len(created),
         "created": created,
         "planned_preview": [
-            {k: row[k] for k in ["company", "domain", "score", "source"]}
+            {k: row[k] for k in ["company", "domain", "country", "score", "source"]}
             for row in planned[:30]
         ],
         "skip_reasons": dict(skip_reasons),
@@ -1097,6 +1145,7 @@ async def run(
             planned.append({
                 "company": lead.get("company"),
                 "domain": lead.get("domain"),
+                "country": lead.get("country"),
                 "contact": lead.get("contact"),
                 "score": score["score"],
                 "grade": score["grade"],
@@ -1164,12 +1213,13 @@ async def run(
         "candidate_table": B2B_LINKEDIN_CANDIDATE_TABLE,
         "domain_limit": domain_limit,
         "record_limit": record_limit,
+        "priority_markets": _priority_markets(),
         "selected_domains": selected_domains,
         "planned_records": len(planned),
         "created_records": len(created),
         "created": created,
         "planned_preview": [
-            {k: row[k] for k in ["company", "domain", "contact", "score", "grade", "linkedin_company_status"]}
+            {k: row[k] for k in ["company", "domain", "country", "contact", "score", "grade", "linkedin_company_status"]}
             for row in planned[:20]
         ],
         "linkedin_company_resolved": sum(1 for row in planned if row.get("linkedin_company")),

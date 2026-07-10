@@ -114,11 +114,51 @@ DEFAULT_QUERY_PACKS = [
         "category": "Nintendo Switch and console accessories distribution",
     },
     {
+        "market": "Thailand",
+        "query": '"Nintendo Switch accessories" distributor Thailand gaming',
+        "country": "Thailand",
+        "company_type": "分销商",
+        "channels": ["分销", "本地电商", "线下连锁"],
+        "category": "Nintendo Switch and gaming accessories distribution",
+    },
+    {
         "market": "Singapore",
         "query": '"gaming accessories" distributor Singapore Nintendo',
         "country": "Singapore",
         "company_type": "分销商",
         "channels": ["分销", "本地电商"],
+        "category": "gaming accessories distributor",
+    },
+    {
+        "market": "Malaysia",
+        "query": '"gaming accessories" distributor Malaysia Nintendo',
+        "country": "Malaysia",
+        "company_type": "分销商",
+        "channels": ["分销", "本地电商", "线下连锁"],
+        "category": "gaming accessories distributor",
+    },
+    {
+        "market": "Philippines",
+        "query": '"Nintendo Switch accessories" distributor Philippines gaming',
+        "country": "Philippines",
+        "company_type": "分销商",
+        "channels": ["分销", "本地电商", "线下连锁"],
+        "category": "Nintendo Switch and gaming accessories distribution",
+    },
+    {
+        "market": "Indonesia",
+        "query": '"gaming accessories" distributor Indonesia Nintendo',
+        "country": "Indonesia",
+        "company_type": "分销商",
+        "channels": ["分销", "本地电商"],
+        "category": "gaming accessories distributor",
+    },
+    {
+        "market": "Vietnam",
+        "query": '"gaming accessories" distributor Vietnam Nintendo',
+        "country": "Vietnam",
+        "company_type": "分销商",
+        "channels": ["分销", "本地电商", "线下连锁"],
         "category": "gaming accessories distributor",
     },
     {
@@ -197,6 +237,7 @@ def _load_query_packs() -> list[dict]:
 
 def _filter_query_packs(market: str) -> list[dict]:
     packs = _load_query_packs()
+    packs = pool._sort_seeds_by_market_priority(packs)
     market_key = (market or "").strip().lower()
     if not market_key:
         return packs

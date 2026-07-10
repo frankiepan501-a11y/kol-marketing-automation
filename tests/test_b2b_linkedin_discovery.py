@@ -16,6 +16,7 @@ class B2BLinkedInDiscoveryTest(unittest.TestCase):
                 "B2B_DISCOVERY_MIN_SCORE",
                 "GOOGLE_SEARCH_PROVIDER",
                 "B2B_DISCOVERY_MANUAL_RESULTS_JSON",
+                "B2B_LINKEDIN_PRIORITY_MARKETS",
             ]
         }
         os.environ["B2B_DISCOVERY_PENDING_TARGET"] = "200"
@@ -23,6 +24,7 @@ class B2BLinkedInDiscoveryTest(unittest.TestCase):
         os.environ["B2B_DISCOVERY_MIN_SCORE"] = "55"
         os.environ["GOOGLE_SEARCH_PROVIDER"] = "manual"
         os.environ.pop("B2B_DISCOVERY_MANUAL_RESULTS_JSON", None)
+        os.environ.pop("B2B_LINKEDIN_PRIORITY_MARKETS", None)
 
     def tearDown(self):
         for key, value in self.old_env.items():
@@ -55,6 +57,14 @@ class B2BLinkedInDiscoveryTest(unittest.TestCase):
         self.assertEqual("example-games.com", seed["domain"])
         self.assertEqual("搜索补给", seed["candidate_source"])
         self.assertIn("query=gaming accessories distributor", seed["notes"])
+
+    def test_default_query_packs_prioritize_thailand_japan_and_sea(self):
+        packs = discovery._filter_query_packs("")
+        first_markets = [pack["market"] for pack in packs[:5]]
+
+        self.assertEqual("Thailand", first_markets[0])
+        self.assertEqual("Japan", first_markets[1])
+        self.assertIn("Singapore", first_markets)
 
     def test_high_waterline_skips_search(self):
         original_indexes = discovery._candidate_indexes

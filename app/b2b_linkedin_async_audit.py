@@ -12,11 +12,12 @@ from typing import Any
 
 import httpx
 
-from . import config, feishu
+from . import b2b_linkedin_daily_card, b2b_linkedin_discovery, config, feishu
 
 N8N_DEFAULT_BASE = "https://frankiepan501.zeabur.app/api/v1"
 SERVICE_DEFAULT_BASE = "https://kol-auto.zeabur.app"
 TIMEOUT = 30.0
+BJ = dt.timezone(dt.timedelta(hours=8))
 
 WORKFLOWS = {
     "discovery": {
@@ -51,6 +52,13 @@ def _parse_iso(value: str) -> dt.datetime | None:
         return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _bj_day(value: str) -> str:
+    parsed = _parse_iso(value)
+    if not parsed:
+        return dt.datetime.now(BJ).strftime("%Y-%m-%d")
+    return parsed.astimezone(BJ).strftime("%Y-%m-%d")
 
 
 def _n8n_creds() -> tuple[str, str]:
@@ -153,6 +161,61 @@ def _status_from_created(defn: dict, result: dict) -> tuple[str, str]:
     return "error", f"created=0, planned={planned}, waterline={waterline or '-'}"
 
 
+def _search_provider_issue_counts(search_provider: dict, items: list[dict]) -> bool:
+    if search_provider.get("ok"):
+        return False
+    discovery = next((item for item in items if item.get("key") == "discovery"), {})
+    if not discovery:
+        return False
+    job_result = discovery.get("job_result") or {}
+    if discovery.get("health") == "ok" and job_result.get("waterline_status") in WORKFLOWS["discovery"].get("zero_ok_status", set()):
+        return False
+    return True
+
+
+async def _fallback_missing_job(key: str, latest_execution: dict) -> dict | None:
+    """Recover audit signal when in-process async job cache was lost.
+
+    The async job endpoint stores compact results in service memory. A restart
+    after the n8n ACK can erase that cache even though the business write
+    already happened. Fall back to durable Bitable state before alerting.
+    """
+    if key == "auto_pool":
+        day = _bj_day(latest_execution.get("startedAt") or "")
+        summary = await b2b_linkedin_daily_card.run_pool_summary(
+            commit=False,
+            notify=False,
+            day=day,
+        )
+        result = {
+            "created_records": summary.get("new_records"),
+            "planned_records": summary.get("new_records"),
+            "waterline_status": "pool_summary_fallback",
+            "provider_errors": [],
+            "skip_reasons": {},
+            "country_counts": summary.get("country_counts") or {},
+            "current_queue_total": summary.get("current_queue_total"),
+        }
+        if int(summary.get("new_records") or 0) > 0:
+            return {"health": "ok", "summary": f"job cache missing; pool summary created={summary.get('new_records')}", "result": result}
+        return {"health": "error", "issues": [f"job cache missing; pool summary new_records={summary.get('new_records') or 0}"], "result": result}
+
+    if key == "discovery":
+        result = await b2b_linkedin_discovery.run(
+            commit=False,
+            provider="all",
+            limit=1,
+            pending_target=0,
+            min_score=0,
+        )
+        health, message = _status_from_created(WORKFLOWS["discovery"], result)
+        if health == "ok":
+            return {"health": "ok", "summary": f"job cache missing; live discovery check {message}", "result": result}
+        return {"health": "error", "issues": [f"job cache missing; live discovery check {message}"], "result": result}
+
+    return None
+
+
 async def _audit_one(key: str, defn: dict, *, since: dt.datetime) -> dict:
     item: dict[str, Any] = {
         "key": key,
@@ -215,6 +278,28 @@ async def _audit_one(key: str, defn: dict, *, since: dt.datetime) -> dict:
         "skip_reasons": result.get("skip_reasons") or {},
     }
 
+    if job.get("status") == "missing":
+        fallback = await _fallback_missing_job(key, latest)
+        if fallback:
+            fallback_result = fallback.get("result") or {}
+            item["fallback"] = "durable_bitable_state"
+            item["job_result"] = {
+                "created": fallback_result.get(defn["created_key"]),
+                "planned": fallback_result.get(defn["planned_key"]),
+                "waterline_status": fallback_result.get("waterline_status"),
+                "provider_errors_count": len(fallback_result.get("provider_errors") or []),
+                "skip_reasons": fallback_result.get("skip_reasons") or {},
+            }
+            if key == "auto_pool":
+                item["job_result"]["country_counts"] = fallback_result.get("country_counts") or {}
+                item["job_result"]["current_queue_total"] = fallback_result.get("current_queue_total")
+            item["health"] = fallback.get("health")
+            if fallback.get("health") == "ok":
+                item["summary"] = fallback.get("summary")
+            else:
+                item["issues"].extend(fallback.get("issues") or [])
+            return item
+
     if job.get("status") == "running":
         item.update(health="warn", issues=["后台 job 仍在 running，稍后需复查"])
         return item
@@ -243,7 +328,7 @@ def _build_alert_card(audit: dict) -> dict:
             f"  n8n={latest.get('id') or '-'} / job={item.get('job_id') or '-'} / status={item.get('job_status') or '-'}"
         )
     readiness = audit.get("search_provider") or {}
-    if readiness and not readiness.get("ok"):
+    if readiness and audit.get("search_provider_issue_counted"):
         issue_lines.append(
             f"- **search_provider**: {readiness.get('provider')} 缺 {', '.join(readiness.get('missing') or [])}"
         )
@@ -281,7 +366,8 @@ async def run(*, notify: bool = False, workflow: str = "all", lookback_hours: in
     search_provider = _search_provider_readiness()
 
     issue_count = sum(1 for item in items if item.get("health") not in {"ok"})
-    if not search_provider.get("ok"):
+    search_provider_issue_counted = _search_provider_issue_counts(search_provider, items)
+    if search_provider_issue_counted:
         issue_count += 1
     health = "ok" if issue_count == 0 else "error"
     audit = {
@@ -290,6 +376,7 @@ async def run(*, notify: bool = False, workflow: str = "all", lookback_hours: in
         "issue_count": issue_count,
         "lookback_hours": lookback_hours,
         "search_provider": search_provider,
+        "search_provider_issue_counted": search_provider_issue_counted,
         "items": items,
     }
     if notify and issue_count:
