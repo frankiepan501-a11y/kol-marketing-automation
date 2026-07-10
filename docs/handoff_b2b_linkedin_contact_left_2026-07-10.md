@@ -53,3 +53,12 @@
 原因：飞书事件/后台转发存在重复送达可能；旧版 `sync_linkedin_contact_left` 虽传了 dedupe_key，但日志正文没有包含该 key，且跟进记录创建没有幂等判断，导致重复事件能产生第二条 CRM 跟进。
 
 修复：离职回执日志追加稳定 `线索ID`，并在 CRM 已存在相同联系人离职日志时跳过新增跟进记录；兼容旧日志中未带线索ID的历史格式。
+
+## 2026-07-10 重复数据清理
+
+已按生产复核建议清理阿华本次点击产生的重复数据：
+
+- 删除重复 CRM 跟进记录：`recvoWeGAOSagF`（actor=外贸助手）。
+- 保留 CRM 跟进记录：`recvoWeH9Bqqle`（actor=冼浩华）。
+- CRM客户 `recvoWeG387MQW` 的 `跟进日志` 已移除 `外贸助手 [LinkedIn]` 那条重复行，保留 `冼浩华 [LinkedIn]` 记录。
+- 删除后复核：`recvoWeGAOSagF` 返回 `RecordIdNotFound`，CRM日志中不再包含外贸助手重复行，仍包含阿华离职记录。
