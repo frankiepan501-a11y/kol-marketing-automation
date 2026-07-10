@@ -12,6 +12,7 @@
 - Added `B2B_LINKEDIN_PRIORITY_MARKETS`, defaulting to Thailand, Japan, Singapore, Malaysia, Vietnam, Indonesia, and Philippines.
 - Candidate refill and 09:00 auto-pool candidate consumption now sort by market priority before score/company fallback.
 - External discovery query packs now include Thailand, Malaysia, Philippines, Indonesia, and Vietnam, and query-pack execution order uses the same market priority.
+- Added maintained seed companies for Japan, Thailand, Singapore, Malaysia, Vietnam, Indonesia, and Philippines so the candidate pool can be replenished near-term even while no search provider key is configured.
 - Async audit now falls back to durable Bitable state when a backend job cache is missing:
   - `auto_pool`: checks same-day pool summary.
   - `discovery`: checks current discovery dry-run/waterline status.
@@ -33,3 +34,4 @@
 - To adjust priority without code changes, update Zeabur env `B2B_LINKEDIN_PRIORITY_MARKETS`.
 - Search provider credentials are still not configured. This is acceptable while candidate waterline is high, but if pending candidates fall below target, discovery will alert until a real provider key or manual result source is configured.
 - This change does not alter salesperson card dispatch limits or LinkedIn execution behavior. It only changes which candidate companies are consumed first.
+- Maintained seed expansion is a stopgap, not a replacement for external discovery. Once the new SEA/Japan seeds are consumed, fresh company discovery still needs Google/SerpAPI/manual input.
