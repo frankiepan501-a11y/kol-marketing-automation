@@ -49,6 +49,7 @@ OP_OPENID = {
     "黄奕纯": "ou_1b981067ce8edfd82af7c70c109310e4",
     "陈翔宇": "ou_9c322382284a7a6672a091b9f4c0a551",
     "林明坚": "ou_35aa6883c0598bac5c7e06fcb06f7c4d",
+    "余培霓": "ou_40ff10b05fc358f88c5674f053665551",
     "张佳烨": "ou_d850dab47bdbaea6736709d354de4b0f",
     "梁俊辉": "ou_b9dd2272e72908fe68964d7bba53109f",
 }
