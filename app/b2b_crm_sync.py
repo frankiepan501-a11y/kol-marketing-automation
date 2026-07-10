@@ -521,3 +521,96 @@ async def sync_mail_receipt_to_customer(reminder_record: dict, *, receipt_type: 
         next_action="CRM已同步邮件提醒回执。",
     )
     return {"ok": True, "customer_record_id": customer_id, "followup_record_id": followup_id}
+
+
+async def sync_linkedin_contact_left(lead_record_id: str, lead_fields: dict, *, actor: str, note: str = "") -> dict:
+    """Log that a LinkedIn contact is no longer at the target company.
+
+    This is a contact-level invalidation, not a company-level rejection. The
+    CRM customer remains open and gets a follow-up log asking the owner to find
+    a replacement buyer/category/BD contact.
+    """
+    lead_fields = lead_fields or {}
+    company = _text(lead_fields.get("公司名称") or lead_fields.get("线索名称")) or lead_record_id
+    owner = _text(lead_fields.get("跟进人")) or actor or "外贸助手"
+    contact = _text(lead_fields.get("联系人姓名")) or "当前联系人"
+    title = _text(lead_fields.get("职位"))
+    website = _url_from_field(lead_fields.get("公司官网"))
+    linkedin = _url_from_field(lead_fields.get("LinkedIn公司页")) or _url_from_field(lead_fields.get("LinkedIn联系人页"))
+    email = _text(lead_fields.get("邮箱"))
+    existing_id = _text(lead_fields.get("CRM记录ID")) or _first_link_id(lead_fields.get("关联CRM客户"))
+
+    match, match_type = await _find_customer_match(
+        existing_id=existing_id,
+        email=email,
+        company=company,
+        website=website,
+    )
+    old_fields = (match or {}).get("fields") or {}
+    customer_id = (match or {}).get("record_id") or existing_id
+    detail = f"LinkedIn核验：联系人 {contact}"
+    if title:
+        detail += f" / {title}"
+    detail += " 已离职或不在当前客户公司；客户公司仍保留开发价值，下一步重新找采购/BD/Category/Product 相关联系人。"
+    if note:
+        detail += f" 业务员备注：{note}"
+    line = f"{_now_text()} {actor or owner} [LinkedIn] {detail}"
+    dedupe_key = f"linkedin_contact_left|{lead_record_id}|{contact}|{actor}|{note}"
+
+    if match:
+        update = {}
+        _field_if_empty(update, old_fields, "跟进人", owner)
+        _field_if_empty(update, old_fields, "开发人", owner)
+        _field_if_empty(update, old_fields, "客户来源", "领英")
+        if website and not _text(old_fields.get("公司官网")):
+            update["公司官网"] = _url_cell(website)
+        if linkedin and not _text(old_fields.get("LinkedIn")):
+            update["LinkedIn"] = _url_cell(linkedin, "LinkedIn")
+        update["跟进日志"] = _append_line(_text(old_fields.get("跟进日志")), line, dedupe_key)
+        await _update_record(B2B_CUSTOMER_TABLE, customer_id, update)
+        created = False
+    else:
+        fields = {
+            "公司名称": company,
+            "登记日期": _now_ms(),
+            "开发日期": _now_ms(),
+            "合作状态": "未联系",
+            "客户来源": "领英",
+            "开发人": owner,
+            "跟进人": owner,
+            "核心联系人": "待补联系人",
+            "联系方式": "邮箱" if email else "",
+            "邮箱": email,
+            "国家/地区": _text(lead_fields.get("国家/地区")),
+            "公司类型": _company_type_from_lead(lead_fields),
+            "主营类目": _text(lead_fields.get("主营类目")),
+            "代理竞品": _text(lead_fields.get("代理竞品")),
+            "客户等级": _grade_from_lead(lead_fields),
+            "跟进日志": line,
+        }
+        website_cell = _url_cell(website)
+        if website_cell:
+            fields["公司官网"] = website_cell
+        linkedin_cell = _url_cell(linkedin, "LinkedIn")
+        if linkedin_cell:
+            fields["LinkedIn"] = linkedin_cell
+        customer_id = await _create_record(B2B_CUSTOMER_TABLE, fields)
+        match_type = "created"
+        created = True
+
+    followup_id = await _create_followup(
+        customer_id=customer_id,
+        company=company,
+        method="LinkedIn",
+        content=detail,
+        owner=actor or owner,
+        feedback="联系人已离职",
+        next_action="保留客户公司，重新找采购/BD/Category/Product 相关联系人后再开发。",
+    )
+    return {
+        "ok": True,
+        "customer_record_id": customer_id,
+        "customer_created": created,
+        "matched_by": match_type,
+        "followup_record_id": followup_id,
+    }

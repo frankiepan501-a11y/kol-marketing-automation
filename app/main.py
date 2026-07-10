@@ -402,6 +402,7 @@ async def run_b2b_linkedin_daily_card(authorization: str = Header(default=""),
                                       notify: bool = False,
                                       limit: int = 5,
                                       owner: str = "",
+                                      record_id: str = "",
                                       include_test: bool = False,
                                       frankie_only: bool = False):
     """B2B LinkedIn 每日开发卡.
@@ -416,6 +417,7 @@ async def run_b2b_linkedin_daily_card(authorization: str = Header(default=""),
             notify=notify,
             limit=limit,
             owner=owner,
+            record_id=record_id,
             include_test=include_test,
             frankie_only=frankie_only,
         )

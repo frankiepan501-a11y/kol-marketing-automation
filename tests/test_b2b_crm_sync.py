@@ -107,6 +107,46 @@ class B2BCrmSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(self.created))
         self.assertEqual("邮件", self.created[0][2]["跟进方式"])
 
+    async def test_linkedin_contact_left_keeps_customer_open(self):
+        async def fake_find(**kwargs):
+            return {
+                "record_id": "rec_customer",
+                "fields": {
+                    "公司名称": "Extra Stores",
+                    "合作状态": "未联系",
+                    "跟进日志": "",
+                },
+            }, "company"
+
+        b2b_crm_sync._find_customer_match = fake_find
+        result = await b2b_crm_sync.sync_linkedin_contact_left(
+            "rec_lead",
+            {
+                "公司名称": "Extra Stores",
+                "联系人姓名": "Wael Abuzaid",
+                "职位": "Finance & Business Development Director",
+                "跟进人": "冼浩华",
+                "国家/地区": "Saudi Arabia",
+                "LinkedIn联系人页": {"link": "https://www.linkedin.com/in/wael", "text": "LinkedIn"},
+            },
+            actor="冼浩华",
+            note="LinkedIn显示5月离职",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("rec_customer", result["customer_record_id"])
+        self.assertFalse(result["customer_created"])
+        self.assertEqual(1, len(self.updated))
+        update_fields = self.updated[0][2]
+        self.assertNotIn("合作状态", update_fields)
+        self.assertIn("Wael Abuzaid", update_fields["跟进日志"])
+        self.assertIn("已离职", update_fields["跟进日志"])
+        self.assertEqual(1, len(self.created))
+        follow_fields = self.created[0][2]
+        self.assertEqual("LinkedIn", follow_fields["跟进方式"])
+        self.assertEqual("联系人已离职", follow_fields["客户反馈"])
+        self.assertIn("重新找", follow_fields["下一步行动"])
+
 
 if __name__ == "__main__":
     unittest.main()

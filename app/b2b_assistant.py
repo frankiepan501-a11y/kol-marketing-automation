@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlparse
 
-from . import b2b_outreach_email, feishu
+from . import b2b_crm_sync, b2b_outreach_email, feishu
 
 BJ = timezone(timedelta(hours=8))
 
@@ -540,6 +540,8 @@ def _linkedin_action(raw: str) -> str:
     raw = _text(raw).lower()
     if not raw:
         return ""
+    if "离职" in raw or "已离开" in raw or "不在职" in raw or "left_company" in raw or "contact_left" in raw:
+        return "linkedin_contact_left"
     if "加人" in raw or "connect" in raw or "connected" in raw or raw in {"已加人", "li_added"}:
         return "linkedin_connected"
     if "私信" in raw or "message" in raw or raw in {"已发私信", "li_sent"}:
@@ -598,7 +600,7 @@ async def _handle_linkedin_receipt(payload: dict) -> dict:
         reply = "LinkedIn回执失败：缺少线索ID或公司名。"
         return {"ok": False, "reply": reply, "reply_result": await _send_reply(payload, reply)}
     if not action:
-        reply = "LinkedIn回执失败：缺少动作。可用：已加人 / 已发私信 / 已转Email / 已回复 / 不合适"
+        reply = "LinkedIn回执失败：缺少动作。可用：已加人 / 已发私信 / 已转Email / 已回复 / 联系人已离职 / 不合适"
         return {"ok": False, "reply": reply, "reply_result": await _send_reply(payload, reply)}
 
     actor = await _operator_name(_text(payload.get("sender_open_id"))) or _text(payload.get("sender_open_id")) or "外贸助手"
@@ -642,6 +644,13 @@ async def _handle_linkedin_receipt(payload: dict) -> dict:
             "触达验证结果": "不相关",
             "下一步行动": "暂停该线索，后续不进入日常开发清单。",
         },
+        "linkedin_contact_left": {
+            "开发状态": "联系人已离职",
+            "触达状态": "联系人失效",
+            "触达渠道": ["LinkedIn"],
+            "触达验证结果": "联系人已离职",
+            "下一步行动": "保留客户公司，重新找采购/BD/Category/Product 相关联系人后再开发。",
+        },
     }
     update = dict(action_map.get(action) or {})
     if not update:
@@ -654,6 +663,17 @@ async def _handle_linkedin_receipt(payload: dict) -> dict:
                 "已创建开发信队列，但暂不能发送："
                 + (queue_result.get("error") or queue_result.get("status") or "待人工检查")
             )
+    crm_sync = None
+    crm_warning = ""
+    if action == "linkedin_contact_left":
+        try:
+            crm_sync = await b2b_crm_sync.sync_linkedin_contact_left(record_id, old_fields, actor=actor, note=note)
+            crm_id = crm_sync.get("customer_record_id")
+            if crm_id:
+                update["CRM记录ID"] = crm_id
+                update["关联CRM客户"] = [crm_id]
+        except Exception as exc:
+            crm_warning = f"CRM同步失败但线索回执已写入: {type(exc).__name__}: {str(exc)[:300]}"
     update["最近LinkedIn动作时间"] = _now_ms()
     if action != "linkedin_to_email":
         update["最近触达时间"] = _now_ms()
@@ -670,14 +690,22 @@ async def _handle_linkedin_receipt(payload: dict) -> dict:
             f"\n开发信队列：{queue_result.get('status')} "
             f"{queue_result.get('queue_url') or ''}"
         )
+    crm_line = ""
+    if crm_sync:
+        crm_line = (
+            f"\nCRM同步：已记录联系人离职 "
+            f"{_record_url(B2B_CUSTOMER_TABLE, crm_sync.get('customer_record_id') or '')}"
+        )
+    if crm_warning:
+        crm_line = f"\nCRM同步：{crm_warning}"
     reply = (
         "LinkedIn回执已写入\n"
         f"公司：{company}\n"
         f"状态：{update['开发状态']}\n"
-        f"下一步：{update.get('下一步行动')}{queue_line}\n"
+        f"下一步：{update.get('下一步行动')}{queue_line}{crm_line}\n"
         f"记录：{_record_url(B2B_LINKEDIN_TABLE, record_id, B2B_LINKEDIN_VIEW)}"
     )
-    return {"ok": True, "record_id": record_id, "action": action, "fields": update, "queue": queue_result, "reply": reply, "reply_result": await _send_reply(payload, reply)}
+    return {"ok": True, "record_id": record_id, "action": action, "fields": update, "queue": queue_result, "crm_sync": crm_sync, "crm_warning": crm_warning, "reply": reply, "reply_result": await _send_reply(payload, reply)}
 
 
 async def handle_event(payload: dict) -> dict:

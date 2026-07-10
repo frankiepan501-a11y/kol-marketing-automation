@@ -156,6 +156,15 @@ async def _list_records(*, field_names: list[str] | None = None, automatic_field
     return items
 
 
+async def _get_record(record_id: str) -> dict:
+    resp = await feishu.api(
+        "GET",
+        f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{B2B_LINKEDIN_TABLE}/records/{record_id}",
+        which="bitable",
+    )
+    return (resp.get("data") or {}).get("record") or {}
+
+
 async def _update_record(record_id: str, fields: dict) -> None:
     await feishu.api(
         "PUT",
@@ -394,6 +403,7 @@ def _row_elements(row: dict, index: int, total: int) -> list[dict]:
     ]
     receipt_2 = [
         _button("📧 转Email", value=_card_action(record_id, "linkedin_to_email", company)),
+        _button("👤 联系人已离职", value=_card_action(record_id, "linkedin_contact_left", company)),
         _button("⛔ 不合适", value=_card_action(record_id, "linkedin_not_fit", company), style="danger"),
     ]
 
@@ -429,6 +439,7 @@ def _row_elements(row: dict, index: int, total: int) -> list[dict]:
                 "content": (
                     "⏱ **执行 / 降配规则**\n"
                     "- 今日动作: 手动查看 profile, 发送连接邀请; 完成后点 **已加人**\n"
+                    "- 若发现联系人已离职/不在该公司: 点 **联系人已离职**; 系统保留客户公司并要求重新找联系人\n"
                     "- 接受后动作: 发送上面的推荐私信; 完成后点 **已发私信**\n"
                     "- 业务员 48h 内未点任何回执按钮: 系统判为 **未确认执行**, 次日降低该线索派发优先级, 并提醒跟进人补状态\n"
                     "- 客户私信后 D+3 未回复: 转 Email / 官网表单\n"
@@ -712,6 +723,7 @@ async def run(
     notify: bool = False,
     limit: int = 5,
     owner: str = "",
+    record_id: str = "",
     include_test: bool = False,
     frankie_only: bool = False,
 ) -> dict:
@@ -722,8 +734,22 @@ async def run(
     if notify and not commit:
         raise ValueError("notify=true requires commit=true")
     limit = max(1, min(int(limit or 5), 10))
-    rows = await _eligible_rows(include_test=include_test)
-    grouped, queued, assignment_stats = _assign_rows(rows, limit_per_owner=limit, owner_filter=owner)
+    record_id = (record_id or "").strip()
+    if record_id:
+        rec = await _get_record(record_id)
+        if not rec:
+            raise ValueError(f"LinkedIn lead record not found: {record_id}")
+        row = _row_from_record(rec)
+        target_owner = (owner or row.get("owner") or "").strip()
+        if not target_owner or target_owner == "未分配":
+            target_owner = DEFAULT_DISPATCH_OWNERS[0]
+        rows = [row]
+        grouped = {target_owner: [_with_assignment(row, target_owner, "指定记录重发")]}
+        queued = []
+        assignment_stats = {"direct_record": 1, "country_rule": 0, "balanced": 0, "queued_capacity": 0}
+    else:
+        rows = await _eligible_rows(include_test=include_test)
+        grouped, queued, assignment_stats = _assign_rows(rows, limit_per_owner=limit, owner_filter=owner)
     assignment_updates = await _sync_assignments(grouped, commit=commit)
 
     message_ids = []
@@ -760,6 +786,7 @@ async def run(
         "notify": notify,
         "limit_per_owner": limit,
         "owner_filter": owner,
+        "record_id": record_id,
         "include_test": include_test,
         "frankie_only": frankie_only,
         "eligible_total": len(rows),
