@@ -147,6 +147,38 @@ class B2BCrmSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("联系人已离职", follow_fields["客户反馈"])
         self.assertIn("重新找", follow_fields["下一步行动"])
 
+    async def test_linkedin_contact_left_is_idempotent_for_same_lead(self):
+        async def fake_find(**kwargs):
+            return {
+                "record_id": "rec_customer",
+                "fields": {
+                    "公司名称": "Extra Stores",
+                    "合作状态": "未联系",
+                    "跟进日志": "2026-07-10 11:43 冼浩华 [LinkedIn] LinkedIn核验：联系人 Wael Abuzaid / Finance & Business Development Director 已离职或不在当前客户公司；客户公司仍保留开发价值，下一步重新找采购/BD/Category/Product 相关联系人。",
+                    "跟进人": "冼浩华",
+                    "开发人": "冼浩华",
+                    "客户来源": "领英",
+                },
+            }, "company"
+
+        b2b_crm_sync._find_customer_match = fake_find
+        result = await b2b_crm_sync.sync_linkedin_contact_left(
+            "rec_lead",
+            {
+                "公司名称": "Extra Stores",
+                "联系人姓名": "Wael Abuzaid",
+                "职位": "Finance & Business Development Director",
+                "跟进人": "冼浩华",
+            },
+            actor="冼浩华",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["already_logged"])
+        self.assertEqual("", result["followup_record_id"])
+        self.assertEqual([], self.created)
+        self.assertEqual([], self.updated)
+
 
 if __name__ == "__main__":
     unittest.main()

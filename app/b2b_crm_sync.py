@@ -554,11 +554,17 @@ async def sync_linkedin_contact_left(lead_record_id: str, lead_fields: dict, *, 
     detail += " 已离职或不在当前客户公司；客户公司仍保留开发价值，下一步重新找采购/BD/Category/Product 相关联系人。"
     if note:
         detail += f" 业务员备注：{note}"
+    detail += f"；线索ID：{lead_record_id}"
     line = f"{_now_text()} {actor or owner} [LinkedIn] {detail}"
-    dedupe_key = f"linkedin_contact_left|{lead_record_id}|{contact}|{actor}|{note}"
+    dedupe_key = f"线索ID：{lead_record_id}"
 
     if match:
         update = {}
+        old_log = _text(old_fields.get("跟进日志"))
+        already_logged = (
+            bool(dedupe_key and dedupe_key in old_log)
+            or (f"LinkedIn核验：联系人 {contact}" in old_log and "已离职" in old_log)
+        )
         _field_if_empty(update, old_fields, "跟进人", owner)
         _field_if_empty(update, old_fields, "开发人", owner)
         _field_if_empty(update, old_fields, "客户来源", "领英")
@@ -566,10 +572,13 @@ async def sync_linkedin_contact_left(lead_record_id: str, lead_fields: dict, *, 
             update["公司官网"] = _url_cell(website)
         if linkedin and not _text(old_fields.get("LinkedIn")):
             update["LinkedIn"] = _url_cell(linkedin, "LinkedIn")
-        update["跟进日志"] = _append_line(_text(old_fields.get("跟进日志")), line, dedupe_key)
-        await _update_record(B2B_CUSTOMER_TABLE, customer_id, update)
+        if not already_logged:
+            update["跟进日志"] = _append_line(old_log, line, dedupe_key)
+        if update:
+            await _update_record(B2B_CUSTOMER_TABLE, customer_id, update)
         created = False
     else:
+        already_logged = False
         fields = {
             "公司名称": company,
             "登记日期": _now_ms(),
@@ -598,19 +607,22 @@ async def sync_linkedin_contact_left(lead_record_id: str, lead_fields: dict, *, 
         match_type = "created"
         created = True
 
-    followup_id = await _create_followup(
-        customer_id=customer_id,
-        company=company,
-        method="LinkedIn",
-        content=detail,
-        owner=actor or owner,
-        feedback="联系人已离职",
-        next_action="保留客户公司，重新找采购/BD/Category/Product 相关联系人后再开发。",
-    )
+    followup_id = ""
+    if not already_logged:
+        followup_id = await _create_followup(
+            customer_id=customer_id,
+            company=company,
+            method="LinkedIn",
+            content=detail,
+            owner=actor or owner,
+            feedback="联系人已离职",
+            next_action="保留客户公司，重新找采购/BD/Category/Product 相关联系人后再开发。",
+        )
     return {
         "ok": True,
         "customer_record_id": customer_id,
         "customer_created": created,
         "matched_by": match_type,
         "followup_record_id": followup_id,
+        "already_logged": already_logged,
     }
