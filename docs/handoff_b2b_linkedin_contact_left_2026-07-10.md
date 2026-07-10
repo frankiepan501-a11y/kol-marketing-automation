@@ -24,6 +24,13 @@
 - `python -m unittest tests.test_b2b_linkedin_contact_left tests.test_b2b_crm_sync -v`：通过
 - `python -m unittest discover -s tests -v`：B2B 相关测试通过；剩余一个既有失败 `tests.test_zeabur_watchdog.ZeaburWatchdogTests.test_run_once_alerts_any_project_service_failed_deployment`，与本次改动无关。
 
+## 部署与通知
+
+- Commit：`6ffc00270a773a038793a0c27a235610ff7369ab`
+- Zeabur deployment：`6a5068dd019866a087e694cd`，状态 `RUNNING`
+- 已重发指定卡片：`Extra Stores / Wael Abuzaid`，record_id `recvoJVEhiNV3w`，接收人 `冼浩华`，message_id `om_x100b6a32db1218a0c1f46d4e4508bed`
+- 已发群操作指引：message_id `om_x100b6a32d9e6cca8c4b35d95671b254`
+
 ## 操作指引
 
 - 联系人仍在该公司：按原流程打开联系人 LinkedIn，发连接后点「已加人」。
