@@ -25,8 +25,12 @@ from . import cs_ingest as _csi  # 复用采集侧 Zoho/网易/Discord 凭据与
 
 CS_APP = os.environ.get("CS_TICKET_APP_TOKEN", "J2fibLgBZaLGTNsQOPHcQXLonZe")
 T_TICKET = os.environ.get("CS_TICKET_TABLE_ID", "tblAhXMA9uDbGEMS")
-CS_ASSIST_ID = os.environ.get("FEISHU_CS_ASSISTANT_APP_ID", "cli_aab6bdb724e1dcdb")
-CS_ASSIST_SECRET = os.environ.get("FEISHU_CS_ASSISTANT_APP_SECRET", "")
+CS_ASSIST_ID = (os.environ.get("FEISHU_CS_ASSISTANT_APP_ID")
+                or os.environ.get("FEISHU_CUSTOMER_SERVICE_APP_ID")
+                or "cli_aab6bdb724e1dcdb")
+CS_ASSIST_SECRET = (os.environ.get("FEISHU_CS_ASSISTANT_APP_SECRET")
+                    or os.environ.get("FEISHU_CUSTOMER_SERVICE_APP_SECRET")
+                    or "")
 OBSERVE = (os.environ.get("CS_DISPATCH_OBSERVE", "1") or "1") != "0"
 OBSERVE_UNION = os.environ.get("CS_DISPATCH_OBSERVE_UNION",
                                "on_6e85dd60606f76f2d5af892785ac1dfe")  # Frankie union_id
@@ -218,6 +222,49 @@ def _handoff_context_md(f: dict) -> str:
     return "\n".join(lines)
 
 
+def _record_url(rid: str) -> str:
+    return f"https://u1wpma3xuhr.feishu.cn/base/{CS_APP}?table={T_TICKET}&record={rid}"
+
+
+def _evidence_context_md(rid: str, f: dict) -> str:
+    status = _x(f, "客户附件状态")
+    count = _x(f, "客户附件数量")
+    summary = _x(f, "客户附件摘要")
+    raw_json = _x(f, "客户附件JSON")
+    if not any([status, count, summary, raw_json]):
+        return ""
+    lines = [f"**📎 客户证据附件:** {status or '-'}" + (f" · 已保存 {count} 个" if count else "")]
+    files = []
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+            if isinstance(parsed, list):
+                files = parsed
+        except Exception:
+            files = []
+    for idx, item in enumerate(files[:6], 1):
+        if not isinstance(item, dict):
+            continue
+        size_mb = (int(item.get("size") or 0) / 1024 / 1024)
+        if item.get("file_token"):
+            state = "已保存"
+        elif item.get("url"):
+            state = "链接"
+        else:
+            state = "跳过" if item.get("skipped_reason") else "待保存"
+        reason = item.get("skipped_reason") or item.get("upload_error") or ""
+        lines.append(f"{idx}. `{item.get('filename') or '-'}` · {item.get('kind') or '文件'} · {size_mb:.2f}MB · {state}"
+                     + (f" · {reason}" if reason else "")
+                     + (f" · [打开链接]({item.get('url')})" if item.get("url") else ""))
+    if len(files) > 6:
+        lines.append(f"... 另有 {len(files) - 6} 个附件，详见工单记录。")
+    if not files and summary:
+        lines.append(summary[:700])
+    lines.append(f"[打开工单记录查看/下载原始附件]({_record_url(rid)})")
+    lines.append("_原始图片/视频已作为证据包保留；AI 摘要不能替代原件。_")
+    return "\n".join(lines)
+
+
 def _header_title(f: dict, rid: str = "") -> str:
     brand = _x(f, "品牌") or "-"
     platform = _x(f, "销售平台") or "未知"
@@ -293,6 +340,7 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
     resource_keys = [r.get("resource_key") for r in resource_context.get("matches") or [] if r.get("resource_key")]
     routing_notice = _routing_notice_md(f)
     handoff_md = _handoff_context_md(f)
+    evidence_md = _evidence_context_md(rid, f)
     info = (f"**工单ID:** `{ticket}`  ·  **处理状态:** {_card_status_label(f)}\n"
             f"**渠道:** {channel}  ·  **品牌:** {brand}  ·  **平台:** {platform}\n"
             f"**客户:** {customer}" + (f"  ·  **订单:** {order}" if order else "") + "\n"
@@ -307,6 +355,11 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
     if handoff_md:
         elements.extend([
             {"tag": "div", "text": {"tag": "lark_md", "content": handoff_md}},
+            {"tag": "hr"},
+        ])
+    if evidence_md:
+        elements.extend([
+            {"tag": "div", "text": {"tag": "lark_md", "content": evidence_md}},
             {"tag": "hr"},
         ])
     elements.extend([
@@ -398,6 +451,30 @@ async def run(limit: int = 10, rids: str = "") -> dict:
                 samples.append({"产品": _x(f, "产品"), "平台": _x(f, "销售平台"),
                                 "建议运营": _x(f, "分配运营"), "摘要": _x(f, "客诉摘要")[:40]})
     return {"observe": OBSERVE, "candidates": len(items), "sent": sent, "samples": samples}
+
+
+async def send_preview_card(rid: str) -> dict:
+    """Send a non-mutating preview card to Frankie/observe target for one ticket."""
+    if not CS_ASSIST_SECRET:
+        return {"ok": False, "error": "FEISHU_CS_ASSISTANT_APP_SECRET 未配"}
+    rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                           which="notify")
+    f = ((rec.get("data", {}) or {}).get("record", {}) or {}).get("fields", {}) or {}
+    if not f:
+        return {"ok": False, "error": "record not found", "record_id": rid}
+    try:
+        resources = await cs_resources.active_resources()
+    except Exception:
+        resources = cs_resources.builtin_resources()
+    card = _build_card(rid, f, resources=resources)
+    card["header"]["template"] = "blue"
+    old_title = card["header"]["title"]["content"]
+    card["header"]["title"]["content"] = f"🧪 测试卡片 · {old_title}"
+    card["elements"].insert(0, {"tag": "note", "elements": [{"tag": "plain_text",
+        "content": "这是证据附件 P0 回放测试卡，不会改变原工单状态，也不会给客户发信。"}]})
+    mid = await _send_card(OBSERVE_UNION, card)
+    return {"ok": bool(mid), "record_id": rid, "message_id": mid,
+            "sent_to": "observe_union", "status": _x(f, "状态")}
 
 
 # ===== 回客户真实渠道发送 (CSP=Powkong Zoho / CSF=Funlab 网易 SMTP / CSD·CSDT=Discord) =====

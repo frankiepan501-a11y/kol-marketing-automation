@@ -1,5 +1,6 @@
 import json
 import unittest
+from email.message import EmailMessage
 
 from app import cs_dispatch, cs_ingest
 
@@ -125,6 +126,88 @@ class CsInfoRequestTests(unittest.TestCase):
         self.assertEqual("free replacement", cs_ingest._info_request_is_safe(
             "We will send a free replacement after you reply."
         ))
+
+    def test_email_attachment_extraction_keeps_customer_image(self):
+        msg = EmailMessage()
+        msg["Subject"] = "Controller issue"
+        msg.set_content("Please see attached image.")
+        msg.add_attachment(b"fake-image-bytes", maintype="image", subtype="jpeg", filename="issue.jpg")
+
+        attachments = cs_ingest._extract_email_attachments(msg)
+
+        self.assertEqual(1, len(attachments))
+        self.assertEqual("issue.jpg", attachments[0]["filename"])
+        self.assertEqual("图片", attachments[0]["kind"])
+        self.assertEqual(b"fake-image-bytes", attachments[0]["bytes"])
+
+    def test_email_link_extraction_keeps_customer_video_url(self):
+        msg = EmailMessage()
+        msg["Subject"] = "Controller issue"
+        msg.set_content("Plain fallback")
+        msg.add_alternative(
+            '<p>Video proof: <a href="https://cdn.shopify.com/s/files/1/abc/issue.mp4">issue</a></p>',
+            subtype="html",
+        )
+
+        attachments = cs_ingest._extract_email_attachments(msg)
+
+        self.assertEqual(1, len(attachments))
+        self.assertEqual("链接", attachments[0]["kind"])
+        self.assertEqual("https://cdn.shopify.com/s/files/1/abc/issue.mp4", attachments[0]["url"])
+
+    def test_card_renders_customer_evidence_context(self):
+        fields = {
+            "工单ID": "CSF-<inbound-2@example.com>",
+            "客户标识": "mailer@shopify.com",
+            "品牌": ["FUNLAB"],
+            "产品": "controller",
+            "销售平台": ["独立站"],
+            "渠道": ["邮箱"],
+            "客诉类型": ["产品"],
+            "AI置信度": ["AI起草人工审"],
+            "分配运营": "陈翔宇",
+            "客诉摘要": "客户提供图片和视频反馈按键问题。",
+            "AI草稿": "Dear customer, thank you.",
+            "客户附件状态": ["已保存"],
+            "客户附件数量": 2,
+            "客户附件JSON": json.dumps([
+                {"filename": "issue.jpg", "kind": "图片", "size": 1024, "file_token": "boxcn_img"},
+                {"filename": "issue.mp4", "kind": "视频", "size": 2048, "file_token": "boxcn_vid"},
+            ], ensure_ascii=False),
+            "客户附件摘要": "客户原始证据附件: 已保存 2 个",
+        }
+
+        card = cs_dispatch._build_card("rec_evidence", fields, resources=[])
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertIn("客户证据附件", rendered)
+        self.assertIn("issue.jpg", rendered)
+        self.assertIn("issue.mp4", rendered)
+        self.assertIn("打开工单记录", rendered)
+
+    def test_card_renders_no_customer_evidence_checked(self):
+        fields = {
+            "工单ID": "CSF-<inbound-3@example.com>",
+            "客户标识": "mailer@shopify.com",
+            "品牌": ["FUNLAB"],
+            "产品": "controller",
+            "销售平台": ["亚马逊-加拿大"],
+            "渠道": ["邮箱"],
+            "客诉类型": ["产品"],
+            "AI置信度": ["AI起草人工审"],
+            "分配运营": "陈翔宇",
+            "客诉摘要": "客户反馈 turbo switch glitching。",
+            "AI草稿": "Dear Aisha, thank you.",
+            "客户附件状态": ["无附件"],
+            "客户附件数量": 0,
+            "客户附件JSON": "[]",
+            "客户附件摘要": "未检测到客户图片/视频/PDF附件。",
+        }
+
+        card = cs_dispatch._build_card("rec_no_evidence", fields, resources=[])
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertIn("客户证据附件", rendered)
+        self.assertIn("无附件", rendered)
+        self.assertIn("未检测到客户图片/视频/PDF附件", rendered)
 
 
 if __name__ == "__main__":

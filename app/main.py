@@ -880,6 +880,36 @@ async def run_cs_resources_index(authorization: str = Header(default=""), commit
         return {"ok": False, "error": str(e), "trace": tr}
 
 
+@app.post("/cs/evidence/backfill")
+async def run_cs_evidence_backfill(authorization: str = Header(default=""),
+                                   record_id: str = "",
+                                   dry_run: bool = False,
+                                   scan_limit: int = 500):
+    """客服证据附件回填: 从原邮箱线程重读图片/视频/PDF附件并写入工单附件字段。"""
+    _check_auth(authorization)
+    try:
+        result = await cs_ingest.backfill_evidence(record_id=record_id, dry_run=dry_run,
+                                                   scan_limit=scan_limit)
+        return {"ok": bool(result.get("ok")), **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/evidence/backfill", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/cs/evidence/preview-card")
+async def run_cs_evidence_preview_card(authorization: str = Header(default=""), record_id: str = ""):
+    """发送一张不改状态的客服证据附件测试卡给观察目标。"""
+    _check_auth(authorization)
+    try:
+        result = await cs_dispatch.send_preview_card(record_id)
+        return {"ok": bool(result.get("ok")), **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/evidence/preview-card", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
 @app.post("/cs/amz-review-audit/run")
 async def run_amz_review_audit(authorization: str = Header(default=""),
                                kind: str = "all",

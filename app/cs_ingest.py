@@ -11,6 +11,8 @@
 - 置信度: 操作咨询=AI直答 / 质量补发=AI起草人工审 / 投诉升级·退款=必须人工.
 """
 import asyncio
+import html
+import json
 import os
 import re
 import time
@@ -44,6 +46,18 @@ CS_INFO_REQUEST_LIVE = (os.environ.get("CS_INFO_REQUEST_LIVE", "0") or "0") == "
 CS_INFO_REQUEST_DRY_RUN_TO = (os.environ.get("CS_INFO_REQUEST_DRY_RUN_TO", "")
                               or os.environ.get("CS_REPLY_DRY_RUN_TO", "") or "").strip()
 CS_INFO_REQUEST_MAX = int(os.environ.get("CS_INFO_REQUEST_MAX", "2") or "2")
+
+# 客户原始证据附件。P0 只做原件透传: 图片/视频/PDF/常见压缩包写入工单附件字段,
+# 不让 AI 摘要替代原始文件。飞书 Bitable 单附件上传当前按 20MB 上限处理。
+CS_EVIDENCE_ATTACHMENT_FIELD = os.environ.get("CS_EVIDENCE_ATTACHMENT_FIELD", "客户证据附件")
+CS_ATTACHMENT_MAX_MB = float(os.environ.get("CS_ATTACHMENT_MAX_MB", "20") or "20")
+CS_ATTACHMENT_MAX_BYTES = int(CS_ATTACHMENT_MAX_MB * 1024 * 1024)
+CS_ATTACHMENT_ALLOWED_PREFIXES = tuple(
+    x.strip().lower() for x in os.environ.get(
+        "CS_ATTACHMENT_ALLOWED_PREFIXES",
+        "image/,video/,application/pdf,application/zip,application/x-zip-compressed",
+    ).split(",") if x.strip()
+)
 
 # ---- Discord FUN Bot (token=env secret; 频道 id 非 secret 给默认值) ----
 # v0 只接 FUNLAB 公开 #support-center (FUN Bot 可读)。私有工单(MEE6)待官号 2FA 授权后补。
@@ -81,8 +95,13 @@ _SELLER_TTL = 3600
 
 
 def _strip_html(s: str) -> str:
+    # Preserve href targets before dropping tags; Shopify/contact-form uploads are
+    # often links in HTML rather than MIME attachments.
+    s = re.sub(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+               lambda m: f" {re.sub(r'<[^>]+>', ' ', m.group(2) or '').strip()} {m.group(1)} ",
+               s or "", flags=re.I | re.S)
     s = re.sub(r"<[^>]+>", " ", s or "")
-    return re.sub(r"\s+", " ", s.replace("&nbsp;", " ")).strip()
+    return re.sub(r"\s+", " ", html.unescape(s).replace("&nbsp;", " ")).strip()
 
 
 def _field_text(v) -> str:
@@ -107,6 +126,212 @@ def _field_text(v) -> str:
 
 def _customer_email(v: str) -> str:
     return (parseaddr(v or "")[1] or v or "").strip().lower()
+
+
+def _safe_filename(name: str, fallback: str = "customer-evidence.bin") -> str:
+    raw = (name or "").strip().replace("\\", "_").replace("/", "_")
+    raw = re.sub(r"[\x00-\x1f<>:\"|?*]+", "_", raw)
+    raw = re.sub(r"\s+", " ", raw).strip(" .")
+    return (raw or fallback)[:180]
+
+
+def _attachment_allowed(content_type: str, filename: str = "") -> bool:
+    ct = (content_type or "application/octet-stream").lower()
+    if any(ct.startswith(prefix) for prefix in CS_ATTACHMENT_ALLOWED_PREFIXES):
+        return True
+    ext = os.path.splitext((filename or "").lower())[1]
+    return ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif",
+                   ".mp4", ".mov", ".avi", ".m4v", ".pdf", ".zip"}
+
+
+def _attachment_kind(content_type: str, filename: str = "") -> str:
+    ct = (content_type or "").lower()
+    if ct == "text/uri-list":
+        return "链接"
+    if ct.startswith("image/"):
+        return "图片"
+    if ct.startswith("video/"):
+        return "视频"
+    if ct == "application/pdf" or filename.lower().endswith(".pdf"):
+        return "PDF"
+    return "文件"
+
+
+_URL_RE = re.compile(r"https?://[^\s<>'\")]+", re.I)
+
+
+def _filename_from_url(url: str, idx: int) -> str:
+    try:
+        path = url.split("?", 1)[0].rstrip("/")
+        name = path.rsplit("/", 1)[-1]
+        return _safe_filename(name or f"customer-evidence-link-{idx}.url")
+    except Exception:
+        return f"customer-evidence-link-{idx}.url"
+
+
+def _looks_like_evidence_url(url: str) -> bool:
+    low = (url or "").lower()
+    if any(x in low for x in ["cdn.shopify.com", "shopifycdn", "/uploads/", "drive.google.com"]):
+        return True
+    return bool(re.search(r"\.(jpg|jpeg|png|gif|webp|heic|heif|mp4|mov|m4v|avi|pdf|zip)(\?|$)", low))
+
+
+def _extract_evidence_links(*texts: str) -> list[dict]:
+    seen, out = set(), []
+    for text in texts:
+        for url in _URL_RE.findall(text or ""):
+            url = html.unescape(url).rstrip(".,;]")
+            if url in seen or not _looks_like_evidence_url(url):
+                continue
+            seen.add(url)
+            idx = len(out) + 1
+            filename = _filename_from_url(url, idx)
+            out.append({"filename": filename, "content_type": "text/uri-list", "size": 0,
+                        "kind": "链接", "source": "email-link", "url": url,
+                        "skipped_reason": "外部证据链接，已在卡片保留 URL"})
+    return out
+
+
+def _public_attachment_meta(att: dict) -> dict:
+    return {k: v for k, v in att.items() if k not in {"bytes", "raw"}}
+
+
+def _attachments_json(attachments: list[dict]) -> str:
+    safe = [_public_attachment_meta(a) for a in attachments]
+    return json.dumps(safe, ensure_ascii=False)[:5000]
+
+
+def _attachments_summary(attachments: list[dict]) -> str:
+    if not attachments:
+        return "未检测到客户图片/视频/PDF附件。"
+    saved = [a for a in attachments if a.get("file_token")]
+    links = [a for a in attachments if a.get("url") and not a.get("file_token")]
+    skipped = [a for a in attachments if a.get("skipped_reason") and not a.get("url")]
+    failed = [a for a in attachments if a.get("upload_error")]
+    lines = [f"客户原始证据: 已保存附件 {len(saved)} 个"
+             + (f"，提取链接 {len(links)} 个" if links else "")
+             + (f"，跳过 {len(skipped)} 个" if skipped else "")
+             + (f"，失败 {len(failed)} 个" if failed else "")]
+    for idx, a in enumerate(attachments[:8], 1):
+        size_mb = (int(a.get("size") or 0) / 1024 / 1024)
+        if a.get("file_token"):
+            state = "已保存"
+        elif a.get("url"):
+            state = "链接"
+        else:
+            state = "跳过" if a.get("skipped_reason") else "待保存"
+        reason = a.get("skipped_reason") or a.get("upload_error") or ""
+        lines.append(f"{idx}. [{a.get('kind') or '文件'}] {a.get('filename') or '-'} · {size_mb:.2f}MB · {state}"
+                     + (f" · {reason}" if reason else ""))
+    if len(attachments) > 8:
+        lines.append(f"... 另有 {len(attachments) - 8} 个附件未在摘要中展开。")
+    return "\n".join(lines)[:5000]
+
+
+def _attachment_status(attachments: list[dict]) -> str:
+    if not attachments:
+        return "无附件"
+    saved = sum(1 for a in attachments if a.get("file_token"))
+    linked = sum(1 for a in attachments if a.get("url") and not a.get("file_token"))
+    failed_or_skipped = sum(1 for a in attachments if (a.get("skipped_reason") and not a.get("url")) or a.get("upload_error"))
+    if saved and not failed_or_skipped:
+        return "已保存"
+    if saved and (failed_or_skipped or linked):
+        return "部分跳过"
+    if linked and not failed_or_skipped:
+        return "部分跳过"
+    return "保存失败" if failed_or_skipped else "无附件"
+
+
+def _attachment_base_fields(attachments: list[dict]) -> dict:
+    return {
+        "客户附件数量": sum(1 for a in attachments if a.get("file_token")),
+        "客户附件状态": _attachment_status(attachments),
+        "客户附件摘要": _attachments_summary(attachments),
+        "客户附件JSON": _attachments_json(attachments),
+    }
+
+
+async def _upload_bitable_attachment(filename: str, content_type: str, data: bytes) -> str:
+    tok = await feishu.token("notify")
+    safe_name = _safe_filename(filename)
+    form = {
+        "file_name": safe_name,
+        "parent_type": "bitable_file",
+        "parent_node": CS_APP_TOKEN,
+        "size": str(len(data)),
+    }
+    files = {"file": (safe_name, data, content_type or "application/octet-stream")}
+    async with httpx.AsyncClient(timeout=90.0) as c:
+        r = await c.post("https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
+                         headers={"Authorization": f"Bearer {tok}"},
+                         data=form, files=files)
+        if r.status_code >= 400:
+            raise Exception(f"Feishu upload {r.status_code}: {r.text[:240]}")
+        d = r.json()
+    token = (d.get("data") or {}).get("file_token")
+    if not token:
+        raise Exception(f"Feishu upload no file_token: {str(d)[:240]}")
+    return token
+
+
+async def _save_attachments_to_ticket(record_id: str, attachments: list[dict],
+                                      existing_fields: dict | None = None,
+                                      dry_run: bool = False) -> dict:
+    """Upload customer evidence to the ticket record attachment field.
+
+    Returns fields that should be written to the ticket. This function keeps
+    bytes out of Bitable JSON and only stores original files in the attachment
+    field plus small metadata.
+    """
+    if not attachments:
+        fields = _attachment_base_fields([])
+        if not dry_run and record_id:
+            await feishu.api("PUT",
+                             f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{record_id}",
+                             {"fields": fields}, which="notify")
+        return fields
+
+    result = []
+    attachment_values = []
+    existing_fields = existing_fields or {}
+    existing_attach = existing_fields.get(CS_EVIDENCE_ATTACHMENT_FIELD)
+    if isinstance(existing_attach, list):
+        for item in existing_attach:
+            if isinstance(item, dict) and item.get("file_token"):
+                attachment_values.append({"file_token": item["file_token"]})
+
+    for att in attachments:
+        meta = _public_attachment_meta(att)
+        data = att.get("bytes") or b""
+        if att.get("skipped_reason"):
+            result.append(meta)
+            continue
+        if not data:
+            meta["skipped_reason"] = "空附件或未下载到二进制"
+            result.append(meta)
+            continue
+        if dry_run:
+            meta["dry_run"] = True
+            result.append(meta)
+            continue
+        try:
+            token = await _upload_bitable_attachment(att.get("filename") or "customer-evidence.bin",
+                                                     att.get("content_type") or "application/octet-stream",
+                                                     data)
+            meta["file_token"] = token
+            attachment_values.append({"file_token": token})
+        except Exception as e:
+            meta["upload_error"] = str(e)[:240]
+        result.append(meta)
+
+    fields = _attachment_base_fields(result)
+    if attachment_values:
+        fields[CS_EVIDENCE_ATTACHMENT_FIELD] = attachment_values
+    if not dry_run:
+        await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{record_id}",
+                         {"fields": fields}, which="notify")
+    return fields
 
 
 # ===== 领星反查 (亚马逊订单号 → 站点/运营) =====
@@ -163,6 +388,66 @@ async def _zget(url: str, tok: str) -> dict:
         return r.json()
 
 
+async def _zget_bytes(url: str, tok: str) -> tuple[bytes, str]:
+    async with httpx.AsyncClient(timeout=90.0) as c:
+        r = await c.get(url, headers={"Authorization": f"Zoho-oauthtoken {tok}"})
+        r.raise_for_status()
+        return r.content, r.headers.get("content-type", "application/octet-stream").split(";")[0]
+
+
+async def _fetch_zoho_attachments(tok: str, folder_id: str, message_id: str) -> list[dict]:
+    """Best-effort Zoho Mail attachment extraction.
+
+    Zoho returns attachment descriptors under slightly different shapes across
+    accounts. Keep parsing defensive and only persist customer evidence-like
+    files.
+    """
+    try:
+        info = await _zget(
+            f"https://mail.zoho.com/api/accounts/{ZACC}/folders/{folder_id}"
+            f"/messages/{message_id}/attachmentinfo", tok)
+    except Exception:
+        return []
+    raw = info.get("data") or info.get("attachments") or []
+    if isinstance(raw, dict):
+        raw = raw.get("attachments") or raw.get("attachmentInfo") or raw.get("data") or []
+    out = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        aid = item.get("attachmentId") or item.get("id") or item.get("storeName")
+        filename = _safe_filename(item.get("attachmentName") or item.get("fileName") or item.get("name") or str(aid or "attachment"))
+        content_type = (item.get("contentType") or item.get("mimeType") or "application/octet-stream").split(";")[0]
+        try:
+            size = int(item.get("attachmentSize") or item.get("size") or 0)
+        except Exception:
+            size = 0
+        meta = {"filename": filename, "content_type": content_type, "size": size,
+                "kind": _attachment_kind(content_type, filename), "source": "zoho"}
+        if not aid:
+            meta["skipped_reason"] = "Zoho 未返回 attachmentId"
+        elif not _attachment_allowed(content_type, filename):
+            meta["skipped_reason"] = f"非证据类型: {content_type}"
+        elif size and size > CS_ATTACHMENT_MAX_BYTES:
+            meta["skipped_reason"] = f"超过 {CS_ATTACHMENT_MAX_MB:g}MB 上限"
+        if not meta.get("skipped_reason"):
+            try:
+                data, real_ct = await _zget_bytes(
+                    f"https://mail.zoho.com/api/accounts/{ZACC}/folders/{folder_id}"
+                    f"/messages/{message_id}/attachments/{aid}", tok)
+                if len(data) > CS_ATTACHMENT_MAX_BYTES:
+                    meta["skipped_reason"] = f"超过 {CS_ATTACHMENT_MAX_MB:g}MB 上限"
+                else:
+                    meta["bytes"] = data
+                    meta["size"] = len(data)
+                    meta["content_type"] = real_ct or content_type
+                    meta["kind"] = _attachment_kind(meta["content_type"], filename)
+            except Exception as e:
+                meta["skipped_reason"] = f"Zoho 下载失败: {str(e)[:120]}"
+        out.append(meta)
+    return out
+
+
 async def _fetch_powkong(limit: int) -> list:
     if not (ZCID and ZRT and ZACC):
         return []
@@ -183,13 +468,37 @@ async def _fetch_powkong(limit: int) -> list:
             body = _strip_html(d.get("content", "") if isinstance(d, dict) else "")
         except Exception:
             body = ""
+        attachments = await _fetch_zoho_attachments(tok, POWKONG_INBOX_FID, mid)
+        attachments.extend(_extract_evidence_links(body))
         out.append({"id": mid, "id_prefix": "CSP", "frm": m.get("fromAddress", ""),
                     "subj": m.get("subject", ""), "received_ms": int(m.get("receivedTime") or 0),
                     "body": body, "channel": "邮箱", "brand_default": "POWKONG",
                     "in_reply_to": m.get("inReplyTo") or m.get("inReplyToHeader") or "",
                     "references": m.get("references") or "",
-                    "mail_thread_id": m.get("threadId") or ""})
+                    "mail_thread_id": m.get("threadId") or "",
+                    "attachments": attachments})
     return out
+
+
+async def _fetch_powkong_one(message_id: str) -> dict:
+    if not (ZCID and ZRT and ZACC and message_id):
+        return {}
+    tok = await _ztoken()
+    body = ""
+    try:
+        content = await _zget(
+            f"https://mail.zoho.com/api/accounts/{ZACC}/folders/{POWKONG_INBOX_FID}"
+            f"/messages/{message_id}/content", tok)
+        d = content.get("data")
+        body = _strip_html(d.get("content", "") if isinstance(d, dict) else "")
+    except Exception:
+        body = ""
+    attachments = await _fetch_zoho_attachments(tok, POWKONG_INBOX_FID, message_id)
+    attachments.extend(_extract_evidence_links(body))
+    return {"id": message_id, "id_prefix": "CSP", "frm": "", "subj": "",
+            "received_ms": 0, "body": body, "channel": "邮箱", "brand_default": "POWKONG",
+            "in_reply_to": "", "references": "", "mail_thread_id": "",
+            "attachments": attachments}
 
 
 # ===== 源 ② Funlab (网易 IMAP, 同步, 跑在线程里) =====
@@ -218,6 +527,83 @@ def _extract_body(msg) -> str:
         return txt if msg.get_content_type() == "text/plain" else _strip_html(txt)
     except Exception:
         return ""
+
+
+def _decode_email_filename(raw: str) -> str:
+    try:
+        from email.header import decode_header, make_header
+        return str(make_header(decode_header(raw or "")))
+    except Exception:
+        return raw or ""
+
+
+def _email_text_parts_for_links(msg) -> list[str]:
+    texts = []
+    try:
+        parts = msg.walk() if msg.is_multipart() else [msg]
+        for part in parts:
+            if part.is_multipart():
+                continue
+            ct = part.get_content_type()
+            if ct not in ("text/plain", "text/html"):
+                continue
+            if (part.get("Content-Disposition") or "").lower().startswith("attachment"):
+                continue
+            try:
+                payload = part.get_payload(decode=True)
+                if not payload:
+                    continue
+                txt = payload.decode(part.get_content_charset() or "utf-8", "replace")
+            except Exception:
+                continue
+            texts.append(txt if ct == "text/plain" else _strip_html(txt))
+    except Exception:
+        return []
+    return texts
+
+
+def _extract_email_attachments(msg) -> list[dict]:
+    out = []
+    try:
+        parts = msg.walk() if msg.is_multipart() else [msg]
+        idx = 0
+        for part in parts:
+            if part.is_multipart():
+                continue
+            filename = _decode_email_filename(part.get_filename() or "")
+            disp = (part.get("Content-Disposition") or "").lower()
+            ct = (part.get_content_type() or "application/octet-stream").split(";")[0]
+            # 只保留明确附件或带文件名的图片/视频/PDF；无文件名的 inline logo 暂不采。
+            if not filename:
+                continue
+            if "attachment" not in disp and not _attachment_allowed(ct, filename):
+                continue
+            idx += 1
+            safe_name = _safe_filename(filename, f"customer-evidence-{idx}.bin")
+            meta = {"filename": safe_name, "content_type": ct, "size": 0,
+                    "kind": _attachment_kind(ct, safe_name), "source": "netease-imap"}
+            if not _attachment_allowed(ct, safe_name):
+                meta["skipped_reason"] = f"非证据类型: {ct}"
+                out.append(meta)
+                continue
+            try:
+                data = part.get_payload(decode=True) or b""
+            except Exception:
+                data = b""
+            meta["size"] = len(data)
+            if not data:
+                meta["skipped_reason"] = "空附件"
+            elif len(data) > CS_ATTACHMENT_MAX_BYTES:
+                meta["skipped_reason"] = f"超过 {CS_ATTACHMENT_MAX_MB:g}MB 上限"
+            else:
+                meta["bytes"] = data
+            out.append(meta)
+        out.extend(_extract_evidence_links(*_email_text_parts_for_links(msg)))
+    except Exception as e:
+        out.append({"filename": "attachment-parse-error", "content_type": "application/octet-stream",
+                    "size": 0, "kind": "文件", "source": "netease-imap",
+                    "skipped_reason": f"解析失败: {str(e)[:120]}"})
+    return out
 
 
 def _fetch_funlab_sync(limit: int) -> list:
@@ -257,7 +643,8 @@ def _fetch_funlab_sync(limit: int) -> list:
                         "channel": "邮箱", "brand_default": "FUNLAB",
                         "in_reply_to": (msg.get("In-Reply-To", "") or "").strip(),
                         "references": (msg.get("References", "") or "").strip(),
-                        "mail_thread_id": ""})
+                        "mail_thread_id": "",
+                        "attachments": _extract_email_attachments(msg)})
     finally:
         try:
             conn.logout()
@@ -268,6 +655,67 @@ def _fetch_funlab_sync(limit: int) -> list:
 
 async def _fetch_funlab(limit: int) -> list:
     return await asyncio.to_thread(_fetch_funlab_sync, limit)
+
+
+def _fetch_funlab_one_sync(message_id: str, scan_limit: int = 500) -> dict:
+    import imaplib, ssl, email
+    from email.header import decode_header, make_header
+    from email.utils import parsedate_to_datetime, parseaddr
+    if not (NE_USER and NE_CODE and message_id):
+        return {}
+    conn = imaplib.IMAP4_SSL(NE_IMAP, 993, ssl_context=ssl.create_default_context(), timeout=30)
+    try:
+        conn.login(NE_USER, NE_CODE)
+        imaplib.Commands["ID"] = ("AUTH", "SELECTED")
+        conn._simple_command(
+            "ID", '("name" "funlab-cs-backfill" "version" "1.0" "vendor" "python" "contact" "%s")' % NE_USER)
+        conn.select("INBOX", readonly=True)
+        candidates = []
+        if message_id.startswith("<") and message_id.endswith(">"):
+            try:
+                typ, data = conn.search(None, "HEADER", "Message-ID", f'"{message_id}"')
+                if typ == "OK" and data and data[0]:
+                    candidates.extend(data[0].split())
+            except Exception:
+                pass
+        if not candidates:
+            typ, data = conn.search(None, "ALL")
+            ids = (data[0].split() if data and data[0] else [])[-scan_limit:][::-1]
+            candidates.extend(ids)
+        for mid in candidates:
+            typ, d = conn.fetch(mid, "(BODY.PEEK[])")
+            if not d or not d[0]:
+                continue
+            msg = email.message_from_bytes(d[0][1])
+            msgid = (msg.get("Message-ID", "") or "").strip() or f"netease-{mid.decode()}"
+            if msgid != message_id and f"netease-{mid.decode()}" != message_id:
+                continue
+            try:
+                subj = str(make_header(decode_header(msg.get("Subject", ""))))
+            except Exception:
+                subj = msg.get("Subject", "")
+            frm = parseaddr(msg.get("From", ""))[1] or msg.get("From", "")
+            try:
+                received_ms = int(parsedate_to_datetime(msg.get("Date")).timestamp() * 1000)
+            except Exception:
+                received_ms = 0
+            return {"id": msgid, "id_prefix": "CSF", "frm": frm, "subj": subj,
+                    "received_ms": received_ms, "body": _extract_body(msg)[:8000],
+                    "channel": "邮箱", "brand_default": "FUNLAB",
+                    "in_reply_to": (msg.get("In-Reply-To", "") or "").strip(),
+                    "references": (msg.get("References", "") or "").strip(),
+                    "mail_thread_id": "",
+                    "attachments": _extract_email_attachments(msg)}
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    return {}
+
+
+async def _fetch_funlab_one(message_id: str, scan_limit: int = 500) -> dict:
+    return await asyncio.to_thread(_fetch_funlab_one_sync, message_id, scan_limit)
 
 
 # ===== 源 ③ Discord (FUN Bot REST: 公开 #support-center + 私有工单 MEE6) =====
@@ -660,6 +1108,8 @@ def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = N
         fields["沟通历史摘要"] = (f"首封问题: {summary[:260]}\n"
                             f"路由依据: {route_basis or '待客户补充'}\n"
                             f"仍缺字段: {' / '.join(info_gaps)}")[:5000]
+    if not (msg.get("attachments") or []):
+        fields.update(_attachment_base_fields([]))
     if status == STATUS_WAIT_INFO:
         fields["AI草稿"] = _info_request_reply(fields, fields.get("信息缺口", ""))[:5000]
         fields["补充信息次数"] = 0
@@ -811,6 +1261,38 @@ async def _handle_waiting_info_reply(row: dict, msg: dict, resources: list | Non
     return {"action": "wait_reply_escalate_to_triage", "record_id": rid, "dry_run": dry_run}
 
 
+async def backfill_evidence(record_id: str, dry_run: bool = False, scan_limit: int = 500) -> dict:
+    """Re-read the original mailbox message for an existing ticket and attach evidence files."""
+    if not record_id:
+        return {"ok": False, "error": "missing record_id"}
+    rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{record_id}",
+                           which="notify")
+    f = ((rec.get("data") or {}).get("record") or {}).get("fields", {}) or {}
+    ticket = _field_text(f.get("工单ID"))
+    thread_id = _field_text(f.get("线程ID"))
+    prefix = (ticket.split("-", 1)[0] if "-" in ticket else "").upper()
+    msg = {}
+    if prefix == "CSF":
+        msg = await _fetch_funlab_one(thread_id, scan_limit=scan_limit)
+    elif prefix == "CSP":
+        msg = await _fetch_powkong_one(thread_id)
+    else:
+        return {"ok": False, "record_id": record_id, "error": f"unsupported ticket prefix: {prefix or ticket}"}
+
+    attachments = msg.get("attachments") or []
+    if dry_run:
+        fields = _attachment_base_fields([_public_attachment_meta(a) for a in attachments])
+        return {"ok": True, "record_id": record_id, "dry_run": True,
+                "thread_id": thread_id, "found_message": bool(msg),
+                "attachment_count": len(attachments), "fields": fields}
+    fields = await _save_attachments_to_ticket(record_id, attachments, existing_fields=f, dry_run=False)
+    return {"ok": True, "record_id": record_id, "thread_id": thread_id,
+            "found_message": bool(msg), "attachment_count": len(attachments),
+            "saved_count": fields.get("客户附件数量", 0),
+            "status": fields.get("客户附件状态"),
+            "summary": fields.get("客户附件摘要", "")[:1000]}
+
+
 # ===== 主入口 =====
 async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> dict:
     src_err = {}
@@ -847,9 +1329,14 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
         if waiting_match:
             try:
                 result = await _handle_waiting_info_reply(waiting_match, m, resources, dry_run=dry_run)
+                if (m.get("attachments") or []) and result.get("record_id") and not dry_run:
+                    await _save_attachments_to_ticket(result["record_id"], m.get("attachments") or [],
+                                                      existing_fields=(waiting_match.get("fields") or {}),
+                                                      dry_run=False)
                 if len(samples) < 14:
                     samples.append({"from": m["frm"][:26], "状态": "客户补充归并",
-                                    "动作": result.get("action"), "record": result.get("record_id", "")})
+                                    "动作": result.get("action"), "record": result.get("record_id", ""),
+                                    "附件": len(m.get("attachments") or [])})
                 new_cnt += 1
             except Exception:
                 err_cnt += 1
@@ -879,11 +1366,16 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
             samples.append({"渠道品牌": f"{fields['品牌']}", "from": m["frm"][:26],
                             "is_cs": c.get("is_cs"), "平台": fields["销售平台"],
                             "运营": fields["分配运营"], "状态": fields["状态"],
+                            "附件": len(m.get("attachments") or []),
                             "摘要": fields["客诉摘要"][:48]})
         if not dry_run:
-            await feishu.api(
+            created = await feishu.api(
                 "POST", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records",
                 {"fields": fields}, which="notify")
+            rid = (((created.get("data") or {}).get("record") or {}).get("record_id")
+                   or ((created.get("data") or {}).get("record_id") or ""))
+            if rid and (m.get("attachments") or []):
+                await _save_attachments_to_ticket(rid, m.get("attachments") or [], dry_run=False)
         new_cnt += 1
 
     return {"sources": source, "fetched": len(msgs), "new": new_cnt, "skipped": skip_cnt,
