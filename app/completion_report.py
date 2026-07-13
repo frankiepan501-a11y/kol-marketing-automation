@@ -152,16 +152,18 @@ async def run(dry_run: bool = False) -> dict:
 
 
 async def _notify(card) -> int:
-    """Frankie 定: 运营群 + Frankie 私聊。运营在群里看(不重复私聊), 私聊只给 Frankie。"""
+    """运营群 + 独立站运营专员私聊 + Frankie 私聊。
+
+    2026-07-13: 张佳烨反馈没有收到 KOL 周报。仅发群会让周报交付不可确认，
+    所以周报类报告也走 reviewer 角色私聊，保持和审核卡同一在职人员解析规则。
+    """
     sent = 0
     try:
         await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
         sent += 1
     except Exception as e:
         print(f"[completion_report] 群发送失败: {e}")
-    for name, oid in config.NOTIFY_USERS:
-        if "Frankie" not in name and "潘志聪" not in name:
-            continue
+    for name, oid in await feishu.resolve_notify_targets("reviewer"):
         try:
             await feishu.send_card_message("open_id", oid, card)
             sent += 1

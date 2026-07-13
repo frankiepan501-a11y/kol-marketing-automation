@@ -1403,7 +1403,8 @@ async def run_completion_report(authorization: str = Header(default=""), dry_run
     if async_mode and not dry_run:
         async def _job():
             try:
-                await completion_report.run(dry_run=False)
+                res = await completion_report.run(dry_run=False)
+                print(f"[completion_report] background done notified={res.get('notified')}")
             except Exception as e:
                 import traceback
                 await _alert_endpoint_failure("/completion-report/run", str(e), traceback.format_exc()[-1200:])
@@ -1518,7 +1519,8 @@ async def run_upload_task_report(authorization: str = Header(default=""), dry_ru
     if async_mode and not dry_run:
         async def _job():
             try:
-                await upload_task_report.run(dry_run=False, notify=notify, frankie_only=frankie_only)
+                res = await upload_task_report.run(dry_run=False, notify=notify, frankie_only=frankie_only)
+                print(f"[upload_task_report] background done notified={res.get('notified')} products={res.get('products')} written={res.get('written')}")
             except Exception as e:
                 import traceback
                 await _alert_endpoint_failure("/upload-task-report/run", str(e), traceback.format_exc()[-1200:])

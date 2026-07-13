@@ -291,6 +291,11 @@ def _build_card(rows: list, week: str) -> dict:
 
 
 async def _notify(card, frankie_only: bool = False) -> int:
+    """运营群 + 独立站运营专员私聊 + Frankie 私聊。
+
+    2026-07-13: 周报是交接界面，不应只靠群消息被动发现。默认私聊在职
+    独立站运营专员，并保留 Frankie CC；frankie_only 仍用于格式审查。
+    """
     sent = 0
     if not frankie_only:
         try:
@@ -298,9 +303,11 @@ async def _notify(card, frankie_only: bool = False) -> int:
             sent += 1
         except Exception as e:
             print(f"[upload_task_report] 群发送失败: {e}")
-    for name, oid in config.NOTIFY_USERS:
-        if "Frankie" not in name and "潘志聪" not in name:
-            continue
+    targets = [(name, oid) for name, oid in config.NOTIFY_USERS
+               if "Frankie" in name or "潘志聪" in name]
+    if not frankie_only:
+        targets = await feishu.resolve_notify_targets("reviewer")
+    for name, oid in targets:
         try:
             await feishu.send_card_message("open_id", oid, card)
             sent += 1
