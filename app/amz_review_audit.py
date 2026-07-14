@@ -368,6 +368,14 @@ def should_alert_issue(issue: dict) -> bool:
     return rating == 3 and (bool(issue.get("homepage_visible")) or _high_risk(issue))
 
 
+def _is_test_issue(issue: dict) -> bool:
+    haystack = " ".join(
+        _text(issue.get(k))
+        for k in ("issue_key", "source_id", "asin", "parent_asin", "representative_asin", "store_name", "erp_name", "title", "summary")
+    ).lower()
+    return any(marker in haystack for marker in ("sample-", "b0test", "test-asin", "callback-smoke", "测试卡", "回调修复测试"))
+
+
 def issue_key(issue: dict) -> str:
     source_type = _text(issue.get("source_type")).upper() or "REVIEW"
     if source_type == "HOMEPAGE":
@@ -1016,6 +1024,7 @@ async def daily_digest(mode: str = "dry_run", notify: bool = False, limit: int =
     else:
         records = await _list_audit_records([STATE_NEW, STATE_SUBMITTED, STATE_RECHECK_FAIL], limit=limit)
         issues = [fields_to_issue(rec.get("record_id", ""), rec.get("fields") or {}) for rec in records]
+        issues = [issue for issue in issues if not _is_test_issue(issue)]
     grouped: dict[str, list[dict]] = defaultdict(list)
     for issue in issues:
         grouped[issue.get("owner") or "未分配"].append(issue)
@@ -1054,6 +1063,7 @@ async def recheck_due(mode: str = "dry_run", notify: bool = False, limit: int = 
     else:
         records = await _list_audit_records([STATE_SUBMITTED], limit=limit)
         issues = [fields_to_issue(rec.get("record_id", ""), rec.get("fields") or {}) for rec in records]
+        issues = [issue for issue in issues if not _is_test_issue(issue)]
     due = [issue for issue in issues if not issue.get("recheck_due_ms") or int(issue.get("recheck_due_ms") or 0) <= now_ms()]
     failed: list[dict] = []
     passed: list[dict] = []
