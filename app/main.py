@@ -22,6 +22,7 @@ from . import b2b_linkedin_discovery  # B2B 外部搜索/Snov 候选公司补给
 from . import b2b_linkedin_async_audit  # B2B n8n async ACK 后台 job 产出巡检
 from . import b2b_outreach_email  # B2B LinkedIn 转 Email 开发信队列 + dry-run sender
 from . import invest  # 投资助手: X 帖子抓取 → A股观察映射 → 投资助手 App 推送
+from . import kol_roi_mapping  # KOL ROI 归因缺口卡 + 映射回填
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
 app.include_router(invest.router)
@@ -1170,6 +1171,36 @@ async def run_sales_attribution(authorization: str = Header(default="")):
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
+@app.post("/kol-roi/gap-card/send")
+async def run_kol_roi_gap_card_send(authorization: str = Header(default=""),
+                                    limit: int = 2, dry_run: bool = True,
+                                    frankie_only: bool = True, source: str = ""):
+    """KOL ROI 缺口卡灰测.
+
+    默认 dry_run=true + frankie_only=true. 真发前先用 dry_run 看卡片结构;
+    生产扩散前必须先 Frankie-only 验证回调、写映射、PATCH 原卡。
+    """
+    _check_auth(authorization)
+    try:
+        return await kol_roi_mapping.send_pending_gap_cards(
+            limit=limit, dry_run=dry_run, frankie_only=frankie_only, source=source)
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
+@app.post("/kol-roi/mapping/callback")
+async def kol_roi_mapping_callback(request: Request, authorization: str = Header(default="")):
+    """KOL ROI 缺口卡回调.
+
+    n8n event-hub 标准化 card.action.trigger payload 后转发到这里。
+    """
+    _check_auth(authorization)
+    payload = await request.json()
+    event = payload.get("event", payload)
+    return await kol_roi_mapping.handle_callback(event)
 
 
 @app.get("/amazon/oauth/start")

@@ -159,6 +159,11 @@ SNOV_EDITOR_FINDER_ENABLED = (env("SNOV_EDITOR_FINDER_ENABLED", "1") or "1") != 
 # 2026-06-05: KOL 上稿×任务进度 周报留档表 (按产品审计). 非 secret, 给默认值.
 T_UPLOAD_REPORT = env("T_UPLOAD_REPORT", "tblHrlzTeSIhOjCY")
 
+# 2026-07-16: KOL ROI P1 归因映射 SSOT + 缺口处理台.
+# 运营不直接改映射表; UpPromote/Amazon 无法自动匹配时进缺口台, 后续用交互卡回填。
+T_ROI_ATTR_MAP = env("T_ROI_ATTR_MAP", "tblzxyUxNF7gWqJe")
+T_ROI_ATTR_GAP = env("T_ROI_ATTR_GAP", "tbliU8GDl6SU9b4y")
+
 # 通知目标
 # 2026-06-08: KOL/媒体人业务通知群 → 电商运营部(Frankie 拍板从站外运营部 oc_4ddd…26ac 迁出)。
 # 告警类(退信/重复/端点失败)不进此群, 改私聊 Frankie+负责运营(见 bounce_monitor/kol_dedup/main)。
