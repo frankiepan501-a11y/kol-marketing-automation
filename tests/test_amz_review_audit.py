@@ -7,6 +7,58 @@ from app import amz_review_audit as audit
 
 
 class AmzReviewAuditPureTests(unittest.TestCase):
+    def test_wanci_action_forwards_to_wanci_callback(self):
+        payload = {
+            "header": {"event_type": "card.action.trigger"},
+            "event": {
+                "action": {"value": {"action": "wanci_issue_done", "事项键": "WANCI:TEST"}},
+                "context": {"open_message_id": "om_wanci_card"},
+                "operator": {"open_id": "ou_operator"},
+            },
+        }
+        calls = []
+
+        class FakeResp:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return {"ok": True}
+
+        class FakeClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, json=None, headers=None):
+                calls.append({"url": url, "json": json, "headers": headers or {}})
+                return FakeResp()
+
+        old_url = amz_assistant.WANCI_CALLBACK_URL
+        old_token = amz_assistant.WANCI_CALLBACK_TOKEN
+        old_client = amz_assistant.httpx.AsyncClient
+        try:
+            amz_assistant.WANCI_CALLBACK_URL = "https://wanci.example/callback"
+            amz_assistant.WANCI_CALLBACK_TOKEN = "secret-test-token"
+            amz_assistant.httpx.AsyncClient = FakeClient
+
+            result = asyncio.run(amz_assistant.handle_feishu_callback(payload))
+        finally:
+            amz_assistant.WANCI_CALLBACK_URL = old_url
+            amz_assistant.WANCI_CALLBACK_TOKEN = old_token
+            amz_assistant.httpx.AsyncClient = old_client
+
+        self.assertEqual("info", result["toast"]["type"])
+        self.assertEqual(1, len(calls))
+        self.assertEqual("https://wanci.example/callback", calls[0]["url"])
+        self.assertEqual(payload, calls[0]["json"])
+        self.assertEqual("secret-test-token", calls[0]["headers"]["x-wanci-callback-token"])
+
     def test_normalize_issue_keeps_required_context_and_listing_link(self):
         issue = audit.normalize_issue({
             "source_type": "review",

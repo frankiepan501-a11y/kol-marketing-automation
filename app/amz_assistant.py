@@ -20,6 +20,8 @@ APP_ID = os.environ.get("FEISHU_AMZ_ASSISTANT_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_AMZ_ASSISTANT_APP_SECRET", "")
 VERIFICATION_TOKEN = os.environ.get("FEISHU_AMZ_ASSISTANT_VERIFICATION_TOKEN", "")
 FRANKIE_UNION_ID = os.environ.get("AMZ_REVIEW_OBSERVE_UNION", cs_dispatch.OBSERVE_UNION)
+WANCI_CALLBACK_URL = os.environ.get("WANCI_CARD_CALLBACK_URL", "")
+WANCI_CALLBACK_TOKEN = os.environ.get("WANCI_CARD_CALLBACK_TOKEN", "")
 
 _tok = {"v": "", "exp": 0.0}
 
@@ -157,6 +159,28 @@ def _event_log_context(payload: dict) -> dict:
     }
 
 
+async def _forward_wanci_callback(payload: dict[str, Any]) -> dict:
+    if not WANCI_CALLBACK_URL:
+        return {"toast": {"type": "error", "content": "万词卡片回调未配置，请联系系统处理"}}
+    headers = {}
+    if WANCI_CALLBACK_TOKEN:
+        headers["x-wanci-callback-token"] = WANCI_CALLBACK_TOKEN
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            resp = await client.post(WANCI_CALLBACK_URL, json=payload, headers=headers)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"ok": False, "err": resp.text[:200]}
+        if resp.status_code < 400 and data.get("ok"):
+            return {"toast": {"type": "info", "content": "已收到，系统已登记并更新原卡"}}
+        err = data.get("err") or data.get("msg") or f"HTTP {resp.status_code}"
+        return {"toast": {"type": "error", "content": f"万词卡片处理失败：{str(err)[:80]}"}}
+    except Exception as exc:
+        print(f"[amz_assistant.wanci_forward] fail: {exc}")
+        return {"toast": {"type": "error", "content": "万词卡片转发失败，请稍后重试"}}
+
+
 async def handle_feishu_callback(payload: dict[str, Any]) -> dict:
     if payload.get("encrypt"):
         return {"code": 400, "msg": "encrypted callbacks are not enabled for this endpoint yet"}
@@ -169,7 +193,10 @@ async def handle_feishu_callback(payload: dict[str, Any]) -> dict:
     event_type = _event_type(payload)
     if event_type and event_type not in ("card.action.trigger", "card.action.trigger_v1"):
         return {"code": 0, "msg": "ignored"}
-    print(f"[amz_assistant.callback] {json.dumps(_event_log_context(payload), ensure_ascii=False)}")
+    context = _event_log_context(payload)
+    print(f"[amz_assistant.callback] {json.dumps(context, ensure_ascii=False)}")
+    if context.get("action", "").startswith("wanci_"):
+        return await _forward_wanci_callback(payload)
     from . import amz_review_audit
 
     return await amz_review_audit.handle_callback(_card_event(payload))
