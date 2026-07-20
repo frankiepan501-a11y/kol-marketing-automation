@@ -60,7 +60,7 @@ class CsDispatchCardTests(unittest.TestCase):
         self.assertIn("[客服·待回]", card["header"]["title"]["content"])
         self.assertNotIn("兜底发给 Frankie", rendered)
 
-    def test_custom_reply_input_allows_2000_chars(self):
+    def test_custom_reply_input_splits_2000_chars_across_two_fields(self):
         fields = {
             "工单ID": "CSF-<raw@mail.example.com>",
             "客户标识": "customer@example.com",
@@ -77,10 +77,13 @@ class CsDispatchCardTests(unittest.TestCase):
 
         card = cs_dispatch._build_card("rec_len", fields, resources=[])
         form = next(e for e in card["elements"] if e.get("tag") == "form")
-        custom = next(e for e in form["elements"] if e.get("name") == "custom_reply")
+        primary = next(e for e in form["elements"] if e.get("name") == "custom_reply")
+        extra = next(e for e in form["elements"] if e.get("name") == "custom_reply_extra")
 
-        self.assertEqual(2000, custom["max_length"])
-        self.assertIn("≤2000字", custom["label"]["content"])
+        self.assertEqual(1000, primary["max_length"])
+        self.assertEqual(1000, extra["max_length"])
+        self.assertIn("第1段", primary["label"]["content"])
+        self.assertIn("总计≤2000字", extra["label"]["content"])
         rendered = json.dumps(card, ensure_ascii=False)
         self.assertIn("Hello," + "x" * 1994, rendered)
         self.assertNotIn("Hello," + "x" * 1995, rendered)

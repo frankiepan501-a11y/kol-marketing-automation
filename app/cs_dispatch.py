@@ -39,6 +39,7 @@ CS_REPLY_LIVE = (os.environ.get("CS_REPLY_LIVE", "0") or "0") != "0"
 # Scott Stein 铁律: 改/上线回客户代码先开此 env → 全部回复改发测试邮箱(真客户/频道不收), 验证 raw 完整再删
 CS_REPLY_DRY_RUN_TO = (os.environ.get("CS_REPLY_DRY_RUN_TO", "") or "").strip()
 CS_CUSTOM_REPLY_MAX_CHARS = int(os.environ.get("CS_CUSTOM_REPLY_MAX_CHARS", "2000") or "2000")
+CS_CARD_INPUT_MAX_CHARS = 1000
 # 发件身份 (Zoho send-as / 网易登录账号)
 ZOHO_CS_FROM = os.environ.get("ZOHO_POWKONG_CS_FROM", "support@powkong.com")
 NE_SMTP = os.environ.get("NETEASE_SMTP_HOST", "smtp.qiye.163.com")
@@ -369,9 +370,13 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
         {"tag": "hr"},
         {"tag": "form", "name": f"r_{rid}", "elements": [
             {"tag": "input", "name": "custom_reply", "width": "fill", "label_position": "top",
-             "label": {"tag": "plain_text", "content": f"✍️ 如需修改：输入最终回复（≤{CS_CUSTOM_REPLY_MAX_CHARS}字；留空=用上方草稿）"},
-             "placeholder": {"tag": "plain_text", "content": "留空则用上方 AI 草稿；要改就在此输入"},
-             "max_length": CS_CUSTOM_REPLY_MAX_CHARS},
+             "label": {"tag": "plain_text", "content": f"✍️ 如需修改：最终回复第1段（≤{CS_CARD_INPUT_MAX_CHARS}字；留空=用上方草稿）"},
+             "placeholder": {"tag": "plain_text", "content": "1000字以内直接填这里；超过1000字请接着填下面第2段"},
+             "max_length": CS_CARD_INPUT_MAX_CHARS},
+            {"tag": "input", "name": "custom_reply_extra", "width": "fill", "label_position": "top",
+             "label": {"tag": "plain_text", "content": f"✍️ 最终回复第2段（可选，总计≤{CS_CUSTOM_REPLY_MAX_CHARS}字）"},
+             "placeholder": {"tag": "plain_text", "content": "仅当第1段不够时填写；系统会和第1段合并发送"},
+             "max_length": max(0, CS_CUSTOM_REPLY_MAX_CHARS - CS_CARD_INPUT_MAX_CHARS)},
             {"tag": "button", "action_type": "form_submit", "name": "send", "type": "primary",
              "text": {"tag": "plain_text", "content": "✅ 发送回复给客户"},
              "value": {"act": "send_reply", "action": "cs_send_reply", "rid": rid,
@@ -813,7 +818,12 @@ async def handle_callback(event: dict) -> dict:
 
     if act == "send_reply":
         form = action.get("form_value", {}) or {}
-        reply = ((form.get("custom_reply") or "").strip() or _x(f, "AI草稿") or "").strip()
+        custom_parts = [
+            (form.get("custom_reply") or "").strip(),
+            (form.get("custom_reply_extra") or "").strip(),
+        ]
+        custom_reply = "\n".join([p for p in custom_parts if p]).strip()
+        reply = (custom_reply or _x(f, "AI草稿") or "").strip()
         if len(reply) < 10:
             return _toast("回复内容过短，请填写后再发", "error")
         if len(reply) > CS_CUSTOM_REPLY_MAX_CHARS:
