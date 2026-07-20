@@ -896,6 +896,36 @@ FALSE_ATTACHMENT_RE = re.compile(
     re.I,
 )
 PLACEHOLDER_URL_RE = re.compile(r"(\[link\]|\[url\]|\(link\)|<link>|https?://example\.com)", re.I)
+REPLY_URL_RE = re.compile(r"https?://[^\s<>'\")]+", re.I)
+
+
+def _canonical_url_key(url: str) -> str:
+    raw = unescape((url or "").strip()).rstrip(".,;])")
+    m = re.search(r"drive\.google\.com/drive/folders/([^/?#]+)", raw, re.I)
+    if m:
+        return "gdrive-folder:" + m.group(1)
+    return re.sub(r"[?#].*$", "", raw).rstrip("/").lower()
+
+
+def _reply_url_keys(text: str) -> set[str]:
+    return {_canonical_url_key(url) for url in REPLY_URL_RE.findall(text or "")}
+
+
+def _matched_urls_present(required_urls: list[str], text: str) -> list[str]:
+    keys = _reply_url_keys(text)
+    present = []
+    for url in required_urls:
+        if url and (_canonical_url_key(url) in keys or url in text):
+            present.append(url)
+    return present
+
+
+def _must_include_all_firmware_urls(context: dict, firmware_urls: list[str]) -> bool:
+    return (
+        context.get("model") == "FF05"
+        and not context.get("current_version")
+        and len([u for u in firmware_urls if u]) > 1
+    )
 
 
 def validate_reply_for_ticket(reply: str, fields: dict, resources: list[dict] | None = None) -> str:
@@ -910,7 +940,13 @@ def validate_reply_for_ticket(reply: str, fields: dict, resources: list[dict] | 
         return "该工单需要官方资源，但资源真相源缺失，不能默认发送。"
     if "firmware_download" in (context.get("needs") or []):
         firmware_urls = [r.get("url") for r in context.get("matches") or [] if r.get("resource_type") == "firmware_download"]
-        missing_urls = [u for u in firmware_urls if u and u not in text]
-        if missing_urls:
+        firmware_urls = [u for u in firmware_urls if u]
+        present_urls = _matched_urls_present(firmware_urls, text)
+        if firmware_urls and not present_urls:
             return "回复涉及固件下载，但没有包含命中的官方固件 URL。"
+        if _must_include_all_firmware_urls(context, firmware_urls):
+            present_keys = {_canonical_url_key(u) for u in present_urls}
+            missing_urls = [u for u in firmware_urls if _canonical_url_key(u) not in present_keys]
+            if missing_urls:
+                return "回复涉及多个候选固件下载，但没有包含全部需客户选择的官方固件 URL。"
     return ""

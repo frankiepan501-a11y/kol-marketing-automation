@@ -38,6 +38,7 @@ OBSERVE_UNION = os.environ.get("CS_DISPATCH_OBSERVE_UNION",
 CS_REPLY_LIVE = (os.environ.get("CS_REPLY_LIVE", "0") or "0") != "0"
 # Scott Stein 铁律: 改/上线回客户代码先开此 env → 全部回复改发测试邮箱(真客户/频道不收), 验证 raw 完整再删
 CS_REPLY_DRY_RUN_TO = (os.environ.get("CS_REPLY_DRY_RUN_TO", "") or "").strip()
+CS_CUSTOM_REPLY_MAX_CHARS = int(os.environ.get("CS_CUSTOM_REPLY_MAX_CHARS", "2000") or "2000")
 # 发件身份 (Zoho send-as / 网易登录账号)
 ZOHO_CS_FROM = os.environ.get("ZOHO_POWKONG_CS_FROM", "support@powkong.com")
 NE_SMTP = os.environ.get("NETEASE_SMTP_HOST", "smtp.qiye.163.com")
@@ -333,7 +334,7 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
     channel = _x(f, "渠道"); customer = _x(f, "客户标识"); order = _x(f, "订单号")
     summary = _x(f, "客诉摘要"); operator = _x(f, "分配运营") or "未定"
     conf = _x(f, "AI置信度"); ctype = _x(f, "客诉类型")
-    draft = (_x(f, "AI草稿") or "(无 AI 草稿)")[:2000]
+    draft = (_x(f, "AI草稿") or "(无 AI 草稿)")[:CS_CUSTOM_REPLY_MAX_CHARS]
     ticket = _ticket_label(f, rid)
     resource_context = cs_resources.resolve_for_ticket(f, resources=resources)
     resource_md = cs_resources.format_card_block(resource_context)
@@ -368,8 +369,9 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
         {"tag": "hr"},
         {"tag": "form", "name": f"r_{rid}", "elements": [
             {"tag": "input", "name": "custom_reply", "width": "fill", "label_position": "top",
-             "label": {"tag": "plain_text", "content": "✍️ 如需修改：输入最终回复（留空=用上方草稿）"},
-             "placeholder": {"tag": "plain_text", "content": "留空则用上方 AI 草稿；要改就在此输入"}},
+             "label": {"tag": "plain_text", "content": f"✍️ 如需修改：输入最终回复（≤{CS_CUSTOM_REPLY_MAX_CHARS}字；留空=用上方草稿）"},
+             "placeholder": {"tag": "plain_text", "content": "留空则用上方 AI 草稿；要改就在此输入"},
+             "max_length": CS_CUSTOM_REPLY_MAX_CHARS},
             {"tag": "button", "action_type": "form_submit", "name": "send", "type": "primary",
              "text": {"tag": "plain_text", "content": "✅ 发送回复给客户"},
              "value": {"act": "send_reply", "action": "cs_send_reply", "rid": rid,
@@ -814,6 +816,8 @@ async def handle_callback(event: dict) -> dict:
         reply = ((form.get("custom_reply") or "").strip() or _x(f, "AI草稿") or "").strip()
         if len(reply) < 10:
             return _toast("回复内容过短，请填写后再发", "error")
+        if len(reply) > CS_CUSTOM_REPLY_MAX_CHARS:
+            return _toast(f"回复内容超过 {CS_CUSTOM_REPLY_MAX_CHARS} 字，请缩短后再发", "error")
         # 发送前占位符校验拦截 (Scott Stein 铁律)
         ph = _placeholder_hit(reply)
         if ph:

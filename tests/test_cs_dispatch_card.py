@@ -60,6 +60,31 @@ class CsDispatchCardTests(unittest.TestCase):
         self.assertIn("[客服·待回]", card["header"]["title"]["content"])
         self.assertNotIn("兜底发给 Frankie", rendered)
 
+    def test_custom_reply_input_allows_2000_chars(self):
+        fields = {
+            "工单ID": "CSF-<raw@mail.example.com>",
+            "客户标识": "customer@example.com",
+            "品牌": ["FUNLAB"],
+            "产品": "FF01 controller",
+            "销售平台": ["亚马逊-美国"],
+            "渠道": ["邮箱"],
+            "客诉类型": ["产品"],
+            "AI置信度": ["AI起草人工审"],
+            "分配运营": "陈翔宇",
+            "客诉摘要": "Need firmware.",
+            "AI草稿": "Hello," + "x" * 2500,
+        }
+
+        card = cs_dispatch._build_card("rec_len", fields, resources=[])
+        form = next(e for e in card["elements"] if e.get("tag") == "form")
+        custom = next(e for e in form["elements"] if e.get("name") == "custom_reply")
+
+        self.assertEqual(2000, custom["max_length"])
+        self.assertIn("≤2000字", custom["label"]["content"])
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertIn("Hello," + "x" * 1994, rendered)
+        self.assertNotIn("Hello," + "x" * 1995, rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

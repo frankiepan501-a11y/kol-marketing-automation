@@ -117,6 +117,53 @@ class CSResourceSafetyTest(unittest.TestCase):
         self.assertNotIn("attached", reply.lower())
         self.assertEqual("", cs_resources.validate_reply_for_ticket(reply, fields))
 
+    def test_firefly_firmware_subset_of_official_urls_is_safe(self):
+        fields = {
+            "品牌": "FUNLAB",
+            "产品": "FF01 Firefly controller",
+            "客诉摘要": "After firmware update, ZR/ZL/ABXY are unresponsive and need firmware.",
+            "原文": "FF01 firmware problem after update.",
+        }
+        resources = [
+            cs_resources._resource(
+                series="Firefly", model="FF01", resource_type="firmware_download",
+                title="FUNLAB Firefly FF01 firmware V203",
+                url="https://drive.google.com/drive/folders/1bW6cBkNNEkZftiPU_-KtOLHIc1z1p4E?usp=sharing",
+                conditions={"target_version": "V203"}, source_page=cs_resources.UPGRADE_FIRMWARE_URL,
+                issue_tags=["firmware"],
+            ),
+            cs_resources._resource(
+                series="Firefly", model="FF01", resource_type="firmware_download",
+                title="FUNLAB Firefly FF01 firmware V204",
+                url="https://drive.google.com/drive/folders/1XwvhMGHsWhQ7tCBXd84zugJ59pZL9w62?usp=sharing",
+                conditions={"target_version": "V204"}, source_page=cs_resources.UPGRADE_FIRMWARE_URL,
+                issue_tags=["firmware"],
+            ),
+            cs_resources._resource(
+                series="Firefly", model="FF01", resource_type="firmware_download",
+                title="FUNLAB Firefly FF01 firmware V198",
+                url="https://drive.google.com/drive/folders/1fPc-vOOiBSXO5neQlT8R5aUdnJ74XMiy?usp=sharing",
+                conditions={"target_version": "V198"}, source_page=cs_resources.UPGRADE_FIRMWARE_URL,
+                issue_tags=["firmware"],
+            ),
+            *cs_resources.builtin_resources(),
+        ]
+        reply = (
+            "Hi, please use the official firmware links below.\n"
+            "Download V203: https://drive.google.com/drive/folders/1bW6cBkNNEkZftiPU_-KtOLHIc1z1p4E\n"
+            "Download V204: https://drive.google.com/drive/folders/1XwvhMGHsWhQ7tCBXd84zugJ59pZL9w62?usp=sharing\n"
+        )
+
+        self.assertEqual("", cs_resources.validate_reply_for_ticket(reply, fields, resources=resources))
+
+    def test_ff05_ambiguous_firmware_still_requires_all_candidate_urls(self):
+        fields = ff05_fields()
+        reply = "Download V454: https://drive.google.com/drive/folders/12Pj09f83wBIdCce2hHEkhVdQuqxZYehW"
+
+        reason = cs_resources.validate_reply_for_ticket(reply, fields)
+
+        self.assertIn("多个候选固件", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
