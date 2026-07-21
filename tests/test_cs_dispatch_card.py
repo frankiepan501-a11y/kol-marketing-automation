@@ -88,6 +88,44 @@ class CsDispatchCardTests(unittest.TestCase):
         self.assertIn("Hello," + "x" * 1994, rendered)
         self.assertNotIn("Hello," + "x" * 1995, rendered)
 
+    def test_reassign_result_card_keeps_undo_action(self):
+        fields = {
+            "工单ID": "CSP",
+            "客户标识": "customer@example.com",
+            "品牌": "POWKONG",
+            "销售平台": "独立站",
+            "分配运营": "张佳烨",
+            "客诉摘要": "Order not received.",
+        }
+
+        card = cs_dispatch._build_result_card(
+            "rec_rea", fields, "blue", "已请求改派",
+            "🔁 [客服·已请求改派]",
+            "已通知负责人重新分配。",
+            "若为误点，可恢复原卡。",
+            actions=cs_dispatch._undo_reassign_actions("rec_rea", "om_original", "张佳烨"),
+        )
+        rendered = json.dumps(card, ensure_ascii=False)
+
+        self.assertIn("cs_undo_reassign", rendered)
+        self.assertIn("om_original", rendered)
+        self.assertIn("张佳烨", rendered)
+        self.assertNotIn("按钮已移除", rendered)
+
+    def test_reassign_notice_card_can_restore_original_card(self):
+        fields = {"工单ID": "CSP", "客户标识": "customer@example.com", "分配运营": "张佳烨"}
+
+        card = cs_dispatch._build_reassign_notice_card(
+            "rec_rea", fields, "张佳烨",
+            "POWKONG·独立站·customer@example.com",
+            "Order not received.", "om_original"
+        )
+        rendered = json.dumps(card, ensure_ascii=False)
+
+        self.assertIn("[客服·改派请求]", card["header"]["title"]["content"])
+        self.assertIn("cs_undo_reassign", rendered)
+        self.assertIn("om_original", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

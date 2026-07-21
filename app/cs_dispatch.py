@@ -314,7 +314,8 @@ def _ticket_info_md(rid: str, f: dict, status_label: str = "待处理") -> str:
 
 
 def _build_result_card(rid: str, f: dict, template: str, status_label: str,
-                       title_prefix: str, result: str, detail: str = "") -> dict:
+                       title_prefix: str, result: str, detail: str = "",
+                       actions: list | None = None) -> dict:
     ticket = _ticket_label(f, rid)
     customer = _short(_x(f, "客户标识"), 36)
     content = _ticket_info_md(rid, f, status_label)
@@ -322,12 +323,45 @@ def _build_result_card(rid: str, f: dict, template: str, status_label: str,
         content += f"\n\n**处理结果:** {result}"
     if detail:
         content += f"\n**说明:** {detail}"
-    content += "\n\n_此卡片已更新，按钮已移除；同一工单不用重复处理。_"
+    if actions:
+        content += "\n\n_此卡片已更新；如为误操作，可用下方按钮恢复。_"
+    else:
+        content += "\n\n_此卡片已更新，按钮已移除；同一工单不用重复处理。_"
+    elements = [{"tag": "div", "text": {"tag": "lark_md", "content": content}}]
+    if actions:
+        elements.append({"tag": "action", "actions": actions})
     return {"config": {"wide_screen_mode": True},
             "header": {"template": template,
                        "title": {"tag": "plain_text",
-                                 "content": f"{title_prefix} {ticket} · {customer}"}},
-            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": content}}]}
+                                  "content": f"{title_prefix} {ticket} · {customer}"}},
+            "elements": elements}
+
+
+def _undo_reassign_actions(rid: str, target_mid: str = "", return_to: str = "") -> list:
+    return [{"tag": "button", "type": "primary",
+             "text": {"tag": "plain_text", "content": "↩️ 误点，恢复给原负责人"},
+             "value": {"act": "undo_reassign", "action": "cs_undo_reassign", "rid": rid,
+                       "target_mid": target_mid, "return_to": return_to}}]
+
+
+def _build_reassign_notice_card(rid: str, f: dict, op: str, tag: str,
+                                summary: str, target_mid: str = "") -> dict:
+    ticket = _ticket_label(f, rid)
+    customer = _short(_x(f, "客户标识"), 36)
+    owner = op or _x(f, "分配运营") or "原负责人"
+    content = (f"**工单ID:** `{ticket}`\n"
+               f"**原负责人:** {owner}\n"
+               f"**工单:** {tag}\n"
+               f"**客诉:** {summary or '-'}\n\n"
+               "如果这是运营误点，请点下方按钮把原卡恢复给原负责人；"
+               "如果确实需要改派，请在工单记录里重新分配负责人。\n"
+               f"[打开工单记录]({_record_url(rid)})")
+    return {"config": {"wide_screen_mode": True},
+            "header": {"template": "blue",
+                       "title": {"tag": "plain_text",
+                                  "content": f"🔁 [客服·改派请求] {ticket} · {customer}"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": content}},
+                         {"tag": "action", "actions": _undo_reassign_actions(rid, target_mid, owner)}]}
 
 
 def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
@@ -681,12 +715,17 @@ async def _escalate_async(rid: str, f: dict, tag: str, summary: str, msg_id: str
 
 async def _reassign_async(rid: str, f: dict, tag: str, op: str, summary: str, msg_id: str = ""):
     try:
-        await _notify_frankie(f"🔁 改派请求（原派 {op}）\n{tag}\n{summary}")
+        notice_mid = await _send_card(OBSERVE_UNION, _build_reassign_notice_card(
+            rid, f, op, tag, summary, msg_id
+        ))
+        if not notice_mid:
+            await _notify_frankie(f"🔁 改派请求（原派 {op}）\n{tag}\n{summary}")
         await _update_card(msg_id, _build_result_card(
             rid, f, "blue", "已请求改派",
             "🔁 [客服·已请求改派]",
             "已通知 Frankie/负责人重新分配；当前负责人不用在这张卡上回客户。",
-            "改派只改变负责人，不会回复客户。"
+            "改派只改变负责人，不会回复客户。若为误点，可点下方按钮恢复原卡。",
+            actions=_undo_reassign_actions(rid, msg_id, op)
         ))
     except Exception as e:
         print(f"[cs_dispatch._reassign_async] err={e}")
@@ -696,6 +735,43 @@ async def _reassign_async(rid: str, f: dict, tag: str, op: str, summary: str, ms
             f"改派通知失败：{str(e)[:120]}",
             "请稍后重试，或手动联系 Frankie。"
         ))
+
+
+async def _undo_reassign_async(rid: str, f: dict, source_msg_id: str = "",
+                               target_msg_id: str = "", return_to: str = ""):
+    try:
+        owner = (return_to or _x(f, "分配运营") or "").strip()
+        fields = {"状态": "待回"}
+        if owner:
+            fields["分配运营"] = owner
+        await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                         {"fields": fields}, which="notify")
+        f2 = dict(f)
+        f2.update(fields)
+        try:
+            resources = await cs_resources.active_resources()
+        except Exception:
+            resources = cs_resources.builtin_resources()
+        target = target_msg_id or _x(f, "卡片消息ID") or source_msg_id
+        restored = await _update_card(target, _build_card(rid, f2, resources=resources))
+        if source_msg_id and source_msg_id != target:
+            await _update_card(source_msg_id, _build_result_card(
+                rid, f2, "green", "已发回原负责人",
+                "✅ [客服·已发回原负责人]",
+                f"已恢复给 {owner or '原负责人'}；请在原卡继续处理。",
+                "这次操作不会回复客户，也不会新建工单。"
+            ))
+        if not restored and source_msg_id:
+            await _notify_frankie(f"⚠️ 客服卡片恢复失败\n{rid}\n请手动检查原卡 message_id={target}")
+    except Exception as e:
+        print(f"[cs_dispatch._undo_reassign_async] rid={rid} err={e}")
+        if source_msg_id:
+            await _update_card(source_msg_id, _build_result_card(
+                rid, f, "red", "恢复失败",
+                "❌ [客服·恢复失败]",
+                f"恢复原负责人失败：{str(e)[:120]}",
+                "请稍后重试，或手动联系 Frankie。"
+            ))
 
 
 async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = ""):
@@ -764,6 +840,7 @@ async def handle_callback(event: dict) -> dict:
         "cs_send_reply": "send_reply",
         "cs_reassign": "reassign",
         "cs_escalate": "escalate",
+        "cs_undo_reassign": "undo_reassign",
     }.get(act, act)
     rid = val.get("rid")
     if not rid:
@@ -797,13 +874,29 @@ async def handle_callback(event: dict) -> dict:
         _spawn(_escalate_async(rid, f, tag, _x(f, "客诉摘要"), msg_id))  # 异步, 立即返回防 timeout
         return _toast("已升级给 Frankie/负责人 ✓")
 
+    if act == "undo_reassign":
+        status = _x(f, "状态")
+        if status in ("已回复", "已解决", "已升级"):
+            _spawn(_update_card(msg_id, _build_result_card(
+                rid, f, "red", "不能恢复",
+                "❌ [客服·不能恢复]",
+                f"工单已进入终态：{status}，不能恢复到待回。",
+                "避免把已经回复/升级的工单重新放回运营待办。"
+            )))
+            return _toast("工单已进入终态，不能恢复", "error")
+        target_mid = (val.get("target_mid") or _x(f, "卡片消息ID") or msg_id).strip()
+        return_to = (val.get("return_to") or _x(f, "分配运营") or "").strip()
+        _spawn(_undo_reassign_async(rid, f, msg_id, target_mid, return_to))
+        return _toast("已发回原负责人 ✓")
+
     if act == "reassign":
         if _recent_seen(f"{rid}:rea"):
             _spawn(_update_card(msg_id, _build_result_card(
                 rid, f, "blue", "已请求改派",
                 "🔁 [客服·已请求改派]",
                 "已提交过改派请求，无需重复点击。",
-                "改派不会回复客户，等待负责人重新分配。"
+                "改派不会回复客户，等待负责人重新分配。若为误点，可点下方按钮恢复原卡。",
+                actions=_undo_reassign_actions(rid, msg_id, _x(f, "分配运营"))
             )))
             return _toast("已通知改派 ✓ 无需重复")
         _recent[f"{rid}:rea"] = time.time()
