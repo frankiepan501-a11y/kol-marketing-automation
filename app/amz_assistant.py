@@ -96,6 +96,29 @@ async def update_card(message_id: str, card: dict) -> bool:
         return False
 
 
+async def upload_image_for_card(image_bytes: bytes, filename: str = "image.jpg", content_type: str = "image/jpeg") -> str:
+    """Upload an image to Feishu IM resources and return an image_key for card img elements."""
+    if not image_bytes:
+        return ""
+    token = await (_token() if is_configured() else cs_dispatch._token())
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://open.feishu.cn/open-apis/im/v1/images",
+                headers={"Authorization": f"Bearer {token}"},
+                data={"image_type": "message"},
+                files={"image": (filename or "image.jpg", image_bytes, content_type or "image/jpeg")},
+            )
+            data = resp.json()
+        if data.get("code") != 0:
+            print(f"[amz_assistant.upload_image_for_card] fail code={data.get('code')} msg={str(data.get('msg') or '')[:120]}")
+            return ""
+        return (data.get("data") or {}).get("image_key") or ""
+    except Exception as exc:
+        print(f"[amz_assistant.upload_image_for_card] fail: {exc}")
+        return ""
+
+
 async def notify_frankie(text: str) -> str:
     if not is_configured():
         await cs_dispatch._notify_frankie(text)

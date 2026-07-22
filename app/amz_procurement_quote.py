@@ -9,12 +9,15 @@ P0 scope:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+import httpx
 
 from . import amz_assistant, feishu
 
@@ -62,6 +65,7 @@ FIELD_NAMES = [
 
 _bg_tasks: set[asyncio.Task] = set()
 _recent_callbacks: dict[str, float] = {}
+_image_key_cache: dict[str, str] = {}
 
 
 def _now_ms() -> int:
@@ -180,6 +184,72 @@ def _url_button(text: str, url: str, typ: str = "default") -> dict:
     return {"tag": "button", "text": {"tag": "plain_text", "content": text}, "type": typ, "url": url}
 
 
+def _md_link(label: str, url: str) -> str:
+    safe = _text(url)
+    return f"[{label}]({safe})" if safe.startswith(("http://", "https://")) else label
+
+
+def _guess_ext(content_type: str, url: str) -> str:
+    ctype = (content_type or "").lower()
+    if "png" in ctype:
+        return ".png"
+    if "webp" in ctype:
+        return ".webp"
+    if "gif" in ctype:
+        return ".gif"
+    if "jpeg" in ctype or "jpg" in ctype:
+        return ".jpg"
+    m = re.search(r"\.(jpg|jpeg|png|webp|gif)(?:[?#]|$)", url, re.I)
+    return f".{m.group(1).lower()}" if m else ".jpg"
+
+
+async def _download_image(image_url: str) -> tuple[bytes, str]:
+    url = _text(image_url)
+    if not url.startswith(("http://", "https://")):
+        return b"", ""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    }
+    async with httpx.AsyncClient(timeout=25.0, follow_redirects=True, headers=headers) as client:
+        resp = await client.get(url)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"image fetch HTTP {resp.status_code}")
+    content_type = (resp.headers.get("content-type") or "image/jpeg").split(";")[0].strip()
+    data = resp.content or b""
+    if len(data) < 100:
+        raise RuntimeError("image fetch returned too little data")
+    if len(data) > 10 * 1024 * 1024:
+        raise RuntimeError("image is larger than 10MB")
+    return data, content_type
+
+
+async def _image_key_for_url(image_url: str, asin: str = "") -> str:
+    url = _text(image_url)
+    if not url:
+        return ""
+    if url in _image_key_cache:
+        return _image_key_cache[url]
+    try:
+        data, content_type = await _download_image(url)
+        digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
+        filename = f"amz_{_safe_id(asin) or digest}{_guess_ext(content_type, url)}"
+        image_key = await amz_assistant.upload_image_for_card(data, filename, content_type)
+        if image_key:
+            _image_key_cache[url] = image_key
+        return image_key
+    except Exception as exc:
+        print(f"[amz_procurement_quote.image] upload skipped asin={asin} err={exc}")
+        return ""
+
+
+async def _prepare_card_images(candidates: list[dict]) -> None:
+    for candidate in candidates:
+        if candidate.get("image_key") or not candidate.get("image_url"):
+            continue
+        candidate["image_key"] = await _image_key_for_url(candidate.get("image_url"), candidate.get("asin"))
+
+
 def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]:
     rid = candidate.get("record_id", "")
     sid = _safe_id(rid)
@@ -200,14 +270,35 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
     elements: list[dict] = [
         {"tag": "hr"},
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**{title}**\n{_short(candidate.get('title'), 180)}"}},
-        {"tag": "div", "fields": fields},
-        {"tag": "div", "text": {"tag": "lark_md", "content": f"**套装内容/采购注意**\n{candidate.get('set_content') or '待采购按主图和供应商页核对'}"}},
     ]
+    if candidate.get("image_key"):
+        elements.append(
+            {
+                "tag": "img",
+                "img_key": candidate["image_key"],
+                "alt": {"tag": "plain_text", "content": f"{title} 主图"},
+                "mode": "fit_horizontal",
+                "preview": True,
+            }
+        )
+    reference_links = []
+    if amazon:
+        reference_links.append(_md_link("打开 Amazon Listing", amazon))
+    if image:
+        reference_links.append(_md_link("查看主图原图", image))
+    if reference_links:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**采购参考**\n" + " ｜ ".join(reference_links)}})
+    elements.extend(
+        [
+            {"tag": "div", "fields": fields},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**套装内容/采购注意**\n{candidate.get('set_content') or '待采购按主图和供应商页核对'}"}},
+        ]
+    )
     actions = []
     if amazon:
-        actions.append(_url_button("打开Amazon Listing", amazon, "primary"))
+        actions.append(_url_button("打开 Listing", amazon, "primary"))
     if image:
-        actions.append(_url_button("查看主图", image))
+        actions.append(_url_button("查看主图原图", image))
     actions.append(_url_button("打开候选表记录", _record_url(rid)))
     elements.append({"tag": "action", "actions": actions})
     if completed:
@@ -505,6 +596,7 @@ async def _process_callback(event: dict) -> dict:
                 if item.get("record_id") == record_id:
                     candidates[idx] = candidate
                     break
+            await _prepare_card_images(candidates)
             await amz_assistant.update_card(msg_id, build_quote_card(candidates, _text(value.get("batch_id"))))
         else:
             await amz_assistant.update_card(
@@ -549,6 +641,8 @@ async def send_quote_card(
         raise RuntimeError("AMZ_PROCUREMENT_CANDIDATE_APP_TOKEN/TABLE_ID not configured")
     batch = batch_id or DEFAULT_BATCH_ID
     candidates = await _get_candidates_by_ids(record_ids or []) if record_ids else await _search_candidates(batch, limit=limit)
+    if mode == "commit":
+        await _prepare_card_images(candidates)
     card = build_quote_card(candidates, batch)
     effective_frankie_only = bool(frankie_only or FRANKIE_ONLY)
     result: dict[str, Any] = {

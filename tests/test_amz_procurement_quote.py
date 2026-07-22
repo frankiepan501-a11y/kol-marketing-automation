@@ -15,6 +15,7 @@ class AmzProcurementQuoteTests(unittest.TestCase):
             "cn_name": "Dreame L20 Ultra 扫地机替换滤网",
             "amazon_url": "https://www.amazon.de/dp/B0CH1817WW",
             "image_url": "https://m.media-amazon.com/images/I/41Bum-N615L._AC_.jpg",
+            "image_key": "img_test_key",
             "package_size": "12.9,5.5,3.6",
             "weight_g": "50",
             "set_count": "",
@@ -40,8 +41,10 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         self.assertIn("proc_link_rec1", rendered)
         self.assertIn("proc_link_rec2", rendered)
         self.assertIn(quote.ACTION_SUBMIT, rendered)
-        self.assertIn("打开Amazon Listing", rendered)
-        self.assertIn("查看主图", rendered)
+        self.assertIn("打开 Listing", rendered)
+        self.assertIn("查看主图原图", rendered)
+        self.assertIn('"tag": "img"', rendered)
+        self.assertIn("img_test_key", rendered)
         self.assertIn("提交只更新当前产品", rendered)
 
     def test_completed_product_renders_without_input(self):
@@ -232,6 +235,35 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         self.assertEqual("om_chat,om_union", updates[0][1]["采购卡片消息ID"])
         self.assertEqual(("chat", "oc_purchase"), sent[0][:2])
         self.assertEqual(("union", "on_purchase"), sent[1][:2])
+
+    def test_prepare_card_images_uploads_image_url_to_key(self):
+        original_download = quote._download_image
+        original_upload = quote.amz_assistant.upload_image_for_card
+        original_cache = dict(quote._image_key_cache)
+
+        async def fake_download(url):
+            return b"fake-image-bytes" * 20, "image/jpeg"
+
+        async def fake_upload(data, filename, content_type):
+            self.assertIn("amz_B0CH1817WW", filename)
+            self.assertEqual("image/jpeg", content_type)
+            self.assertGreater(len(data), 100)
+            return "img_uploaded_key"
+
+        try:
+            quote._image_key_cache.clear()
+            quote._download_image = fake_download
+            quote.amz_assistant.upload_image_for_card = fake_upload
+            candidate = self._candidate("rec1")
+            candidate.pop("image_key", None)
+            asyncio.run(quote._prepare_card_images([candidate]))
+        finally:
+            quote._download_image = original_download
+            quote.amz_assistant.upload_image_for_card = original_upload
+            quote._image_key_cache.clear()
+            quote._image_key_cache.update(original_cache)
+
+        self.assertEqual("img_uploaded_key", candidate["image_key"])
 
 
 if __name__ == "__main__":
