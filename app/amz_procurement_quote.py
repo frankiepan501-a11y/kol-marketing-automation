@@ -250,6 +250,14 @@ async def _prepare_card_images(candidates: list[dict]) -> None:
         candidate["image_key"] = await _image_key_for_url(candidate.get("image_url"), candidate.get("asin"))
 
 
+def _card_media_stats(candidates: list[dict]) -> dict[str, int]:
+    return {
+        "image_url_count": sum(1 for c in candidates if c.get("image_url")),
+        "image_embedded_count": sum(1 for c in candidates if c.get("image_key")),
+        "listing_url_count": sum(1 for c in candidates if c.get("amazon_url")),
+    }
+
+
 def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]:
     rid = candidate.get("record_id", "")
     sid = _safe_id(rid)
@@ -652,6 +660,7 @@ async def send_quote_card(
         "batch_id": batch,
         "count": len(candidates),
         "record_ids": [c.get("record_id") for c in candidates],
+        **_card_media_stats(candidates),
     }
     if mode == "dry_run":
         result["card"] = card
