@@ -2,7 +2,12 @@
 
 ## Status
 
-P0 code is implemented locally for the Germany candidate-table procurement-cost callback loop.
+P0 code is implemented and pushed to `master`.
+
+Deploy checkpoint:
+- Commit: `a7b4074`
+- Online `/openapi.json` includes `POST /cs/amz-procurement-quote/send`.
+- Unauthenticated call to the endpoint returns `401`, confirming the route is live and protected.
 
 Scope:
 - One category/batch sends one shared card.
@@ -133,6 +138,8 @@ P0 live card is not sent from local because this machine does not expose:
 - `INTERNAL_TOKEN`
 - `FEISHU_NOTIFY_APP_ID`
 - `FEISHU_AMZ_ASSISTANT_APP_ID`
+
+On 2026-07-23, n8n MCP list-workflows returned `AUTHENTICATION_ERROR`, so it could not be used as a safe token-bearing trigger path.
 
 Next smallest live step after deploy:
 
