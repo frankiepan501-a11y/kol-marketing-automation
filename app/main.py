@@ -13,7 +13,7 @@ from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
 from . import cs_resources  # 客服官方资源真相源: 固件/手册/视频 URL 解析与发送闸
-from . import amz_assistant, amz_review_audit  # 亚马逊差评/Feedback 审计: 提醒卡 + T+7 复检公开升级
+from . import amz_assistant, amz_review_audit, amz_procurement_quote  # 亚马逊运营卡片: 差评审计 + 采购报价回填
 from . import b2b_mail_reminder  # B2B 外贸邮箱跟进提醒(日 10:00, 外贸助手回执卡)
 from . import b2b_assistant  # 外贸助手: 客户指令 + LinkedIn 回执
 from . import b2b_linkedin_daily_card  # B2B LinkedIn 每日开发卡派发
@@ -933,6 +933,40 @@ async def run_amz_review_audit(authorization: str = Header(default=""),
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/cs/amz-review-audit/run", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/cs/amz-procurement-quote/send")
+async def run_amz_procurement_quote_card(authorization: str = Header(default=""),
+                                         mode: str = "dry_run",
+                                         limit: int = 4,
+                                         batch_id: str = "",
+                                         record_ids: str = "",
+                                         frankie_only: bool = True,
+                                         gray_union_ids: str = "",
+                                         gray_chat_ids: str = ""):
+    """亚马逊欧洲选品采购成本回填卡.
+
+    P0 默认只发 Frankie。每个产品独立填写采购成本与1688链接，按钮回调只写当前候选行。
+    """
+    _check_auth(authorization)
+    try:
+        ids = [x.strip() for x in (record_ids or "").split(",") if x.strip()]
+        gray_unions = [x.strip() for x in (gray_union_ids or "").split(",") if x.strip()]
+        gray_chats = [x.strip() for x in (gray_chat_ids or "").split(",") if x.strip()]
+        result = await amz_procurement_quote.send_quote_card(
+            mode=mode,
+            limit=limit,
+            batch_id=batch_id,
+            record_ids=ids,
+            frankie_only=frankie_only,
+            gray_union_ids=gray_unions or None,
+            gray_chat_ids=gray_chats or None,
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/amz-procurement-quote/send", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 

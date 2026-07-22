@@ -154,7 +154,7 @@ def _event_log_context(payload: dict) -> dict:
     return {
         "event_type": _event_type(payload),
         "action": value.get("action") or value.get("act") or "",
-        "issue_id": value.get("issue_id") or value.get("issue_key") or "",
+        "issue_id": value.get("issue_id") or value.get("issue_key") or value.get("record_id") or "",
         "message_id": context.get("open_message_id") or context.get("message_id") or event.get("message_id") or event.get("open_message_id") or "",
     }
 
@@ -195,8 +195,13 @@ async def handle_feishu_callback(payload: dict[str, Any]) -> dict:
         return {"code": 0, "msg": "ignored"}
     context = _event_log_context(payload)
     print(f"[amz_assistant.callback] {json.dumps(context, ensure_ascii=False)}")
-    if context.get("action", "").startswith("wanci_"):
+    action = context.get("action", "")
+    if action.startswith("wanci_"):
         return await _forward_wanci_callback(payload)
+    if action.startswith("amz_proc_quote_"):
+        from . import amz_procurement_quote
+
+        return await amz_procurement_quote.handle_callback(_card_event(payload))
     from . import amz_review_audit
 
     return await amz_review_audit.handle_callback(_card_event(payload))
