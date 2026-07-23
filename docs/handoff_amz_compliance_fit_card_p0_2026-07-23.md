@@ -13,10 +13,10 @@ Current P0 direction:
 The old manual card action `amz_fit_check_submit` is now treated as a disabled legacy action.
 
 Latest confirmed production state:
-- Git commit: `d6bb568 feat: add AMZ compliance fit card`
-- Zeabur deployment: `6a61fc479cfc4cd5e689838e`, status `RUNNING`, commit `d6bb568a2687268d57b79ce65ab4b0e8f082a6ad`
-- Frankie-only sample card sent: `om_x100b692b9e03c0a4df9d31f797d0b99`
-- Callback writeback is still waiting for a real card click on the Frankie-only sample.
+- Code commit: `4bc7c1d fix: make AMZ compliance card automated risk feedback`
+- Zeabur deployment: `6a624de99cfc4cd5e689957e`, status `RUNNING`, commit `4bc7c1d`
+- Corrected Frankie-only sample card sent: `om_x100b6910aa1d9ca0ded8a5f95a39ce0`
+- Callback writeback is still waiting for a real card click on the corrected Frankie-only sample.
 
 Scope:
 - One batch sends one shared automated risk-scan result card.
@@ -183,6 +183,31 @@ Result:
 - commit mode uploaded and embedded 2 product images;
 - Feishu message readback confirmed `msg_type=interactive`, product images, Listing buttons, image buttons, candidate-record buttons, supplier buttons, and three-channel margin text.
 - This card is obsolete after the 2026-07-24 correction. Its legacy submit action is disabled in code.
+
+Corrected online result after the 2026-07-24 correction:
+
+```text
+POST https://kol-auto.zeabur.app/cs/amz-compliance-fit/send?mode=dry_run&batch_id=AMZ-DE-FITCHECK-20260723-P0&record_ids=recvq1QtafnVjX,recvq1QtUEEcXv
+```
+
+Result:
+- `ok=true`
+- `count=2`
+- `card_selftest=passed`
+- generated card structure contained 2 exception-handling forms, 2 selects, 2 note inputs, `amz_fit_check_feedback_submit`, automated risk findings, Listing links, and the three-channel margin section.
+- generated card did not contain legacy `fit_result_*`, `fit_iprisk_*`, or `确认核查本产品`.
+
+Corrected Frankie-only real send:
+
+```text
+POST https://kol-auto.zeabur.app/cs/amz-compliance-fit/send?mode=commit&batch_id=AMZ-DE-FITCHECK-20260723-P0&record_ids=recvq1QtafnVjX,recvq1QtUEEcXv&frankie_only=true
+```
+
+Result:
+- sent to Frankie union id only;
+- `message_id=om_x100b6910aa1d9ca0ded8a5f95a39ce0`;
+- commit mode uploaded and embedded 2 product images;
+- Feishu message readback confirmed `msg_type=interactive`, product images, 8 buttons, automated risk result text, automated issue list text, and no legacy `fit_result_*` / `fit_iprisk_*`.
 
 Readback caveat:
 - Feishu message readback returns a simplified/collapsed card body for interactive cards, so it did not expose form controls as normal top-level `form` nodes.
