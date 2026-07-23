@@ -47,6 +47,100 @@ def _check_auth(auth: str):
         raise HTTPException(401, "Invalid token")
 
 
+def _is_feishu_data_not_ready(error: str, trace: str = "") -> bool:
+    text = f"{error or ''}\n{trace or ''}"
+    return "1254607" in text or "Data not ready" in text
+
+
+def _clip(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _extract_feishu_log_id(text: str) -> str:
+    import re
+
+    m = re.search(r'"log_id"\s*:\s*"([^"]+)"', text or "")
+    return m.group(1) if m else ""
+
+
+def _endpoint_failure_context(endpoint: str, transient: bool) -> dict:
+    if endpoint == "/auto-send/run" and transient:
+        return {
+            "title": "KOL 发信链读表暂时失败",
+            "status": "飞书数据未就绪（系统已重试仍失败）",
+            "stage": "读取 KOL 邮件草稿表，做去重和 24h 限速检查",
+            "impact": "本轮 auto-send 没有进入发信队列；没有证据显示已误发邮件。",
+            "owner_action": "运营无需处理草稿。Frankie 只需观察；如果 1h 后仍重复出现，再查飞书表状态或 Zeabur 日志。",
+            "next_try": "下次 cron 会自动再试；同 endpoint 1h 内只提醒 1 次，避免刷屏。",
+        }
+    if endpoint == "/auto-send/run":
+        return {
+            "title": "KOL 发信链运行失败",
+            "status": "auto-send endpoint 运行失败",
+            "stage": "扫描已通过草稿并准备发送",
+            "impact": "本轮 auto-send 可能未完成；需先确认是否有草稿被卡住。",
+            "owner_action": "Frankie 或技术侧检查 Zeabur 日志、飞书表字段和 Zoho 状态；运营先不要手动改草稿状态。",
+            "next_try": "下次 cron 会自动再试；同 endpoint 1h 内只提醒 1 次。",
+        }
+    return {
+        "title": "系统任务运行失败",
+        "status": "endpoint 运行失败",
+        "stage": endpoint,
+        "impact": "本轮任务没有完成；下次 cron 可能会再跑。",
+        "owner_action": "需要技术侧按 endpoint 日志排查；业务同事先不要重复触发。",
+        "next_try": "同 endpoint 1h 内只提醒 1 次。",
+    }
+
+
+def _build_endpoint_failure_card(endpoint: str, error: str, trace: str = "") -> tuple[dict, str]:
+    transient = _is_feishu_data_not_ready(error, trace)
+    level = "P2" if transient else "P1"
+    ctx = _endpoint_failure_context(endpoint, transient)
+    template = "yellow" if transient else "red"
+    level_emoji = "🟡" if transient else "🟠"
+    evidence = error or trace or "(无错误详情)"
+    log_id = _extract_feishu_log_id(evidence) or _extract_feishu_log_id(trace)
+    reason = "飞书 Bitable 数据暂时未就绪" if transient else "endpoint 抛出异常"
+    detail_lines = [
+        f"• endpoint: `{endpoint}`",
+        f"• 判断: {reason}",
+    ]
+    if log_id:
+        detail_lines.append(f"• 飞书 log_id: `{log_id}`")
+    detail_lines.append(f"• 错误摘要: `{_clip(error or '(空)', 220)}`")
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": template,
+            "title": {"tag": "plain_text", "content": f"{level_emoji} [KOL·{level}] {ctx['title']} · {endpoint}"},
+        },
+        "elements": [
+            {"tag": "div", "fields": [
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**状态**\n{ctx['status']}"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**P级**\n{level}"}},
+                {"is_short": False, "text": {"tag": "lark_md", "content": f"**发生环节**\n{ctx['stage']}"}},
+            ]},
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md",
+                "content": (
+                    f"**影响判断**\n{ctx['impact']}\n\n"
+                    f"**需要谁做什么**\n{ctx['owner_action']}\n\n"
+                    f"**系统会怎么处理**\n{ctx['next_try']}"
+                )}},
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md",
+                "content": "**排查依据（技术侧看）**\n" + "\n".join(detail_lines)}},
+            {"tag": "note", "elements": [
+                {"tag": "plain_text", "content": _clip((trace or "").replace("\n", " "), 300) or "Trace 为空"}
+            ]},
+        ],
+    }, level
+
+
 async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
     """n8n cron 触发的 endpoint 失败时, 发飞书卡片告警给 Frankie.
     Dedup: 同 endpoint 60min 内只发 1 次, 防 cron 5min 跑一次轰炸 Frankie.
@@ -59,30 +153,7 @@ async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
         return  # 冷却期内, 跳过
     _alert_last[endpoint] = now
 
-    transient = "1254607" in (error or "") or "Data not ready" in (error or "") or "1254607" in (trace or "")
-    level = "P2" if transient else "P1"
-    template = "yellow" if transient else "red"
-    impact = "本轮 endpoint 未完成；下次 cron 会再跑。若连续出现再查 Zeabur/飞书。"
-    if endpoint == "/auto-send/run":
-        impact = "本轮 auto-send 可能跳过，已通过 1h 冷却避免重复刷屏；下次 cron 会再尝试。"
-
-    card = {
-        "header": {
-            "template": template,
-            "title": {"tag": "plain_text", "content": f"KOL 发信链运行异常 · {endpoint}"},
-        },
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md",
-                "content": (
-                    "**类型**: endpoint 运行失败（不是草稿状态审计）\n"
-                    f"**影响**: {impact}\n"
-                    f"**错误**: {(error or '')[:300]}\n"
-                    "**冷却**: 同 endpoint 1h 内只告 1 次"
-                )}},
-            {"tag": "div", "text": {"tag": "lark_md",
-                "content": f"**Trace 末段**:\n```\n{trace[-400:] if trace else '(无)'}\n```"}},
-        ],
-    }
+    card, level = _build_endpoint_failure_card(endpoint, error, trace)
     try:
         # 2026-06-08 不进群(Frankie #4)。端点失败=infra 故障, 运营无法处理 → 保持只私聊 Frankie
         # (退信/重复才给 Frankie+运营; 此处沿用原"防其他人误以为要处理"设计)。

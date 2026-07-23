@@ -107,6 +107,20 @@ _HIGH_PRIORITY_SRC = {"reply", "ship_confirm", "affiliate_quote", "warm_recap", 
 _COLD_SRC = {"cold", "followup"}     # 非时间敏感(批量 cold + 跟进), 受 cold 天级上限(留预留给回信)
 _READY_DRAFT_STATUSES = {"自动通过", "通过"}
 _SENT_SEND_STATUSES = {"已发", "已发送"}
+_SCAN_ALL_DRAFT_FIELDS = [
+    # scan_ready 只需要这些字段做 follow-up 守门、24h 限速和重复发送拦截。
+    # 继续用 list API 而不是 search API，避免分页/排序丢行影响发送安全。
+    "关联KOL",
+    "关联媒体人",
+    "关联产品",
+    "是否回复",
+    "发送状态",
+    "发送时间",
+    "发送邮箱",
+    "邮件草稿来源",
+    "邮件草稿ID",
+    "邮件草稿状态",
+]
 
 
 def _draft_id_of(f: dict) -> str:
@@ -346,7 +360,11 @@ async def scan_ready() -> tuple:
 
     # follow-up 守门: 拉所有按 KOL 分组的草稿
     all_drafts_by_kol = {}
-    all_recs = await feishu.fetch_all_records(config.T_DRAFT)
+    all_recs = await feishu.fetch_all_records(
+        config.T_DRAFT,
+        field_names=_SCAN_ALL_DRAFT_FIELDS,
+        page_size=500,
+    )
     for rec in all_recs:
         kid = xrid(rec["fields"].get("关联KOL"))
         if kid: all_drafts_by_kol.setdefault(kid, []).append(rec)

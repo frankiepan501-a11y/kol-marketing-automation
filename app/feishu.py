@@ -1,4 +1,7 @@
 """飞书 API 封装 - 双 App token 管理"""
+import json
+import urllib.parse
+
 import httpx
 import time
 from . import config
@@ -197,12 +200,22 @@ def xrid(f):
     return None
 
 
-async def fetch_all_records(table_id: str):
+async def fetch_all_records(table_id: str, field_names: list = None, page_size: int = 100):
     items = []
     page_token = ""
+    try:
+        page_size_i = int(page_size)
+    except (TypeError, ValueError):
+        page_size_i = 100
+    page_size_i = max(1, min(page_size_i, 500))
     while True:
-        path = f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records?page_size=100"
-        if page_token: path += f"&page_token={page_token}"
+        params = {"page_size": page_size_i}
+        if field_names:
+            params["field_names"] = json.dumps(list(field_names), ensure_ascii=False, separators=(",", ":"))
+        if page_token:
+            params["page_token"] = page_token
+        query = urllib.parse.urlencode(params)
+        path = f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records?{query}"
         r = await api("GET", path)
         d = r.get("data") or {}
         items.extend(d.get("items") or [])
