@@ -24,6 +24,43 @@ class AmzProcurementQuoteTests(unittest.TestCase):
             "quote_cost": 18.5 if status == "已回填" else None,
             "supplier_link": "https://detail.1688.com/offer/test.html" if status == "已回填" else "",
             "fulfillment": "FBA头程-经济线",
+            "fba_fee_eur": "3.04",
+            "commission_eur": "2.39",
+            "channels": [
+                {
+                    "code": "A",
+                    "label": "FBA经济线",
+                    "aliases": ["FBA头程-经济线", "经济线"],
+                    "pre_margin_rmb": "92.23",
+                    "pre_margin_rate": "49.5",
+                    "logistics_rmb": "31.05",
+                    "freight_ratio": "0.17",
+                    "margin_rmb": "73.73",
+                    "margin_rate": "39.5",
+                },
+                {
+                    "code": "B",
+                    "label": "FBA快速线",
+                    "aliases": ["FBA头程-快速线", "快速线"],
+                    "pre_margin_rmb": "84.86",
+                    "pre_margin_rate": "45.6",
+                    "logistics_rmb": "38.42",
+                    "freight_ratio": "0.21",
+                    "margin_rmb": "66.36",
+                    "margin_rate": "35.6",
+                },
+                {
+                    "code": "C",
+                    "label": "FBM-4PX",
+                    "aliases": ["FBM", "4PX", "自发货"],
+                    "pre_margin_rmb": "50.12",
+                    "pre_margin_rate": "37.1",
+                    "logistics_rmb": "43.15",
+                    "freight_ratio": "0.32",
+                    "margin_rmb": "31.62",
+                    "margin_rate": "23.4",
+                },
+            ],
             "pre_margin_rmb": "92.23",
             "pre_margin_rate": "49.5",
             "logistics_rmb": "31.05",
@@ -46,6 +83,13 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         self.assertIn("打开候选表记录", rendered)
         self.assertIn('"tag": "img"', rendered)
         self.assertIn("img_test_key", rendered)
+        self.assertIn("三渠道对比", rendered)
+        self.assertIn("A FBA经济线（推荐）", rendered)
+        self.assertIn("B FBA快速线", rendered)
+        self.assertIn("C FBM-4PX", rendered)
+        self.assertIn("采购后 73.73 RMB / 39.5%", rendered)
+        self.assertIn("FBA配送费", rendered)
+        self.assertIn("佣金", rendered)
         self.assertIn("提交只更新当前产品", rendered)
         self.assertEqual([], quote.validate_quote_card(card, [self._candidate("rec1"), self._candidate("rec2")]))
 

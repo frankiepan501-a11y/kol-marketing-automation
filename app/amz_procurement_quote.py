@@ -55,10 +55,26 @@ FIELD_NAMES = [
     "采购卡片批次ID",
     "采购卡片消息ID",
     "三方案推荐履约",
+    "FBA€",
+    "佣金€",
+    "A-采购前可用毛利RMB",
+    "A-采购前毛利率%",
+    "A-物流成本RMB",
+    "A-货运比",
+    "A-毛利RMB",
+    "A-毛利率%",
+    "B-采购前可用毛利RMB",
+    "B-采购前毛利率%",
+    "B-物流成本RMB",
+    "B-货运比",
+    "B-毛利RMB",
+    "B-毛利率%",
     "C-采购前可用毛利RMB",
     "C-采购前毛利率%",
     "C-物流成本RMB",
     "C-货运比",
+    "C-毛利RMB",
+    "C-毛利率%",
     "财务闸结论",
     "下一步动作",
 ]
@@ -151,6 +167,103 @@ def _field(label: str, value: Any) -> dict:
     return {"is_short": True, "text": {"tag": "lark_md", "content": f"**{label}**\n{_text(value) or '-'}"}}
 
 
+def _format_rmb(value: Any) -> str:
+    text = _text(value)
+    if not text:
+        return "-"
+    if "RMB" in text or not re.search(r"\d", text):
+        return text
+    return f"{text} RMB"
+
+
+def _format_eur(value: Any) -> str:
+    text = _text(value)
+    if not text:
+        return "-"
+    if text.startswith("€") or not re.search(r"\d", text):
+        return text
+    return f"€{text}"
+
+
+def _format_rate(value: Any) -> str:
+    text = _text(value)
+    if not text:
+        return "-"
+    if "%" in text or not re.search(r"\d", text):
+        return text
+    return f"{text}%"
+
+
+def _format_margin_pair(rmb: Any, rate: Any, missing: str) -> str:
+    money = _format_rmb(rmb)
+    pct = _format_rate(rate)
+    if money == "-" and pct == "-":
+        return missing
+    return f"{money} / {pct}"
+
+
+def _channel_from_fields(fields: dict, code: str, label: str, aliases: list[str]) -> dict:
+    return {
+        "code": code,
+        "label": label,
+        "aliases": aliases,
+        "pre_margin_rmb": _text(fields.get(f"{code}-采购前可用毛利RMB")),
+        "pre_margin_rate": _text(fields.get(f"{code}-采购前毛利率%")),
+        "logistics_rmb": _text(fields.get(f"{code}-物流成本RMB")),
+        "freight_ratio": _text(fields.get(f"{code}-货运比")),
+        "margin_rmb": _text(fields.get(f"{code}-毛利RMB")),
+        "margin_rate": _text(fields.get(f"{code}-毛利率%")),
+    }
+
+
+def _channel_has_data(channel: dict) -> bool:
+    return any(
+        _text(channel.get(key))
+        for key in ("pre_margin_rmb", "pre_margin_rate", "logistics_rmb", "freight_ratio", "margin_rmb", "margin_rate")
+    )
+
+
+def _legacy_channel(candidate: dict) -> dict:
+    return {
+        "code": "建议",
+        "label": candidate.get("fulfillment") or "-",
+        "aliases": [],
+        "pre_margin_rmb": candidate.get("pre_margin_rmb"),
+        "pre_margin_rate": candidate.get("pre_margin_rate"),
+        "logistics_rmb": candidate.get("logistics_rmb"),
+        "freight_ratio": candidate.get("freight_ratio"),
+        "margin_rmb": "",
+        "margin_rate": "",
+    }
+
+
+def _recommended_suffix(channel: dict, fulfillment: Any) -> str:
+    text = _text(fulfillment)
+    if not text or text == "-":
+        return ""
+    candidates = [channel.get("code"), channel.get("label"), *(channel.get("aliases") or [])]
+    return "（推荐）" if any(_text(item) and _text(item) in text for item in candidates) else ""
+
+
+def _channel_compare_text(candidate: dict) -> str:
+    channels = [c for c in (candidate.get("channels") or []) if _channel_has_data(c)]
+    if not channels:
+        channels = [_legacy_channel(candidate)]
+    lines = ["**三渠道对比**"]
+    fulfillment = candidate.get("fulfillment")
+    for channel in channels:
+        name = f"{channel.get('code')} {channel.get('label')}".strip()
+        suffix = _recommended_suffix(channel, fulfillment)
+        lines.append(
+            f"{name}{suffix}: "
+            f"物流 {_format_rmb(channel.get('logistics_rmb'))}｜"
+            f"采购前 {_format_margin_pair(channel.get('pre_margin_rmb'), channel.get('pre_margin_rate'), '暂不可算')}｜"
+            f"采购后 {_format_margin_pair(channel.get('margin_rmb'), channel.get('margin_rate'), '待采购成本')}｜"
+            f"货运比 {_text(channel.get('freight_ratio')) or '-'}"
+        )
+    return "\n".join(lines)
+
+
 def _record_url(record_id: str) -> str:
     return f"https://u1wpma3xuhr.feishu.cn/base/{CANDIDATE_APP_TOKEN}?table={CANDIDATE_TABLE_ID}&record={record_id}"
 
@@ -178,6 +291,13 @@ def _candidate_from_record(record: dict) -> dict:
         "batch_id": _text(fields.get("采购卡片批次ID")),
         "message_id": _text(fields.get("采购卡片消息ID")),
         "fulfillment": " / ".join(_list_values(fields.get("三方案推荐履约"))) or "-",
+        "fba_fee_eur": _text(fields.get("FBA€")),
+        "commission_eur": _text(fields.get("佣金€")),
+        "channels": [
+            _channel_from_fields(fields, "A", "FBA经济线", ["FBA头程-经济线", "经济线"]),
+            _channel_from_fields(fields, "B", "FBA快速线", ["FBA头程-快速线", "快速线"]),
+            _channel_from_fields(fields, "C", "FBM-4PX", ["FBM", "4PX", "自发货"]),
+        ],
         "pre_margin_rmb": _text(fields.get("C-采购前可用毛利RMB")),
         "pre_margin_rate": _text(fields.get("C-采购前毛利率%")),
         "logistics_rmb": _text(fields.get("C-物流成本RMB")),
@@ -227,6 +347,7 @@ def validate_quote_card(card: dict, candidates: list[dict]) -> list[str]:
     """Return human-readable card wiring errors. Empty list means safe to send."""
     errors: list[str] = []
     nodes = list(_card_nodes(card))
+    rendered = json.dumps(card, ensure_ascii=False)
     buttons = [n for n in nodes if n.get("tag") == "button"]
     forms = {n.get("name"): n for n in nodes if n.get("tag") == "form" and n.get("name")}
 
@@ -279,6 +400,8 @@ def validate_quote_card(card: dict, candidates: list[dict]) -> list[str]:
         expected_ids = [c.get("record_id") for c in candidates if c.get("record_id")]
         if record_ids != expected_ids:
             errors.append(f"{label}: submit payload card_record_ids is invalid")
+    if candidates and "三渠道对比" not in rendered:
+        errors.append("card missing three-channel comparison section")
     return errors
 
 
@@ -364,9 +487,8 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
         _field("包装尺寸", candidate.get("package_size") or "待核"),
         _field("重量", f"{candidate.get('weight_g')}g" if candidate.get("weight_g") else "待核"),
         _field("件数", candidate.get("set_count") or "待核"),
-        _field("采购前空间", f"{candidate.get('pre_margin_rmb') or '-'} RMB / {candidate.get('pre_margin_rate') or '-'}%"),
-        _field("物流成本", f"{candidate.get('logistics_rmb') or '-'} RMB"),
-        _field("货运比", candidate.get("freight_ratio") or "-"),
+        _field("FBA配送费", _format_eur(candidate.get("fba_fee_eur"))),
+        _field("佣金", _format_eur(candidate.get("commission_eur"))),
     ]
     elements: list[dict] = [
         {"tag": "hr"},
@@ -392,6 +514,7 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
     elements.extend(
         [
             {"tag": "div", "fields": fields},
+            {"tag": "div", "text": {"tag": "lark_md", "content": _channel_compare_text(candidate)}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**套装内容/采购注意**\n{candidate.get('set_content') or '待采购按主图和供应商页核对'}"}},
         ]
     )
