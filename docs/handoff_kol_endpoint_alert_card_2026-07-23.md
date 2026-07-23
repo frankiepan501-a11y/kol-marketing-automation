@@ -62,9 +62,13 @@ Result: all passed. The existing draft audit tests print missing-env warnings in
 
 No Feishu message was sent, no Bitable data was written, and no Zeabur env/config was changed while making this code change.
 
-Before production rollout:
+2026-07-23 production rollout:
 
-1. Review the local diff.
-2. Commit and push intentionally.
-3. Deploy the updated `kol-automation` service.
-4. Trigger a Frankie-only or synthetic alert sample if available, then inspect the rendered card.
+1. Runtime fix commit: `831cd8118dea510b8b366787170ee5274684db4e`.
+2. Zeabur `kol-automation` deployment `6a61ba5a9cfc4cd5e68972e5` reached `RUNNING` on that commit.
+3. Online `GET https://kol-auto.zeabur.app/health` returned `{"status":"ok"}`.
+4. Online `GET https://kol-auto.zeabur.app/openapi.json` confirmed `/auto-send/run` is still registered.
+5. Sent a Frankie-only `[DRY-RUN]` synthetic card sample with message id `om_x100b692fe07ea500df6aa5548aa3b55`.
+6. Readback confirmed the sample is `msg_type=interactive` and contains `[KOL·P2]`, `运营无需处理草稿`, and `没有证据显示已误发邮件`.
+
+The synthetic card did not read/write Bitable and did not trigger any email send.
