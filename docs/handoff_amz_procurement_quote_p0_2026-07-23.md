@@ -7,6 +7,7 @@ P0 code is implemented and pushed to `master`.
 Deploy checkpoint:
 - Runtime code fix commit: `a2759b6`
 - Post-fix verification/doc commit checked online: `73383ae`
+- URL-field fix commit: `521d823`
 - Zeabur `kol-automation` production deployment was verified `RUNNING` after the card callback fix. Re-check Zeabur deployment status after any later docs-only commit.
 - Online `/openapi.json` includes `POST /cs/amz-procurement-quote/send`.
 - Unauthenticated call to the endpoint returns `401`, confirming the route is live and protected.
@@ -182,6 +183,10 @@ Result:
 - Manually repaired `recvq1Quaar3h2` by writing both `1688供应商链接` and legacy `采购链接` as `{link,text}` objects. Candidate Base readback now confirms `B0CNRH4GRJ` is `已回填`, cost `20`, and both URL fields contain the provided 1688 URL.
 - Code fix: `app/amz_procurement_quote.py` now uses `_url_cell()` for both URL fields during callback writeback.
 - Regression coverage: `test_url_cell_preserves_bare_1688_offer_link` plus updated callback tests and `scripts/amz_procurement_card_selftest.py` now require Feishu URL cell shape.
+- Zeabur deployment `6a61a9b89cfc4cd5e6896eda` reached `RUNNING` on commit `521d823`.
+- Online callback replay for `recvq1Quaar3h2` returned the normal processing toast, then patched original card `om_x100b69249b8e70a0c00088987697b04`.
+- Final card readback confirms title `已全部回填`, no active `确认回填本产品` button/form remains, and the fourth row shows `采购成本: 20.0 RMB` with the clickable 1688 URL.
+- Protected online dry-run with the four explicit P0 record IDs returned `ok=true`, `count=4`, `card_selftest=passed`.
 
 2026-07-23 deployment verification for commit `a2759b6`:
 - Zeabur deployment `6a61a66c9cfc4cd5e6896e3e` is `RUNNING`.

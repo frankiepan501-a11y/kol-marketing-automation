@@ -19,3 +19,6 @@
 - 已按 `{link,text}` 对象格式手工补写第 4 个产品：采购成本 `20`，供应商链接 `https://detail.1688.com/offer/6150807684`，候选表读回为 `已回填`。
 - 已修复 `app/amz_procurement_quote.py`，回调写 `1688供应商链接` 和 `采购链接` 时统一使用飞书 URL 单元格对象；新增单测覆盖裸 1688 offer 链接。
 - 本地验证通过：`py_compile`、`17 tests OK`、`scripts/amz_procurement_card_selftest.py` 通过。
+- 已提交并推送 `521d823 fix: write AMZ procurement URL fields as links`，Zeabur deployment `6a61a9b89cfc4cd5e6896eda` 已 `RUNNING`。
+- 已用线上 `/amz/feishu/callback` 重放第 4 个产品提交并 PATCH 原卡；原卡读回标题为 `已全部回填`，不再包含 `确认回填本产品` 按钮/表单，第 4 个显示 `采购成本: 20.0 RMB` 和可点击 1688 链接。
+- 受保护线上 dry-run 显式 4 条 P0 record_ids 返回 `ok=true`、`count=4`、`card_selftest=passed`。
