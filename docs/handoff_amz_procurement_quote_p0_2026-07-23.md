@@ -42,11 +42,13 @@ P0 records prepared:
 - `recvq1QtUEEcXv` / `B0D1CLBFD9` / 2 pieces
 - `recvq1Quaar3h2` / `B0CNRH4GRJ` / 5 pieces
 
-Current P0 state after Frankie-only click test:
+Current P0 state after Frankie-only click tests and manual reconciliation:
 - `recvq1QtafnVjX` / `B0CH1817WW`: `采购回填状态=已回填`, `采购成本RMB=4`, `1688供应商链接` and legacy `采购链接` filled.
-- Other three P0 records remain `采购回填状态=待回填`.
+- `recvq1QtFKPwoI` / `B0CSCXSHPQ`: `采购回填状态=已回填`, `采购成本RMB=40.1`, `1688供应商链接` and legacy `采购链接` filled.
+- `recvq1QtUEEcXv` / `B0D1CLBFD9`: `采购回填状态=已回填`, `采购成本RMB=12.5`, `1688供应商链接` and legacy `采购链接` filled.
+- `recvq1Quaar3h2` / `B0CNRH4GRJ`: remains `采购回填状态=待回填`.
 - All four have `采购卡片批次ID=AMZ-DE-PROCQ-20260723-P0`.
-- Latest card message id is `om_x100b69249b8e70a0c00088987697b04`; the original card is patched to `待采购回填 3/4`.
+- Latest card message id is `om_x100b69249b8e70a0c00088987697b04`; the original card is patched to `待采购回填 1/4`.
 - Amazon main-image URL is filled from the public Amazon page `og:image`.
 
 ## Code Changes
@@ -107,6 +109,12 @@ Second click guard added on 2026-07-23:
 - Feishu millisecond datetime values are formatted before rendering the card, so `采购回填时间` displays as `YYYY-MM-DD HH:mm` instead of a raw timestamp.
 - The manually reconciled second row is `recvq1QtFKPwoI` / `B0CSCXSHPQ`, cost `40.1`, supplier link from 1688 offer `934664075097`.
 
+Third click/input fix added on 2026-07-23:
+- The previous parser only covered flat `action.form_value`. It now flattens flat form values, nested form-name payloads such as `proc_quote_form_<record_id>`, `input_values` lists, and JSON-string `card_form_value`.
+- `send_quote_card()` now runs `validate_quote_card()` before sending. If any product is missing the Amazon Listing button, image button, candidate record button, cost/link/note inputs, or `form_submit` payload, the card raises instead of being sent.
+- New local pre-send self-test: `scripts/amz_procurement_card_selftest.py`. It validates button/input wiring and simulates record writeback + original-card PATCH for flat, nested, and list callback shapes.
+- The manually reconciled third row is `recvq1QtUEEcXv` / `B0D1CLBFD9`, cost `12.5`, supplier link from 1688 offer `1049232514744`.
+
 ## Verification
 
 Local:
@@ -136,8 +144,19 @@ raise SystemExit(0 if result.wasSuccessful() else 1)
 ```
 
 Result:
-- `test_amz_procurement_quote.py`: 12 tests passed.
+- `test_amz_procurement_quote.py`: 16 tests passed.
 - `test_amz_review_audit.py`: 18 tests passed.
+
+2026-07-23 card self-test command:
+
+```powershell
+C:\tmp\py311-embed\python.exe scripts\amz_procurement_card_selftest.py
+```
+
+Result:
+- Card structure passed.
+- Checked: Amazon Listing button, image button, candidate record button, cost/link/note inputs, form_submit payload, callback record update, original card patch.
+- Callback shapes passed: `flat_form_value`, `nested_form_value`, `input_values_list`.
 
 2026-07-23 post-click verification:
 - Candidate Base single-record read confirms `B0CH1817WW` is now `已回填`, cost `4`, both supplier URL fields populated.
@@ -148,6 +167,11 @@ Result:
 2026-07-23 second-product verification:
 - Candidate Base single-record read confirms `B0CSCXSHPQ` is now `已回填`, cost `40.1`, and both `1688供应商链接` and `采购链接` contain the provided 1688 offer URL.
 - IM message read confirms card `om_x100b69249b8e70a0c00088987697b04` is still `msg_type=interactive`, title `待采购回填 2/4`, and the card text includes `B0CSCXSHPQ` with `采购已回填` and `采购成本: 40.1 RMB`.
+
+2026-07-23 third-product verification:
+- Candidate Base single-record read confirms `B0D1CLBFD9` is now `已回填`, cost `12.5`, and both `1688供应商链接` and `采购链接` contain the provided 1688 offer URL.
+- IM message read confirms card `om_x100b69249b8e70a0c00088987697b04` is still `msg_type=interactive`, title `待采购回填 1/4`, and the card text includes `B0D1CLBFD9` with `采购已回填` and `采购成本: 12.5 RMB`.
+- Real-record dry-run validation for all four P0 rows returned `errors=[]`; the only pending product is `B0CNRH4GRJ`.
 
 Online health checked:
 
@@ -179,7 +203,9 @@ POST https://kol-auto.zeabur.app/cs/amz-procurement-quote/send?mode=commit&batch
 Authorization: Bearer <INTERNAL_TOKEN>
 ```
 
-Then click one remaining product on the received card and verify:
+Before any new procurement card is sent, run `scripts/amz_procurement_card_selftest.py` and a real-record dry-run validation. Do not ask Frankie or procurement to be the first tester for button/input wiring.
+
+Then click one remaining product on the received card only after the above self-tests pass, and verify:
 - that product row becomes `采购回填状态=已回填`;
 - `采购成本RMB`, `1688供应商链接`, and legacy `采购链接` are populated;
 - original card is patched, with completed products read-only and pending products still editable.

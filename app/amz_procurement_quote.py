@@ -202,6 +202,81 @@ def _md_link(label: str, url: str) -> str:
     return f"[{label}]({safe})" if safe.startswith(("http://", "https://")) else label
 
 
+def _card_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return _text(value.get("content") or value.get("text") or value.get("name") or value.get("value") or "")
+    return _text(value)
+
+
+def _card_nodes(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from _card_nodes(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _card_nodes(item)
+
+
+def validate_quote_card(card: dict, candidates: list[dict]) -> list[str]:
+    """Return human-readable card wiring errors. Empty list means safe to send."""
+    errors: list[str] = []
+    nodes = list(_card_nodes(card))
+    buttons = [n for n in nodes if n.get("tag") == "button"]
+    forms = {n.get("name"): n for n in nodes if n.get("tag") == "form" and n.get("name")}
+
+    def url_button_exists(label: str, expected_url: str) -> bool:
+        for button in buttons:
+            if _card_text(button.get("text")) != label:
+                continue
+            url = _text(button.get("url"))
+            if url == expected_url and url.startswith(("http://", "https://")):
+                return True
+        return False
+
+    for candidate in candidates:
+        rid = candidate.get("record_id") or ""
+        sid = _safe_id(rid)
+        label = candidate.get("asin") or rid or "unknown"
+        completed = _text(candidate.get("quote_status")) == "已回填" and candidate.get("quote_cost")
+        if candidate.get("amazon_url") and not url_button_exists("打开 Listing", candidate["amazon_url"]):
+            errors.append(f"{label}: missing or invalid Amazon Listing button")
+        if candidate.get("image_url") and not url_button_exists("查看主图原图", candidate["image_url"]):
+            errors.append(f"{label}: missing or invalid image button")
+        if not url_button_exists("打开候选表记录", _record_url(rid)):
+            errors.append(f"{label}: missing or invalid candidate-record button")
+        if completed:
+            continue
+        form_name = f"proc_quote_form_{sid}"
+        form = forms.get(form_name)
+        if not form:
+            errors.append(f"{label}: missing form {form_name}")
+            continue
+        form_elements = form.get("elements") or []
+        input_names = {x.get("name") for x in form_elements if isinstance(x, dict) and x.get("tag") == "input"}
+        for name in (f"proc_cost_{sid}", f"proc_link_{sid}", f"proc_note_{sid}"):
+            if name not in input_names:
+                errors.append(f"{label}: missing input {name}")
+        submit = None
+        for item in form_elements:
+            if isinstance(item, dict) and item.get("tag") == "button" and item.get("action_type") == "form_submit":
+                submit = item
+                break
+        if not submit:
+            errors.append(f"{label}: missing form_submit button")
+            continue
+        value = submit.get("value") or {}
+        if _text(value.get("action")) != ACTION_SUBMIT:
+            errors.append(f"{label}: submit payload action is invalid")
+        if _text(value.get("record_id")) != rid:
+            errors.append(f"{label}: submit payload record_id is invalid")
+        record_ids = [_text(x) for x in (value.get("card_record_ids") or []) if _text(x)]
+        expected_ids = [c.get("record_id") for c in candidates if c.get("record_id")]
+        if record_ids != expected_ids:
+            errors.append(f"{label}: submit payload card_record_ids is invalid")
+    return errors
+
+
 def _guess_ext(content_type: str, url: str) -> str:
     ctype = (content_type or "").lower()
     if "png" in ctype:
@@ -490,13 +565,90 @@ def _extract_action(event: dict) -> tuple[str, dict, dict]:
             value = json.loads(value)
         except Exception:
             value = {"action": value}
-    form = action.get("form_value") or event.get("card_form_value") or {}
-    if isinstance(form, str):
-        try:
-            form = json.loads(form)
-        except Exception:
-            form = {}
+    form = _extract_form_values(event, action)
     return _text(value.get("action") or value.get("act")), value, form
+
+
+def _jsonish(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return value
+    try:
+        return json.loads(text)
+    except Exception:
+        return value
+
+
+def _form_scalar(value: Any) -> str:
+    value = _jsonish(value)
+    if isinstance(value, dict):
+        for key in ("value", "input_value", "selected_value", "text", "content", "link", "url"):
+            if key in value:
+                return _form_scalar(value.get(key))
+        if len(value) == 1:
+            return _form_scalar(next(iter(value.values())))
+    if isinstance(value, list):
+        return "".join(_form_scalar(item) for item in value).strip()
+    return _text(value)
+
+
+def _merge_form_values(out: dict[str, str], raw: Any) -> None:
+    raw = _jsonish(raw)
+    if not raw:
+        return
+    if isinstance(raw, list):
+        for item in raw:
+            item = _jsonish(item)
+            if isinstance(item, dict):
+                name = _text(item.get("name") or item.get("key") or item.get("id") or item.get("field"))
+                has_value = any(k in item for k in ("value", "input_value", "selected_value", "text", "content", "link", "url"))
+                if name and has_value:
+                    out[name] = _form_scalar(item)
+                _merge_form_values(out, item)
+        return
+    if not isinstance(raw, dict):
+        return
+    wrapper_keys = {
+        "form_value",
+        "form_values",
+        "card_form_value",
+        "input_values",
+        "inputs",
+        "form",
+        "fields",
+        "elements",
+    }
+    field_prefixes = ("proc_", "amz_proc_")
+    for key, value in raw.items():
+        key_text = _text(key)
+        value = _jsonish(value)
+        if key_text in wrapper_keys:
+            _merge_form_values(out, value)
+            continue
+        if key_text.startswith(field_prefixes) or key_text in ("cost", "link", "note"):
+            out[key_text] = _form_scalar(value)
+        if isinstance(value, (dict, list, str)):
+            _merge_form_values(out, value)
+
+
+def _extract_form_values(event: dict, action: dict | None = None) -> dict[str, str]:
+    action = action or event.get("action") or {}
+    out: dict[str, str] = {}
+    for raw in (
+        action.get("form_value"),
+        action.get("form_values"),
+        action.get("input_values"),
+        action.get("inputs"),
+        event.get("card_form_value"),
+        event.get("form_value"),
+        event.get("form_values"),
+        event.get("input_values"),
+        event.get("inputs"),
+    ):
+        _merge_form_values(out, raw)
+    return out
 
 
 def _form_value(form: dict, record_id: str, suffix: str) -> str:
@@ -683,6 +835,9 @@ async def send_quote_card(
     if mode == "commit":
         await _prepare_card_images(candidates)
     card = build_quote_card(candidates, batch)
+    validation_errors = validate_quote_card(card, candidates)
+    if validation_errors:
+        raise RuntimeError("Procurement quote card self-test failed: " + "; ".join(validation_errors))
     effective_frankie_only = bool(frankie_only or FRANKIE_ONLY)
     result: dict[str, Any] = {
         "ok": True,
@@ -691,6 +846,7 @@ async def send_quote_card(
         "batch_id": batch,
         "count": len(candidates),
         "record_ids": [c.get("record_id") for c in candidates],
+        "card_selftest": "passed",
         **_card_media_stats(candidates),
     }
     if mode == "dry_run":

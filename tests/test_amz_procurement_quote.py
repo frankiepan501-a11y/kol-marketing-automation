@@ -43,9 +43,11 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         self.assertIn(quote.ACTION_SUBMIT, rendered)
         self.assertIn("打开 Listing", rendered)
         self.assertIn("查看主图原图", rendered)
+        self.assertIn("打开候选表记录", rendered)
         self.assertIn('"tag": "img"', rendered)
         self.assertIn("img_test_key", rendered)
         self.assertIn("提交只更新当前产品", rendered)
+        self.assertEqual([], quote.validate_quote_card(card, [self._candidate("rec1"), self._candidate("rec2")]))
 
     def test_completed_product_renders_without_input(self):
         card = quote.build_quote_card([self._candidate("rec1", "已回填")], "batch-test")
@@ -109,6 +111,57 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         result = asyncio.run(quote.handle_callback(event))
         self.assertEqual("error", result["toast"]["type"])
         self.assertIn("1688供应商链接", result["toast"]["content"])
+
+    def test_extract_action_flattens_nested_form_value(self):
+        action, value, form = quote._extract_action({
+            "action": {
+                "value": {"action": quote.ACTION_SUBMIT, "record_id": "rec1"},
+                "form_value": {
+                    "proc_quote_form_rec1": {
+                        "proc_cost_rec1": {"value": "18.5"},
+                        "proc_link_rec1": {"value": "https://detail.1688.com/offer/test.html"},
+                        "proc_note_rec1": {"value": "MOQ 100"},
+                    }
+                },
+            }
+        })
+
+        self.assertEqual(quote.ACTION_SUBMIT, action)
+        self.assertEqual("rec1", value["record_id"])
+        self.assertEqual("18.5", quote._form_value(form, "rec1", "cost"))
+        self.assertEqual("https://detail.1688.com/offer/test.html", quote._form_value(form, "rec1", "link"))
+        self.assertEqual("MOQ 100", quote._form_value(form, "rec1", "note"))
+
+    def test_extract_action_flattens_input_values_list(self):
+        action, _, form = quote._extract_action({
+            "action": {
+                "value": json.dumps({"action": quote.ACTION_SUBMIT, "record_id": "rec1"}, ensure_ascii=False),
+                "input_values": [
+                    {"name": "proc_cost_rec1", "value": "18.5"},
+                    {"name": "proc_link_rec1", "value": {"text": "https://detail.1688.com/offer/test.html"}},
+                    {"name": "proc_note_rec1", "input_value": "颜色要核对"},
+                ],
+            }
+        })
+
+        self.assertEqual(quote.ACTION_SUBMIT, action)
+        self.assertEqual("18.5", quote._form_value(form, "rec1", "cost"))
+        self.assertEqual("https://detail.1688.com/offer/test.html", quote._form_value(form, "rec1", "link"))
+        self.assertEqual("颜色要核对", quote._form_value(form, "rec1", "note"))
+
+    def test_extract_action_flattens_event_card_form_value_json(self):
+        _, _, form = quote._extract_action({
+            "action": {"value": {"action": quote.ACTION_SUBMIT, "record_id": "rec1"}},
+            "card_form_value": json.dumps({
+                "proc_quote_form_rec1": {
+                    "proc_cost_rec1": "18.5",
+                    "proc_link_rec1": "https://detail.1688.com/offer/test.html",
+                }
+            }, ensure_ascii=False),
+        })
+
+        self.assertEqual("18.5", quote._form_value(form, "rec1", "cost"))
+        self.assertEqual("https://detail.1688.com/offer/test.html", quote._form_value(form, "rec1", "link"))
 
     def test_handle_callback_fast_ack_spawns_background(self):
         original_spawn = quote._spawn
@@ -279,6 +332,63 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         rendered = json.dumps(patches[0][1], ensure_ascii=False)
         self.assertIn("采购已回填", rendered)
         self.assertIn("proc_cost_rec2", rendered)
+
+    def test_process_callback_accepts_nested_form_payload(self):
+        original_get = quote._get_candidate
+        original_update = quote._update_candidate
+        original_get_many = quote._get_candidates_by_ids
+        original_patch = quote.amz_assistant.update_card
+        updates = []
+        patches = []
+
+        async def fake_get(record_id):
+            return self._candidate(record_id)
+
+        async def fake_update(record_id, fields):
+            updates.append((record_id, fields))
+
+        async def fake_get_many(record_ids):
+            return [self._candidate(rid) for rid in record_ids]
+
+        async def fake_patch(message_id, card):
+            patches.append((message_id, card))
+            return True
+
+        try:
+            quote._get_candidate = fake_get
+            quote._update_candidate = fake_update
+            quote._get_candidates_by_ids = fake_get_many
+            quote.amz_assistant.update_card = fake_patch
+            result = asyncio.run(quote._process_callback({
+                "context": {"open_message_id": "om_proc"},
+                "operator": {"union_id": "on_operator"},
+                "action": {
+                    "value": {
+                        "action": quote.ACTION_SUBMIT,
+                        "record_id": "rec1",
+                        "batch_id": "batch-test",
+                        "card_record_ids": ["rec1", "rec2"],
+                    },
+                    "form_value": {
+                        "proc_quote_form_rec1": {
+                            "proc_cost_rec1": {"value": "19.6"},
+                            "proc_link_rec1": {"value": "https://detail.1688.com/offer/nested.html"},
+                            "proc_note_rec1": {"value": "嵌套表单"},
+                        }
+                    },
+                },
+            }))
+        finally:
+            quote._get_candidate = original_get
+            quote._update_candidate = original_update
+            quote._get_candidates_by_ids = original_get_many
+            quote.amz_assistant.update_card = original_patch
+
+        self.assertEqual("success", result["toast"]["type"])
+        self.assertEqual("rec1", updates[0][0])
+        self.assertEqual(19.6, updates[0][1]["采购成本RMB"])
+        self.assertEqual("https://detail.1688.com/offer/nested.html", updates[0][1]["1688供应商链接"])
+        self.assertEqual(1, len(patches))
 
     def test_update_candidate_raises_on_feishu_business_error(self):
         original_api = quote.feishu.api
