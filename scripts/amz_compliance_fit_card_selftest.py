@@ -104,19 +104,17 @@ def _candidate(rid: str = "rec_selftest_1", status: str = "pending") -> dict[str
 def _form_flat(record_id: str) -> dict[str, Any]:
     sid = fit._safe_id(record_id)
     return {
-        f"fit_result_{sid}": "Go",
-        f"fit_iprisk_{sid}": "低",
-        f"fit_note_{sid}": "selftest fitment passed",
+        f"risk_action_{sid}": "确认系统建议",
+        f"risk_note_{sid}": "selftest confirm automated findings",
     }
 
 
 def _form_nested(record_id: str) -> dict[str, Any]:
     sid = fit._safe_id(record_id)
     return {
-        f"fit_check_form_{sid}": {
-            f"fit_result_{sid}": {"value": "Go"},
-            f"fit_iprisk_{sid}": {"selected_value": "低"},
-            f"fit_note_{sid}": {"input_value": "selftest nested"},
+        f"risk_feedback_form_{sid}": {
+            f"risk_action_{sid}": {"value": "确认系统建议"},
+            f"risk_note_{sid}": {"input_value": "selftest nested"},
         }
     }
 
@@ -124,9 +122,8 @@ def _form_nested(record_id: str) -> dict[str, Any]:
 def _form_list(record_id: str) -> list[dict[str, Any]]:
     sid = fit._safe_id(record_id)
     return [
-        {"name": f"fit_result_{sid}", "value": "Go"},
-        {"name": f"fit_iprisk_{sid}", "value": {"text": "低"}},
-        {"name": f"fit_note_{sid}", "input_value": "selftest list"},
+        {"name": f"risk_action_{sid}", "value": "确认系统建议"},
+        {"name": f"risk_note_{sid}", "input_value": "selftest list"},
     ]
 
 
@@ -190,18 +187,21 @@ async def _callback_smoke(name: str, form_builder: Callable[[str], Any]) -> dict
     if len(patches) != 1:
         raise AssertionError(f"{name}: expected 1 card patch, got {len(patches)}")
     fields = updates[0][1]
-    if fields.get("合规闸结论") != "Go":
-        raise AssertionError(f"{name}: compliance gate not written correctly")
-    if fields.get("当前状态") != "待50件验证":
-        raise AssertionError(f"{name}: next status not written correctly")
+    if fields.get("合规闸结论") != "暂缓":
+        raise AssertionError(f"{name}: compliance gate not written from automated scan correctly")
+    if fields.get("当前状态") != "待合规核查":
+        raise AssertionError(f"{name}: next status not written from automated scan correctly")
+    if "自动风险扫描" not in (fields.get("侵权风险说明") or ""):
+        raise AssertionError(f"{name}: risk note does not contain automated scan findings")
     rendered = json.dumps(patches[0][1], ensure_ascii=False)
-    if "合规/适配已核查" not in rendered:
+    if "自动风险处理已完成" not in rendered:
         raise AssertionError(f"{name}: patched card does not show completed state")
     return {"shape": name, "updated": updates[0][0], "patched": patches[0][0]}
 
 
 async def main() -> dict[str, Any]:
     candidates = [_candidate("rec_selftest_1"), _candidate("rec_selftest_2")]
+    fit._attach_risk_scans(candidates)
     card = fit.build_fit_card(candidates, "selftest-batch")
     errors = fit.validate_fit_card(card, candidates)
     if errors:
@@ -221,7 +221,9 @@ async def main() -> dict[str, Any]:
             "1688 supplier button",
             "embedded product image",
             "three-channel margin section",
-            "result/risk/note controls",
+            "automated risk finding section",
+            "risk action/note controls",
+            "legacy manual Go/No-Go controls absent",
             "form_submit payload",
             "callback record update",
             "original card patch",

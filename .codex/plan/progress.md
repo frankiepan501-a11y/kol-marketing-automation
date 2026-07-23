@@ -56,3 +56,8 @@
 - 已用 Zeabur 当前环境变量里的 `INTERNAL_TOKEN` 做受保护线上 dry-run，返回 `ok=true`、`count=2`、`card_selftest=passed`；生成卡结构确认包含 2 个独立表单、4 个结果/风险下拉、2 个备注输入、`amz_fit_check_submit`、Listing 链接和三渠道毛利。
 - 已真实发送 Frankie-only 合规/适配核查样卡，`message_id=om_x100b692b9e03c0a4df9d31f797d0b99`，commit 模式上传并嵌入 2 张产品图；飞书消息读回确认 `msg_type=interactive`，可见产品图片、Listing/主图/候选表/1688 按钮和三渠道毛利文本。
 - 飞书读回 API 对 interactive card 返回的是简化 card body，未正常展开 form 节点；但线上 dry-run 和本地 selftest 均已确认生成卡含活跃表单。下一步需要 Frankie 在样卡上点击 1 个产品做真实回调测试，再读回候选表与原卡 PATCH 状态。
+- 2026-07-24 用户纠正合规/适配节点边界：卡片不应让采购/运营人工核查 `Go/No-Go`、IP/外观/专利风险；应由自动化先扫描风险，再把系统发现的问题点、证据和建议动作反馈给运营处理例外。
+- 已按该纠正改造 `app/amz_compliance_fit_card.py`：旧人工动作 `amz_fit_check_submit` 已停用并返回提示；新动作为 `amz_fit_check_feedback_submit`。卡片展示自动风险扫描结果、自动发现的问题点、证据、系统建议和处理动作，不再展示 `fit_result_*` / `fit_iprisk_*` / `确认核查本产品`。
+- 自动扫描 P0 当前覆盖：兼容品牌词、原厂/官方/正版/OEM 暗示、型号/套装资料缺口、1688供应商资料缺口、知名品牌耗材外观/专利线索、EU/GPSR基础资料、限制类关键词。该扫描是业务风险线索，不是法律结论。
+- 新回调写回由系统扫描决定：`确认系统建议` 才按自动判断写 `Go/暂缓/No-Go`；`标记系统误报`、`要求采购补资料`、`升级合规复核` 都写为暂缓并保留自动问题清单到 `侵权风险说明`。
+- 本地验证通过：`py_compile`、`scripts/amz_compliance_fit_card_selftest.py`、`test_amz_compliance_fit_card.py` 12 tests、采购卡回归 17 tests、AMZ审计回归 18 tests。

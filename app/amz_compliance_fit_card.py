@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Amazon Europe compliance and fitment review cards.
+"""Amazon Europe automated compliance / fitment risk feedback cards.
 
 P0 scope:
-- send a Frankie-only card for selected candidate records;
-- each product has its own compliance result/risk/note controls;
-- callback writes only that product row and patches the original card.
+- run deterministic risk scanning from candidate fields;
+- send a Frankie-only card with automatic findings, evidence, and suggested actions;
+- humans handle exceptions only: confirm system suggestion, mark false positive,
+  request procurement evidence, or escalate for manual compliance review.
 """
 from __future__ import annotations
 
@@ -21,7 +22,8 @@ from . import amz_assistant, amz_procurement_quote as proc
 
 BJ = timezone(timedelta(hours=8))
 
-ACTION_SUBMIT = "amz_fit_check_submit"
+ACTION_SUBMIT = "amz_fit_check_feedback_submit"
+ACTION_LEGACY_SUBMIT = "amz_fit_check_submit"
 
 DEFAULT_BATCH_ID = os.environ.get("AMZ_COMPLIANCE_DEFAULT_BATCH_ID", "AMZ-DE-FITCHECK-20260723-P0")
 DEFAULT_RECORD_IDS = [
@@ -76,8 +78,8 @@ FIELD_NAMES = [
     "人审备注",
 ]
 
-FIT_RESULTS = ("Go", "需整改", "No-Go")
 IP_RISKS = ("低", "中", "高", "不可做")
+HUMAN_ACTIONS = ("确认系统建议", "标记系统误报", "要求采购补资料", "升级合规复核")
 DONE_GATES = ("Go", "暂缓", "No-Go")
 
 _bg_tasks: set[asyncio.Task] = set()
@@ -185,6 +187,7 @@ def _completed(candidate: dict) -> bool:
 
 
 def _payload(candidate: dict, card_record_ids: list[str]) -> dict:
+    scan = candidate.get("risk_scan") or scan_candidate(candidate)
     return {
         "source": "amz_compliance_fit",
         "action": ACTION_SUBMIT,
@@ -192,7 +195,253 @@ def _payload(candidate: dict, card_record_ids: list[str]) -> dict:
         "asin": candidate.get("asin"),
         "batch_id": candidate.get("fit_batch_id") or DEFAULT_BATCH_ID,
         "card_record_ids": card_record_ids,
+        "auto_risk_level": scan.get("level"),
+        "auto_decision": scan.get("decision"),
+        "auto_score": scan.get("score"),
     }
+
+
+BRAND_TERMS = (
+    "Dreame",
+    "Xiaomi",
+    "Roborock",
+    "Dyson",
+    "iRobot",
+    "Roomba",
+    "Shark",
+    "Miele",
+    "Bosch",
+    "Philips",
+    "Braun",
+    "Oral-B",
+    "Karcher",
+)
+COMPATIBLE_TERMS = ("replacement", "compatible", "fit", "fits", "for ", "ersatz", "zubehor", "zubehör", "适配", "替换", "兼容")
+ORIGINAL_CLAIM_TERMS = ("original", "official", "genuine", "authentic", "oem", "正版", "原装", "原厂", "官方")
+EU_RESTRICTED_TERMS = (
+    "battery",
+    "charger",
+    "adapter",
+    "power supply",
+    "toy",
+    "child",
+    "kids",
+    "food contact",
+    "cosmetic",
+    "medical",
+    "adult",
+    "sex",
+    "电池",
+    "充电",
+    "儿童",
+    "食品接触",
+    "化妆",
+    "医疗",
+    "成人",
+)
+CONSUMABLE_TERMS = ("filter", "brush", "roller", "mop", "dust bag", "滤网", "刷", "滚刷", "拖布", "尘袋")
+
+
+def _combined_text(candidate: dict) -> str:
+    parts = [
+        candidate.get("title"),
+        candidate.get("cn_name"),
+        candidate.get("set_content"),
+        candidate.get("package_size"),
+        candidate.get("fulfillment"),
+    ]
+    return " ".join(_text(x) for x in parts if _text(x))
+
+
+def _term_hits(text: str, terms: tuple[str, ...]) -> list[str]:
+    hits = []
+    lower = text.lower()
+    for term in terms:
+        if term.lower() in lower:
+            hits.append(term)
+    return hits
+
+
+def _issue(severity: str, dimension: str, finding: str, evidence: str, action: str) -> dict:
+    return {
+        "severity": severity,
+        "dimension": dimension,
+        "finding": finding,
+        "evidence": evidence,
+        "action": action,
+    }
+
+
+def scan_candidate(candidate: dict) -> dict:
+    """Run P0 automated risk scan.
+
+    This is not legal advice. It produces business risk signals and evidence so
+    operators do not need to inspect the product from scratch.
+    """
+    text = _combined_text(candidate)
+    title = _text(candidate.get("title")) or _text(candidate.get("cn_name")) or "-"
+    issues: list[dict] = []
+
+    brand_hits = _term_hits(text, BRAND_TERMS)
+    compatible_hits = _term_hits(text, COMPATIBLE_TERMS)
+    original_hits = _term_hits(text, ORIGINAL_CLAIM_TERMS)
+    restricted_hits = _term_hits(text, EU_RESTRICTED_TERMS)
+    consumable_hits = _term_hits(text, CONSUMABLE_TERMS)
+
+    if brand_hits:
+        sev = "高" if original_hits else "中"
+        issues.append(
+            _issue(
+                sev,
+                "品牌词/IP",
+                f"识别到兼容品牌词：{', '.join(sorted(set(brand_hits)))}",
+                f"候选标题/套装内容：{proc._short(title, 140)}",
+                "Listing、包装和说明书只能写兼容/适配关系，不能出现原厂、官方、正版或品牌Logo暗示。",
+            )
+        )
+    if brand_hits and not compatible_hits:
+        issues.append(
+            _issue(
+                "高",
+                "型号适配",
+                "出现品牌/型号词，但未识别到 replacement/compatible/for/适配 等兼容关系表达。",
+                f"文本：{proc._short(text, 180)}",
+                "改标题和包装文案，明确为第三方兼容配件；进入 50 件验证前必须复核。",
+            )
+        )
+    if original_hits:
+        issues.append(
+            _issue(
+                "高",
+                "商标/误导",
+                f"识别到可能暗示原厂/正版的词：{', '.join(sorted(set(original_hits)))}",
+                f"文本：{proc._short(text, 180)}",
+                "删除原厂/官方/正版/OEM等表述；确认供应商图片和包装无品牌Logo。",
+            )
+        )
+    if not candidate.get("supplier_link"):
+        issues.append(
+            _issue(
+                "中",
+                "采购资料",
+                "缺少1688供应商链接，无法自动核对供应商图、包装和套装。",
+                "候选表未提供供应商链接。",
+                "要求采购补供应商链接、实物图、包装图后重跑自动扫描。",
+            )
+        )
+    if not candidate.get("package_size") or not candidate.get("weight_g"):
+        issues.append(
+            _issue(
+                "中",
+                "型号/物流资料",
+                "包装尺寸或重量缺失，型号适配和履约成本复核不完整。",
+                f"尺寸={candidate.get('package_size') or '-'}，重量={candidate.get('weight_g') or '-'}",
+                "补齐尺寸重量后再进入 50 件验证。",
+            )
+        )
+    if not candidate.get("set_count") or not candidate.get("set_content"):
+        issues.append(
+            _issue(
+                "中",
+                "套装适配",
+                "套装件数或套装内容缺失，采购无法稳定对齐 Amazon 主图和供应商报价。",
+                f"件数={candidate.get('set_count') or '-'}，套装内容={proc._short(candidate.get('set_content'), 120) or '-'}",
+                "补套装件数、套装内容、适配型号后再重算风险。",
+            )
+        )
+    if consumable_hits and brand_hits:
+        issues.append(
+            _issue(
+                "中",
+                "外观/专利线索",
+                "第三方耗材适配知名品牌设备，外观/卡扣/滤网结构可能存在设计或专利线索。",
+                f"耗材词：{', '.join(sorted(set(consumable_hits)))}；品牌词：{', '.join(sorted(set(brand_hits)))}",
+                "P0 可继续做商业筛选，但进入样品前需核主图、包装、实物是否带Logo或过度复刻原厂外观。",
+            )
+        )
+    if restricted_hits:
+        issues.append(
+            _issue(
+                "高",
+                "EU合规/限制类",
+                f"识别到可能触发欧盟特殊合规的词：{', '.join(sorted(set(restricted_hits)))}",
+                f"文本：{proc._short(text, 180)}",
+                "需补对应认证/警示/说明书；高风险品不得自动进入验证。",
+            )
+        )
+    issues.append(
+        _issue(
+            "低",
+            "EU/GPSR",
+            "欧洲站上架前需要准备 GPSR 责任人、德语/当地语言标签、警示语、包装和说明书信息。",
+            "P0 候选表尚未记录这些资料。",
+            "进入 50 件验证前建立包装/标签资料清单；低客单小配件也不能跳过。",
+        )
+    )
+
+    score_map = {"低": 10, "中": 25, "高": 45, "不可做": 100}
+    score = min(100, sum(score_map.get(x.get("severity"), 0) for x in issues))
+    max_sev = "低"
+    for sev in ("不可做", "高", "中"):
+        if any(x.get("severity") == sev for x in issues):
+            max_sev = sev
+            break
+    if any(x.get("severity") == "不可做" for x in issues) or score >= 90:
+        decision = "reject_recommended"
+        decision_label = "建议淘汰/不推进"
+        next_action = "淘汰归档或升级合规复核"
+    elif max_sev in ("高", "中") or score >= 25:
+        decision = "review_required"
+        decision_label = "暂缓，先处理风险点"
+        next_action = "按自动风险点补资料/改文案后重扫"
+    else:
+        decision = "auto_pass"
+        decision_label = "自动低风险，可进入50件验证"
+        next_action = "发起50件验证"
+    return {
+        "score": score,
+        "level": max_sev,
+        "decision": decision,
+        "decision_label": decision_label,
+        "next_action": next_action,
+        "brand_hits": sorted(set(brand_hits)),
+        "issues": issues,
+    }
+
+
+def _attach_risk_scans(candidates: list[dict]) -> None:
+    for candidate in candidates:
+        candidate["risk_scan"] = scan_candidate(candidate)
+
+
+def _severity_icon(severity: str) -> str:
+    return {"低": "🟢", "中": "🟡", "高": "🟠", "不可做": "🔴"}.get(_text(severity), "🟡")
+
+
+def _scan_issue_lines(scan: dict, limit: int = 6) -> list[str]:
+    lines = []
+    for issue in (scan.get("issues") or [])[:limit]:
+        lines.append(
+            f"{_severity_icon(issue.get('severity'))} **{issue.get('dimension')}**："
+            f"{issue.get('finding')}｜证据：{issue.get('evidence')}｜建议：{issue.get('action')}"
+        )
+    return lines or ["🟢 未发现需要运营处理的明显风险点。"]
+
+
+def _scan_summary(scan: dict) -> str:
+    return f"{scan.get('level')}风险 / {scan.get('score')}分 / {scan.get('decision_label')}"
+
+
+def _scan_note(scan: dict, note: str = "") -> str:
+    lines = [
+        f"自动风险扫描：{_scan_summary(scan)}",
+        "问题点：",
+    ]
+    for issue in (scan.get("issues") or [])[:8]:
+        lines.append(f"- [{issue.get('severity')}] {issue.get('dimension')}: {issue.get('finding')} 建议: {issue.get('action')}")
+    if note:
+        lines.append(f"人工反馈：{note}")
+    return "\n".join(lines)
 
 
 def _line_item(label: str, value: Any) -> str:
@@ -238,6 +487,7 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
     rid = candidate.get("record_id", "")
     sid = _safe_id(rid)
     completed = _completed(candidate)
+    scan = candidate.get("risk_scan") or scan_candidate(candidate)
     title = candidate.get("cn_name") or candidate.get("title") or candidate.get("asin") or rid
     amazon = candidate.get("amazon_url")
     image = candidate.get("image_url")
@@ -278,10 +528,29 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
             "text": {
                 "tag": "lark_md",
                 "content": (
-                    "**核查重点**\n"
-                    f"- {_risk_hint(candidate)}\n"
-                    f"- 套装内容/采购注意：{candidate.get('set_content') or '待按主图和供应商页核对'}"
+                    "**自动风险扫描结果**\n"
+                    f"- 系统判断：{_scan_summary(scan)}\n"
+                    f"- 系统建议：{scan.get('next_action')}\n"
+                    "- 说明：这是自动风险线索，不是法律结论；人只处理系统发现的例外。"
                 ),
+            },
+        }
+    )
+    elements.append(
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "**自动发现的问题点**\n" + "\n".join(f"- {line}" for line in _scan_issue_lines(scan)),
+            },
+        }
+    )
+    elements.append(
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**套装内容/采购注意**\n{candidate.get('set_content') or '待按主图和供应商页核对'}",
             },
         }
     )
@@ -301,7 +570,7 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
                 "text": {
                     "tag": "lark_md",
                     "content": (
-                        "**合规/适配已核查**\n"
+                        "**自动风险处理已完成**\n"
                         f"{_line_item('合规结论', candidate.get('compliance_gate'))}\n"
                         f"{_line_item('IP/外观风险', candidate.get('ip_risk'))}\n"
                         f"{_line_item('说明', candidate.get('risk_note'))}\n"
@@ -314,33 +583,27 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
     elements.append(
         {
             "tag": "form",
-            "name": f"fit_check_form_{sid}",
+            "name": f"risk_feedback_form_{sid}",
             "elements": [
                 {
                     "tag": "select_static",
-                    "name": f"fit_result_{sid}",
-                    "placeholder": {"tag": "plain_text", "content": "选择结论：Go / 需整改 / No-Go"},
-                    "options": [_button_option(x) for x in FIT_RESULTS],
-                },
-                {
-                    "tag": "select_static",
-                    "name": f"fit_iprisk_{sid}",
-                    "placeholder": {"tag": "plain_text", "content": "选择IP/外观风险"},
-                    "options": [_button_option(x) for x in IP_RISKS],
+                    "name": f"risk_action_{sid}",
+                    "placeholder": {"tag": "plain_text", "content": "处理系统建议"},
+                    "options": [_button_option(x) for x in HUMAN_ACTIONS],
                 },
                 {
                     "tag": "input",
-                    "name": f"fit_note_{sid}",
+                    "name": f"risk_note_{sid}",
                     "label_position": "left",
-                    "label": {"tag": "plain_text", "content": "核查备注"},
-                    "placeholder": {"tag": "plain_text", "content": "型号适配证据、需整改点、GPSR/标签/包装缺口"},
+                    "label": {"tag": "plain_text", "content": "处理备注"},
+                    "placeholder": {"tag": "plain_text", "content": "误报原因、需采购补什么、升级复核说明"},
                 },
                 {
                     "tag": "button",
                     "action_type": "form_submit",
-                    "name": f"fit_submit_{sid}",
+                    "name": f"risk_submit_{sid}",
                     "type": "primary",
-                    "text": {"tag": "plain_text", "content": "确认核查本产品"},
+                    "text": {"tag": "plain_text", "content": "处理系统建议"},
                     "value": _payload(candidate, card_record_ids),
                 },
             ],
@@ -365,11 +628,11 @@ def build_fit_card(candidates: list[dict], batch_id: str = "") -> dict:
                 "content": (
                     f"**批次**: {batch}\n"
                     f"**状态**: {title_status}\n"
-                    "**要求**: 逐个产品核查型号适配、兼容品牌词、IP/外观风险、GPSR/包装标签；提交只更新当前产品。"
+                    "**定位**: 系统先自动扫描型号适配、兼容品牌词、IP/外观、专利线索和EU/GPSR资料缺口；卡片只反馈系统发现的问题点，不要求采购或运营从零核查。"
                 ),
             },
         },
-        {"tag": "note", "elements": [{"tag": "plain_text", "content": "P0 默认只发 Frankie 样卡确认。通过合规/适配后才进入 50 件验证，不代表已正式上架。"}]},
+        {"tag": "note", "elements": [{"tag": "plain_text", "content": "P0 默认只发 Frankie 样卡确认。低风险或处理完风险点后才进入 50 件验证，不代表已正式上架或法律无风险。"}]},
     ]
     for candidate in candidates:
         elements.extend(_product_elements(candidate, record_ids))
@@ -421,7 +684,7 @@ def validate_fit_card(card: dict, candidates: list[dict]) -> list[str]:
             errors.append(f"{label}: missing or invalid supplier button")
         if _completed(candidate):
             continue
-        form_name = f"fit_check_form_{sid}"
+        form_name = f"risk_feedback_form_{sid}"
         form = forms.get(form_name)
         if not form:
             errors.append(f"{label}: missing form {form_name}")
@@ -429,9 +692,8 @@ def validate_fit_card(card: dict, candidates: list[dict]) -> list[str]:
         form_elements = form.get("elements") or []
         names = {x.get("name"): x.get("tag") for x in form_elements if isinstance(x, dict) and x.get("name")}
         expected = {
-            f"fit_result_{sid}": "select_static",
-            f"fit_iprisk_{sid}": "select_static",
-            f"fit_note_{sid}": "input",
+            f"risk_action_{sid}": "select_static",
+            f"risk_note_{sid}": "input",
         }
         for name, tag in expected.items():
             if names.get(name) != tag:
@@ -453,7 +715,9 @@ def validate_fit_card(card: dict, candidates: list[dict]) -> list[str]:
         expected_ids = [c.get("record_id") for c in candidates if c.get("record_id")]
         if record_ids != expected_ids:
             errors.append(f"{label}: submit payload card_record_ids is invalid")
-    for required in ("核查重点", "三渠道毛利", "GPSR", "提交只更新当前产品"):
+    if "fit_result_" in rendered or "选择IP/外观风险" in rendered or "确认核查本产品" in rendered:
+        errors.append("card still contains legacy manual compliance controls")
+    for required in ("自动风险扫描结果", "自动发现的问题点", "系统建议", "三渠道毛利", "GPSR", "人只处理系统发现的例外"):
         if required not in rendered:
             errors.append(f"card missing {required}")
     return errors
@@ -480,7 +744,7 @@ def _merge_form_values(out: dict[str, str], raw: Any) -> None:
     if not isinstance(raw, dict):
         return
     wrapper_keys = {"form_value", "form_values", "card_form_value", "input_values", "inputs", "form", "fields", "elements"}
-    field_prefixes = ("fit_", "amz_fit_")
+    field_prefixes = ("fit_", "amz_fit_", "risk_")
     for key, value in raw.items():
         key_text = _text(key)
         value = proc._jsonish(value)
@@ -513,36 +777,35 @@ def _extract_form_values(event: dict, action: dict | None = None) -> dict[str, s
 
 def _form_value(form: dict, record_id: str, suffix: str) -> str:
     sid = _safe_id(record_id)
-    keys = [f"fit_{suffix}_{sid}", f"amz_fit_{suffix}_{sid}", suffix]
+    keys = [f"risk_{suffix}_{sid}", f"fit_{suffix}_{sid}", f"amz_fit_{suffix}_{sid}", suffix]
     for key in keys:
         if key in form:
             return _text(form.get(key))
     for key, value in form.items():
-        if key.startswith(f"fit_{suffix}_") or key.startswith(f"amz_fit_{suffix}_"):
+        if key.startswith(f"risk_{suffix}_") or key.startswith(f"fit_{suffix}_") or key.startswith(f"amz_fit_{suffix}_"):
             return _text(value)
     return ""
 
 
-def _normalize_result(raw: str) -> str:
+def _normalize_human_action(raw: str) -> str:
     text = _text(raw)
     aliases = {
-        "通过": "Go",
-        "go": "Go",
-        "GO": "Go",
-        "整改": "需整改",
-        "暂缓": "需整改",
-        "不通过": "No-Go",
-        "淘汰": "No-Go",
-        "no-go": "No-Go",
-        "NO-GO": "No-Go",
+        "确认": "确认系统建议",
+        "确认建议": "确认系统建议",
+        "确认系统判断": "确认系统建议",
+        "误报": "标记系统误报",
+        "标记误报": "标记系统误报",
+        "采购补资料": "要求采购补资料",
+        "补资料": "要求采购补资料",
+        "升级": "升级合规复核",
+        "人工复核": "升级合规复核",
     }
     return aliases.get(text, text)
 
 
-def _normalize_risk(raw: str) -> str:
-    text = _text(raw)
-    aliases = {"低风险": "低", "中风险": "中", "高风险": "高", "禁做": "不可做", "不能做": "不可做"}
-    return aliases.get(text, text)
+def _risk_for_write(level: str) -> str:
+    level = _text(level)
+    return level if level in IP_RISKS else "中"
 
 
 def _message_id(event: dict) -> str:
@@ -576,40 +839,58 @@ def _recent_seen(key: str, ttl_sec: int = 300) -> bool:
     return key in _recent_callbacks and now - _recent_callbacks[key] <= ttl_sec
 
 
-def _build_update_fields(result: str, risk: str, note: str, actor: str) -> dict:
-    reviewed = f"{_now_label()} {actor}: 结论={result}; IP/外观风险={risk}; 备注={note or '-'}"
-    if result == "Go" and risk in ("低", "中"):
+def _auto_decision_fields(scan: dict) -> dict:
+    risk = _risk_for_write(scan.get("level"))
+    if scan.get("decision") == "auto_pass":
         return {
             "合规闸结论": "Go",
             "IP/外观风险": risk,
-            "侵权风险说明": note or "型号适配、兼容品牌词、包装标签待按样品复核；卡片人审先通过。",
             "当前状态": "待50件验证",
             "综合结论": "50件验证",
             "下一步动作": "发起50件验证",
             "数据缺口": [],
-            "人审备注": reviewed,
         }
-    if result == "No-Go" or risk == "不可做":
+    if scan.get("decision") == "reject_recommended":
         return {
             "合规闸结论": "No-Go",
             "IP/外观风险": risk,
-            "侵权风险说明": note or "合规/型号适配不通过。",
             "当前状态": "淘汰",
             "综合结论": "淘汰",
             "下一步动作": "淘汰归档",
             "数据缺口": ["认证"],
-            "人审备注": reviewed,
         }
     return {
         "合规闸结论": "暂缓",
         "IP/外观风险": risk,
-        "侵权风险说明": note or "需补型号适配、包装标签、GPSR或供应商实物证据后再判断。",
         "当前状态": "待合规核查",
         "综合结论": "暂缓",
-        "下一步动作": "查合规/型号适配",
+        "下一步动作": scan.get("next_action") or "按自动风险点补资料/改文案后重扫",
         "数据缺口": ["认证"],
-        "人审备注": reviewed,
     }
+
+
+def _build_update_fields(human_action: str, note: str, actor: str, scan: dict) -> dict:
+    reviewed = (
+        f"{_now_label()} {actor}: 自动扫描={_scan_summary(scan)}; "
+        f"处理动作={human_action}; 备注={note or '-'}"
+    )
+    fields = _auto_decision_fields(scan) if human_action == "确认系统建议" else {
+        "合规闸结论": "暂缓",
+        "IP/外观风险": _risk_for_write(scan.get("level")),
+        "当前状态": "待合规核查",
+        "综合结论": "暂缓",
+        "数据缺口": ["认证"],
+    }
+    if human_action == "标记系统误报":
+        fields["下一步动作"] = "复核系统误报后重跑扫描"
+    elif human_action == "要求采购补资料":
+        fields["下一步动作"] = "采购补供应商/包装/实物资料后重跑扫描"
+        fields["数据缺口"] = ["认证", "供应商资料"]
+    elif human_action == "升级合规复核":
+        fields["下一步动作"] = "升级合规/IP复核"
+    fields["侵权风险说明"] = _scan_note(scan, note)
+    fields["人审备注"] = reviewed
+    return fields
 
 
 async def _process_callback_background(event: dict, callback_key: str) -> None:
@@ -625,25 +906,25 @@ async def _process_callback_background(event: dict, callback_key: str) -> None:
 async def _process_callback(event: dict) -> dict:
     action, value, _ = _extract_action(event)
     form = _extract_form_values(event, event.get("action") or {})
+    if action == ACTION_LEGACY_SUBMIT:
+        return _toast("旧人工核查卡已停用，请使用新的自动风险扫描结果卡", "error")
     if action != ACTION_SUBMIT:
-        return _toast("未知合规核查动作", "error")
+        return _toast("未知自动风险处理动作", "error")
     record_id = _text(value.get("record_id"))
     if not record_id:
         return _toast("缺少候选记录ID", "error")
-    result = _normalize_result(_form_value(form, record_id, "result"))
-    risk = _normalize_risk(_form_value(form, record_id, "iprisk"))
+    human_action = _normalize_human_action(_form_value(form, record_id, "action"))
     note = _form_value(form, record_id, "note")
-    if result not in FIT_RESULTS:
-        return _toast("请选择合规/适配结论", "error")
-    if risk not in IP_RISKS:
-        return _toast("请选择IP/外观风险", "error")
-    if (result != "Go" or risk in ("高", "不可做")) and not note:
-        return _toast("需整改、No-Go或高风险时必须填写核查备注", "error")
+    if human_action not in HUMAN_ACTIONS:
+        return _toast("请选择如何处理系统建议", "error")
+    if human_action in ("标记系统误报", "升级合规复核") and not note:
+        return _toast("标记误报或升级复核时必须填写处理备注", "error")
 
     candidate = await _get_candidate(record_id)
+    scan = scan_candidate(candidate)
     msg_id = _message_id(event) or candidate.get("fit_message_id")
     actor = _operator_label(event)
-    fields = _build_update_fields(result, risk, note, actor)
+    fields = _build_update_fields(human_action, note, actor, scan)
     await _update_candidate(record_id, fields)
     candidate.update(
         {
@@ -655,6 +936,7 @@ async def _process_callback(event: dict) -> dict:
             "next_action": fields.get("下一步动作"),
             "review_note": fields.get("人审备注"),
             "data_gaps": fields.get("数据缺口") or [],
+            "risk_scan": scan,
         }
     )
     record_ids = [x for x in (value.get("card_record_ids") or []) if _text(x)]
@@ -669,26 +951,25 @@ async def _process_callback(event: dict) -> dict:
             await amz_assistant.update_card(msg_id, build_fit_card(candidates, _text(value.get("batch_id"))))
         else:
             await amz_assistant.update_card(msg_id, build_fit_card([candidate], _text(value.get("batch_id"))))
-    return _toast("本产品合规/适配核查已写回")
+    return _toast("本产品自动风险处理结果已写回")
 
 
 async def handle_callback(event: dict) -> dict:
     action, value, _ = _extract_action(event)
     form = _extract_form_values(event, event.get("action") or {})
+    if action == ACTION_LEGACY_SUBMIT:
+        return _toast("旧人工核查卡已停用，请使用新的自动风险扫描结果卡", "error")
     if action != ACTION_SUBMIT:
         return {"ok": False, "ignored": True, "action": action}
     record_id = _text(value.get("record_id"))
     if not record_id:
         return _toast("缺少候选记录ID", "error")
-    result = _normalize_result(_form_value(form, record_id, "result"))
-    risk = _normalize_risk(_form_value(form, record_id, "iprisk"))
+    human_action = _normalize_human_action(_form_value(form, record_id, "action"))
     note = _form_value(form, record_id, "note")
-    if result not in FIT_RESULTS:
-        return _toast("请选择合规/适配结论", "error")
-    if risk not in IP_RISKS:
-        return _toast("请选择IP/外观风险", "error")
-    if (result != "Go" or risk in ("高", "不可做")) and not note:
-        return _toast("需整改、No-Go或高风险时必须填写核查备注", "error")
+    if human_action not in HUMAN_ACTIONS:
+        return _toast("请选择如何处理系统建议", "error")
+    if human_action in ("标记系统误报", "升级合规复核") and not note:
+        return _toast("标记误报或升级复核时必须填写处理备注", "error")
     callback_key = _callback_key(record_id, form)
     if _recent_seen(callback_key):
         try:
@@ -700,10 +981,10 @@ async def handle_callback(event: dict) -> dict:
         _recent_callbacks.pop(callback_key, None)
         _recent_callbacks[callback_key] = time.time()
         _spawn(_process_callback_background(event, callback_key))
-        return _toast("已重新收到本产品核查结果，正在补写候选表并更新原卡")
+        return _toast("已重新收到本产品自动风险处理结果，正在补写候选表并更新原卡")
     _recent_callbacks[callback_key] = time.time()
     _spawn(_process_callback_background(event, callback_key))
-    return _toast("已收到本产品核查结果，正在写回候选表并更新原卡")
+    return _toast("已收到本产品自动风险处理结果，正在写回候选表并更新原卡")
 
 
 async def send_fit_card(
@@ -721,6 +1002,7 @@ async def send_fit_card(
     batch = batch_id or DEFAULT_BATCH_ID
     ids = record_ids if record_ids is not None else DEFAULT_RECORD_IDS
     candidates = await _get_candidates_by_ids(ids) if ids else await _search_candidates(batch, limit=limit)
+    _attach_risk_scans(candidates)
     if mode == "commit":
         await _prepare_card_images(candidates)
     card = build_fit_card(candidates, batch)

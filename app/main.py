@@ -1050,9 +1050,9 @@ async def run_amz_compliance_fit_card(authorization: str = Header(default=""),
                                       frankie_only: bool = True,
                                       gray_union_ids: str = "",
                                       gray_chat_ids: str = ""):
-    """亚马逊欧洲选品合规/型号适配核查卡.
+    """亚马逊欧洲选品自动合规/型号适配风险扫描结果卡.
 
-    P0 默认只发 Frankie。每个产品独立提交合规结论、IP/外观风险和核查备注，回调只写当前候选行。
+    P0 默认只发 Frankie。系统先生成风险点和建议动作；人只处理系统建议或例外，回调只写当前候选行。
     """
     _check_auth(authorization)
     try:

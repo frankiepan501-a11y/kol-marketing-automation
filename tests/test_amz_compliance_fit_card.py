@@ -7,11 +7,11 @@ from app import amz_compliance_fit_card as fit
 
 
 class AmzComplianceFitCardTests(unittest.TestCase):
-    def _candidate(self, rid="rec1", gate="待核"):
+    def _candidate(self, rid="rec1", gate="待核", title=None):
         return {
             "record_id": rid,
             "asin": "B0CH1817WW",
-            "title": "Dreame L20 Ultra replacement filter",
+            "title": title or "Dreame L20 Ultra replacement filter",
             "cn_name": "Dreame L20 Ultra 扫地机替换滤网",
             "amazon_url": "https://www.amazon.de/dp/B0CH1817WW",
             "image_url": "https://m.media-amazon.com/images/I/41Bum-N615L._AC_.jpg",
@@ -59,20 +59,43 @@ class AmzComplianceFitCardTests(unittest.TestCase):
             "finance_gate": "财务通过",
             "compliance_gate": gate,
             "ip_risk": "低" if gate == "Go" else "待核",
-            "risk_note": "已核查" if gate == "Go" else "",
+            "risk_note": "已处理" if gate == "Go" else "",
             "data_gaps": ["认证"],
             "next_action": "发起50件验证" if gate == "Go" else "查合规/型号适配",
         }
 
-    def test_fit_card_has_independent_form_and_operational_context(self):
-        card = fit.build_fit_card([self._candidate("rec1"), self._candidate("rec2")], "batch-test")
+    def test_scan_detects_compatibility_brand_and_gpsr_risks(self):
+        scan = fit.scan_candidate(self._candidate())
+
+        rendered = json.dumps(scan, ensure_ascii=False)
+        self.assertEqual("review_required", scan["decision"])
+        self.assertEqual("中", scan["level"])
+        self.assertIn("Dreame", rendered)
+        self.assertIn("品牌词/IP", rendered)
+        self.assertIn("EU/GPSR", rendered)
+        self.assertIn("不是法律结论", json.dumps(fit.build_fit_card([self._candidate()], "batch-test"), ensure_ascii=False))
+
+    def test_low_signal_product_can_auto_pass_with_gpsr_reminder(self):
+        candidate = self._candidate(title="Generic replacement dust filter")
+        candidate["cn_name"] = "通用替换滤网"
+        candidate["set_content"] = "2 filters, no brand model wording"
+        scan = fit.scan_candidate(candidate)
+
+        self.assertEqual("auto_pass", scan["decision"])
+        self.assertEqual("低", scan["level"])
+
+    def test_risk_feedback_card_has_independent_forms_and_no_manual_audit_controls(self):
+        candidates = [self._candidate("rec1"), self._candidate("rec2")]
+        fit._attach_risk_scans(candidates)
+        card = fit.build_fit_card(candidates, "batch-test")
         rendered = json.dumps(card, ensure_ascii=False)
 
         self.assertIn("AMZ·P0", rendered)
-        self.assertIn("fit_result_rec1", rendered)
-        self.assertIn("fit_result_rec2", rendered)
-        self.assertIn("fit_iprisk_rec1", rendered)
-        self.assertIn("fit_note_rec1", rendered)
+        self.assertIn("自动风险扫描结果", rendered)
+        self.assertIn("自动发现的问题点", rendered)
+        self.assertIn("risk_action_rec1", rendered)
+        self.assertIn("risk_action_rec2", rendered)
+        self.assertIn("risk_note_rec1", rendered)
         self.assertIn(fit.ACTION_SUBMIT, rendered)
         self.assertIn("打开 Listing", rendered)
         self.assertIn("查看主图原图", rendered)
@@ -81,17 +104,20 @@ class AmzComplianceFitCardTests(unittest.TestCase):
         self.assertIn('"tag": "img"', rendered)
         self.assertIn("select_static", rendered)
         self.assertIn("三渠道毛利", rendered)
-        self.assertIn("核查重点", rendered)
         self.assertIn("GPSR", rendered)
-        self.assertIn("提交只更新当前产品", rendered)
-        self.assertEqual([], fit.validate_fit_card(card, [self._candidate("rec1"), self._candidate("rec2")]))
+        self.assertIn("人只处理系统发现的例外", rendered)
+        self.assertNotIn("fit_result_rec1", rendered)
+        self.assertNotIn("选择IP/外观风险", rendered)
+        self.assertEqual([], fit.validate_fit_card(card, candidates))
 
     def test_completed_product_renders_without_form(self):
-        card = fit.build_fit_card([self._candidate("rec1", "Go")], "batch-test")
+        candidate = self._candidate("rec1", "Go")
+        fit._attach_risk_scans([candidate])
+        card = fit.build_fit_card([candidate], "batch-test")
         rendered = json.dumps(card, ensure_ascii=False)
 
-        self.assertIn("合规/适配已核查", rendered)
-        self.assertNotIn("fit_result_rec1", rendered)
+        self.assertIn("自动风险处理已完成", rendered)
+        self.assertNotIn("risk_action_rec1", rendered)
 
     def test_amz_assistant_dispatches_fit_action(self):
         original_handler = fit.handle_callback
@@ -119,50 +145,57 @@ class AmzComplianceFitCardTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual("om_card", calls[0]["context"]["open_message_id"])
 
-    def test_handle_callback_validates_required_fields_before_spawn(self):
+    def test_legacy_manual_card_action_is_disabled(self):
         event = {
             "action": {
-                "value": {"action": fit.ACTION_SUBMIT, "record_id": "rec1"},
-                "form_value": {"fit_result_rec1": "", "fit_iprisk_rec1": "低"},
+                "value": {"action": fit.ACTION_LEGACY_SUBMIT, "record_id": "rec1"},
+                "form_value": {"fit_result_rec1": "Go", "fit_iprisk_rec1": "低"},
             }
         }
         result = asyncio.run(fit.handle_callback(event))
         self.assertEqual("error", result["toast"]["type"])
-        self.assertIn("请选择合规", result["toast"]["content"])
+        self.assertIn("旧人工核查卡已停用", result["toast"]["content"])
 
-        event["action"]["form_value"] = {"fit_result_rec1": "需整改", "fit_iprisk_rec1": "高", "fit_note_rec1": ""}
+    def test_handle_callback_validates_required_feedback_fields_before_spawn(self):
+        event = {
+            "action": {
+                "value": {"action": fit.ACTION_SUBMIT, "record_id": "rec1"},
+                "form_value": {"risk_action_rec1": "", "risk_note_rec1": ""},
+            }
+        }
         result = asyncio.run(fit.handle_callback(event))
         self.assertEqual("error", result["toast"]["type"])
-        self.assertIn("必须填写核查备注", result["toast"]["content"])
+        self.assertIn("请选择如何处理系统建议", result["toast"]["content"])
+
+        event["action"]["form_value"] = {"risk_action_rec1": "标记系统误报", "risk_note_rec1": ""}
+        result = asyncio.run(fit.handle_callback(event))
+        self.assertEqual("error", result["toast"]["type"])
+        self.assertIn("必须填写处理备注", result["toast"]["content"])
 
     def test_extract_form_values_accepts_nested_and_list_payloads(self):
         nested = fit._extract_form_values({
             "action": {
                 "form_value": {
-                    "fit_check_form_rec1": {
-                        "fit_result_rec1": {"value": "Go"},
-                        "fit_iprisk_rec1": {"selected_value": "低"},
-                        "fit_note_rec1": {"input_value": "型号适配已核"},
+                    "risk_feedback_form_rec1": {
+                        "risk_action_rec1": {"value": "确认系统建议"},
+                        "risk_note_rec1": {"input_value": "按系统建议处理"},
                     }
                 }
             }
         })
-        self.assertEqual("Go", fit._form_value(nested, "rec1", "result"))
-        self.assertEqual("低", fit._form_value(nested, "rec1", "iprisk"))
-        self.assertEqual("型号适配已核", fit._form_value(nested, "rec1", "note"))
+        self.assertEqual("确认系统建议", fit._form_value(nested, "rec1", "action"))
+        self.assertEqual("按系统建议处理", fit._form_value(nested, "rec1", "note"))
 
         listed = fit._extract_form_values({
             "action": {
                 "input_values": [
-                    {"name": "fit_result_rec1", "value": "No-Go"},
-                    {"name": "fit_iprisk_rec1", "value": {"text": "不可做"}},
-                    {"name": "fit_note_rec1", "input_value": "供应商图有品牌误导"},
+                    {"name": "risk_action_rec1", "value": "升级合规复核"},
+                    {"name": "risk_note_rec1", "input_value": "外观相似度需要人工看"},
                 ]
             }
         })
-        self.assertEqual("No-Go", fit._form_value(listed, "rec1", "result"))
-        self.assertEqual("不可做", fit._form_value(listed, "rec1", "iprisk"))
-        self.assertEqual("供应商图有品牌误导", fit._form_value(listed, "rec1", "note"))
+        self.assertEqual("升级合规复核", fit._form_value(listed, "rec1", "action"))
+        self.assertEqual("外观相似度需要人工看", fit._form_value(listed, "rec1", "note"))
 
     def test_handle_callback_fast_ack_spawns_background(self):
         original_spawn = fit._spawn
@@ -179,7 +212,7 @@ class AmzComplianceFitCardTests(unittest.TestCase):
             result = asyncio.run(fit.handle_callback({
                 "action": {
                     "value": {"action": fit.ACTION_SUBMIT, "record_id": "rec1"},
-                    "form_value": {"fit_result_rec1": "Go", "fit_iprisk_rec1": "低", "fit_note_rec1": "型号适配已核"},
+                    "form_value": {"risk_action_rec1": "确认系统建议", "risk_note_rec1": "按系统建议处理"},
                 }
             }))
         finally:
@@ -199,7 +232,7 @@ class AmzComplianceFitCardTests(unittest.TestCase):
         event = {
             "action": {
                 "value": {"action": fit.ACTION_SUBMIT, "record_id": "rec1"},
-                "form_value": {"fit_result_rec1": "Go", "fit_iprisk_rec1": "低", "fit_note_rec1": "型号适配已核"},
+                "form_value": {"risk_action_rec1": "确认系统建议", "risk_note_rec1": "按系统建议处理"},
             }
         }
         key = fit._callback_key("rec1", event["action"]["form_value"])
@@ -227,7 +260,7 @@ class AmzComplianceFitCardTests(unittest.TestCase):
         self.assertIn("已核查", result["toast"]["content"])
         self.assertEqual([], spawned)
 
-    def test_process_callback_updates_only_current_record_and_patches_card(self):
+    def test_process_callback_confirm_system_suggestion_updates_current_record_and_patches_card(self):
         original_get = fit._get_candidate
         original_update = fit._update_candidate
         original_get_many = fit._get_candidates_by_ids
@@ -268,7 +301,7 @@ class AmzComplianceFitCardTests(unittest.TestCase):
                         "batch_id": "batch-test",
                         "card_record_ids": ["rec1", "rec2"],
                     },
-                    "form_value": {"fit_result_rec1": "Go", "fit_iprisk_rec1": "低", "fit_note_rec1": "型号适配已核"},
+                    "form_value": {"risk_action_rec1": "确认系统建议", "risk_note_rec1": "按系统建议处理"},
                 },
             }))
         finally:
@@ -280,14 +313,14 @@ class AmzComplianceFitCardTests(unittest.TestCase):
 
         self.assertEqual("success", result["toast"]["type"])
         self.assertEqual("rec1", updates[0][0])
-        self.assertEqual("Go", updates[0][1]["合规闸结论"])
-        self.assertEqual("低", updates[0][1]["IP/外观风险"])
-        self.assertEqual("待50件验证", updates[0][1]["当前状态"])
-        self.assertEqual("发起50件验证", updates[0][1]["下一步动作"])
+        self.assertEqual("暂缓", updates[0][1]["合规闸结论"])
+        self.assertEqual("中", updates[0][1]["IP/外观风险"])
+        self.assertEqual("待合规核查", updates[0][1]["当前状态"])
+        self.assertIn("自动风险扫描", updates[0][1]["侵权风险说明"])
         self.assertEqual(1, len(patches))
         rendered = json.dumps(patches[0][1], ensure_ascii=False)
-        self.assertIn("合规/适配已核查", rendered)
-        self.assertIn("fit_result_rec2", rendered)
+        self.assertIn("自动风险处理已完成", rendered)
+        self.assertIn("risk_action_rec2", rendered)
 
     def test_send_fit_card_can_send_to_gray_recipients_when_enabled(self):
         original_frankie_only = fit.FRANKIE_ONLY
