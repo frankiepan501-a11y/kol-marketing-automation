@@ -326,8 +326,14 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         self.assertEqual("rec1", updates[0][0])
         self.assertEqual(18.5, updates[0][1]["采购成本RMB"])
         self.assertEqual("已回填", updates[0][1]["采购回填状态"])
-        self.assertEqual("https://detail.1688.com/offer/test.html", updates[0][1]["1688供应商链接"])
-        self.assertEqual("https://detail.1688.com/offer/test.html", updates[0][1]["采购链接"])
+        self.assertEqual(
+            {"link": "https://detail.1688.com/offer/test.html", "text": "https://detail.1688.com/offer/test.html"},
+            updates[0][1]["1688供应商链接"],
+        )
+        self.assertEqual(
+            {"link": "https://detail.1688.com/offer/test.html", "text": "https://detail.1688.com/offer/test.html"},
+            updates[0][1]["采购链接"],
+        )
         self.assertEqual(1, len(patches))
         rendered = json.dumps(patches[0][1], ensure_ascii=False)
         self.assertIn("采购已回填", rendered)
@@ -387,8 +393,15 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         self.assertEqual("success", result["toast"]["type"])
         self.assertEqual("rec1", updates[0][0])
         self.assertEqual(19.6, updates[0][1]["采购成本RMB"])
-        self.assertEqual("https://detail.1688.com/offer/nested.html", updates[0][1]["1688供应商链接"])
+        self.assertEqual(
+            {"link": "https://detail.1688.com/offer/nested.html", "text": "https://detail.1688.com/offer/nested.html"},
+            updates[0][1]["1688供应商链接"],
+        )
         self.assertEqual(1, len(patches))
+
+    def test_url_cell_preserves_bare_1688_offer_link(self):
+        url = "https://detail.1688.com/offer/6150807684"
+        self.assertEqual({"link": url, "text": url}, quote._url_cell(url))
 
     def test_update_candidate_raises_on_feishu_business_error(self):
         original_api = quote.feishu.api

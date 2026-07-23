@@ -174,6 +174,15 @@ Result:
 - IM message read confirms card `om_x100b69249b8e70a0c00088987697b04` is still `msg_type=interactive`, title `待采购回填 1/4`, and the card text includes `B0D1CLBFD9` with `采购已回填` and `采购成本: 12.5 RMB`.
 - Real-record dry-run validation for all four P0 rows returned `errors=[]`; the only pending product is `B0CNRH4GRJ`.
 
+2026-07-23 fourth-product verification and URL-field fix:
+- Frankie filled the fourth card row `B0CNRH4GRJ / recvq1Quaar3h2` with cost `20` and supplier URL `https://detail.1688.com/offer/6150807684`.
+- The card toast said the callback was received, but Candidate Base readback still showed `采购回填状态=待回填`, cost empty, supplier URL empty.
+- Reproduced the write failure: Feishu returned `1254068 URLFieldConvFail` when URL-style fields were written as plain strings.
+- Raw readback from successful rows showed Feishu stores URL-style text fields as `{link,text}` objects.
+- Manually repaired `recvq1Quaar3h2` by writing both `1688供应商链接` and legacy `采购链接` as `{link,text}` objects. Candidate Base readback now confirms `B0CNRH4GRJ` is `已回填`, cost `20`, and both URL fields contain the provided 1688 URL.
+- Code fix: `app/amz_procurement_quote.py` now uses `_url_cell()` for both URL fields during callback writeback.
+- Regression coverage: `test_url_cell_preserves_bare_1688_offer_link` plus updated callback tests and `scripts/amz_procurement_card_selftest.py` now require Feishu URL cell shape.
+
 2026-07-23 deployment verification for commit `a2759b6`:
 - Zeabur deployment `6a61a66c9cfc4cd5e6896e3e` is `RUNNING`.
 - Online `/health` returned `ok`.

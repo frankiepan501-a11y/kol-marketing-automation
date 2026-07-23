@@ -14,3 +14,8 @@
 - 已提交并推送代码修复 `a2759b6 fix: harden AMZ procurement card callbacks` 到 `master`。
 - 文档/计划更新提交 `73383ae docs: record AMZ procurement card verification` 也已推送并部署到 `RUNNING`。
 - 线上 smoke 通过：`/health=ok`、`/amz/feishu/callback configured=true`、受保护 dry-run 返回 `card_selftest=passed`；显式 4 条 P0 record_ids dry-run 也返回 `count=4`、`card_selftest=passed`。
+- 用户已在原卡填写第 4 个产品 `B0CNRH4GRJ / recvq1Quaar3h2`，卡片前端显示“已收到”，但候选表读回仍为 `采购回填状态=待回填`。
+- 根因定位：飞书 URL 样式字段不能稳定接收纯字符串，本次回调/手工复现报 `1254068 URLFieldConvFail`；已确认已成功记录的 URL 字段原始结构为 `{link,text}` 对象。
+- 已按 `{link,text}` 对象格式手工补写第 4 个产品：采购成本 `20`，供应商链接 `https://detail.1688.com/offer/6150807684`，候选表读回为 `已回填`。
+- 已修复 `app/amz_procurement_quote.py`，回调写 `1688供应商链接` 和 `采购链接` 时统一使用飞书 URL 单元格对象；新增单测覆盖裸 1688 offer 链接。
+- 本地验证通过：`py_compile`、`17 tests OK`、`scripts/amz_procurement_card_selftest.py` 通过。

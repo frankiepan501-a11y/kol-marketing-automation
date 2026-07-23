@@ -104,6 +104,11 @@ def _url(value: Any) -> str:
     return _text(value)
 
 
+def _url_cell(value: Any) -> dict[str, str]:
+    url = _url(value)
+    return {"link": url, "text": url}
+
+
 def _list_values(value: Any) -> list[str]:
     if value is None:
         return []
@@ -752,8 +757,8 @@ async def _process_callback(event: dict) -> dict:
         record_id,
         {
             "采购成本RMB": round(cost, 2),
-            "1688供应商链接": supplier_link,
-            "采购链接": supplier_link,
+            "1688供应商链接": _url_cell(supplier_link),
+            "采购链接": _url_cell(supplier_link),
             "采购回填状态": "已回填",
             "采购回填人": actor,
             "采购回填时间": _now_ms(),

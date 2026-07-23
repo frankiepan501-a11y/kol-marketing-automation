@@ -158,8 +158,10 @@ async def _callback_smoke(name: str, form_builder: Callable[[str], Any]) -> dict
     fields = updates[0][1]
     if fields.get("采购成本RMB") != 18.5:
         raise AssertionError(f"{name}: cost not written correctly")
-    if fields.get("1688供应商链接") != "https://detail.1688.com/offer/selftest.html":
+    if quote._url(fields.get("1688供应商链接")) != "https://detail.1688.com/offer/selftest.html":
         raise AssertionError(f"{name}: supplier link not written correctly")
+    if not isinstance(fields.get("1688供应商链接"), dict):
+        raise AssertionError(f"{name}: supplier link must use Feishu URL cell format")
     rendered = json.dumps(patches[0][1], ensure_ascii=False)
     if "采购已回填" not in rendered:
         raise AssertionError(f"{name}: patched card does not show completed state")
