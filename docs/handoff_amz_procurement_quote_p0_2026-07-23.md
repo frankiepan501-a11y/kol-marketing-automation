@@ -5,7 +5,8 @@
 P0 code is implemented and pushed to `master`.
 
 Deploy checkpoint:
-- Commit: `a7b4074`
+- Latest commit: `7a63d1b`
+- Zeabur `kol-automation` production deployment `6a618ce99cfc4cd5e689680c` is `RUNNING` on commit `7a63d1b79d3e9ad02f7c37112f535572333ecb2c`.
 - Online `/openapi.json` includes `POST /cs/amz-procurement-quote/send`.
 - Unauthenticated call to the endpoint returns `401`, confirming the route is live and protected.
 
@@ -41,10 +42,12 @@ P0 records prepared:
 - `recvq1QtUEEcXv` / `B0D1CLBFD9` / 2 pieces
 - `recvq1Quaar3h2` / `B0CNRH4GRJ` / 5 pieces
 
-All four have:
-- `采购回填状态=待回填`
-- `采购卡片批次ID=AMZ-DE-PROCQ-20260723-P0`
-- Amazon main-image URL filled from the public Amazon page `og:image`.
+Current P0 state after Frankie-only click test:
+- `recvq1QtafnVjX` / `B0CH1817WW`: `采购回填状态=已回填`, `采购成本RMB=4`, `1688供应商链接` and legacy `采购链接` filled.
+- Other three P0 records remain `采购回填状态=待回填`.
+- All four have `采购卡片批次ID=AMZ-DE-PROCQ-20260723-P0`.
+- Latest card message id is `om_x100b69249b8e70a0c00088987697b04`; the original card is patched to `待采购回填 3/4`.
+- Amazon main-image URL is filled from the public Amazon page `og:image`.
 
 ## Code Changes
 
@@ -93,6 +96,11 @@ The callback writes Bitable through `feishu.api(which=AMZ_PROCUREMENT_FEISHU_API
 Before live card sending, confirm the chosen Feishu App has access to the candidate Base.
 Callback writes the new field `1688供应商链接` and also mirrors the same URL into legacy field `采购链接`.
 
+Important failure guard added on 2026-07-23:
+- Feishu HTTP 200 is not enough. `app.amz_procurement_quote._feishu_api()` checks Feishu response body `code`; non-zero codes raise and prevent the card from being patched as a false success.
+- This was added after the first click test patched the card to "采购已回填" while the candidate Base row remained `待回填`.
+- The manually reconciled row is `recvq1QtafnVjX` / `B0CH1817WW`.
+
 ## Verification
 
 Local:
@@ -122,8 +130,14 @@ raise SystemExit(0 if result.wasSuccessful() else 1)
 ```
 
 Result:
-- `test_amz_procurement_quote.py`: 6 tests passed.
+- `test_amz_procurement_quote.py`: 9 tests passed.
 - `test_amz_review_audit.py`: 18 tests passed.
+
+2026-07-23 post-click verification:
+- Candidate Base single-record read confirms `B0CH1817WW` is now `已回填`, cost `4`, both supplier URL fields populated.
+- IM message read confirms card `om_x100b69249b8e70a0c00088987697b04` is `msg_type=interactive`, `updated=true`, title `待采购回填 3/4`, and only `B0CH1817WW` is read-only.
+- Online `/health` returned `{"status":"ok"}`.
+- Zeabur latest deployment is `RUNNING` on commit `7a63d1b79d3e9ad02f7c37112f535572333ecb2c`.
 
 Online health checked:
 
@@ -155,10 +169,10 @@ POST https://kol-auto.zeabur.app/cs/amz-procurement-quote/send?mode=commit&batch
 Authorization: Bearer <INTERNAL_TOKEN>
 ```
 
-Then click one product on the received card and verify:
+Then click one remaining product on the received card and verify:
 - that product row becomes `采购回填状态=已回填`;
 - `采购成本RMB`, `1688供应商链接`, and legacy `采购链接` are populated;
-- original card is patched, with only that product read-only and other products still editable.
+- original card is patched, with completed products read-only and pending products still editable.
 
 After Frankie-only passes, enable a procurement gray run:
 
