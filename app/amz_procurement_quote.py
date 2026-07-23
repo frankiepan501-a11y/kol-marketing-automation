@@ -129,6 +129,19 @@ def _short(value: Any, limit: int = 120) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "..."
 
 
+def _time_label(value: Any) -> str:
+    text = _text(value)
+    if not text:
+        return ""
+    if re.fullmatch(r"\d{13}", text):
+        return datetime.fromtimestamp(int(text) / 1000, BJ).strftime("%Y-%m-%d %H:%M")
+    if re.fullmatch(r"\d{10}", text):
+        return datetime.fromtimestamp(int(text), BJ).strftime("%Y-%m-%d %H:%M")
+    if re.match(r"\d{4}-\d{2}-\d{2}", text):
+        return text[:16]
+    return text
+
+
 def _field(label: str, value: Any) -> dict:
     return {"is_short": True, "text": {"tag": "lark_md", "content": f"**{label}**\n{_text(value) or '-'}"}}
 
@@ -155,7 +168,7 @@ def _candidate_from_record(record: dict) -> dict:
         "supplier_link": _url(fields.get("1688供应商链接")) or _url(fields.get("采购链接")),
         "quote_status": _text(fields.get("采购回填状态")) or "待回填",
         "quote_user": _text(fields.get("采购回填人")),
-        "quote_time": _text(fields.get("采购回填时间")),
+        "quote_time": _time_label(fields.get("采购回填时间")),
         "quote_note": _text(fields.get("采购备注")),
         "batch_id": _text(fields.get("采购卡片批次ID")),
         "message_id": _text(fields.get("采购卡片消息ID")),
@@ -636,7 +649,16 @@ async def handle_callback(event: dict) -> dict:
         return _toast("请填写可打开的1688供应商链接", "error")
     callback_key = _callback_key(record_id, form)
     if _recent_seen(callback_key):
-        return _toast("该产品回填已收到，正在处理或已处理，无需重复点击")
+        try:
+            current = await _get_candidate(record_id)
+            if _text(current.get("quote_status")) == "已回填" and current.get("quote_cost"):
+                return _toast("该产品已回填，无需重复点击")
+        except Exception as exc:
+            print(f"[amz_procurement_quote.callback_duplicate_check] {record_id} fail: {exc}")
+        _recent_callbacks.pop(callback_key, None)
+        _recent_callbacks[callback_key] = time.time()
+        _spawn(_process_callback_background(event, callback_key))
+        return _toast("已重新收到本产品采购成本，正在补写候选表并更新原卡")
     _recent_callbacks[callback_key] = time.time()
     _spawn(_process_callback_background(event, callback_key))
     return _toast("已收到本产品采购成本，正在写回候选表并更新原卡")

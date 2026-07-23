@@ -101,6 +101,12 @@ Important failure guard added on 2026-07-23:
 - This was added after the first click test patched the card to "采购已回填" while the candidate Base row remained `待回填`.
 - The manually reconciled row is `recvq1QtafnVjX` / `B0CH1817WW`.
 
+Second click guard added on 2026-07-23:
+- The card can show a success toast from the fast callback path while the background write has not actually completed. A duplicate click inside the in-memory callback window must not be treated as final success unless the candidate Base row already has `采购回填状态=已回填` and `采购成本RMB`.
+- `handle_callback()` now checks the current candidate row on duplicate callbacks. If the row is still pending, it retries the background write and original-card PATCH.
+- Feishu millisecond datetime values are formatted before rendering the card, so `采购回填时间` displays as `YYYY-MM-DD HH:mm` instead of a raw timestamp.
+- The manually reconciled second row is `recvq1QtFKPwoI` / `B0CSCXSHPQ`, cost `40.1`, supplier link from 1688 offer `934664075097`.
+
 ## Verification
 
 Local:
@@ -130,7 +136,7 @@ raise SystemExit(0 if result.wasSuccessful() else 1)
 ```
 
 Result:
-- `test_amz_procurement_quote.py`: 9 tests passed.
+- `test_amz_procurement_quote.py`: 12 tests passed.
 - `test_amz_review_audit.py`: 18 tests passed.
 
 2026-07-23 post-click verification:
@@ -138,6 +144,10 @@ Result:
 - IM message read confirms card `om_x100b69249b8e70a0c00088987697b04` is `msg_type=interactive`, `updated=true`, title `待采购回填 3/4`, and only `B0CH1817WW` is read-only.
 - Online `/health` returned `{"status":"ok"}`.
 - Zeabur latest deployment is `RUNNING` on commit `7a63d1b79d3e9ad02f7c37112f535572333ecb2c`.
+
+2026-07-23 second-product verification:
+- Candidate Base single-record read confirms `B0CSCXSHPQ` is now `已回填`, cost `40.1`, and both `1688供应商链接` and `采购链接` contain the provided 1688 offer URL.
+- IM message read confirms card `om_x100b69249b8e70a0c00088987697b04` is still `msg_type=interactive`, title `待采购回填 2/4`, and the card text includes `B0CSCXSHPQ` with `采购已回填` and `采购成本: 40.1 RMB`.
 
 Online health checked:
 

@@ -55,6 +55,19 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         self.assertIn("18.5 RMB", rendered)
         self.assertNotIn("proc_cost_rec1", rendered)
 
+    def test_candidate_time_label_formats_feishu_milliseconds(self):
+        item = quote._candidate_from_record({
+            "record_id": "rec1",
+            "fields": {
+                "ASIN": "B0CH1817WW",
+                "采购回填状态": "已回填",
+                "采购成本RMB": 18.5,
+                "采购回填时间": 1784781360000,
+            },
+        })
+
+        self.assertEqual("2026-07-23 12:36", item["quote_time"])
+
     def test_amz_assistant_dispatches_procurement_action(self):
         original_handler = quote.handle_callback
         calls = []
@@ -126,6 +139,86 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         self.assertEqual("success", result["toast"]["type"])
         self.assertIn("已收到", result["toast"]["content"])
         self.assertEqual(1, len(spawned))
+
+    def test_duplicate_callback_retries_when_record_not_written(self):
+        original_spawn = quote._spawn
+        original_recent = dict(quote._recent_callbacks)
+        original_get = quote._get_candidate
+        spawned = []
+
+        event = {
+            "action": {
+                "value": {"action": quote.ACTION_SUBMIT, "record_id": "rec1"},
+                "form_value": {
+                    "proc_cost_rec1": "18.5",
+                    "proc_link_rec1": "https://detail.1688.com/offer/test.html",
+                },
+            }
+        }
+        key = quote._callback_key("rec1", event["action"]["form_value"])
+
+        def fake_spawn(coro):
+            spawned.append(coro)
+            coro.close()
+
+        async def fake_get(record_id):
+            return self._candidate(record_id, status="待回填")
+
+        try:
+            quote._recent_callbacks.clear()
+            quote._recent_callbacks[key] = 9999999999.0
+            quote._spawn = fake_spawn
+            quote._get_candidate = fake_get
+            result = asyncio.run(quote.handle_callback(event))
+        finally:
+            quote._spawn = original_spawn
+            quote._get_candidate = original_get
+            quote._recent_callbacks.clear()
+            quote._recent_callbacks.update(original_recent)
+
+        self.assertEqual("success", result["toast"]["type"])
+        self.assertIn("重新收到", result["toast"]["content"])
+        self.assertEqual(1, len(spawned))
+
+    def test_duplicate_callback_does_not_retry_when_record_already_written(self):
+        original_spawn = quote._spawn
+        original_recent = dict(quote._recent_callbacks)
+        original_get = quote._get_candidate
+        spawned = []
+
+        event = {
+            "action": {
+                "value": {"action": quote.ACTION_SUBMIT, "record_id": "rec1"},
+                "form_value": {
+                    "proc_cost_rec1": "18.5",
+                    "proc_link_rec1": "https://detail.1688.com/offer/test.html",
+                },
+            }
+        }
+        key = quote._callback_key("rec1", event["action"]["form_value"])
+
+        def fake_spawn(coro):
+            spawned.append(coro)
+            coro.close()
+
+        async def fake_get(record_id):
+            return self._candidate(record_id, status="已回填")
+
+        try:
+            quote._recent_callbacks.clear()
+            quote._recent_callbacks[key] = 9999999999.0
+            quote._spawn = fake_spawn
+            quote._get_candidate = fake_get
+            result = asyncio.run(quote.handle_callback(event))
+        finally:
+            quote._spawn = original_spawn
+            quote._get_candidate = original_get
+            quote._recent_callbacks.clear()
+            quote._recent_callbacks.update(original_recent)
+
+        self.assertEqual("success", result["toast"]["type"])
+        self.assertIn("已回填", result["toast"]["content"])
+        self.assertEqual([], spawned)
 
     def test_process_callback_updates_only_current_record_and_patches_card(self):
         original_get = quote._get_candidate
