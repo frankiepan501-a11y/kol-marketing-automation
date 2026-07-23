@@ -51,4 +51,8 @@
 - 已新增受保护发送 endpoint：`POST /cs/amz-compliance-fit/send`，默认 `mode=dry_run`、`frankie_only=true`，灰度前必须先 Frankie-only 样卡确认。
 - 合规卡写回使用候选表已有字段，不新增字段：`合规闸结论`、`IP/外观风险`、`侵权风险说明`、`当前状态`、`综合结论`、`数据缺口`、`下一步动作`、`人审备注`。
 - 本地验证通过：`py_compile`、`scripts/amz_compliance_fit_card_selftest.py`、`test_amz_compliance_fit_card.py` 9 tests、采购卡回归 17 tests、差评审计回归 18 tests。`unittest discover`/直接跑测试文件会被旧 `C:\tmp\ml-data-sync\app` 包污染，需用 inline runner 强制当前仓库优先。
-- 交接文档已写入 `docs/handoff_amz_compliance_fit_card_p0_2026-07-23.md`。本机当前没有 `INTERNAL_TOKEN` / 飞书 App 环境变量，只有 `ZEABUR_API_KEY`；如需发真实 Frankie-only 样卡，下一步需 commit/push 触发 Zeabur 后通过已授权通道拿 endpoint token 或由 n8n/Zeabur 环境触发。
+- 交接文档已写入 `docs/handoff_amz_compliance_fit_card_p0_2026-07-23.md`。
+- 已提交并推送 `d6bb568 feat: add AMZ compliance fit card` 到 `master`，Zeabur deployment `6a61fc479cfc4cd5e689838e` 已 `RUNNING`，线上 `/health=ok`，`/openapi.json` 已暴露 `/cs/amz-compliance-fit/send` 和 `/amz/feishu/callback`。
+- 已用 Zeabur 当前环境变量里的 `INTERNAL_TOKEN` 做受保护线上 dry-run，返回 `ok=true`、`count=2`、`card_selftest=passed`；生成卡结构确认包含 2 个独立表单、4 个结果/风险下拉、2 个备注输入、`amz_fit_check_submit`、Listing 链接和三渠道毛利。
+- 已真实发送 Frankie-only 合规/适配核查样卡，`message_id=om_x100b692b9e03c0a4df9d31f797d0b99`，commit 模式上传并嵌入 2 张产品图；飞书消息读回确认 `msg_type=interactive`，可见产品图片、Listing/主图/候选表/1688 按钮和三渠道毛利文本。
+- 飞书读回 API 对 interactive card 返回的是简化 card body，未正常展开 form 节点；但线上 dry-run 和本地 selftest 均已确认生成卡含活跃表单。下一步需要 Frankie 在样卡上点击 1 个产品做真实回调测试，再读回候选表与原卡 PATCH 状态。

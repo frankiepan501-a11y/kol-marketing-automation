@@ -2,7 +2,13 @@
 
 ## Status
 
-P0 code is implemented locally and verified with local tests.
+P0 code is implemented, pushed to `master`, deployed on Zeabur, and verified with local plus online dry-run tests.
+
+Latest confirmed production state:
+- Git commit: `d6bb568 feat: add AMZ compliance fit card`
+- Zeabur deployment: `6a61fc479cfc4cd5e689838e`, status `RUNNING`, commit `d6bb568a2687268d57b79ce65ab4b0e8f082a6ad`
+- Frankie-only sample card sent: `om_x100b692b9e03c0a4df9d31f797d0b99`
+- Callback writeback is still waiting for a real card click on the Frankie-only sample.
 
 Scope:
 - One batch sends one shared compliance/fitment card.
@@ -122,16 +128,53 @@ Known local test runner pitfall:
 - The local machine has a stale `C:\tmp\ml-data-sync\app` package on `sys.path`.
 - Run tests with the repository root forced to the first `sys.path` entry and that stale path removed, or use the self-test script.
 
+Online:
+
+```text
+POST https://kol-auto.zeabur.app/cs/amz-compliance-fit/send?mode=dry_run&batch_id=AMZ-DE-FITCHECK-20260723-P0&record_ids=recvq1QtafnVjX,recvq1QtUEEcXv
+```
+
+Result:
+- `ok=true`
+- `count=2`
+- `card_selftest=passed`
+- generated card structure contained `2` forms, `4` result/risk selects, `2` note inputs, `amz_fit_check_submit`, Listing links, and the three-channel margin section.
+
+Frankie-only real send:
+
+```text
+POST https://kol-auto.zeabur.app/cs/amz-compliance-fit/send?mode=commit&batch_id=AMZ-DE-FITCHECK-20260723-P0&record_ids=recvq1QtafnVjX,recvq1QtUEEcXv&frankie_only=true
+```
+
+Result:
+- sent to Frankie union id only;
+- `message_id=om_x100b692b9e03c0a4df9d31f797d0b99`;
+- commit mode uploaded and embedded 2 product images;
+- Feishu message readback confirmed `msg_type=interactive`, product images, Listing buttons, image buttons, candidate-record buttons, supplier buttons, and three-channel margin text.
+
+Readback caveat:
+- Feishu message readback returns a simplified/collapsed card body for interactive cards, so it did not expose form controls as normal top-level `form` nodes.
+- The online protected dry-run and local selftest both confirm the generated card contains active per-product forms.
+
 ## Next Live Step
 
-After commit/push and Zeabur deployment:
+Ask Frankie to click one product on the sample card:
+- result: `Go`
+- IP/appearance risk: `低`
+- note: short test note, for example `P0 callback test`
+
+Then verify:
+- candidate table row changed to `合规闸结论=Go`, `当前状态=待50件验证`, `综合结论=50件验证`;
+- original card is patched in place, the clicked product becomes read-only, and the other product remains actionable.
+
+Dry-run command if the card needs to be regenerated:
 
 ```text
 POST https://kol-auto.zeabur.app/cs/amz-compliance-fit/send?mode=dry_run&batch_id=AMZ-DE-FITCHECK-20260723-P0&record_ids=recvq1QtafnVjX,recvq1QtUEEcXv
 Authorization: Bearer <INTERNAL_TOKEN>
 ```
 
-If protected dry-run succeeds, send Frankie-only:
+Frankie-only resend command:
 
 ```text
 POST https://kol-auto.zeabur.app/cs/amz-compliance-fit/send?mode=commit&batch_id=AMZ-DE-FITCHECK-20260723-P0&record_ids=recvq1QtafnVjX,recvq1QtUEEcXv&frankie_only=true
