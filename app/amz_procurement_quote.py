@@ -425,14 +425,23 @@ def _path(record_id: str = "") -> str:
     return f"{base}/{record_id}" if record_id else base
 
 
+async def _feishu_api(method: str, path: str, body: dict | None = None) -> dict:
+    data = await feishu.api(method, path, body, which=FEISHU_API_WHICH)
+    code = data.get("code")
+    if code not in (None, 0):
+        msg = _text(data.get("msg") or data.get("message")) or "Feishu API error"
+        raise RuntimeError(f"{method} {path} failed: code={code} msg={msg}")
+    return data
+
+
 async def _get_candidate(record_id: str) -> dict:
-    data = await feishu.api("GET", _path(record_id), which=FEISHU_API_WHICH)
+    data = await _feishu_api("GET", _path(record_id))
     record = ((data.get("data") or {}).get("record") or {})
     return _candidate_from_record(record)
 
 
 async def _update_candidate(record_id: str, fields: dict) -> None:
-    await feishu.api("PUT", _path(record_id), {"fields": fields}, which=FEISHU_API_WHICH)
+    await _feishu_api("PUT", _path(record_id), {"fields": fields})
 
 
 async def _search_candidates(batch_id: str = "", limit: int = 4) -> list[dict]:
@@ -447,7 +456,7 @@ async def _search_candidates(batch_id: str = "", limit: int = 4) -> list[dict]:
         "field_names": FIELD_NAMES,
         "filter": {"conjunction": "and", "conditions": conditions},
     }
-    data = await feishu.api("POST", _path() + "/search", body, which=FEISHU_API_WHICH)
+    data = await _feishu_api("POST", _path() + "/search", body)
     rows = ((data.get("data") or {}).get("items") or [])
     return [_candidate_from_record(row) for row in rows]
 

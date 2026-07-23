@@ -187,6 +187,24 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         self.assertIn("采购已回填", rendered)
         self.assertIn("proc_cost_rec2", rendered)
 
+    def test_update_candidate_raises_on_feishu_business_error(self):
+        original_api = quote.feishu.api
+        calls = []
+
+        async def fake_api(method, path, body=None, which="bitable"):
+            calls.append((method, path, body, which))
+            return {"code": 1254030, "msg": "permission denied"}
+
+        try:
+            quote.feishu.api = fake_api
+            with self.assertRaisesRegex(RuntimeError, "code=1254030"):
+                asyncio.run(quote._update_candidate("rec1", {"采购回填状态": "已回填"}))
+        finally:
+            quote.feishu.api = original_api
+
+        self.assertEqual("PUT", calls[0][0])
+        self.assertEqual(quote.FEISHU_API_WHICH, calls[0][3])
+
     def test_send_quote_card_can_send_to_gray_recipients_when_enabled(self):
         original_frankie_only = quote.FRANKIE_ONLY
         original_get_many = quote._get_candidates_by_ids
