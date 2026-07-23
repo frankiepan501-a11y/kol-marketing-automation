@@ -5,8 +5,8 @@
 P0 code is implemented and pushed to `master`.
 
 Deploy checkpoint:
-- Latest commit: `7a63d1b`
-- Zeabur `kol-automation` production deployment `6a618ce99cfc4cd5e689680c` is `RUNNING` on commit `7a63d1b79d3e9ad02f7c37112f535572333ecb2c`.
+- Latest commit: `a2759b6`
+- Zeabur `kol-automation` production deployment `6a61a66c9cfc4cd5e6896e3e` is `RUNNING` on commit `a2759b6`.
 - Online `/openapi.json` includes `POST /cs/amz-procurement-quote/send`.
 - Unauthenticated call to the endpoint returns `401`, confirming the route is live and protected.
 
@@ -172,6 +172,13 @@ Result:
 - Candidate Base single-record read confirms `B0D1CLBFD9` is now `已回填`, cost `12.5`, and both `1688供应商链接` and `采购链接` contain the provided 1688 offer URL.
 - IM message read confirms card `om_x100b69249b8e70a0c00088987697b04` is still `msg_type=interactive`, title `待采购回填 1/4`, and the card text includes `B0D1CLBFD9` with `采购已回填` and `采购成本: 12.5 RMB`.
 - Real-record dry-run validation for all four P0 rows returned `errors=[]`; the only pending product is `B0CNRH4GRJ`.
+
+2026-07-23 deployment verification for commit `a2759b6`:
+- Zeabur deployment `6a61a66c9cfc4cd5e6896e3e` is `RUNNING`.
+- Online `/health` returned `ok`.
+- Online `/amz/feishu/callback` returned `ok=true`, `configured=true`.
+- Protected dry-run for pending rows returned `ok=true`, `mode=dry_run`, `card_selftest=passed`, `count=1`, record `recvq1Quaar3h2`.
+- Protected dry-run with all four explicit P0 `record_ids` returned `ok=true`, `mode=dry_run`, `card_selftest=passed`, `count=4`.
 
 Online health checked:
 

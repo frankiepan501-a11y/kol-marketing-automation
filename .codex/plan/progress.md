@@ -11,3 +11,6 @@
 - 目标单测通过：`16 tests OK`。
 - 当前 P0 真实 4 条记录 dry-run 自测通过：`validate_quote_card` 返回空错误；已回填 `B0CH1817WW / B0CSCXSHPQ / B0D1CLBFD9`，待回填 `B0CNRH4GRJ`。
 - 已写入 lesson candidate：`C:\Users\Administrator\.codex\memory-candidates\2026-07-23-amz-procurement-card-preflight.md`。
+- 已提交并推送 `a2759b6 fix: harden AMZ procurement card callbacks` 到 `master`。
+- Zeabur deployment `6a61a66c9cfc4cd5e6896e3e` 已 `RUNNING`，commit `a2759b6`。
+- 线上 smoke 通过：`/health=ok`、`/amz/feishu/callback configured=true`、受保护 dry-run 返回 `card_selftest=passed`；显式 4 条 P0 record_ids dry-run 也返回 `count=4`、`card_selftest=passed`。
