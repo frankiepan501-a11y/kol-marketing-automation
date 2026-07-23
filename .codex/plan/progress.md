@@ -31,3 +31,24 @@
 - 用户追问采购卡是否已改成“三渠道对比”；复查确认旧卡仍只展示一组 `建议履约 / 采购前空间 / 物流成本 / 货运比`，且这组数字来自 C/FBM 字段，存在口径错位。
 - 已升级 `app/amz_procurement_quote.py`：候选表读取增加 `FBA€`、`佣金€` 以及 A/B/C 三套 `采购前可用毛利 / 采购前毛利率 / 物流成本 / 货运比 / 采购后毛利 / 采购后毛利率` 字段；卡片每个产品直接展示 `三渠道对比`，A=FBA经济线、B=FBA快速线、C=FBM-4PX，并标注推荐方案。
 - 已补 `tests/test_amz_procurement_quote.py` 和 `scripts/amz_procurement_card_selftest.py`，本地验证通过：`17 tests OK`、`py_compile` 通过、selftest 覆盖 Amazon Listing 按钮、主图按钮、候选表按钮、三渠道展示、成本/链接/备注输入、form_submit payload、回调写表、原卡 PATCH。
+- 本轮 P0 灰度已从“采购群发送”改为“采购部人员 union_id 点对点发送”：采购群 `oc_73d455d69842f2104da68201dc282677` 发送失败，飞书返回 `230002 Bot/User can NOT be out of the chat`，原因是亚马逊助手 bot 不在该群。
+- 已按采购部实时通讯录结果灰度给 2 名采购专员，`mode=commit`、`frankie_only=false`、`card_selftest=passed`、4 个主图和 4 个 Listing 链接均已嵌入，返回消息：
+  - `om_x100b6928d28768b0c1f80bf9323d663`
+  - `om_x100b6928d2a91ca0dd11dc43cf24e7b`
+- 灰度证据文件：`D:\Documents\AI知识库\.codex_tmp\amz_procurement_gray_p0_commit_union_20260723.json`；群发送失败证据：`D:\Documents\AI知识库\.codex_tmp\amz_procurement_gray_p0_commit_instrumented_20260723.json`。
+- 已进入“带采购成本的毛利重算/候选排序”P2：五站点、双店铺、三渠道补齐后，生成推进清单 `D:\Documents\AI知识库\.codex_tmp\four_asin_p2_action_list_20260723.md` 和 CSV。
+- 已回写德国站候选表四条 P0 样品记录，补齐 A/B/C 三渠道德国站中企号毛利、物流成本、货运比、FBA费、状态和下一步动作；回读验证通过：
+  - `B0CH1817WW`：`待合规核查 / 50件验证 / 财务通过`，A/B/C 毛利率 `56.3% / 55.7% / 53.2%`。
+  - `B0D1CLBFD9`：`待合规核查 / 50件验证 / 财务通过`，A/B/C 毛利率 `41.5% / 36.9% / 28.7%`。
+  - `B0CSCXSHPQ`：`待财务复核 / 50件验证 / 财务暂缓`，A/B/C 毛利率 `30.6% / 24.1% / 14.1%`。
+  - `B0CNRH4GRJ`：`暂缓 / 暂缓 / 财务暂缓`，A/B/C 毛利率 `28.8% / 23.1% / 12.5%`。
+- 已替换四条记录旧人审备注中的“欧洲卖家占优单独淘汰”口径，改为“毛利、货运比、供应同款确认、合规/型号适配”综合判断。
+- 用户截图确认采购专员端灰度卡片已显示 `[AMZ·P0] 德国站采购成本回填 · 已全部回填`；卡片真实飞书渲染中可见商品主图、Amazon Listing 链接、主图原图链接、候选表记录链接、三渠道对比和采购已回填结果态。P0 采购卡片可作为后续正式工作流节点复用，但每批正式发送前仍必须跑 selftest + Frankie-only 样卡确认。
+- 项目节点总览已沉淀到 `D:\Documents\AI知识库\.planning\2026-07-22-germany-light-category-pool\project_flow_status_20260723.md`，用于后续从“候选记录→发采购卡→回填采购价→自动重算→自动排序→发合规卡→50件验证卡”接入正式流程。
+- 已新增德国站 P0 合规/型号适配核查卡代码闭环，默认只发两条继续推进记录：`B0CH1817WW / recvq1QtafnVjX`、`B0D1CLBFD9 / recvq1QtUEEcXv`。
+- 新模块 `app/amz_compliance_fit_card.py` 已实现：卡片展示产品主图、Amazon Listing、主图原图、候选表记录、1688供应商链接、三渠道毛利、型号适配/GPSR/品牌词核查重点；每个产品独立提交 `Go / 需整改 / No-Go`、`IP/外观风险`、核查备注。
+- 回调已接入 `app/amz_assistant.py`：`value.action=amz_fit_check_submit` 进入合规卡处理器；仍复用 `/amz/feishu/callback`，保持发卡 App 和 PATCH App 一致。
+- 已新增受保护发送 endpoint：`POST /cs/amz-compliance-fit/send`，默认 `mode=dry_run`、`frankie_only=true`，灰度前必须先 Frankie-only 样卡确认。
+- 合规卡写回使用候选表已有字段，不新增字段：`合规闸结论`、`IP/外观风险`、`侵权风险说明`、`当前状态`、`综合结论`、`数据缺口`、`下一步动作`、`人审备注`。
+- 本地验证通过：`py_compile`、`scripts/amz_compliance_fit_card_selftest.py`、`test_amz_compliance_fit_card.py` 9 tests、采购卡回归 17 tests、差评审计回归 18 tests。`unittest discover`/直接跑测试文件会被旧 `C:\tmp\ml-data-sync\app` 包污染，需用 inline runner 强制当前仓库优先。
+- 交接文档已写入 `docs/handoff_amz_compliance_fit_card_p0_2026-07-23.md`。本机当前没有 `INTERNAL_TOKEN` / 飞书 App 环境变量，只有 `ZEABUR_API_KEY`；如需发真实 Frankie-only 样卡，下一步需 commit/push 触发 Zeabur 后通过已授权通道拿 endpoint token 或由 n8n/Zeabur 环境触发。
