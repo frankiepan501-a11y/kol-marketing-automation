@@ -5,8 +5,9 @@
 P0 code is implemented and pushed to `master`.
 
 Deploy checkpoint:
-- Latest commit: `a2759b6`
-- Zeabur `kol-automation` production deployment `6a61a66c9cfc4cd5e6896e3e` is `RUNNING` on commit `a2759b6`.
+- Runtime code fix commit: `a2759b6`
+- Post-fix verification/doc commit checked online: `73383ae`
+- Zeabur `kol-automation` production deployment was verified `RUNNING` after the card callback fix. Re-check Zeabur deployment status after any later docs-only commit.
 - Online `/openapi.json` includes `POST /cs/amz-procurement-quote/send`.
 - Unauthenticated call to the endpoint returns `401`, confirming the route is live and protected.
 
