@@ -59,8 +59,8 @@
 - 2026-07-24 用户纠正合规/适配节点边界：卡片不应让采购/运营人工核查 `Go/No-Go`、IP/外观/专利风险；应由自动化先扫描风险，再把系统发现的问题点、证据和建议动作反馈给运营处理例外。
 - 已按该纠正改造 `app/amz_compliance_fit_card.py`：旧人工动作 `amz_fit_check_submit` 已停用并返回提示；新动作为 `amz_fit_check_feedback_submit`。卡片展示自动风险扫描结果、自动发现的问题点、证据、系统建议和处理动作，不再展示 `fit_result_*` / `fit_iprisk_*` / `确认核查本产品`。
 - 自动扫描 P0 当前覆盖：兼容品牌词、原厂/官方/正版/OEM 暗示、型号/套装资料缺口、1688供应商资料缺口、知名品牌耗材外观/专利线索、EU/GPSR基础资料、限制类关键词。该扫描是业务风险线索，不是法律结论。
-- 新回调写回由系统扫描决定：`确认系统建议` 才按自动判断写 `Go/暂缓/No-Go`；`标记系统误报`、`要求采购补资料`、`升级合规复核` 都写为暂缓并保留自动问题清单到 `侵权风险说明`。
+- 新回调写回由系统扫描决定：`采纳系统建议，自动进入下一步` 才按自动判断写 `Go/暂缓/No-Go`；`系统判断有误，退回复核`、`资料不够，采购补资料`、`风险较高，升级合规复核` 都写为暂缓并保留自动问题清单到 `侵权风险说明`。旧动作名仍保留回调兼容。
 - 本地验证通过：`py_compile`、`scripts/amz_compliance_fit_card_selftest.py`、`test_amz_compliance_fit_card.py` 12 tests、采购卡回归 17 tests、AMZ审计回归 18 tests。
 - 已提交并推送 `4bc7c1d fix: make AMZ compliance card automated risk feedback` 到 `master`，Zeabur deployment `6a624de99cfc4cd5e689957e` 已 `RUNNING`，线上 `/health=ok`。
 - 已跑线上受保护 dry-run：`ok=true`、`count=2`、`card_selftest=passed`、2 个独立异常处理表单、2 个 action 下拉、2 个备注输入、`amz_fit_check_feedback_submit`，且不含旧 `fit_result_*` / `fit_iprisk_*` / `确认核查本产品`。
-- 已发送新的 Frankie-only 自动风险扫描结果样卡，`message_id=om_x100b6910aa1d9ca0ded8a5f95a39ce0`，读回确认为 `msg_type=interactive`，含自动风险扫描结果、自动发现的问题点、2 张产品图、8 个业务按钮，且不含旧人工风险字段。下一步等待 Frankie 在新卡上点一个产品的“确认系统建议”做真实回调写回测试。
+- 已发送新的 Frankie-only 自动风险扫描结果样卡，`message_id=om_x100b6910aa1d9ca0ded8a5f95a39ce0`，读回确认为 `msg_type=interactive`，含自动风险扫描结果、自动发现的问题点、2 张产品图、8 个业务按钮，且不含旧人工风险字段。2026-07-24 用户指出下拉动作名不清晰；已改为业务动作文案，下一张样卡需验证“怎么选”说明和新动作名渲染。

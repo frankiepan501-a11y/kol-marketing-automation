@@ -21,7 +21,7 @@ Latest confirmed production state:
 Scope:
 - One batch sends one shared automated risk-scan result card.
 - Each product row shows automatic findings for fitment, compatible-brand wording, IP/appearance, patent clues, EU/GPSR, supplier evidence, and data gaps.
-- Each product row has one exception-handling form: `确认系统建议 / 标记系统误报 / 要求采购补资料 / 升级合规复核`.
+- Each product row has one exception-handling form with business-facing options: `采纳系统建议，自动进入下一步 / 系统判断有误，退回复核 / 资料不够，采购补资料 / 风险较高，升级合规复核`.
 - Submitting one product updates only that candidate record.
 - The original card is patched after callback. Completed products render as read-only, pending products keep their own controls.
 - P0 sending is Frankie-only by default.
@@ -62,10 +62,10 @@ Writeback mapping:
 
 | Human action | Required note | Fields written |
 |---|---:|---|
-| `确认系统建议` | optional | writes the automatic decision: low risk -> `Go / 待50件验证`; review needed -> `暂缓 / 待合规核查`; reject recommended -> `No-Go / 淘汰` |
-| `标记系统误报` | required | `合规闸结论=暂缓`, `下一步动作=复核系统误报后重跑扫描` |
-| `要求采购补资料` | optional | `合规闸结论=暂缓`, `数据缺口=["认证","供应商资料"]`, `下一步动作=采购补供应商/包装/实物资料后重跑扫描` |
-| `升级合规复核` | required | `合规闸结论=暂缓`, `下一步动作=升级合规/IP复核` |
+| `采纳系统建议，自动进入下一步` | optional | agrees with the automated scan and writes the automatic decision: low risk -> `Go / 待50件验证`; review needed -> `暂缓 / 待合规核查`; reject recommended -> `No-Go / 淘汰` |
+| `系统判断有误，退回复核` | required | operator says the automated scan is a false positive; writes `合规闸结论=暂缓`, `下一步动作=复核系统误报后重跑扫描` |
+| `资料不够，采购补资料` | optional | missing supplier/product proof; writes `合规闸结论=暂缓`, `数据缺口=["认证","供应商资料"]`, `下一步动作=采购补供应商/包装/实物资料后重跑扫描` |
+| `风险较高，升级合规复核` | required | trademark/IP/appearance/patent/platform/EU compliance concern; writes `合规闸结论=暂缓`, `下一步动作=升级合规/IP复核` |
 
 `侵权风险说明` is generated from the automated scan findings plus the human feedback note.
 
@@ -235,7 +235,7 @@ Authorization: Bearer <INTERNAL_TOKEN>
 ```
 
 Frankie should test one product with:
-- action: `确认系统建议`
+- action: `采纳系统建议，自动进入下一步`
 - note: `P0 automated risk callback test`
 
 Then verify:

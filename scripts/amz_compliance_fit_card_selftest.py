@@ -104,7 +104,7 @@ def _candidate(rid: str = "rec_selftest_1", status: str = "pending") -> dict[str
 def _form_flat(record_id: str) -> dict[str, Any]:
     sid = fit._safe_id(record_id)
     return {
-        f"risk_action_{sid}": "确认系统建议",
+        f"risk_action_{sid}": fit.ACTION_ACCEPT_AUTO,
         f"risk_note_{sid}": "selftest confirm automated findings",
     }
 
@@ -113,7 +113,7 @@ def _form_nested(record_id: str) -> dict[str, Any]:
     sid = fit._safe_id(record_id)
     return {
         f"risk_feedback_form_{sid}": {
-            f"risk_action_{sid}": {"value": "确认系统建议"},
+            f"risk_action_{sid}": {"value": fit.ACTION_ACCEPT_AUTO},
             f"risk_note_{sid}": {"input_value": "selftest nested"},
         }
     }
@@ -122,7 +122,7 @@ def _form_nested(record_id: str) -> dict[str, Any]:
 def _form_list(record_id: str) -> list[dict[str, Any]]:
     sid = fit._safe_id(record_id)
     return [
-        {"name": f"risk_action_{sid}", "value": "确认系统建议"},
+        {"name": f"risk_action_{sid}", "value": fit.ACTION_ACCEPT_AUTO},
         {"name": f"risk_note_{sid}", "input_value": "selftest list"},
     ]
 

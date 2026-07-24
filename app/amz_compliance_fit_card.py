@@ -79,7 +79,16 @@ FIELD_NAMES = [
 ]
 
 IP_RISKS = ("低", "中", "高", "不可做")
-HUMAN_ACTIONS = ("确认系统建议", "标记系统误报", "要求采购补资料", "升级合规复核")
+ACTION_ACCEPT_AUTO = "采纳系统建议，自动进入下一步"
+ACTION_FALSE_POSITIVE = "系统判断有误，退回复核"
+ACTION_NEED_PROCUREMENT = "资料不够，采购补资料"
+ACTION_ESCALATE_REVIEW = "风险较高，升级合规复核"
+HUMAN_ACTIONS = (
+    ACTION_ACCEPT_AUTO,
+    ACTION_FALSE_POSITIVE,
+    ACTION_NEED_PROCUREMENT,
+    ACTION_ESCALATE_REVIEW,
+)
 DONE_GATES = ("Go", "暂缓", "No-Go")
 
 _bg_tasks: set[asyncio.Task] = set()
@@ -112,6 +121,16 @@ def _url_button(text: str, url: str, typ: str = "default") -> dict:
 
 def _button_option(value: str) -> dict:
     return {"text": {"tag": "plain_text", "content": value}, "value": value}
+
+
+def _action_help_text() -> str:
+    return (
+        "**怎么选**\n"
+        f"- **{ACTION_ACCEPT_AUTO}**：同意系统判断；系统会按自动扫描结果写入“推进50件验证 / 暂缓补资料 / 淘汰”。\n"
+        f"- **{ACTION_FALSE_POSITIVE}**：系统把正常点误判成风险；备注写明为什么是误报，系统先退回复核，不直接推进。\n"
+        f"- **{ACTION_NEED_PROCUREMENT}**：缺供应商链接、包装图、实物图、标签/说明书、套装件数或适配型号；采购补齐后再重扫。\n"
+        f"- **{ACTION_ESCALATE_REVIEW}**：涉及商标/IP、外观、专利、平台政策或欧盟合规高风险；先不要推进，升级复核。"
+    )
 
 
 def _candidate_from_record(record: dict) -> dict:
@@ -588,7 +607,7 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
                 {
                     "tag": "select_static",
                     "name": f"risk_action_{sid}",
-                    "placeholder": {"tag": "plain_text", "content": "处理系统建议"},
+                    "placeholder": {"tag": "plain_text", "content": "选择处理动作（先看系统建议和问题点）"},
                     "options": [_button_option(x) for x in HUMAN_ACTIONS],
                 },
                 {
@@ -596,14 +615,14 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
                     "name": f"risk_note_{sid}",
                     "label_position": "left",
                     "label": {"tag": "plain_text", "content": "处理备注"},
-                    "placeholder": {"tag": "plain_text", "content": "误报原因、需采购补什么、升级复核说明"},
+                    "placeholder": {"tag": "plain_text", "content": "按所选动作填写：误报原因 / 采购需补资料 / 升级复核原因"},
                 },
                 {
                     "tag": "button",
                     "action_type": "form_submit",
                     "name": f"risk_submit_{sid}",
                     "type": "primary",
-                    "text": {"tag": "plain_text", "content": "处理系统建议"},
+                    "text": {"tag": "plain_text", "content": "提交处理动作"},
                     "value": _payload(candidate, card_record_ids),
                 },
             ],
@@ -628,7 +647,8 @@ def build_fit_card(candidates: list[dict], batch_id: str = "") -> dict:
                 "content": (
                     f"**批次**: {batch}\n"
                     f"**状态**: {title_status}\n"
-                    "**定位**: 系统先自动扫描型号适配、兼容品牌词、IP/外观、专利线索和EU/GPSR资料缺口；卡片只反馈系统发现的问题点，不要求采购或运营从零核查。"
+                    "**定位**: 系统先自动扫描型号适配、兼容品牌词、IP/外观、专利线索和EU/GPSR资料缺口；卡片只反馈系统发现的问题点，不要求采购或运营从零核查。\n\n"
+                    + _action_help_text()
                 ),
             },
         },
@@ -717,7 +737,19 @@ def validate_fit_card(card: dict, candidates: list[dict]) -> list[str]:
             errors.append(f"{label}: submit payload card_record_ids is invalid")
     if "fit_result_" in rendered or "选择IP/外观风险" in rendered or "确认核查本产品" in rendered:
         errors.append("card still contains legacy manual compliance controls")
-    for required in ("自动风险扫描结果", "自动发现的问题点", "系统建议", "三渠道毛利", "GPSR", "人只处理系统发现的例外"):
+    for required in (
+        "自动风险扫描结果",
+        "自动发现的问题点",
+        "系统建议",
+        "三渠道毛利",
+        "GPSR",
+        "人只处理系统发现的例外",
+        "怎么选",
+        ACTION_ACCEPT_AUTO,
+        ACTION_FALSE_POSITIVE,
+        ACTION_NEED_PROCUREMENT,
+        ACTION_ESCALATE_REVIEW,
+    ):
         if required not in rendered:
             errors.append(f"card missing {required}")
     return errors
@@ -790,15 +822,19 @@ def _form_value(form: dict, record_id: str, suffix: str) -> str:
 def _normalize_human_action(raw: str) -> str:
     text = _text(raw)
     aliases = {
-        "确认": "确认系统建议",
-        "确认建议": "确认系统建议",
-        "确认系统判断": "确认系统建议",
-        "误报": "标记系统误报",
-        "标记误报": "标记系统误报",
-        "采购补资料": "要求采购补资料",
-        "补资料": "要求采购补资料",
-        "升级": "升级合规复核",
-        "人工复核": "升级合规复核",
+        "确认": ACTION_ACCEPT_AUTO,
+        "确认建议": ACTION_ACCEPT_AUTO,
+        "确认系统判断": ACTION_ACCEPT_AUTO,
+        "确认系统建议": ACTION_ACCEPT_AUTO,
+        "误报": ACTION_FALSE_POSITIVE,
+        "标记误报": ACTION_FALSE_POSITIVE,
+        "标记系统误报": ACTION_FALSE_POSITIVE,
+        "采购补资料": ACTION_NEED_PROCUREMENT,
+        "补资料": ACTION_NEED_PROCUREMENT,
+        "要求采购补资料": ACTION_NEED_PROCUREMENT,
+        "升级": ACTION_ESCALATE_REVIEW,
+        "人工复核": ACTION_ESCALATE_REVIEW,
+        "升级合规复核": ACTION_ESCALATE_REVIEW,
     }
     return aliases.get(text, text)
 
@@ -874,19 +910,19 @@ def _build_update_fields(human_action: str, note: str, actor: str, scan: dict) -
         f"{_now_label()} {actor}: 自动扫描={_scan_summary(scan)}; "
         f"处理动作={human_action}; 备注={note or '-'}"
     )
-    fields = _auto_decision_fields(scan) if human_action == "确认系统建议" else {
+    fields = _auto_decision_fields(scan) if human_action == ACTION_ACCEPT_AUTO else {
         "合规闸结论": "暂缓",
         "IP/外观风险": _risk_for_write(scan.get("level")),
         "当前状态": "待合规核查",
         "综合结论": "暂缓",
         "数据缺口": ["认证"],
     }
-    if human_action == "标记系统误报":
+    if human_action == ACTION_FALSE_POSITIVE:
         fields["下一步动作"] = "复核系统误报后重跑扫描"
-    elif human_action == "要求采购补资料":
+    elif human_action == ACTION_NEED_PROCUREMENT:
         fields["下一步动作"] = "采购补供应商/包装/实物资料后重跑扫描"
         fields["数据缺口"] = ["认证", "供应商资料"]
-    elif human_action == "升级合规复核":
+    elif human_action == ACTION_ESCALATE_REVIEW:
         fields["下一步动作"] = "升级合规/IP复核"
     fields["侵权风险说明"] = _scan_note(scan, note)
     fields["人审备注"] = reviewed
@@ -916,9 +952,9 @@ async def _process_callback(event: dict) -> dict:
     human_action = _normalize_human_action(_form_value(form, record_id, "action"))
     note = _form_value(form, record_id, "note")
     if human_action not in HUMAN_ACTIONS:
-        return _toast("请选择如何处理系统建议", "error")
-    if human_action in ("标记系统误报", "升级合规复核") and not note:
-        return _toast("标记误报或升级复核时必须填写处理备注", "error")
+        return _toast("请选择一个处理动作", "error")
+    if human_action in (ACTION_FALSE_POSITIVE, ACTION_ESCALATE_REVIEW) and not note:
+        return _toast("退回复核或升级复核时必须填写处理备注", "error")
 
     candidate = await _get_candidate(record_id)
     scan = scan_candidate(candidate)
@@ -967,9 +1003,9 @@ async def handle_callback(event: dict) -> dict:
     human_action = _normalize_human_action(_form_value(form, record_id, "action"))
     note = _form_value(form, record_id, "note")
     if human_action not in HUMAN_ACTIONS:
-        return _toast("请选择如何处理系统建议", "error")
-    if human_action in ("标记系统误报", "升级合规复核") and not note:
-        return _toast("标记误报或升级复核时必须填写处理备注", "error")
+        return _toast("请选择一个处理动作", "error")
+    if human_action in (ACTION_FALSE_POSITIVE, ACTION_ESCALATE_REVIEW) and not note:
+        return _toast("退回复核或升级复核时必须填写处理备注", "error")
     callback_key = _callback_key(record_id, form)
     if _recent_seen(callback_key):
         try:

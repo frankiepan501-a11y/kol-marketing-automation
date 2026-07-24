@@ -106,8 +106,15 @@ class AmzComplianceFitCardTests(unittest.TestCase):
         self.assertIn("三渠道毛利", rendered)
         self.assertIn("GPSR", rendered)
         self.assertIn("人只处理系统发现的例外", rendered)
+        self.assertIn("怎么选", rendered)
+        self.assertIn(fit.ACTION_ACCEPT_AUTO, rendered)
+        self.assertIn(fit.ACTION_FALSE_POSITIVE, rendered)
+        self.assertIn(fit.ACTION_NEED_PROCUREMENT, rendered)
+        self.assertIn(fit.ACTION_ESCALATE_REVIEW, rendered)
         self.assertNotIn("fit_result_rec1", rendered)
         self.assertNotIn("选择IP/外观风险", rendered)
+        self.assertNotIn("确认系统建议", rendered)
+        self.assertNotIn("处理系统建议", rendered)
         self.assertEqual([], fit.validate_fit_card(card, candidates))
 
     def test_completed_product_renders_without_form(self):
@@ -165,9 +172,9 @@ class AmzComplianceFitCardTests(unittest.TestCase):
         }
         result = asyncio.run(fit.handle_callback(event))
         self.assertEqual("error", result["toast"]["type"])
-        self.assertIn("请选择如何处理系统建议", result["toast"]["content"])
+        self.assertIn("请选择一个处理动作", result["toast"]["content"])
 
-        event["action"]["form_value"] = {"risk_action_rec1": "标记系统误报", "risk_note_rec1": ""}
+        event["action"]["form_value"] = {"risk_action_rec1": fit.ACTION_FALSE_POSITIVE, "risk_note_rec1": ""}
         result = asyncio.run(fit.handle_callback(event))
         self.assertEqual("error", result["toast"]["type"])
         self.assertIn("必须填写处理备注", result["toast"]["content"])
@@ -177,24 +184,24 @@ class AmzComplianceFitCardTests(unittest.TestCase):
             "action": {
                 "form_value": {
                     "risk_feedback_form_rec1": {
-                        "risk_action_rec1": {"value": "确认系统建议"},
+                        "risk_action_rec1": {"value": fit.ACTION_ACCEPT_AUTO},
                         "risk_note_rec1": {"input_value": "按系统建议处理"},
                     }
                 }
             }
         })
-        self.assertEqual("确认系统建议", fit._form_value(nested, "rec1", "action"))
+        self.assertEqual(fit.ACTION_ACCEPT_AUTO, fit._form_value(nested, "rec1", "action"))
         self.assertEqual("按系统建议处理", fit._form_value(nested, "rec1", "note"))
 
         listed = fit._extract_form_values({
             "action": {
                 "input_values": [
-                    {"name": "risk_action_rec1", "value": "升级合规复核"},
+                    {"name": "risk_action_rec1", "value": fit.ACTION_ESCALATE_REVIEW},
                     {"name": "risk_note_rec1", "input_value": "外观相似度需要人工看"},
                 ]
             }
         })
-        self.assertEqual("升级合规复核", fit._form_value(listed, "rec1", "action"))
+        self.assertEqual(fit.ACTION_ESCALATE_REVIEW, fit._form_value(listed, "rec1", "action"))
         self.assertEqual("外观相似度需要人工看", fit._form_value(listed, "rec1", "note"))
 
     def test_handle_callback_fast_ack_spawns_background(self):
@@ -212,7 +219,7 @@ class AmzComplianceFitCardTests(unittest.TestCase):
             result = asyncio.run(fit.handle_callback({
                 "action": {
                     "value": {"action": fit.ACTION_SUBMIT, "record_id": "rec1"},
-                    "form_value": {"risk_action_rec1": "确认系统建议", "risk_note_rec1": "按系统建议处理"},
+                    "form_value": {"risk_action_rec1": fit.ACTION_ACCEPT_AUTO, "risk_note_rec1": "按系统建议处理"},
                 }
             }))
         finally:
@@ -232,7 +239,7 @@ class AmzComplianceFitCardTests(unittest.TestCase):
         event = {
             "action": {
                 "value": {"action": fit.ACTION_SUBMIT, "record_id": "rec1"},
-                "form_value": {"risk_action_rec1": "确认系统建议", "risk_note_rec1": "按系统建议处理"},
+                "form_value": {"risk_action_rec1": fit.ACTION_ACCEPT_AUTO, "risk_note_rec1": "按系统建议处理"},
             }
         }
         key = fit._callback_key("rec1", event["action"]["form_value"])
@@ -301,7 +308,7 @@ class AmzComplianceFitCardTests(unittest.TestCase):
                         "batch_id": "batch-test",
                         "card_record_ids": ["rec1", "rec2"],
                     },
-                    "form_value": {"risk_action_rec1": "确认系统建议", "risk_note_rec1": "按系统建议处理"},
+                    "form_value": {"risk_action_rec1": fit.ACTION_ACCEPT_AUTO, "risk_note_rec1": "按系统建议处理"},
                 },
             }))
         finally:
