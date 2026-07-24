@@ -1120,27 +1120,47 @@ async def run_kol_discount_selftest(authorization: str = Header(default=""), bra
 
 
 @app.post("/dashboard/refresh")
-async def run_dashboard(authorization: str = Header(default="")):
-    """每日 9:00 刷新 KOL+编辑 营销数据看板"""
+async def run_dashboard(authorization: str = Header(default=""), async_mode: bool = True):
+    """每日 9:00 刷新 KOL+编辑 营销数据看板.
+    默认后台跑, 避免 n8n 等待长同步任务超时。"""
     _check_auth(authorization)
+    if async_mode:
+        async def _job():
+            try:
+                result = await dashboard.run()
+                print(f"[dashboard_refresh] background done ok={result.get('ok', True)}")
+            except Exception as e:
+                await _alert_endpoint_failure("/dashboard/refresh", str(e), _tb.format_exc()[-1200:])
+        asyncio.create_task(_job())
+        return {"ok": True, "started": "background",
+                "msg": "dashboard refresh started, will update dashboard tables when done"}
     try:
         result = await dashboard.run()
         return {"ok": True, **result}
     except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+        return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-1000:]}
 
 
 @app.post("/followup/generate")
-async def run_followup(authorization: str = Header(default="")):
-    """每日 10:00 扫无回复草稿 → 生成 D+7 第2封 / D+14 第3封 → 调 reviewer"""
+async def run_followup(authorization: str = Header(default=""), async_mode: bool = True):
+    """每日 10:00 扫无回复草稿 → 生成 D+7 第2封 / D+14 第3封 → 调 reviewer.
+    默认后台跑, 避免 n8n 等待长同步任务超时。"""
     _check_auth(authorization)
+    if async_mode:
+        async def _job():
+            try:
+                result = await followup.run()
+                print(f"[followup_generate] background done ok={result.get('ok', True)}")
+            except Exception as e:
+                await _alert_endpoint_failure("/followup/generate", str(e), _tb.format_exc()[-1200:])
+        asyncio.create_task(_job())
+        return {"ok": True, "started": "background",
+                "msg": "followup generation started, will update drafts when done"}
     try:
         result = await followup.run()
         return {"ok": True, **result}
     except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+        return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-1000:]}
 
 
 @app.post("/dispatch/run")
