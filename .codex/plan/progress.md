@@ -73,3 +73,6 @@
 - 原飞书卡 `om_x100b69190ff3a8b4c4cdbdacbd8da8c` 读回确认 `msg_type=interactive`、`updated=true`、含 `自动风险处理已完成`；同卡第二条 `B0D1CLBFD9 / recvq1QtUEEcXv` 仍为 `合规闸结论=待核`，说明单产品回调隔离正常。
 - 2026-07-24 用户再次校正铺货节奏：铺货/精铺优先速度和数量，风险分 `<=60` 的普通问题点不应再发人工卡片提醒；系统应直接写 `Go / 待50件验证`，并把注意点留在 `侵权风险说明`。
 - 已修改合规/适配发送分流：`AMZ_COMPLIANCE_FAST_PASS_SCORE=60`；`<=60` 自动通过并写候选表，`>60` 或硬风险才进入飞书例外处理卡。旧已发卡上的“采纳系统建议”回调也会按新阈值写 `Go`。
+- 已提交并推送 `5982587 fix: fast-pass AMZ puhuo compliance scan`，Zeabur deployment `6a62e5599cfc4cd5e689a0d2` 已 `RUNNING`，线上 `/health=ok`。
+- 已跑线上受保护 dry-run：两条 P0 记录均 `60分 / 中风险 / auto_pass_with_notes`，`card_count=0`，不生成新卡；commit 后返回 `sent=false`、`message_ids=[]`、`auto_written_record_ids=[recvq1QtafnVjX,recvq1QtUEEcXv]`。
+- 候选表读回确认 `B0CH1817WW` 和 `B0D1CLBFD9` 均已写成 `合规闸结论=Go`、`当前状态=待50件验证`、`综合结论=50件验证`、`下一步动作=发起50件验证`，`侵权风险说明` 保留品牌/IP、外观/专利线索、EU/GPSR 注意点。

@@ -14,10 +14,11 @@ Current P0 direction:
 The old manual card action `amz_fit_check_submit` is now treated as a disabled legacy action.
 
 Latest confirmed production state:
-- Code commit: `2c5902a fix: clarify AMZ compliance card actions`
-- Zeabur deployment: `6a62d3389cfc4cd5e6899e36`, status `RUNNING`, commit `2c5902a`
+- Code commit: `5982587 fix: fast-pass AMZ puhuo compliance scan`
+- Zeabur deployment: `6a62e5599cfc4cd5e689a0d2`, status `RUNNING`, commit `5982587`
 - Current Frankie-only sample card sent: `om_x100b69190ff3a8b4c4cdbdacbd8da8c`
 - First real callback writeback verified for `B0CH1817WW / recvq1QtafnVjX`.
+- Fast-pass commit verified for `B0CH1817WW / recvq1QtafnVjX` and `B0D1CLBFD9 / recvq1QtUEEcXv`: both now `Go / 待50件验证`; no new card was sent.
 
 Scope:
 - One batch sends one shared automated risk-scan result card.
@@ -281,3 +282,25 @@ Before any operations/采购/合规 group rollout, require:
   - `侵权风险说明` includes the automated issue list.
 - Original Feishu card readback confirmed `msg_type=interactive`, `updated=true`, and `自动风险处理已完成`.
 - Same-card second product `B0D1CLBFD9 / recvq1QtUEEcXv` remained pending (`合规闸结论=待核`), confirming row-level callback isolation.
+
+2026-07-24 puhuo fast-pass correction:
+- Commit `5982587` deployed as Zeabur deployment `6a62e5599cfc4cd5e689a0d2`, status `RUNNING`; `/health` returned `{"status":"ok"}`.
+- Protected online dry-run for `recvq1QtafnVjX,recvq1QtUEEcXv` returned:
+  - `auto_pass_threshold=60`
+  - `auto_pass_count=2`
+  - `auto_write_count=2`
+  - `card_count=0`
+  - `card_selftest=skipped_no_card_candidates`
+  - both records scored `60 / 中 / auto_pass_with_notes`
+- Protected online commit for the same two records returned:
+  - `auto_written_record_ids=["recvq1QtafnVjX","recvq1QtUEEcXv"]`
+  - `sent=false`
+  - `message_ids=[]`
+- Candidate table readback confirmed both rows now have:
+  - `合规闸结论=Go`
+  - `IP/外观风险=中`
+  - `当前状态=待50件验证`
+  - `综合结论=50件验证`
+  - `数据缺口=null`
+  - `下一步动作=发起50件验证`
+  - `侵权风险说明` includes the automatic issue list: brand/IP wording, appearance/patent clue, EU/GPSR preparation.
