@@ -86,3 +86,10 @@
 - 已执行线上 commit：`updated_record_ids=recvq1QtafnVjX,recvq1QtUEEcXv`，`sent=true`，Frankie-only 启动卡 `message_id=om_x100b691ab7d71ca0dfd33119ed4643b`，图片嵌入数 `2/2`。
 - 候选表回读确认两条均为 `当前状态=待50件验证`、`综合结论=50件验证`、`下一步动作=发起50件验证`、`50件验证状态=进行中`，`人审备注` 已追加 `进入50件验证` 批次记录。
 - 飞书消息读回确认 `msg_type=interactive`，卡内包含 `B0CH1817WW`、`B0D1CLBFD9`、`50件验证要看`、`打开1688供应商`、图片 key，且不含 `form_submit`。
+- 2026-07-24 用户重新定义项目大阶段：亚马逊欧洲铺货/精铺工作流拆为 `选品阶段 -> 采购阶段 -> Listing上架阶段 -> 运营与监控阶段`。本 session 实际完成的是选品阶段的自动化样板验证：类目定位、候选 ASIN 采集、选品闸门筛选、成本与毛利试算、采购成本回填、自动合规/适配扫描。
+- 2026-07-24 流程纠偏：旧 `50件验证` 节点位置错误。当前还未采购、到货、上架，不能称为真实验证；应改为选品阶段收尾的 `小批量采购建议`。该建议应根据竞品/月销、类目容量、毛利、货运比、MOQ、装箱倍数和风险等级动态计算首批采购量，不固定 50 件。
+- 2026-07-24 选品阶段收尾任务：生成 `选品结果确认表/卡` 给运营和上司确认，内容包括候选产品、站点、图片/Listing、采购价、三渠道毛利、货运比、中企号/本土号差异、合规注意点、推荐采购量、淘汰/暂缓原因。确认通过后才触发采购阶段；真正验证放在 Listing 上架和库存可售后，用 7/14/30 天运营数据判断扩采、改款或淘汰。
+- 2026-07-24 已按用户新增要求输出 `选品结果确认表/卡` 需求稿：`C:\Users\Administrator\workspace\outputs\sop\2026-07-24-amz-eu-selection-result-confirmation-card.md`。关键口径：每站展示竞品售价和建议售价；每站分别计算建议采购量并汇总总采购量；采购量基于 `竞品平均月销量 × 60% + 类目新品平均月销量 × 40%`、新品入场系数和覆盖天数动态计算；按国民哥哥回款比模型展示回款、投入、预留押款和投入回收率；四个动作按钮为 `Go / 条件推进 / 暂缓 / 淘汰`，点击后只改变选品确认状态并触发对应下一步，不能绕过采购阶段。
+- 2026-07-24 已完成 `选品结果确认卡` 本地 P0 实现：新增 `app/amz_selection_confirmation.py`、接口 `POST /cs/amz-selection-confirmation/send`、飞书回调路由 `amz_selection_`、自测 `scripts/amz_selection_confirmation_selftest.py`、单测 `tests/test_amz_selection_confirmation.py`，交接文档 `docs/handoff_amz_selection_confirmation_p0_2026-07-24.md`。卡片展示五站竞品售价/建议售价/建议采购量、三渠道毛利、回款/投入分析、合规注意点，并用 `Go / 条件推进 / 暂缓 / 淘汰` 四个按钮写回候选表已有状态字段。
+- 本地验证通过：`py_compile app\amz_selection_confirmation.py app\amz_assistant.py app\main.py`、`tests\test_amz_selection_confirmation.py` 4 tests、`scripts\amz_selection_confirmation_selftest.py`。selftest 确认含图片、Listing、候选表、1688链接、四个决策按钮，样例月销下建议采购总量为 20 件；按钮写回语义分别为待采购确认/待采购复核/暂缓/淘汰。相邻回归也通过：采购卡 17 tests、合规卡 14 tests、旧 50 件节点 5 tests。直接执行旧测试文件会被 `C:\tmp\ml-data-sync\app` 路径污染，需用 inline runner 或给测试文件补 repo-root `sys.path`。
+- 当前生产数据边界：候选表已有采购价、供应商链接、三渠道毛利、FBA费/佣金、合规注意点；但五站竞品均价/中位价、竞品平均月销量、类目新品平均月销量、本土号毛利率仍未保证结构化入表。P0 代码不会硬猜月销量，字段缺失时卡片显示 `需补月销`，不能作为最终下单数量。

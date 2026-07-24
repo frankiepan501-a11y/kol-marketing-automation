@@ -13,7 +13,7 @@ from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
 from . import cs_resources  # 客服官方资源真相源: 固件/手册/视频 URL 解析与发送闸
-from . import amz_assistant, amz_review_audit, amz_procurement_quote, amz_compliance_fit_card, amz_validation50  # 亚马逊运营卡片: 差评审计 + 采购报价回填 + 合规/适配核查 + 50件验证
+from . import amz_assistant, amz_review_audit, amz_procurement_quote, amz_compliance_fit_card, amz_selection_confirmation, amz_validation50  # 亚马逊运营卡片: 差评审计 + 采购报价回填 + 合规/适配核查 + 选品结果确认 + 50件验证
 from . import b2b_mail_reminder  # B2B 外贸邮箱跟进提醒(日 10:00, 外贸助手回执卡)
 from . import b2b_assistant  # 外贸助手: 客户指令 + LinkedIn 回执
 from . import b2b_linkedin_daily_card  # B2B LinkedIn 每日开发卡派发
@@ -1072,6 +1072,41 @@ async def run_amz_compliance_fit_card(authorization: str = Header(default=""),
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/cs/amz-compliance-fit/send", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/cs/amz-selection-confirmation/send")
+async def run_amz_selection_confirmation_card(authorization: str = Header(default=""),
+                                              mode: str = "dry_run",
+                                              limit: int = 10,
+                                              batch_id: str = "",
+                                              record_ids: str = "",
+                                              frankie_only: bool = True,
+                                              gray_union_ids: str = "",
+                                              gray_chat_ids: str = ""):
+    """亚马逊欧洲选品阶段收尾确认卡.
+
+    P0 默认只发 Frankie。卡片展示竞品售价、建议售价、五站小批量采购建议、
+    三渠道毛利、回款/投入分析，并由 Go/条件推进/暂缓/淘汰 四个按钮写回候选表。
+    """
+    _check_auth(authorization)
+    try:
+        ids = [x.strip() for x in (record_ids or "").split(",") if x.strip()]
+        gray_unions = [x.strip() for x in (gray_union_ids or "").split(",") if x.strip()]
+        gray_chats = [x.strip() for x in (gray_chat_ids or "").split(",") if x.strip()]
+        result = await amz_selection_confirmation.send_selection_confirmation_card(
+            mode=mode,
+            limit=limit,
+            batch_id=batch_id,
+            record_ids=ids or None,
+            frankie_only=frankie_only,
+            gray_union_ids=gray_unions or None,
+            gray_chat_ids=gray_chats or None,
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/amz-selection-confirmation/send", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 
