@@ -76,6 +76,32 @@ class CsInfoRequestTests(unittest.TestCase):
         self.assertEqual("陈翔宇", fields["分配运营"])
         self.assertIn("缺订单号", fields["信息缺口"])
 
+    def test_walmart_relay_routes_to_walmart_owner_even_if_ai_says_dtc(self):
+        msg = base_msg(
+            "Customer asks when the order will ship.",
+            "When will my order ship?",
+        )
+        msg["id"] = "<20260723022844.a9ffbbb6dfc2cf40@relay.walmart.com>"
+        msg["frm"] = "pc-3C93FAEC67834D5C9CFC023D2F0004BD@relay.walmart.com"
+        fields = cs_ingest._to_fields(msg, {
+            "is_cs": True,
+            "is_amazon": False,
+            "brand": "FUNLAB",
+            "platform": "独立站",
+            "complaint_type": "物流",
+            "product": "",
+            "order_no": "",
+            "language": "EN",
+            "summary": "客户询问发货时间，来自 Walmart relay 邮件。",
+            "confidence": "AI起草人工审",
+            "draft_reply": "Hi, please share your order number.",
+        }, resources=[])
+
+        self.assertEqual("待派", fields["状态"])
+        self.assertEqual("沃尔玛", fields["销售平台"])
+        self.assertEqual("林明坚", fields["分配运营"])
+        self.assertNotEqual("独立站", fields["销售平台"])
+
     def test_waiting_ticket_match_uses_outbound_message_id(self):
         incoming = base_msg("My order number is 123-4567890-1234567.", "Re: Firefly issue")
         incoming["id"] = "<customer-reply@example.com>"

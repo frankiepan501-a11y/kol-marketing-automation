@@ -4,9 +4,10 @@
 只采集+分类+写工单台(只读观察), 不发卡、不回客户。所有凭据走 env(public 仓铁律)。
 设计稿: memory `cs-channel-apiization-2026-06-24`。
 
-分类/路由规则 v1 (Frankie 2026-06-25 封板):
-- 真实客户: 亚马逊单(订单号 3-7-7) → 站点待领星反查(不自动派站点, 防误派); 美客多单 → 梁俊辉;
-  其余非亚马逊客诉 → 独立站(张佳烨); 无订单号+身份不明(客户vs分销商) → 默认当客户走独立站.
+分类/路由规则 v1 (Frankie 2026-06-25 封板; 2026-07-24 补 Walmart):
+- 真实客户: 亚马逊单(订单号 3-7-7) → 站点待领星反查(不自动派站点, 防误派);
+  Walmart/沃尔玛 → 林明坚; 美客多单 → 梁俊辉; 独立站 → 张佳烨.
+- 无订单号且分不清是客户还是分销商 → 默认当客户; 有平台线索则按平台路由, 否则独立站兜底.
 - 非客户: 供应商/B2B/合作 → 标记推 B2B 群; 营销/SEO/平台通知/垃圾 → 忽略归档.
 - 置信度: 操作咨询=AI直答 / 质量补发=AI起草人工审 / 投诉升级·退款=必须人工.
 """
@@ -866,6 +867,7 @@ def _match_waiting_info_ticket(msg: dict, waiting: list) -> dict | None:
 def _marketplace_hint(text: str):
     t = (text or "").lower()
     patterns = [
+        (r"\b(walmart|relay\.walmart\.com|marketplace\.walmart\.com)\b|沃尔玛", ("沃尔玛", "林明坚")),
         (r"\b(amazon\s*(us|usa)|usa|united states|amazon\.com|america)\b|美国", ("亚马逊-美国", "黄奕纯")),
         (r"\b(amazon\s*mx|amazon\s*mexico|mexico|amazon\.com\.mx)\b|墨西哥", ("亚马逊-墨西哥", "陈翔宇")),
         (r"\b(amazon\s*ca|amazon\s*canada|canada|amazon\.ca)\b|加拿大", ("亚马逊-加拿大", "陈翔宇")),
@@ -878,6 +880,19 @@ def _marketplace_hint(text: str):
         if re.search(pat, t, re.I):
             return route
     return None, None
+
+
+def _is_walmart_ticket(msg: dict, c: dict | None = None) -> bool:
+    c = c or {}
+    text = "\n".join([
+        msg.get("frm", ""),
+        msg.get("subj", ""),
+        msg.get("body", ""),
+        str(c.get("platform") or ""),
+        str(c.get("summary") or ""),
+    ])
+    platform, _operator = _marketplace_hint(text)
+    return platform == "沃尔玛"
 
 
 def _amazon_info_gaps(order_no: str, platform: str, route_basis: str = "") -> list:
@@ -1007,9 +1022,10 @@ CLASSIFY_PROMPT = """你是跨境电商(游戏配件 POWKONG/FUNLAB)客服分诊
 1. 真实客户(客诉/咨询/售后)→is_cs=true:
    - 订单号是亚马逊格式(3位-7位-7位数字) → is_amazon=true(站点稍后由领星定);
    - 明确提到 Amazon/亚马逊/差评/review 但没有订单号 → is_amazon=true, platform=未知, draft_reply 只请求订单号和国家站点;
+   - Walmart/沃尔玛/relay.walmart.com → platform=沃尔玛;
    - 美客多订单 → platform=美客多;
-   - 其余一切非亚马逊客诉(独立站如PK+数字, 或任何国家不在亚马逊运营范围) → platform=独立站(兜底);
-   - 无订单号且分不清是客户还是分销商 → 默认当客户, platform=独立站.
+   - 其余非平台客诉(独立站如PK+数字) → platform=独立站(兜底);
+   - 无订单号且分不清是客户还是分销商 → 默认当客户; 有平台线索按平台, 否则 platform=独立站.
 2. 供应商/B2B/合作/分销 询盘 → is_cs=false, route=B2B群.
 3. 营销推广/SEO外链/平台系统通知/纯垃圾 → is_cs=false, route=忽略.
 4. 纯寒暄/致谢/确认收到/无实际问题或诉求的对话碎片(尤其 Discord 闲聊) → is_cs=false, route=忽略.
@@ -1035,7 +1051,7 @@ draft_reply 用英文自然体现以上, 给客户清晰下一步(如缺陷:"wit
 字段:
 is_cs(bool), is_amazon(bool), route(B2B群/忽略/空),
 brand(FUNLAB或POWKONG, 据产品判断, 不确定用给定的默认品牌),
-platform(美客多/独立站/未知 三选一; 亚马逊单填未知),
+platform(沃尔玛/美客多/独立站/未知 四选一; 亚马逊单填未知),
 complaint_type(物流/产品/退换货/售后/投诉升级, 非客服留空),
 product, order_no, language(EN/中文/德/法/西/葡/日/其他),
 summary(一句中文摘要), confidence(AI直答/AI起草人工审/必须人工),
@@ -1057,6 +1073,7 @@ def _pick(v, opts, default=None):
 def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = None) -> dict:
     order_no = (c.get("order_no") or "").strip()
     is_amazon = bool(c.get("is_amazon")) or bool(AMZ_ORDER_RE.search(order_no))
+    is_walmart = _is_walmart_ticket(msg, c)
     is_cs = bool(c.get("is_cs"))
     summary = (c.get("summary") or "").strip()
     info_gaps, route_basis = [], ""
@@ -1067,7 +1084,9 @@ def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = N
         summary = f"[→{route}] {summary}" if route else summary
     else:
         status = "待派"
-        if is_amazon:
+        if is_walmart:
+            platform, operator = "沃尔玛", "林明坚"
+        elif is_amazon:
             if amz_override and amz_override[0]:
                 platform, operator = amz_override[0], amz_override[1]  # 领星/文本命中真实站点
                 route_basis = amz_override[2] if len(amz_override) > 2 else "order_lookup"
