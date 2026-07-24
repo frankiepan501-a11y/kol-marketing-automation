@@ -6,7 +6,8 @@
 
 Current P0 direction:
 - the system runs an automated risk scan first;
-- the card shows automatic findings, evidence, severity, and suggested action;
+- risk score `<=60` is puhuo fast-pass: write `Go / 待50件验证` directly and keep issue notes in `侵权风险说明`;
+- the card shows automatic findings, evidence, severity, and suggested action only for records above the fast-pass threshold or hard-stop records;
 - humans only handle exceptions: confirm the system suggestion, mark a false positive, ask procurement to provide missing evidence, or escalate compliance review;
 - procurement is not responsible for IP / appearance / patent risk analysis.
 
@@ -20,7 +21,8 @@ Latest confirmed production state:
 
 Scope:
 - One batch sends one shared automated risk-scan result card.
-- Each product row shows automatic findings for fitment, compatible-brand wording, IP/appearance, patent clues, EU/GPSR, supplier evidence, and data gaps.
+- Before sending, records with score `<=60` are auto-written to the candidate table and removed from the card queue.
+- Each card product row shows automatic findings for fitment, compatible-brand wording, IP/appearance, patent clues, EU/GPSR, supplier evidence, and data gaps.
 - Each product row has one exception-handling form with business-facing options: `采纳系统建议，自动进入下一步 / 系统判断有误，退回复核 / 资料不够，采购补资料 / 风险较高，升级合规复核`.
 - Submitting one product updates only that candidate record.
 - The original card is patched after callback. Completed products render as read-only, pending products keep their own controls.
@@ -60,9 +62,14 @@ Automated scan output:
 
 Writeback mapping:
 
+| System condition | Card? | Fields written |
+|---|---:|---|
+| risk score `<=60` and no hard-stop decision | no | system writes `合规闸结论=Go`, `当前状态=待50件验证`, `综合结论=50件验证`, `下一步动作=发起50件验证`; issue list remains in `侵权风险说明` |
+| risk score `>60`, reject score, or hard-stop | yes | send exception card for operator handling |
+
 | Human action | Required note | Fields written |
 |---|---:|---|
-| `采纳系统建议，自动进入下一步` | optional | agrees with the automated scan and writes the automatic decision: low risk -> `Go / 待50件验证`; review needed -> `暂缓 / 待合规核查`; reject recommended -> `No-Go / 淘汰` |
+| `采纳系统建议，自动进入下一步` | optional | only applies to carded exception rows; agrees with the automated scan and writes the automatic decision: review needed -> `暂缓 / 待合规核查`; reject recommended -> `No-Go / 淘汰` |
 | `系统判断有误，退回复核` | required | operator says the automated scan is a false positive; writes `合规闸结论=暂缓`, `下一步动作=复核系统误报后重跑扫描` |
 | `资料不够，采购补资料` | optional | missing supplier/product proof; writes `合规闸结论=暂缓`, `数据缺口=["认证","供应商资料"]`, `下一步动作=采购补供应商/包装/实物资料后重跑扫描` |
 | `风险较高，升级合规复核` | required | trademark/IP/appearance/patent/platform/EU compliance concern; writes `合规闸结论=暂缓`, `下一步动作=升级合规/IP复核` |
@@ -108,6 +115,7 @@ New optional env:
 AMZ_COMPLIANCE_DEFAULT_BATCH_ID=AMZ-DE-FITCHECK-20260723-P0
 AMZ_COMPLIANCE_DEFAULT_RECORD_IDS=recvq1QtafnVjX,recvq1QtUEEcXv
 AMZ_COMPLIANCE_CARD_FRANKIE_ONLY=1
+AMZ_COMPLIANCE_FAST_PASS_SCORE=60
 AMZ_COMPLIANCE_GRAY_UNION_IDS=
 AMZ_COMPLIANCE_GRAY_CHAT_IDS=
 ```
@@ -126,6 +134,8 @@ Each product row includes:
 - A/B/C three-channel margin summary;
 - automated risk score, risk level, system suggestion, issue list, evidence, and suggested action;
 - one exception-handling form, not a blank manual compliance review form.
+
+Rows with risk score `<=60` are not supposed to reach this card in normal send flow. Their issue list is still written to the candidate table so procurement and operations can see attention points during 50-piece validation.
 
 The card must not contain legacy controls:
 - `fit_result_*`

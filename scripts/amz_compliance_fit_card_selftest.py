@@ -187,9 +187,9 @@ async def _callback_smoke(name: str, form_builder: Callable[[str], Any]) -> dict
     if len(patches) != 1:
         raise AssertionError(f"{name}: expected 1 card patch, got {len(patches)}")
     fields = updates[0][1]
-    if fields.get("合规闸结论") != "暂缓":
+    if fields.get("合规闸结论") != "Go":
         raise AssertionError(f"{name}: compliance gate not written from automated scan correctly")
-    if fields.get("当前状态") != "待合规核查":
+    if fields.get("当前状态") != "待50件验证":
         raise AssertionError(f"{name}: next status not written from automated scan correctly")
     if "自动风险扫描" not in (fields.get("侵权风险说明") or ""):
         raise AssertionError(f"{name}: risk note does not contain automated scan findings")

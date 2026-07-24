@@ -3,7 +3,8 @@
 
 P0 scope:
 - run deterministic risk scanning from candidate fields;
-- send a Frankie-only card with automatic findings, evidence, and suggested actions;
+- auto-pass ordinary puhuo findings under the fast-pass risk threshold;
+- send a Frankie-only card only for exception findings above the threshold;
 - humans handle exceptions only: confirm system suggestion, mark false positive,
   request procurement evidence, or escalate for manual compliance review.
 """
@@ -38,6 +39,17 @@ FRANKIE_ONLY = (os.environ.get("AMZ_COMPLIANCE_CARD_FRANKIE_ONLY", "1") or "1") 
 FRANKIE_UNION_ID = os.environ.get("AMZ_REVIEW_OBSERVE_UNION", amz_assistant.FRANKIE_UNION_ID)
 GRAY_UNION_IDS = [x.strip() for x in os.environ.get("AMZ_COMPLIANCE_GRAY_UNION_IDS", "").split(",") if x.strip()]
 GRAY_CHAT_IDS = [x.strip() for x in os.environ.get("AMZ_COMPLIANCE_GRAY_CHAT_IDS", "").split(",") if x.strip()]
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+FAST_PASS_RISK_SCORE = _env_int("AMZ_COMPLIANCE_FAST_PASS_SCORE", 60)
+AUTO_PASS_DECISIONS = ("auto_pass", "auto_pass_with_notes")
 
 FIELD_NAMES = [
     "ASIN",
@@ -126,7 +138,7 @@ def _button_option(value: str) -> dict:
 def _action_help_text() -> str:
     return (
         "**怎么选**\n"
-        f"- **{ACTION_ACCEPT_AUTO}**：同意系统判断；系统会按自动扫描结果写入“推进50件验证 / 暂缓补资料 / 淘汰”。\n"
+        f"- **{ACTION_ACCEPT_AUTO}**：同意系统判断；仅用于超过 {FAST_PASS_RISK_SCORE} 分仍需人处理的例外，系统会按扫描结果写入“暂缓补资料 / 淘汰”。\n"
         f"- **{ACTION_FALSE_POSITIVE}**：系统把正常点误判成风险；备注写明为什么是误报，系统先退回复核，不直接推进。\n"
         f"- **{ACTION_NEED_PROCUREMENT}**：缺供应商链接、包装图、实物图、标签/说明书、套装件数或适配型号；采购补齐后再重扫。\n"
         f"- **{ACTION_ESCALATE_REVIEW}**：涉及商标/IP、外观、专利、平台政策或欧盟合规高风险；先不要推进，升级复核。"
@@ -409,10 +421,14 @@ def scan_candidate(candidate: dict) -> dict:
         decision = "reject_recommended"
         decision_label = "建议淘汰/不推进"
         next_action = "淘汰归档或升级合规复核"
-    elif max_sev in ("高", "中") or score >= 25:
+    elif score > FAST_PASS_RISK_SCORE:
         decision = "review_required"
-        decision_label = "暂缓，先处理风险点"
+        decision_label = f"超过{FAST_PASS_RISK_SCORE}分，发卡处理例外"
         next_action = "按自动风险点补资料/改文案后重扫"
+    elif max_sev in ("中", "高"):
+        decision = "auto_pass_with_notes"
+        decision_label = f"{FAST_PASS_RISK_SCORE}分内快速通过，问题点留档"
+        next_action = "发起50件验证；注意自动风险点"
     else:
         decision = "auto_pass"
         decision_label = "自动低风险，可进入50件验证"
@@ -461,6 +477,40 @@ def _scan_note(scan: dict, note: str = "") -> str:
     if note:
         lines.append(f"人工反馈：{note}")
     return "\n".join(lines)
+
+
+def _is_auto_pass_scan(scan: dict) -> bool:
+    return scan.get("decision") in AUTO_PASS_DECISIONS
+
+
+def _already_fast_passed(candidate: dict) -> bool:
+    return (
+        _text(candidate.get("compliance_gate")) == "Go"
+        and _text(candidate.get("current_status")) == "待50件验证"
+    )
+
+
+def _scan_public_summary(candidate: dict) -> dict:
+    scan = candidate.get("risk_scan") or scan_candidate(candidate)
+    return {
+        "record_id": candidate.get("record_id"),
+        "asin": candidate.get("asin"),
+        "score": scan.get("score"),
+        "level": scan.get("level"),
+        "decision": scan.get("decision"),
+        "decision_label": scan.get("decision_label"),
+        "next_action": scan.get("next_action"),
+        "issue_count": len(scan.get("issues") or []),
+        "issues": [
+            {
+                "severity": issue.get("severity"),
+                "dimension": issue.get("dimension"),
+                "finding": issue.get("finding"),
+                "action": issue.get("action"),
+            }
+            for issue in (scan.get("issues") or [])[:8]
+        ],
+    }
 
 
 def _line_item(label: str, value: Any) -> str:
@@ -547,7 +597,7 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
             "text": {
                 "tag": "lark_md",
                 "content": (
-                    "**自动风险扫描结果**\n"
+                    f"**自动风险扫描结果（{FAST_PASS_RISK_SCORE}分内不发卡，问题点留档）**\n"
                     f"- 系统判断：{_scan_summary(scan)}\n"
                     f"- 系统建议：{scan.get('next_action')}\n"
                     "- 说明：这是自动风险线索，不是法律结论；人只处理系统发现的例外。"
@@ -647,12 +697,12 @@ def build_fit_card(candidates: list[dict], batch_id: str = "") -> dict:
                 "content": (
                     f"**批次**: {batch}\n"
                     f"**状态**: {title_status}\n"
-                    "**定位**: 系统先自动扫描型号适配、兼容品牌词、IP/外观、专利线索和EU/GPSR资料缺口；卡片只反馈系统发现的问题点，不要求采购或运营从零核查。\n\n"
+                    f"**定位**: 系统先自动扫描型号适配、兼容品牌词、IP/外观、专利线索和EU/GPSR资料缺口；{FAST_PASS_RISK_SCORE}分内自动通过并只把问题点写入候选表，卡片只处理超过阈值的例外。\n\n"
                     + _action_help_text()
                 ),
             },
         },
-        {"tag": "note", "elements": [{"tag": "plain_text", "content": "P0 默认只发 Frankie 样卡确认。低风险或处理完风险点后才进入 50 件验证，不代表已正式上架或法律无风险。"}]},
+        {"tag": "note", "elements": [{"tag": "plain_text", "content": f"P0 默认只发 Frankie 样卡确认。风险分 ≤{FAST_PASS_RISK_SCORE} 直接进入 50 件验证并留档注意点；这不代表已正式上架或法律无风险。"}]},
     ]
     for candidate in candidates:
         elements.extend(_product_elements(candidate, record_ids))
@@ -877,7 +927,7 @@ def _recent_seen(key: str, ttl_sec: int = 300) -> bool:
 
 def _auto_decision_fields(scan: dict) -> dict:
     risk = _risk_for_write(scan.get("level"))
-    if scan.get("decision") == "auto_pass":
+    if scan.get("decision") in AUTO_PASS_DECISIONS:
         return {
             "合规闸结论": "Go",
             "IP/外观风险": risk,
@@ -924,6 +974,22 @@ def _build_update_fields(human_action: str, note: str, actor: str, scan: dict) -
         fields["数据缺口"] = ["认证", "供应商资料"]
     elif human_action == ACTION_ESCALATE_REVIEW:
         fields["下一步动作"] = "升级合规/IP复核"
+    fields["侵权风险说明"] = _scan_note(scan, note)
+    fields["人审备注"] = reviewed
+    return fields
+
+
+def _build_system_fast_pass_fields(scan: dict) -> dict:
+    note = (
+        f"铺货快速阈值自动通过：风险分 {scan.get('score')} <= {FAST_PASS_RISK_SCORE}；"
+        "自动发现的问题点只留档提醒，不发人工卡片阻塞。"
+    )
+    reviewed = (
+        f"{_now_label()} system: 自动扫描={_scan_summary(scan)}; "
+        f"处理动作=铺货快速阈值自动通过; 备注={note}"
+    )
+    fields = _auto_decision_fields(scan)
+    fields["下一步动作"] = "发起50件验证"
     fields["侵权风险说明"] = _scan_note(scan, note)
     fields["人审备注"] = reviewed
     return fields
@@ -1039,12 +1105,28 @@ async def send_fit_card(
     ids = record_ids if record_ids is not None else DEFAULT_RECORD_IDS
     candidates = await _get_candidates_by_ids(ids) if ids else await _search_candidates(batch, limit=limit)
     _attach_risk_scans(candidates)
-    if mode == "commit":
-        await _prepare_card_images(candidates)
-    card = build_fit_card(candidates, batch)
-    validation_errors = validate_fit_card(card, candidates)
-    if validation_errors:
-        raise RuntimeError("Compliance fit card self-test failed: " + "; ".join(validation_errors))
+    auto_pass_candidates = [
+        c for c in candidates
+        if _is_auto_pass_scan(c.get("risk_scan") or {}) and not _already_fast_passed(c)
+    ]
+    card_candidates = [
+        c for c in candidates
+        if not _is_auto_pass_scan(c.get("risk_scan") or {}) and not _completed(c)
+    ]
+    skipped_completed = [
+        c for c in candidates
+        if not _is_auto_pass_scan(c.get("risk_scan") or {}) and _completed(c)
+    ]
+    card = None
+    card_selftest = "skipped_no_card_candidates"
+    if card_candidates:
+        if mode == "commit":
+            await _prepare_card_images(card_candidates)
+        card = build_fit_card(card_candidates, batch)
+        validation_errors = validate_fit_card(card, card_candidates)
+        if validation_errors:
+            raise RuntimeError("Compliance fit card self-test failed: " + "; ".join(validation_errors))
+        card_selftest = "passed"
     effective_frankie_only = bool(frankie_only or FRANKIE_ONLY)
     result: dict[str, Any] = {
         "ok": True,
@@ -1053,15 +1135,43 @@ async def send_fit_card(
         "batch_id": batch,
         "count": len(candidates),
         "record_ids": [c.get("record_id") for c in candidates],
-        "card_selftest": "passed",
-        **proc._card_media_stats(candidates),
+        "auto_pass_threshold": FAST_PASS_RISK_SCORE,
+        "auto_pass_count": sum(1 for c in candidates if _is_auto_pass_scan(c.get("risk_scan") or {})),
+        "auto_write_count": len(auto_pass_candidates),
+        "card_count": len(card_candidates),
+        "skipped_completed_count": len(skipped_completed),
+        "card_record_ids": [c.get("record_id") for c in card_candidates],
+        "auto_pass_records": [_scan_public_summary(c) for c in candidates if _is_auto_pass_scan(c.get("risk_scan") or {})],
+        "card_records": [_scan_public_summary(c) for c in card_candidates],
+        "skipped_completed_records": [_scan_public_summary(c) for c in skipped_completed],
+        "card_selftest": card_selftest,
+        **proc._card_media_stats(card_candidates),
     }
     if mode == "dry_run":
-        result["card"] = card
+        if card is not None:
+            result["card"] = card
         return result
-    if not candidates:
+    for candidate in auto_pass_candidates:
+        fields = _build_system_fast_pass_fields(candidate.get("risk_scan") or scan_candidate(candidate))
+        await _update_candidate(candidate["record_id"], fields)
+        candidate.update(
+            {
+                "compliance_gate": fields.get("合规闸结论"),
+                "ip_risk": fields.get("IP/外观风险"),
+                "risk_note": fields.get("侵权风险说明"),
+                "current_status": fields.get("当前状态"),
+                "overall_decision": fields.get("综合结论"),
+                "next_action": fields.get("下一步动作"),
+                "review_note": fields.get("人审备注"),
+                "data_gaps": fields.get("数据缺口") or [],
+            }
+        )
+    result["auto_written_record_ids"] = [c.get("record_id") for c in auto_pass_candidates]
+    if not card_candidates:
         result["sent"] = False
         result["message_id"] = ""
+        result["message_ids"] = []
+        result["recipients"] = []
         return result
     message_ids: list[str] = []
     recipients: list[dict[str, str]] = []

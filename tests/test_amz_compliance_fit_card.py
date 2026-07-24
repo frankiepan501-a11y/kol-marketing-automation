@@ -68,8 +68,10 @@ class AmzComplianceFitCardTests(unittest.TestCase):
         scan = fit.scan_candidate(self._candidate())
 
         rendered = json.dumps(scan, ensure_ascii=False)
-        self.assertEqual("review_required", scan["decision"])
+        self.assertEqual(60, scan["score"])
+        self.assertEqual("auto_pass_with_notes", scan["decision"])
         self.assertEqual("中", scan["level"])
+        self.assertIn("快速通过", scan["decision_label"])
         self.assertIn("Dreame", rendered)
         self.assertIn("品牌词/IP", rendered)
         self.assertIn("EU/GPSR", rendered)
@@ -83,6 +85,15 @@ class AmzComplianceFitCardTests(unittest.TestCase):
 
         self.assertEqual("auto_pass", scan["decision"])
         self.assertEqual("低", scan["level"])
+
+    def test_high_score_product_still_requires_exception_card(self):
+        candidate = self._candidate(
+            title="Official OEM Dreame L20 Ultra replacement filter with charger for kids toy"
+        )
+        scan = fit.scan_candidate(candidate)
+
+        self.assertEqual("reject_recommended", scan["decision"])
+        self.assertGreater(scan["score"], fit.FAST_PASS_RISK_SCORE)
 
     def test_risk_feedback_card_has_independent_forms_and_no_manual_audit_controls(self):
         candidates = [self._candidate("rec1"), self._candidate("rec2")]
@@ -320,14 +331,56 @@ class AmzComplianceFitCardTests(unittest.TestCase):
 
         self.assertEqual("success", result["toast"]["type"])
         self.assertEqual("rec1", updates[0][0])
-        self.assertEqual("暂缓", updates[0][1]["合规闸结论"])
+        self.assertEqual("Go", updates[0][1]["合规闸结论"])
         self.assertEqual("中", updates[0][1]["IP/外观风险"])
-        self.assertEqual("待合规核查", updates[0][1]["当前状态"])
+        self.assertEqual("待50件验证", updates[0][1]["当前状态"])
         self.assertIn("自动风险扫描", updates[0][1]["侵权风险说明"])
         self.assertEqual(1, len(patches))
         rendered = json.dumps(patches[0][1], ensure_ascii=False)
         self.assertIn("自动风险处理已完成", rendered)
         self.assertIn("risk_action_rec2", rendered)
+
+    def test_send_fit_card_auto_writes_fast_pass_and_skips_card(self):
+        original_get_many = fit._get_candidates_by_ids
+        original_update = fit._update_candidate
+        original_send_union = fit.amz_assistant.send_card_to_union
+        updates = []
+        sent = []
+
+        async def fake_get_many(record_ids):
+            return [self._candidate(record_ids[0])]
+
+        async def fake_update(record_id, fields):
+            updates.append((record_id, fields))
+
+        async def fake_send_union(union_id, card):
+            sent.append((union_id, card))
+            return "om_unexpected"
+
+        try:
+            fit._get_candidates_by_ids = fake_get_many
+            fit._update_candidate = fake_update
+            fit.amz_assistant.send_card_to_union = fake_send_union
+            result = asyncio.run(fit.send_fit_card(
+                mode="commit",
+                record_ids=["rec1"],
+                frankie_only=True,
+            ))
+        finally:
+            fit._get_candidates_by_ids = original_get_many
+            fit._update_candidate = original_update
+            fit.amz_assistant.send_card_to_union = original_send_union
+
+        self.assertEqual(1, result["auto_pass_count"])
+        self.assertEqual(1, result["auto_write_count"])
+        self.assertEqual(0, result["card_count"])
+        self.assertFalse(result["sent"])
+        self.assertEqual([], sent)
+        self.assertEqual("rec1", updates[0][0])
+        self.assertEqual("Go", updates[0][1]["合规闸结论"])
+        self.assertEqual("待50件验证", updates[0][1]["当前状态"])
+        self.assertIn("铺货快速阈值自动通过", updates[0][1]["人审备注"])
+        self.assertIn("问题点", updates[0][1]["侵权风险说明"])
 
     def test_send_fit_card_can_send_to_gray_recipients_when_enabled(self):
         original_frankie_only = fit.FRANKIE_ONLY
@@ -338,7 +391,10 @@ class AmzComplianceFitCardTests(unittest.TestCase):
         sent = []
 
         async def fake_get_many(record_ids):
-            return [self._candidate(record_ids[0])]
+            return [self._candidate(
+                record_ids[0],
+                title="Official OEM Dreame L20 Ultra replacement filter with charger for kids toy",
+            )]
 
         async def fake_send_union(union_id, card):
             sent.append(("union", union_id, card))
@@ -372,6 +428,7 @@ class AmzComplianceFitCardTests(unittest.TestCase):
             fit.amz_assistant.send_card_to_chat = original_send_chat
 
         self.assertFalse(result["frankie_only"])
+        self.assertEqual(1, result["card_count"])
         self.assertEqual(["om_chat", "om_union"], result["message_ids"])
         self.assertEqual(("chat", "oc_ops"), sent[0][:2])
         self.assertEqual(("union", "on_ops"), sent[1][:2])
