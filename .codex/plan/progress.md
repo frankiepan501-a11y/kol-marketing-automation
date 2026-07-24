@@ -76,3 +76,8 @@
 - 已提交并推送 `5982587 fix: fast-pass AMZ puhuo compliance scan`，Zeabur deployment `6a62e5599cfc4cd5e689a0d2` 已 `RUNNING`，线上 `/health=ok`。
 - 已跑线上受保护 dry-run：两条 P0 记录均 `60分 / 中风险 / auto_pass_with_notes`，`card_count=0`，不生成新卡；commit 后返回 `sent=false`、`message_ids=[]`、`auto_written_record_ids=[recvq1QtafnVjX,recvq1QtUEEcXv]`。
 - 候选表读回确认 `B0CH1817WW` 和 `B0D1CLBFD9` 均已写成 `合规闸结论=Go`、`当前状态=待50件验证`、`综合结论=50件验证`、`下一步动作=发起50件验证`，`侵权风险说明` 保留品牌/IP、外观/专利线索、EU/GPSR 注意点。
+- 2026-07-24 进入 50件验证节点前，先读候选表字段结构：已存在专用字段 `50件验证状态`，选项为 `未开始 / 进行中 / 已通过 / 未通过`；无需新增字段或写脏选项。
+- 已新增 `app/amz_validation50.py` 和受保护 endpoint `POST /cs/amz-validation50/start`。节点进入条件：`合规闸结论=Go`、`当前状态=待50件验证`、`综合结论=50件验证`、`采购回填状态=已回填`、有采购成本和 1688 供应商链接、且 `50件验证状态` 不是 `进行中/已通过`。
+- 50件验证启动卡只做启动交接，不含人工审批表单；展示产品图、Amazon Listing、主图原图、候选表、1688供应商、A/B/C 三渠道经济性、50件采购+物流粗算、验证要看和系统注意点。
+- 本地验证通过：`py_compile app\amz_validation50.py app\main.py`、`tests.test_amz_validation50` 5 tests、`scripts\amz_validation50_selftest.py`、采购卡 17 tests、合规卡 14 tests、AMZ 差评审计 18 tests、合规卡 selftest。
+- 交接文档已写入 `docs/handoff_amz_validation50_p0_2026-07-24.md`。下一步是提交推送、线上 dry-run，然后 commit 启动 `recvq1QtafnVjX` 和 `recvq1QtUEEcXv` 的 50件验证。
