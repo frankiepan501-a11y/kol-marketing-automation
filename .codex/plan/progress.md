@@ -64,3 +64,8 @@
 - 已提交并推送 `4bc7c1d fix: make AMZ compliance card automated risk feedback` 到 `master`，Zeabur deployment `6a624de99cfc4cd5e689957e` 已 `RUNNING`，线上 `/health=ok`。
 - 已跑线上受保护 dry-run：`ok=true`、`count=2`、`card_selftest=passed`、2 个独立异常处理表单、2 个 action 下拉、2 个备注输入、`amz_fit_check_feedback_submit`，且不含旧 `fit_result_*` / `fit_iprisk_*` / `确认核查本产品`。
 - 已发送新的 Frankie-only 自动风险扫描结果样卡，`message_id=om_x100b6910aa1d9ca0ded8a5f95a39ce0`，读回确认为 `msg_type=interactive`，含自动风险扫描结果、自动发现的问题点、2 张产品图、8 个业务按钮，且不含旧人工风险字段。2026-07-24 用户指出下拉动作名不清晰；已改为业务动作文案，下一张样卡需验证“怎么选”说明和新动作名渲染。
+- 2026-07-24 已完成合规/适配卡动作清晰化：卡片顶部新增“怎么选”，四个动作改为 `采纳系统建议，自动进入下一步` / `系统判断有误，退回复核` / `资料不够，采购补资料` / `风险较高，升级合规复核`，并在卡内说明点选后的系统写回结果。旧动作名仍作为回调别名兼容已发旧卡，但新卡不展示旧文案。
+- 本地验证通过：`py_compile`、`scripts/amz_compliance_fit_card_selftest.py`、`test_amz_compliance_fit_card.py` 12 tests、采购卡回归 17 tests、AMZ审计回归 18 tests、`git diff --check` 无错误。
+- 已提交并推送 `2c5902a fix: clarify AMZ compliance card actions` 到 `master`，Zeabur deployment `6a62d3389cfc4cd5e6899e36` 已 `RUNNING`，线上 `/health=ok`。
+- 已跑线上受保护 dry-run：`ok=true`、`count=2`、`card_selftest=passed`；生成卡 JSON 确认包含“怎么选”和四个新动作，且不含旧 `确认系统建议`、`处理系统建议`、`fit_result_*`。
+- 已发送新的 Frankie-only 清晰化样卡，`message_id=om_x100b69190ff3a8b4c4cdbdacbd8da8c`；飞书消息读回确认 `msg_type=interactive`，含“怎么选”和四个新动作，旧文案和旧人工控件均不存在。下一步需要 Frankie 在这张新卡上点一个产品做真实回调写回测试，再读候选表和原卡 PATCH 状态。

@@ -13,9 +13,9 @@ Current P0 direction:
 The old manual card action `amz_fit_check_submit` is now treated as a disabled legacy action.
 
 Latest confirmed production state:
-- Code commit: `4bc7c1d fix: make AMZ compliance card automated risk feedback`
-- Zeabur deployment: `6a624de99cfc4cd5e689957e`, status `RUNNING`, commit `4bc7c1d`
-- Corrected Frankie-only sample card sent: `om_x100b6910aa1d9ca0ded8a5f95a39ce0`
+- Code commit: `2c5902a fix: clarify AMZ compliance card actions`
+- Zeabur deployment: `6a62d3389cfc4cd5e6899e36`, status `RUNNING`, commit `2c5902a`
+- Current Frankie-only sample card sent: `om_x100b69190ff3a8b4c4cdbdacbd8da8c`
 - Callback writeback is still waiting for a real card click on the corrected Frankie-only sample.
 
 Scope:
@@ -225,7 +225,8 @@ Authorization: Bearer <INTERNAL_TOKEN>
 Expected corrected dry-run:
 - `card_selftest=passed`
 - card contains `自动风险扫描结果`, `自动发现的问题点`, `risk_action_*`, `risk_note_*`, and `amz_fit_check_feedback_submit`
-- card does not contain `fit_result_*`, `fit_iprisk_*`, or `确认核查本产品`
+- card contains `怎么选` and the four business-facing actions;
+- card does not contain `fit_result_*`, `fit_iprisk_*`, `确认核查本产品`, `确认系统建议`, or `处理系统建议`.
 
 Then send Frankie-only corrected sample:
 
@@ -248,3 +249,11 @@ Before any operations/采购/合规 group rollout, require:
 - protected online dry-run passed;
 - Frankie-only real card render confirmed;
 - at least one callback writeback verified by candidate table readback and original-card PATCH readback.
+
+2026-07-24 clarity fix verification:
+- Commit `2c5902a` deployed as Zeabur deployment `6a62d3389cfc4cd5e6899e36`, status `RUNNING`; `/health` returned `{"status":"ok"}`.
+- Protected online dry-run returned `ok=true`, `count=2`, `card_selftest=passed`.
+- Dry-run card JSON confirmed `怎么选`, `采纳系统建议，自动进入下一步`, `系统判断有误，退回复核`, `资料不够，采购补资料`, `风险较高，升级合规复核`.
+- Dry-run card JSON confirmed old wording/control absence: no `确认系统建议`, no `处理系统建议`, no `fit_result_*`.
+- Frankie-only sample card sent: `message_id=om_x100b69190ff3a8b4c4cdbdacbd8da8c`.
+- Feishu IM readback confirmed `msg_type=interactive` and the same new action wording; old wording/control strings were absent.
