@@ -69,3 +69,5 @@
 - 已提交并推送 `2c5902a fix: clarify AMZ compliance card actions` 到 `master`，Zeabur deployment `6a62d3389cfc4cd5e6899e36` 已 `RUNNING`，线上 `/health=ok`。
 - 已跑线上受保护 dry-run：`ok=true`、`count=2`、`card_selftest=passed`；生成卡 JSON 确认包含“怎么选”和四个新动作，且不含旧 `确认系统建议`、`处理系统建议`、`fit_result_*`。
 - 已发送新的 Frankie-only 清晰化样卡，`message_id=om_x100b69190ff3a8b4c4cdbdacbd8da8c`；飞书消息读回确认 `msg_type=interactive`，含“怎么选”和四个新动作，旧文案和旧人工控件均不存在。下一步需要 Frankie 在这张新卡上点一个产品做真实回调写回测试，再读候选表和原卡 PATCH 状态。
+- 2026-07-24 Frankie 已在清晰化样卡点击 `B0CH1817WW / recvq1QtafnVjX` 的 `采纳系统建议，自动进入下一步`；候选表读回确认 `合规闸结论=暂缓`、`IP/外观风险=中`、`当前状态=待合规核查`、`综合结论=暂缓`、`数据缺口=认证`、`下一步动作=按自动风险点补资料/改文案后重扫`，`人审备注` 含处理动作，`侵权风险说明` 已写入自动问题清单。
+- 原飞书卡 `om_x100b69190ff3a8b4c4cdbdacbd8da8c` 读回确认 `msg_type=interactive`、`updated=true`、含 `自动风险处理已完成`；同卡第二条 `B0D1CLBFD9 / recvq1QtUEEcXv` 仍为 `合规闸结论=待核`，说明单产品回调隔离正常。

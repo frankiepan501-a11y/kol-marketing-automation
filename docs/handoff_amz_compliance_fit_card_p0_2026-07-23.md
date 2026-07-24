@@ -16,7 +16,7 @@ Latest confirmed production state:
 - Code commit: `2c5902a fix: clarify AMZ compliance card actions`
 - Zeabur deployment: `6a62d3389cfc4cd5e6899e36`, status `RUNNING`, commit `2c5902a`
 - Current Frankie-only sample card sent: `om_x100b69190ff3a8b4c4cdbdacbd8da8c`
-- Callback writeback is still waiting for a real card click on the corrected Frankie-only sample.
+- First real callback writeback verified for `B0CH1817WW / recvq1QtafnVjX`.
 
 Scope:
 - One batch sends one shared automated risk-scan result card.
@@ -257,3 +257,17 @@ Before any operations/采购/合规 group rollout, require:
 - Dry-run card JSON confirmed old wording/control absence: no `确认系统建议`, no `处理系统建议`, no `fit_result_*`.
 - Frankie-only sample card sent: `message_id=om_x100b69190ff3a8b4c4cdbdacbd8da8c`.
 - Feishu IM readback confirmed `msg_type=interactive` and the same new action wording; old wording/control strings were absent.
+
+2026-07-24 first real callback verification:
+- Frankie clicked `采纳系统建议，自动进入下一步` on `B0CH1817WW / recvq1QtafnVjX`.
+- Candidate table readback confirmed:
+  - `合规闸结论=暂缓`
+  - `IP/外观风险=中`
+  - `当前状态=待合规核查`
+  - `综合结论=暂缓`
+  - `数据缺口=认证`
+  - `下一步动作=按自动风险点补资料/改文案后重扫`
+  - `人审备注` includes `处理动作=采纳系统建议，自动进入下一步`
+  - `侵权风险说明` includes the automated issue list.
+- Original Feishu card readback confirmed `msg_type=interactive`, `updated=true`, and `自动风险处理已完成`.
+- Same-card second product `B0D1CLBFD9 / recvq1QtUEEcXv` remained pending (`合规闸结论=待核`), confirming row-level callback isolation.
