@@ -81,3 +81,8 @@
 - 50件验证启动卡只做启动交接，不含人工审批表单；展示产品图、Amazon Listing、主图原图、候选表、1688供应商、A/B/C 三渠道经济性、50件采购+物流粗算、验证要看和系统注意点。
 - 本地验证通过：`py_compile app\amz_validation50.py app\main.py`、`tests.test_amz_validation50` 5 tests、`scripts\amz_validation50_selftest.py`、采购卡 17 tests、合规卡 14 tests、AMZ 差评审计 18 tests、合规卡 selftest。
 - 交接文档已写入 `docs/handoff_amz_validation50_p0_2026-07-24.md`。下一步是提交推送、线上 dry-run，然后 commit 启动 `recvq1QtafnVjX` 和 `recvq1QtUEEcXv` 的 50件验证。
+- 已提交并推送 `7037eb7 feat: add AMZ 50-unit validation start node` 到 `master`；Zeabur deployment `6a62ef2d9cfc4cd5e689a206` 已 `RUNNING`，线上 `/health=ok`。
+- 线上受保护 dry-run 通过：`eligible_count=2`、`skipped_count=0`、`card_selftest=passed`、`image_url_count=2`、`listing_url_count=2`、`would_update_count=2`。
+- 已执行线上 commit：`updated_record_ids=recvq1QtafnVjX,recvq1QtUEEcXv`，`sent=true`，Frankie-only 启动卡 `message_id=om_x100b691ab7d71ca0dfd33119ed4643b`，图片嵌入数 `2/2`。
+- 候选表回读确认两条均为 `当前状态=待50件验证`、`综合结论=50件验证`、`下一步动作=发起50件验证`、`50件验证状态=进行中`，`人审备注` 已追加 `进入50件验证` 批次记录。
+- 飞书消息读回确认 `msg_type=interactive`，卡内包含 `B0CH1817WW`、`B0D1CLBFD9`、`50件验证要看`、`打开1688供应商`、图片 key，且不含 `form_submit`。

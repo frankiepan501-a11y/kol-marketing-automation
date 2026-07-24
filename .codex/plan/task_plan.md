@@ -12,7 +12,7 @@
 | 3. 增加卡片发前自测 | complete | 本地脚本检查三个 URL 按钮、输入框、form_submit payload 和模拟回调 |
 | 4. 验证、提交、部署 | complete | 单测和自测通过，commit 推送 master，Zeabur 健康检查通过 |
 | 5. 沉淀教训 | complete | 写入 memory-candidate，后续卡片必须先自测再发 |
-| 6. 进入50件验证节点 | in_progress | 合规自动通过的 P0 候选被写入50件验证启动状态，并生成可追踪的验证启动材料 |
+| 6. 进入50件验证节点 | complete | 合规自动通过的 P0 候选被写入50件验证启动状态，并生成可追踪的验证启动材料 |
 
 ## Decisions
 
