@@ -58,6 +58,12 @@ MARGIN_SNAPSHOT_PATH = Path(
         Path(__file__).resolve().parents[1] / "data" / "amz_selection" / "four_asin_5site_margin_snapshot_20260723.json",
     )
 )
+SALES_SNAPSHOT_PATH = Path(
+    os.environ.get(
+        "AMZ_SELECTION_SALES_SNAPSHOT_PATH",
+        Path(__file__).resolve().parents[1] / "data" / "amz_selection" / "four_asin_5site_sales_metrics_20260728.json",
+    )
+)
 
 SITES = [
     {"code": "DE", "label": "德国", "currency": "EUR", "symbol": "€", "fx": EUR_RMB},
@@ -98,6 +104,7 @@ QTY_LIMITS = {
 _bg_tasks: set[asyncio.Task] = set()
 _recent_callbacks: dict[str, float] = {}
 _margin_snapshot: dict[tuple[str, str], dict] | None = None
+_sales_snapshot: dict[tuple[str, str], dict] | None = None
 
 
 def _now_ms() -> int:
@@ -263,6 +270,32 @@ def _snapshot_for(candidate: dict, site: str) -> dict | None:
     if not asin:
         return None
     return _load_margin_snapshot().get((asin, site.upper()))
+
+
+def _load_sales_snapshot() -> dict[tuple[str, str], dict]:
+    global _sales_snapshot
+    if _sales_snapshot is not None:
+        return _sales_snapshot
+    snapshot: dict[tuple[str, str], dict] = {}
+    try:
+        if SALES_SNAPSHOT_PATH.exists():
+            rows = json.loads(SALES_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+            for row in rows if isinstance(rows, list) else []:
+                asin = _text(row.get("asin") or row.get("ASIN")).upper()
+                site = _text(row.get("site") or row.get("站点")).upper()
+                if asin and site:
+                    snapshot[(asin, site)] = row
+    except Exception:
+        snapshot = {}
+    _sales_snapshot = snapshot
+    return _sales_snapshot
+
+
+def _sales_snapshot_for(candidate: dict, site: str) -> dict | None:
+    asin = _text(candidate.get("asin")).upper()
+    if not asin:
+        return None
+    return _load_sales_snapshot().get((asin, site.upper()))
 
 
 def _field_value(fields: dict, *names: str) -> Any:
@@ -456,6 +489,7 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
     for site in SITES:
         code = site["code"]
         snapshot = _snapshot_for(candidate, code)
+        sales_snapshot = _sales_snapshot_for(candidate, code) or {}
         sample_price = _site_value(
             fields,
             code,
@@ -464,10 +498,40 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
         avg_price = _site_value(fields, code, ["竞品均价", "竞品平均售价", "竞品平均价", "平均售价", "平均价格"])
         median_price = _site_value(fields, code, ["竞品中位价", "竞品价格中位数", "竞品售价中位数", "价格中位数"])
         price_range = _site_value(fields, code, ["竞品价格区间", "价格区间", "售价区间"])
-        comp_sales = _site_value(fields, code, ["竞品平均月销量", "竞品月销量均值", "竞品月销均值", "平均月销量", "月销量", "月销量估算"])
-        new_sales = _site_value(fields, code, ["类目新品平均月销量", "新品平均月销量", "新品月销均值", "新品月销量"])
+        sample_asin_sales = _site_value(fields, code, ["样本ASIN月销量", "样本ASIN月销", "样本月销量", "样本月销"])
+        product_comp_sales = _site_value(
+            fields,
+            code,
+            ["产品级竞品月销量中位数", "产品级竞品月销中位数", "产品级竞品月销", "同型号竞品月销", "竞品中位月销量", "竞品月销中位数"],
+        )
+        product_comp_avg = _site_value(
+            fields,
+            code,
+            ["产品级竞品月销量均值", "产品级竞品月销均值", "同型号竞品月销均值", "竞品平均月销量", "竞品月销量均值", "竞品月销均值", "平均月销量", "月销量", "月销量估算"],
+        )
+        product_comp_n = _site_value(fields, code, ["产品级竞品样本数", "同型号竞品样本数", "竞品月销样本数"])
+        category_comp_sales = _site_value(fields, code, ["类目竞品月销量中位数", "类目竞品月销中位数", "类目竞品月销", "类目可比竞品月销"])
+        new_sales = _site_value(fields, code, ["类目新品月销量中位数", "类目新品月销中位数", "类目新品平均月销量", "新品平均月销量", "新品月销均值", "新品月销量"])
+        new_sales_n = _site_value(fields, code, ["类目新品样本数", "新品样本数"])
         if _num(sample_price) is None and snapshot and _num(snapshot.get("price")) is not None:
             sample_price = snapshot.get("price")
+        if _num(sample_asin_sales) is None:
+            sample_asin_sales = sales_snapshot.get("sample_asin_monthly_sales")
+        if _num(product_comp_sales) is None:
+            product_comp_sales = sales_snapshot.get("product_competitor_median_monthly_sales")
+        if _num(product_comp_avg) is None:
+            product_comp_avg = sales_snapshot.get("product_competitor_trimmed_avg_monthly_sales")
+        if _num(product_comp_sales) is None and _num(product_comp_avg) is not None:
+            product_comp_sales = product_comp_avg
+        if _num(product_comp_n) is None:
+            product_comp_n = sales_snapshot.get("product_competitor_sample_count")
+        if _num(category_comp_sales) is None:
+            category_comp_sales = sales_snapshot.get("category_competitor_median_monthly_sales")
+        if _num(new_sales) is None:
+            new_sales = sales_snapshot.get("category_new_median_monthly_sales")
+        if _num(new_sales_n) is None:
+            new_sales_n = sales_snapshot.get("category_new_sample_count")
+        comp_sales = product_comp_sales if _num(product_comp_sales) is not None else category_comp_sales
         site_decision = product_decision
         reasons = []
         if _num(sample_price) is None and _num(avg_price) is None and _num(median_price) is None:
@@ -475,6 +539,10 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
             reasons.append("需补本站售价")
         elif snapshot and _site_value(fields, code, ["样本竞品售价", "样本ASIN售价", "样本售价", "售价", "价格", "竞品售价"]) is None:
             reasons.append("售价/毛利取五站快照")
+        if sales_snapshot and _site_value(fields, code, ["产品级竞品月销量中位数", "产品级竞品月销中位数", "产品级竞品月销", "同型号竞品月销", "竞品中位月销量", "竞品月销中位数", "类目新品月销量中位数", "类目新品月销中位数", "类目新品平均月销量"]) is None:
+            reasons.append("月销取Sorftime快照")
+        if _num(product_comp_sales) is None and _num(category_comp_sales) is not None:
+            reasons.append("产品级竞品不足，暂用类目可比竞品")
         qty, qty_note = suggest_purchase_qty(
             competitor_avg_monthly_sales=comp_sales,
             category_new_avg_monthly_sales=new_sales,
@@ -506,9 +574,18 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
                 "median_price": median_price,
                 "price_range": price_range,
                 "suggested_price": suggested_price,
+                "sample_asin_monthly_sales": sample_asin_sales,
+                "sample_asin_sales_source": sales_snapshot.get("sample_asin_sales_source") or "",
+                "product_competitor_monthly_sales": product_comp_sales,
+                "product_competitor_avg_monthly_sales": product_comp_avg,
+                "product_competitor_sample_count": product_comp_n,
+                "category_competitor_monthly_sales": category_comp_sales,
                 "competitor_avg_monthly_sales": comp_sales,
                 "category_new_avg_monthly_sales": new_sales,
+                "category_new_sample_count": new_sales_n,
                 "reference_monthly_sales": reference_monthly_sales(comp_sales, new_sales),
+                "monthly_data_quality": sales_snapshot.get("monthly_data_quality") or "",
+                "monthly_source": sales_snapshot.get("monthly_source") or "",
                 "coverage_days": coverage,
                 "suggested_qty": qty,
                 "qty_note": qty_note,
@@ -579,11 +656,24 @@ def _site_line(row: dict) -> str:
     ref = _fmt_monthly(row.get("reference_monthly_sales"))
     sample = _fmt_money(row.get("sample_price"), symbol)
     suggested = _fmt_money(row.get("suggested_price"), symbol)
+    sample_sales = _fmt_monthly(row.get("sample_asin_monthly_sales"))
+    if sample_sales == "待补" and "returned null" in _text(row.get("sample_asin_sales_source")):
+        sample_sales = "不可用"
+    product_comp = _fmt_monthly(row.get("product_competitor_monthly_sales"))
+    product_comp_avg = _fmt_monthly(row.get("product_competitor_avg_monthly_sales"))
+    product_comp_n = _fmt_num(row.get("product_competitor_sample_count"), 0)
+    category_comp = _fmt_monthly(row.get("category_competitor_monthly_sales"))
+    new_sales = _fmt_monthly(row.get("category_new_avg_monthly_sales"))
+    new_sales_n = _fmt_num(row.get("category_new_sample_count"), 0)
+    if product_comp == "待补" and category_comp != "待补":
+        product_part = f"产品竞品不足｜类目竞品中位 {category_comp}"
+    else:
+        product_part = f"产品竞品中位 {product_comp}/均值 {product_comp_avg}/n={product_comp_n}"
     return (
         f"- {row['site']}: 竞品价 {sample}｜建议价 {suggested}｜"
-        f"竞品月销 {_fmt_monthly(row.get('competitor_avg_monthly_sales'))}｜"
-        f"新品月销 {_fmt_monthly(row.get('category_new_avg_monthly_sales'))}｜"
-        f"参考月销 {ref}｜建议采购 {qty_text}｜{row.get('margin_text')}｜{row.get('reason')}"
+        f"样本月销 {sample_sales}｜{product_part}｜"
+        f"类目新品中位 {new_sales}/n={new_sales_n}｜"
+        f"参考月销 {ref}｜建议采购 {qty_text}｜{row.get('margin_text')}｜{row.get('monthly_data_quality') or '数据待标注'}｜{row.get('reason')}"
     )
 
 
@@ -714,7 +804,7 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
             ],
         }
     )
-    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**竞品售价、建议售价与各站采购量**\n" + _site_price_summary(candidate)}})
+    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**竞品售价、月销口径、建议售价与各站采购量**\n" + _site_price_summary(candidate)}})
     elements.append({"tag": "div", "text": {"tag": "lark_md", "content": proc._channel_compare_text(candidate)}})
     elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**回款/投入分析**\n" + _cashflow_line(candidate)}})
     elements.append(
@@ -782,7 +872,7 @@ def build_selection_confirmation_card(candidates: list[dict], batch_id: str = ""
                 ),
             },
         },
-        {"tag": "note", "elements": [{"tag": "plain_text", "content": "首批采购量按竞品月销量×60% + 类目新品月销量×40% 估算；缺月销时只展示缺口，不硬算数量。"}]},
+        {"tag": "note", "elements": [{"tag": "plain_text", "content": "首批采购量按参考月销、入场系数、覆盖天数和装箱倍数估算；参考月销优先用产品级竞品中位数，产品级样本不足时标注并回退到类目可比竞品。"}]},
     ]
     for candidate in candidates:
         elements.extend(_product_elements(candidate, record_ids))
@@ -831,7 +921,7 @@ def validate_selection_confirmation_card(card: dict, candidates: list[dict]) -> 
             for action in DECISION_ACTIONS:
                 if action not in actions:
                     errors.append(f"{label}: missing decision action {action}")
-    for required in ("四个按钮怎么用", "竞品售价", "建议售价", "建议采购", "回款/投入分析", "三渠道对比", "Go", "条件推进", "暂缓", "淘汰"):
+    for required in ("四个按钮怎么用", "竞品售价", "建议售价", "样本月销", "产品竞品", "类目新品", "建议采购", "回款/投入分析", "三渠道对比", "Go", "条件推进", "暂缓", "淘汰"):
         if required not in rendered:
             errors.append(f"card missing {required}")
     if '"tag": "form"' in rendered or "form_submit" in rendered:

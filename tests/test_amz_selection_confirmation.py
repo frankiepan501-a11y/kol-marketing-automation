@@ -119,9 +119,12 @@ class AmzSelectionConfirmationTests(unittest.TestCase):
 
         self.assertIn("欧洲站选品结果确认", rendered)
         self.assertIn("不是上架验证卡，也不是固定50件试销卡", rendered)
-        self.assertIn("竞品售价、建议售价与各站采购量", rendered)
+        self.assertIn("竞品售价、月销口径、建议售价与各站采购量", rendered)
         self.assertIn("DE: 竞品价 €25.99", rendered)
         self.assertIn("UK: 竞品价 £21.99", rendered)
+        self.assertIn("样本月销", rendered)
+        self.assertIn("产品竞品中位", rendered)
+        self.assertIn("类目新品中位", rendered)
         self.assertIn("建议采购 10件", rendered)
         self.assertIn("三渠道对比", rendered)
         self.assertIn("回款/投入分析", rendered)
@@ -152,11 +155,12 @@ class AmzSelectionConfirmationTests(unittest.TestCase):
 
         self.assertIn("UK: 竞品价 £28.45", summary)
         self.assertIn("中企最佳 C 148.2/57.9%", summary)
-        self.assertIn("竞品月销 待补", summary)
-        self.assertIn("新品月销 待补", summary)
-        self.assertIn("建议采购 需补月销", summary)
+        self.assertIn("样本月销 不可用", summary)
+        self.assertIn("产品竞品", summary)
+        self.assertIn("类目新品中位", summary)
+        self.assertIn("月销取Sorftime快照", summary)
         self.assertIn("售价/毛利取五站快照", summary)
-        self.assertGreaterEqual(sum(sel._row_has_data_gap(row) for row in candidate["site_suggestions"]), 4)
+        self.assertLessEqual(sum(sel._row_has_data_gap(row) for row in candidate["site_suggestions"]), 1)
 
     def test_process_callback_updates_decision_and_patches_original_card(self):
         candidate = self._candidate()

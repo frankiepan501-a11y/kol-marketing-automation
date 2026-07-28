@@ -106,3 +106,8 @@
 - 本地验证通过：`py_compile`、`tests/test_amz_selection_confirmation.py` 5 tests OK、`scripts/amz_selection_confirmation_selftest.py`、`git diff --check` 仅 CRLF 提示。
 - 首次线上 dry-run 仍显示非 DE 站点空白；二次定位发现 Dockerfile 只 `COPY app/`，未把新增 `data/` 目录打入镜像。已补 `COPY data/ /app/data/`，与代码默认快照路径 `/app/data/...` 对齐。
 - 当前真实缺口：UK / FR / IT / ES 的竞品平均月销量和类目新品平均月销量还没有结构化数据源；后续应通过 Sorftime/SellerSprite 补写候选表，才能自动算各站建议采购量。
+- 用户指出卡片里竞品月销数据不正确/缺失，已暂停继续发新卡，先补清楚月销口径。
+- 已用 Sorftime `CategoryProducts` 按 4 个 ASIN × 5 站的 BSR 叶子类目拉取 page 1-2（每页 100 个热销品），并在本地按吸尘器配件关键词、价格带和型号词过滤，生成月销快照 `data/amz_selection/four_asin_5site_sales_metrics_20260728.json`。
+- 已额外验证 `AsinSalesVolume`：20 个 ASIN×站点请求中除 `B0CH1817WW/IT` 可从类目页命中 8 件月销外，其余样本 ASIN 直接销量均返回空；因此卡片不能硬写样本 ASIN 月销，必须标注“不可用/未命中”。
+- 已把卡片月销展示拆成：`样本月销`、`产品级竞品中位/均值/n`、`类目新品中位/n`、`参考月销`、`数据质量`、`数据来源说明`。采购量计算优先用产品级竞品中位数；产品级样本不足时标注并回退到类目可比竞品中位数。
+- 本地验证通过：`py_compile app/amz_selection_confirmation.py app/amz_assistant.py app/main.py`、`tests/test_amz_selection_confirmation.py` 5 tests OK、`scripts/amz_selection_confirmation_selftest.py` 返回 `card_selftest=passed`。
