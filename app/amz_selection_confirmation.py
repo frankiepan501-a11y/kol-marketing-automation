@@ -515,23 +515,22 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
         new_sales_n = _site_value(fields, code, ["类目新品样本数", "新品样本数"])
         if _num(sample_price) is None and snapshot and _num(snapshot.get("price")) is not None:
             sample_price = snapshot.get("price")
-        if _num(sample_asin_sales) is None:
+        if sales_snapshot:
             sample_asin_sales = sales_snapshot.get("sample_asin_monthly_sales")
-        if _num(product_comp_sales) is None:
             product_comp_sales = sales_snapshot.get("product_competitor_median_monthly_sales")
-        if _num(product_comp_avg) is None:
             product_comp_avg = sales_snapshot.get("product_competitor_trimmed_avg_monthly_sales")
-        if _num(product_comp_sales) is None and _num(product_comp_avg) is not None:
-            product_comp_sales = product_comp_avg
-        if _num(product_comp_n) is None:
             product_comp_n = sales_snapshot.get("product_competitor_sample_count")
-        if _num(category_comp_sales) is None:
             category_comp_sales = sales_snapshot.get("category_competitor_median_monthly_sales")
-        if _num(new_sales) is None:
             new_sales = sales_snapshot.get("category_new_median_monthly_sales")
-        if _num(new_sales_n) is None:
             new_sales_n = sales_snapshot.get("category_new_sample_count")
-        comp_sales = product_comp_sales if _num(product_comp_sales) is not None else category_comp_sales
+        else:
+            if _num(product_comp_sales) is None and _num(product_comp_avg) is not None:
+                product_comp_sales = product_comp_avg
+        product_comp_n_num = _num(product_comp_n)
+        product_comp_enough = product_comp_n_num is not None and product_comp_n_num >= 3
+        comp_sales = product_comp_sales if product_comp_enough else category_comp_sales
+        if _num(comp_sales) is None:
+            comp_sales = product_comp_sales if _num(product_comp_sales) is not None else category_comp_sales
         site_decision = product_decision
         reasons = []
         if _num(sample_price) is None and _num(avg_price) is None and _num(median_price) is None:
@@ -543,6 +542,8 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
             reasons.append("月销取Sorftime快照")
         if _num(product_comp_sales) is None and _num(category_comp_sales) is not None:
             reasons.append("产品级竞品不足，暂用类目可比竞品")
+        elif not product_comp_enough and _num(category_comp_sales) is not None:
+            reasons.append("产品级样本不足，采购量用类目可比竞品")
         qty, qty_note = suggest_purchase_qty(
             competitor_avg_monthly_sales=comp_sales,
             category_new_avg_monthly_sales=new_sales,
@@ -583,7 +584,7 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
                 "competitor_avg_monthly_sales": comp_sales,
                 "category_new_avg_monthly_sales": new_sales,
                 "category_new_sample_count": new_sales_n,
-                "reference_monthly_sales": reference_monthly_sales(comp_sales, new_sales),
+                "reference_monthly_sales": sales_snapshot.get("reference_monthly_sales") if _num(sales_snapshot.get("reference_monthly_sales")) is not None else reference_monthly_sales(comp_sales, new_sales),
                 "monthly_data_quality": sales_snapshot.get("monthly_data_quality") or "",
                 "monthly_source": sales_snapshot.get("monthly_source") or "",
                 "coverage_days": coverage,
