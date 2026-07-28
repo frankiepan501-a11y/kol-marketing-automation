@@ -673,7 +673,8 @@ def _site_line(row: dict) -> str:
         f"- {row['site']}: 竞品价 {sample}｜建议价 {suggested}｜"
         f"样本月销 {sample_sales}｜{product_part}｜"
         f"类目新品中位 {new_sales}/n={new_sales_n}｜"
-        f"参考月销 {ref}｜建议采购 {qty_text}｜{row.get('margin_text')}｜{row.get('monthly_data_quality') or '数据待标注'}｜{row.get('reason')}"
+        f"参考月销 {ref}｜建议采购 {qty_text}｜{row.get('margin_text')}｜"
+        f"数据质量 {row.get('monthly_data_quality') or '待标注'}｜{row.get('reason')}"
     )
 
 
@@ -921,7 +922,7 @@ def validate_selection_confirmation_card(card: dict, candidates: list[dict]) -> 
             for action in DECISION_ACTIONS:
                 if action not in actions:
                     errors.append(f"{label}: missing decision action {action}")
-    for required in ("四个按钮怎么用", "竞品售价", "建议售价", "样本月销", "产品竞品", "类目新品", "建议采购", "回款/投入分析", "三渠道对比", "Go", "条件推进", "暂缓", "淘汰"):
+    for required in ("四个按钮怎么用", "竞品售价", "建议售价", "样本月销", "产品竞品", "类目新品", "建议采购", "数据质量", "回款/投入分析", "三渠道对比", "Go", "条件推进", "暂缓", "淘汰"):
         if required not in rendered:
             errors.append(f"card missing {required}")
     if '"tag": "form"' in rendered or "form_submit" in rendered:
