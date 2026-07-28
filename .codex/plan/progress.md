@@ -115,3 +115,4 @@
 - 抽取线上 dry-run 文本后发现候选表旧字段会污染 Sorftime 月销快照：例如 `产品竞品中位 741/均值 5/n=1`、`参考月销 655`。根因是 DE 站 `_site_value` 会回退读取候选表泛字段 `月销量/平均月销量`。已提交 `34e395e fix: prioritize AMZ selection sales snapshot`，选品确认卡优先使用本次 Sorftime 快照的月销字段；产品级样本数低于 3 时，展示产品级样本，但采购量用类目可比竞品回退。
 - 线上验证已通过：Zeabur 最新部署 `34e395e` 为 `RUNNING`，`/health=ok`，受保护 dry-run 返回 `count=4`、`card_selftest=passed`、`suggested_total_qty=225`、`data_gap_count=5`。必检文本均存在：`样本月销`、`产品竞品中位`、`类目新品中位`、`参考月销`、`数据质量`、`月销取Sorftime快照`、`产品级样本不足，采购量用类目可比竞品`；旧错误片段均不存在。
 - 已发送新的 Frankie-only 选品结果确认样卡，批次 `AMZ-EU-SELCONF-20260728-P2`，`message_id=om_x100b69bcbcd29ca8df9eac1fc15f3d0`。上一张 `om_x100b69bca7985ca4c23a6af74efc307` 是中间版，不作为最终确认卡。
+- 2026-07-28 用户指出 `产品竞品中位/均值/n=1` 和 `类目新品中位/n=25` 对运营不可读。已提交 `33d9287 fix: clarify AMZ selection sales wording`：卡片改为 `近似竞品月销：中位 X，均值 Y，样本 Z 个`、`类目新品月销：中位 X，样本 Z 个`、`数据可信度`，并移除 `n=`。线上 dry-run 和飞书读回均确认新文案存在、旧文案不存在；新版 Frankie-only 样卡 `message_id=om_x100b69bea73bc8b0c4c29f5ece39993`。
