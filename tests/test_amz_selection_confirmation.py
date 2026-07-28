@@ -135,6 +135,29 @@ class AmzSelectionConfirmationTests(unittest.TestCase):
         self.assertNotIn("form_submit", rendered)
         self.assertEqual([], sel.validate_selection_confirmation_card(card, [candidate]))
 
+    def test_site_snapshot_fallback_populates_non_de_price_and_margin(self):
+        candidate = self._candidate()
+        fields = candidate["raw_fields"]
+        for site in ("UK", "FR", "IT", "ES"):
+            for suffix in (
+                "样本竞品售价",
+                "竞品中位价",
+                "竞品平均月销量",
+                "类目新品平均月销量",
+            ):
+                fields.pop(f"{site}{suffix}", None)
+
+        candidate["site_suggestions"] = sel._build_site_suggestions(candidate)
+        summary = sel._site_price_summary(candidate)
+
+        self.assertIn("UK: 竞品价 £28.45", summary)
+        self.assertIn("中企最佳 C 148.2/57.9%", summary)
+        self.assertIn("竞品月销 待补", summary)
+        self.assertIn("新品月销 待补", summary)
+        self.assertIn("建议采购 需补月销", summary)
+        self.assertIn("售价/毛利取五站快照", summary)
+        self.assertGreaterEqual(sum(sel._row_has_data_gap(row) for row in candidate["site_suggestions"]), 4)
+
     def test_process_callback_updates_decision_and_patches_original_card(self):
         candidate = self._candidate()
         writes = []

@@ -14,6 +14,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from . import amz_assistant, amz_procurement_quote as proc
@@ -51,6 +52,12 @@ GRAY_CHAT_IDS = [x.strip() for x in os.environ.get("AMZ_SELECTION_CONFIRM_GRAY_C
 EUR_RMB = float(os.environ.get("AMZ_SELECTION_EUR_RMB", "7.85"))
 GBP_RMB = float(os.environ.get("AMZ_SELECTION_GBP_RMB", "9.30"))
 DEFAULT_PACK_MULTIPLE = int(os.environ.get("AMZ_SELECTION_PACK_MULTIPLE", "5"))
+MARGIN_SNAPSHOT_PATH = Path(
+    os.environ.get(
+        "AMZ_SELECTION_MARGIN_SNAPSHOT_PATH",
+        Path(__file__).resolve().parents[1] / "data" / "amz_selection" / "four_asin_5site_margin_snapshot_20260723.json",
+    )
+)
 
 SITES = [
     {"code": "DE", "label": "德国", "currency": "EUR", "symbol": "€", "fx": EUR_RMB},
@@ -90,6 +97,7 @@ QTY_LIMITS = {
 
 _bg_tasks: set[asyncio.Task] = set()
 _recent_callbacks: dict[str, float] = {}
+_margin_snapshot: dict[tuple[str, str], dict] | None = None
 
 
 def _now_ms() -> int:
@@ -216,12 +224,45 @@ def _fmt_money(value: Any, symbol: str = "€") -> str:
     return f"{symbol}{num:.2f}".rstrip("0").rstrip(".")
 
 
+def _fmt_monthly(value: Any) -> str:
+    num = _num(value)
+    if num is None:
+        return "待补"
+    return _fmt_num(num)
+
+
 def _fmt_rmb(value: Any) -> str:
     return proc._format_rmb(value)
 
 
 def _fmt_rate(value: Any) -> str:
     return proc._format_rate(value)
+
+
+def _load_margin_snapshot() -> dict[tuple[str, str], dict]:
+    global _margin_snapshot
+    if _margin_snapshot is not None:
+        return _margin_snapshot
+    snapshot: dict[tuple[str, str], dict] = {}
+    try:
+        if MARGIN_SNAPSHOT_PATH.exists():
+            rows = json.loads(MARGIN_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+            for row in rows if isinstance(rows, list) else []:
+                asin = _text(row.get("asin") or row.get("ASIN")).upper()
+                site = _text(row.get("site") or row.get("站点")).upper()
+                if asin and site:
+                    snapshot[(asin, site)] = row
+    except Exception:
+        snapshot = {}
+    _margin_snapshot = snapshot
+    return _margin_snapshot
+
+
+def _snapshot_for(candidate: dict, site: str) -> dict | None:
+    asin = _text(candidate.get("asin")).upper()
+    if not asin:
+        return None
+    return _load_margin_snapshot().get((asin, site.upper()))
 
 
 def _field_value(fields: dict, *names: str) -> Any:
@@ -389,7 +430,7 @@ def _suggested_price(sample_price: Any, median_price: Any, avg_price: Any, decis
     return round(anchor * coef, 2)
 
 
-def _site_margin_text(fields: dict, site: str) -> str:
+def _site_margin_text(fields: dict, site: str, snapshot: dict | None = None) -> str:
     cn_rate = _site_value(fields, site, ["中企号毛利率%", "中企号A-毛利率%", "中企号-毛利率%", "A-毛利率%"])
     local_rate = _site_value(fields, site, ["本土号毛利率%", "本本号毛利率%", "本土号A-毛利率%", "本本号A-毛利率%"])
     parts = []
@@ -397,6 +438,13 @@ def _site_margin_text(fields: dict, site: str) -> str:
         parts.append(f"中企 {_fmt_rate(cn_rate)}")
     if _text(local_rate):
         parts.append(f"本土 {_fmt_rate(local_rate)}")
+    if not parts and snapshot:
+        cn_best = _text(snapshot.get("cn_best"))
+        local_best = _text(snapshot.get("local_best"))
+        if cn_best and cn_best != "无售价":
+            parts.append(f"中企最佳 {cn_best}")
+        if local_best and local_best != "无售价":
+            parts.append(f"本本最佳 {local_best}")
     return " / ".join(parts) if parts else "毛利待结构化"
 
 
@@ -407,6 +455,7 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
     out = []
     for site in SITES:
         code = site["code"]
+        snapshot = _snapshot_for(candidate, code)
         sample_price = _site_value(
             fields,
             code,
@@ -417,11 +466,15 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
         price_range = _site_value(fields, code, ["竞品价格区间", "价格区间", "售价区间"])
         comp_sales = _site_value(fields, code, ["竞品平均月销量", "竞品月销量均值", "竞品月销均值", "平均月销量", "月销量", "月销量估算"])
         new_sales = _site_value(fields, code, ["类目新品平均月销量", "新品平均月销量", "新品月销均值", "新品月销量"])
+        if _num(sample_price) is None and snapshot and _num(snapshot.get("price")) is not None:
+            sample_price = snapshot.get("price")
         site_decision = product_decision
         reasons = []
         if _num(sample_price) is None and _num(avg_price) is None and _num(median_price) is None:
             site_decision = "暂缓" if product_decision != "淘汰" else "淘汰"
             reasons.append("需补本站售价")
+        elif snapshot and _site_value(fields, code, ["样本竞品售价", "样本ASIN售价", "样本售价", "售价", "价格", "竞品售价"]) is None:
+            reasons.append("售价/毛利取五站快照")
         qty, qty_note = suggest_purchase_qty(
             competitor_avg_monthly_sales=comp_sales,
             category_new_avg_monthly_sales=new_sales,
@@ -429,8 +482,15 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
             coverage_days=coverage,
             moq=_site_value(fields, code, ["MOQ", "最小起订量"]),
         )
+        monthly_missing = []
+        if _num(comp_sales) is None:
+            monthly_missing.append("竞品月销")
+        if _num(new_sales) is None:
+            monthly_missing.append("新品月销")
         if qty is None:
             reasons.append(qty_note)
+        elif monthly_missing:
+            reasons.append("、".join(monthly_missing) + "待补，按可用月销估算")
         suggested_price = _site_value(fields, code, ["建议售价", "建议售价€", "建议售价£", "建议价格"])
         if _num(suggested_price) is None:
             suggested_price = _suggested_price(sample_price, median_price, avg_price, site_decision)
@@ -453,8 +513,9 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
                 "suggested_qty": qty,
                 "qty_note": qty_note,
                 "decision": site_decision,
-                "margin_text": _site_margin_text(fields, code),
+                "margin_text": _site_margin_text(fields, code, snapshot),
                 "reason": "；".join(reasons) if reasons else "数据可用",
+                "snapshot": snapshot or {},
             }
         )
     _apply_total_qty_cap(out, product_decision)
@@ -515,13 +576,13 @@ def _site_line(row: dict) -> str:
     symbol = row["symbol"]
     qty = row.get("suggested_qty")
     qty_text = f"{qty}件" if isinstance(qty, int) else "需补月销"
-    ref = _fmt_num(row.get("reference_monthly_sales"))
+    ref = _fmt_monthly(row.get("reference_monthly_sales"))
     sample = _fmt_money(row.get("sample_price"), symbol)
     suggested = _fmt_money(row.get("suggested_price"), symbol)
     return (
         f"- {row['site']}: 竞品价 {sample}｜建议价 {suggested}｜"
-        f"竞品月销 {_fmt_num(row.get('competitor_avg_monthly_sales'))}｜"
-        f"新品月销 {_fmt_num(row.get('category_new_avg_monthly_sales'))}｜"
+        f"竞品月销 {_fmt_monthly(row.get('competitor_avg_monthly_sales'))}｜"
+        f"新品月销 {_fmt_monthly(row.get('category_new_avg_monthly_sales'))}｜"
         f"参考月销 {ref}｜建议采购 {qty_text}｜{row.get('margin_text')}｜{row.get('reason')}"
     )
 
@@ -576,6 +637,16 @@ def _cashflow_line(candidate: dict) -> str:
         f"首批投入约 {total_invest:.2f} RMB；预计净回款约 {gross_receipt:.2f} RMB；"
         f"回款比约 {payback_ratio:.1%}。"
     )
+
+
+def _row_has_data_gap(row: dict) -> bool:
+    if _num(row.get("sample_price")) is None and _num(row.get("avg_price")) is None and _num(row.get("median_price")) is None:
+        return True
+    if row.get("suggested_qty") is None:
+        return True
+    if "待结构化" in _text(row.get("margin_text")):
+        return True
+    return False
 
 
 def _decision_help_text() -> str:
@@ -945,7 +1016,7 @@ async def send_selection_confirmation_card(
             1
             for c in candidates
             for row in (c.get("site_suggestions") or [])
-            if row.get("suggested_qty") is None
+            if _row_has_data_gap(row)
         ),
         **proc._card_media_stats(candidates),
     }

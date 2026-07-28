@@ -93,3 +93,15 @@
 - 2026-07-24 已完成 `选品结果确认卡` 本地 P0 实现：新增 `app/amz_selection_confirmation.py`、接口 `POST /cs/amz-selection-confirmation/send`、飞书回调路由 `amz_selection_`、自测 `scripts/amz_selection_confirmation_selftest.py`、单测 `tests/test_amz_selection_confirmation.py`，交接文档 `docs/handoff_amz_selection_confirmation_p0_2026-07-24.md`。卡片展示五站竞品售价/建议售价/建议采购量、三渠道毛利、回款/投入分析、合规注意点，并用 `Go / 条件推进 / 暂缓 / 淘汰` 四个按钮写回候选表已有状态字段。
 - 本地验证通过：`py_compile app\amz_selection_confirmation.py app\amz_assistant.py app\main.py`、`tests\test_amz_selection_confirmation.py` 4 tests、`scripts\amz_selection_confirmation_selftest.py`。selftest 确认含图片、Listing、候选表、1688链接、四个决策按钮，样例月销下建议采购总量为 20 件；按钮写回语义分别为待采购确认/待采购复核/暂缓/淘汰。相邻回归也通过：采购卡 17 tests、合规卡 14 tests、旧 50 件节点 5 tests。直接执行旧测试文件会被 `C:\tmp\ml-data-sync\app` 路径污染，需用 inline runner 或给测试文件补 repo-root `sys.path`。
 - 当前生产数据边界：候选表已有采购价、供应商链接、三渠道毛利、FBA费/佣金、合规注意点；但五站竞品均价/中位价、竞品平均月销量、类目新品平均月销量、本土号毛利率仍未保证结构化入表。P0 代码不会硬猜月销量，字段缺失时卡片显示 `需补月销`，不能作为最终下单数量。
+
+## 2026-07-28
+
+- 用户截图指出 `选品结果确认卡` 的 UK / FR / IT / ES 行没有数据显示。复查确认不是飞书渲染问题，而是卡片只读飞书候选表字段，未接入此前五站双账号三渠道毛利重算快照。
+- 已新增快照数据文件 `data/amz_selection/four_asin_5site_margin_snapshot_20260723.json`，覆盖四个 ASIN × DE/UK/FR/IT/ES 的售价和中企号/本本号最佳毛利。
+- 已修复 `app/amz_selection_confirmation.py`：
+  - 候选表字段优先；候选表缺站点售价/毛利时，用五站快照兜底。
+  - 缺竞品月销/类目新品月销时展示 `待补`，不再显示空白。
+  - `data_gap_count` 改为统计售价、采购量和毛利结构化缺口，避免“缺数据但计数为 0”。
+- 已补 `tests/test_amz_selection_confirmation.py` 回归测试：模拟 UK/FR/IT/ES 候选表字段缺失，必须展示快照中的 `£28.45`、中企/本本号最佳毛利，并把月销标成 `待补`。
+- 本地验证通过：`py_compile`、`tests/test_amz_selection_confirmation.py` 5 tests OK、`scripts/amz_selection_confirmation_selftest.py`、`git diff --check` 仅 CRLF 提示。
+- 当前真实缺口：UK / FR / IT / ES 的竞品平均月销量和类目新品平均月销量还没有结构化数据源；后续应通过 Sorftime/SellerSprite 补写候选表，才能自动算各站建议采购量。

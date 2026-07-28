@@ -1,0 +1,22 @@
+[
+  {"asin":"B0CH1817WW","site":"UK","price":28.45,"currency":"GBP","seller":"N/A/1","online_date":"2023-09-13","cn_best":"C 148.2/57.9%","local_best":"C 170.2/66.5%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0CH1817WW","site":"DE","price":25.99,"currency":"EUR","seller":"N/A/3","online_date":"2023-09-07","cn_best":"A 124.4/56.3%","local_best":"A 148.6/67.3%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0CH1817WW","site":"FR","price":24.83,"currency":"EUR","seller":"N/A/2","online_date":"2023-09-11","cn_best":"C 110.0/52.1%","local_best":"C 134.6/63.8%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0CH1817WW","site":"IT","price":24.99,"currency":"EUR","seller":"FR/3","online_date":"2023-09-10","cn_best":"C 105.9/49.9%","local_best":"C 133.6/62.9%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0CH1817WW","site":"ES","price":13.0,"currency":"EUR","seller":"N/A/2","online_date":"2023-09-01","cn_best":"C 46.3/41.9%","local_best":"C 59.9/54.2%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0D1CLBFD9","site":"UK","price":16.99,"currency":"GBP","seller":"N/A/1","online_date":"2024-12-14","cn_best":"A 58.8/38.4%","local_best":"C 68.9/45.0%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0D1CLBFD9","site":"DE","price":18.79,"currency":"EUR","seller":"N/A/1","online_date":"2024-04-19","cn_best":"A 66.2/41.5%","local_best":"A 83.8/52.4%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0D1CLBFD9","site":"FR","price":17.79,"currency":"EUR","seller":"N/A/1","online_date":"2024-04-24","cn_best":"C 44.6/29.5%","local_best":"C 62.3/41.2%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0D1CLBFD9","site":"IT","price":null,"currency":"EUR","seller":"N/A/2","online_date":"2024-07-14","cn_best":"无售价","local_best":"无售价","initial_judgment":"暂缓"},
+  {"asin":"B0D1CLBFD9","site":"ES","price":17.99,"currency":"EUR","seller":"N/A/1","online_date":"2024-09-08","cn_best":"A 52.7/34.4%","local_best":"A 71.6/46.8%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0CSCXSHPQ","site":"UK","price":null,"currency":"GBP","seller":"N/A/2","online_date":"2024-07-27","cn_best":"无售价","local_best":"无售价","initial_judgment":"暂缓"},
+  {"asin":"B0CSCXSHPQ","site":"DE","price":24.49,"currency":"EUR","seller":"SE/2","online_date":"2024-04-01","cn_best":"A 63.7/30.6%","local_best":"A 86.5/41.5%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0CSCXSHPQ","site":"FR","price":null,"currency":"EUR","seller":"N/A/2","online_date":"2024-02-06","cn_best":"无售价","local_best":"无售价","initial_judgment":"暂缓"},
+  {"asin":"B0CSCXSHPQ","site":"IT","price":null,"currency":"EUR","seller":"N/A/2","online_date":"2024-01-23","cn_best":"无售价","local_best":"无售价","initial_judgment":"暂缓"},
+  {"asin":"B0CSCXSHPQ","site":"ES","price":24.59,"currency":"EUR","seller":"N/A/2","online_date":"2024-01-24","cn_best":"A 58.3/27.9%","local_best":"A 84.2/40.3%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0CNRH4GRJ","site":"UK","price":9.99,"currency":"GBP","seller":"SE/2","online_date":"2024-08-10","cn_best":"A 11.6/12.9%","local_best":"A 14.4/16.0%","initial_judgment":"淘汰/暂缓"},
+  {"asin":"B0CNRH4GRJ","site":"DE","price":15.19,"currency":"EUR","seller":"SE/2","online_date":"2022-02-06","cn_best":"A 37.2/28.8%","local_best":"A 51.3/39.7%","initial_judgment":"可继续财务/适配复核"},
+  {"asin":"B0CNRH4GRJ","site":"FR","price":14.09,"currency":"EUR","seller":"N/A/2","online_date":"2023-12-07","cn_best":"A 16.1/13.4%","local_best":"A 30.1/25.1%","initial_judgment":"观察"},
+  {"asin":"B0CNRH4GRJ","site":"IT","price":null,"currency":"EUR","seller":"N/A/2","online_date":"2024-05-02","cn_best":"无售价","local_best":"无售价","initial_judgment":"暂缓"},
+  {"asin":"B0CNRH4GRJ","site":"ES","price":14.29,"currency":"EUR","seller":"N/A/2","online_date":"2024-01-04","cn_best":"A 26.0/21.4%","local_best":"A 41.0/33.7%","initial_judgment":"观察"}
+]
