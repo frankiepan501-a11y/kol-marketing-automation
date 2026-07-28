@@ -111,3 +111,7 @@
 - 已额外验证 `AsinSalesVolume`：20 个 ASIN×站点请求中除 `B0CH1817WW/IT` 可从类目页命中 8 件月销外，其余样本 ASIN 直接销量均返回空；因此卡片不能硬写样本 ASIN 月销，必须标注“不可用/未命中”。
 - 已把卡片月销展示拆成：`样本月销`、`产品级竞品中位/均值/n`、`类目新品中位/n`、`参考月销`、`数据质量`、`数据来源说明`。采购量计算优先用产品级竞品中位数；产品级样本不足时标注并回退到类目可比竞品中位数。
 - 本地验证通过：`py_compile app/amz_selection_confirmation.py app/amz_assistant.py app/main.py`、`tests/test_amz_selection_confirmation.py` 5 tests OK、`scripts/amz_selection_confirmation_selftest.py` 返回 `card_selftest=passed`。
+- 线上首次 dry-run 发现卡片虽然显示 `产品级高/低`，但没有显式标注字段名 `数据质量`；已提交 `f349a60 fix: label AMZ selection sales data quality`，把站点月销行改为 `数据质量 产品级高/低/类目级可用`，并纳入卡片自测必检项。
+- 抽取线上 dry-run 文本后发现候选表旧字段会污染 Sorftime 月销快照：例如 `产品竞品中位 741/均值 5/n=1`、`参考月销 655`。根因是 DE 站 `_site_value` 会回退读取候选表泛字段 `月销量/平均月销量`。已提交 `34e395e fix: prioritize AMZ selection sales snapshot`，选品确认卡优先使用本次 Sorftime 快照的月销字段；产品级样本数低于 3 时，展示产品级样本，但采购量用类目可比竞品回退。
+- 线上验证已通过：Zeabur 最新部署 `34e395e` 为 `RUNNING`，`/health=ok`，受保护 dry-run 返回 `count=4`、`card_selftest=passed`、`suggested_total_qty=225`、`data_gap_count=5`。必检文本均存在：`样本月销`、`产品竞品中位`、`类目新品中位`、`参考月销`、`数据质量`、`月销取Sorftime快照`、`产品级样本不足，采购量用类目可比竞品`；旧错误片段均不存在。
+- 已发送新的 Frankie-only 选品结果确认样卡，批次 `AMZ-EU-SELCONF-20260728-P2`，`message_id=om_x100b69bcbcd29ca8df9eac1fc15f3d0`。上一张 `om_x100b69bca7985ca4c23a6af74efc307` 是中间版，不作为最终确认卡。
