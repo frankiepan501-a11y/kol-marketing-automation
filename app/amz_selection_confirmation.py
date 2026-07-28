@@ -794,7 +794,7 @@ def _cashflow_line(candidate: dict) -> str:
     payback_ratio = net_receipt / price_rmb
     gross_receipt = net_receipt * qty
     return (
-        f"建议采购总量 {qty} 件；单件采购+物流投入约 {unit_invest:.2f} RMB；"
+        f"建议采购总量 {qty} 件；单套采购+物流投入约 {unit_invest:.2f} RMB；"
         f"首批投入约 {total_invest:.2f} RMB；预计净回款约 {gross_receipt:.2f} RMB；"
         f"回款比约 {payback_ratio:.1%}。"
     )
@@ -874,12 +874,12 @@ def _product_elements(candidate: dict, card_record_ids: list[str], batch_id: str
             "fields": [
                 _field("ASIN", candidate.get("asin")),
                 _field("系统建议", system_decision),
-                _field("采购成本", _fmt_rmb(candidate.get("quote_cost"))),
+                _field("采购成本（单套）", _fmt_rmb(candidate.get("quote_cost"))),
                 _field("建议采购总量", f"{_total_suggested_qty(candidate)}件" if _total_suggested_qty(candidate) is not None else "需补月销"),
                 _field("推荐履约", candidate.get("fulfillment")),
                 _field("包装尺寸", candidate.get("package_size") or "待核"),
                 _field("重量", f"{candidate.get('weight_g')}g" if candidate.get("weight_g") else "待核"),
-                _field("件数", candidate.get("set_count") or "待核"),
+                _field("套装件数（每套内含）", candidate.get("set_count") or "待核"),
                 _field("FBA配送费 / 佣金", f"{proc._format_eur(candidate.get('fba_fee_eur'))} / {proc._format_eur(candidate.get('commission_eur'))}"),
             ],
         }
