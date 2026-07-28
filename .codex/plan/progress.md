@@ -104,4 +104,5 @@
   - `data_gap_count` 改为统计售价、采购量和毛利结构化缺口，避免“缺数据但计数为 0”。
 - 已补 `tests/test_amz_selection_confirmation.py` 回归测试：模拟 UK/FR/IT/ES 候选表字段缺失，必须展示快照中的 `£28.45`、中企/本本号最佳毛利，并把月销标成 `待补`。
 - 本地验证通过：`py_compile`、`tests/test_amz_selection_confirmation.py` 5 tests OK、`scripts/amz_selection_confirmation_selftest.py`、`git diff --check` 仅 CRLF 提示。
+- 首次线上 dry-run 仍显示非 DE 站点空白；二次定位发现 Dockerfile 只 `COPY app/`，未把新增 `data/` 目录打入镜像。已补 `COPY data/ /app/data/`，与代码默认快照路径 `/app/data/...` 对齐。
 - 当前真实缺口：UK / FR / IT / ES 的竞品平均月销量和类目新品平均月销量还没有结构化数据源；后续应通过 Sorftime/SellerSprite 补写候选表，才能自动算各站建议采购量。
