@@ -137,12 +137,12 @@ def _url_button(text: str, url: str, typ: str = "default") -> dict:
     return {"tag": "button", "text": {"tag": "plain_text", "content": text}, "type": typ, "url": url}
 
 
-def _button(text: str, action: str, candidate: dict, card_record_ids: list[str], typ: str = "default") -> dict:
+def _button(text: str, action: str, candidate: dict, card_record_ids: list[str], typ: str = "default", batch_id: str = "") -> dict:
     return {
         "tag": "button",
         "type": typ,
         "text": {"tag": "plain_text", "content": text},
-        "value": _payload(candidate, card_record_ids, action),
+        "value": _payload(candidate, card_record_ids, action, batch_id),
     }
 
 
@@ -813,13 +813,13 @@ def _decision_help_text() -> str:
     )
 
 
-def _payload(candidate: dict, card_record_ids: list[str], action: str) -> dict:
+def _payload(candidate: dict, card_record_ids: list[str], action: str, batch_id: str = "") -> dict:
     return {
         "source": SOURCE,
         "action": action,
         "record_id": candidate.get("record_id"),
         "asin": candidate.get("asin"),
-        "batch_id": candidate.get("selection_batch_id") or DEFAULT_BATCH_ID,
+        "batch_id": batch_id or candidate.get("selection_batch_id") or DEFAULT_BATCH_ID,
         "card_record_ids": card_record_ids,
         "system_decision": candidate.get("system_selection_decision"),
         "suggested_total_qty": _total_suggested_qty(candidate),
@@ -839,7 +839,7 @@ def _decision_status_text(decision: str) -> str:
     )
 
 
-def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]:
+def _product_elements(candidate: dict, card_record_ids: list[str], batch_id: str = "") -> list[dict]:
     rid = candidate.get("record_id", "")
     title = candidate.get("cn_name") or candidate.get("title") or candidate.get("asin") or rid
     amazon = candidate.get("amazon_url")
@@ -926,10 +926,10 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
         {
             "tag": "action",
             "actions": [
-                _button(ACTION_BUTTON_LABEL[ACTION_GO], ACTION_GO, candidate, card_record_ids, "primary"),
-                _button(ACTION_BUTTON_LABEL[ACTION_CONDITIONAL], ACTION_CONDITIONAL, candidate, card_record_ids, "default"),
-                _button(ACTION_BUTTON_LABEL[ACTION_HOLD], ACTION_HOLD, candidate, card_record_ids, "default"),
-                _button(ACTION_BUTTON_LABEL[ACTION_REJECT], ACTION_REJECT, candidate, card_record_ids, "danger"),
+                _button(ACTION_BUTTON_LABEL[ACTION_GO], ACTION_GO, candidate, card_record_ids, "primary", batch_id),
+                _button(ACTION_BUTTON_LABEL[ACTION_CONDITIONAL], ACTION_CONDITIONAL, candidate, card_record_ids, "default", batch_id),
+                _button(ACTION_BUTTON_LABEL[ACTION_HOLD], ACTION_HOLD, candidate, card_record_ids, "default", batch_id),
+                _button(ACTION_BUTTON_LABEL[ACTION_REJECT], ACTION_REJECT, candidate, card_record_ids, "danger", batch_id),
             ],
         }
     )
@@ -960,7 +960,7 @@ def build_selection_confirmation_card(candidates: list[dict], batch_id: str = ""
         {"tag": "note", "elements": [{"tag": "plain_text", "content": "月销样本=本次 Sorftime 命中的竞品数量；样本少于 3 个时，卡片会展示近似竞品数据，但采购量改用类目可比竞品估算。"}]},
     ]
     for candidate in candidates:
-        elements.extend(_product_elements(candidate, record_ids))
+        elements.extend(_product_elements(candidate, record_ids, batch))
     return {
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {

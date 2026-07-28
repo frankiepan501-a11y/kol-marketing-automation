@@ -125,6 +125,7 @@ class AmzSelectionConfirmationTests(unittest.TestCase):
         self.assertIn("条件采购复核", rendered)
         self.assertIn("暂缓补资料", rendered)
         self.assertIn("淘汰归档", rendered)
+        self.assertIn('"batch_id": "batch-test"', rendered)
         self.assertIn("各站点建议（售价 / 月销 / 采购量）", rendered)
         self.assertIn("🇩🇪 DE 德国｜采购结论", rendered)
         self.assertIn("🇬🇧 UK 英国｜采购结论", rendered)

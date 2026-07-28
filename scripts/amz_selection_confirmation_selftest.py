@@ -73,7 +73,8 @@ def sample_candidate() -> dict:
 
 def main() -> int:
     candidate = sample_candidate()
-    card = sel.build_selection_confirmation_card([candidate], "AMZ-EU-SELCONF-SELFTEST")
+    batch_id = "AMZ-EU-SELCONF-SELFTEST"
+    card = sel.build_selection_confirmation_card([candidate], batch_id)
     errors = sel.validate_selection_confirmation_card(card, [candidate])
     if errors:
         print(json.dumps({"ok": False, "errors": errors}, ensure_ascii=False, indent=2))
@@ -82,7 +83,7 @@ def main() -> int:
     button_writebacks = {}
     record_ids = [candidate["record_id"]]
     for action in sel.DECISION_ACTIONS:
-        payload = sel._payload(candidate, record_ids, action)
+        payload = sel._payload(candidate, record_ids, action, batch_id)
         fields = sel._build_update_fields(candidate, action, "selftest", payload)
         button_writebacks[sel.ACTION_TO_DECISION[action]] = fields
 
@@ -93,6 +94,7 @@ def main() -> int:
         "button_count": rendered.count('"tag": "button"'),
         "contains_image": '"tag": "img"' in rendered,
         "contains_listing_link": "https://www.amazon.de/dp/B0CH1817WW" in rendered,
+        "contains_batch_payload": '"batch_id": "AMZ-EU-SELCONF-SELFTEST"' in rendered,
         "suggested_total_qty": sel._total_suggested_qty(candidate),
         "button_writebacks": button_writebacks,
     }
