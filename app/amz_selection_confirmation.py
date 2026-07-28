@@ -66,11 +66,11 @@ SALES_SNAPSHOT_PATH = Path(
 )
 
 SITES = [
-    {"code": "DE", "label": "德国", "currency": "EUR", "symbol": "€", "fx": EUR_RMB},
-    {"code": "UK", "label": "英国", "currency": "GBP", "symbol": "£", "fx": GBP_RMB},
-    {"code": "FR", "label": "法国", "currency": "EUR", "symbol": "€", "fx": EUR_RMB},
-    {"code": "IT", "label": "意大利", "currency": "EUR", "symbol": "€", "fx": EUR_RMB},
-    {"code": "ES", "label": "西班牙", "currency": "EUR", "symbol": "€", "fx": EUR_RMB},
+    {"code": "DE", "label": "德国", "flag": "🇩🇪", "currency": "EUR", "symbol": "€", "fx": EUR_RMB},
+    {"code": "UK", "label": "英国", "flag": "🇬🇧", "currency": "GBP", "symbol": "£", "fx": GBP_RMB},
+    {"code": "FR", "label": "法国", "flag": "🇫🇷", "currency": "EUR", "symbol": "€", "fx": EUR_RMB},
+    {"code": "IT", "label": "意大利", "flag": "🇮🇹", "currency": "EUR", "symbol": "€", "fx": EUR_RMB},
+    {"code": "ES", "label": "西班牙", "flag": "🇪🇸", "currency": "EUR", "symbol": "€", "fx": EUR_RMB},
 ]
 
 ENTRY_FACTORS = {
@@ -567,6 +567,7 @@ def _build_site_suggestions(candidate: dict) -> list[dict]:
             {
                 "site": code,
                 "label": site["label"],
+                "flag": site.get("flag") or "",
                 "currency": site["currency"],
                 "symbol": site["symbol"],
                 "fx": site["fx"],
@@ -651,6 +652,8 @@ def _system_decision(candidate: dict) -> tuple[str, str]:
 
 
 def _site_line(row: dict) -> str:
+    flag = row.get("flag") or ""
+    site_label = f"{flag} {row['site']} {row.get('label') or ''}".strip()
     symbol = row["symbol"]
     qty = row.get("suggested_qty")
     qty_text = f"{qty}件" if isinstance(qty, int) else "需补月销"
@@ -671,11 +674,64 @@ def _site_line(row: dict) -> str:
     else:
         product_part = f"近似竞品月销：中位 {product_comp}，均值 {product_comp_avg}，样本 {product_comp_n} 个"
     return (
-        f"- {row['site']}：竞品价 {sample}｜建议价 {suggested}｜建议采购 {qty_text}\n"
+        f"- {site_label}：竞品价 {sample}｜建议价 {suggested}｜建议采购 {qty_text}\n"
         f"  月销：样本ASIN {sample_sales}｜{product_part}｜"
         f"类目新品月销：中位 {new_sales}，样本 {new_sales_n} 个｜参考月销 {ref}\n"
         f"  毛利/说明：{row.get('margin_text')}｜数据可信度 {row.get('monthly_data_quality') or '待标注'}｜{row.get('reason')}"
     )
+
+
+def _site_card_elements(candidate: dict) -> list[dict]:
+    elements: list[dict] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "**各站点建议（售价 / 月销 / 采购量）**"}},
+    ]
+    for row in candidate.get("site_suggestions") or []:
+        flag = row.get("flag") or ""
+        site_label = f"{flag} {row.get('site')} {row.get('label') or ''}".strip()
+        symbol = row["symbol"]
+        qty = row.get("suggested_qty")
+        qty_text = f"{qty}件" if isinstance(qty, int) else "需补月销"
+        ref = _fmt_monthly(row.get("reference_monthly_sales"))
+        sample = _fmt_money(row.get("sample_price"), symbol)
+        suggested = _fmt_money(row.get("suggested_price"), symbol)
+        sample_sales = _fmt_monthly(row.get("sample_asin_monthly_sales"))
+        if sample_sales == "待补" and "returned null" in _text(row.get("sample_asin_sales_source")):
+            sample_sales = "不可用"
+        product_comp = _fmt_monthly(row.get("product_competitor_monthly_sales"))
+        product_comp_avg = _fmt_monthly(row.get("product_competitor_avg_monthly_sales"))
+        product_comp_n = _fmt_num(row.get("product_competitor_sample_count"), 0)
+        category_comp = _fmt_monthly(row.get("category_competitor_monthly_sales"))
+        new_sales = _fmt_monthly(row.get("category_new_avg_monthly_sales"))
+        new_sales_n = _fmt_num(row.get("category_new_sample_count"), 0)
+        if product_comp == "待补" and category_comp != "待补":
+            competitor_line = f"近似竞品：样本不足；改看类目可比竞品中位 {category_comp}"
+        else:
+            competitor_line = f"近似竞品：中位 {product_comp} / 均值 {product_comp_avg} / 样本 {product_comp_n} 个"
+        elements.append(
+            {
+                "tag": "div",
+                "fields": [
+                    _field(
+                        f"{site_label}｜采购结论",
+                        f"📦 建议采购：{qty_text}\n💶 竞品价：{sample}\n🏷️ 建议价：{suggested}\n🔎 数据可信度：{row.get('monthly_data_quality') or '待标注'}",
+                    ),
+                    _field(
+                        "📈 月销依据",
+                        f"样本ASIN：{sample_sales}\n{competitor_line}\n类目新品：中位 {new_sales} / 样本 {new_sales_n} 个\n参考月销：{ref}",
+                    ),
+                ],
+            }
+        )
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"- **毛利**：{row.get('margin_text')}\n- **说明**：{row.get('reason')}",
+                },
+            }
+        )
+    return elements
 
 
 def _total_suggested_qty(candidate: dict) -> int | None:
@@ -805,7 +861,7 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
             ],
         }
     )
-    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**竞品售价、月销来源、建议售价与各站采购量**\n" + _site_price_summary(candidate)}})
+    elements.extend(_site_card_elements(candidate))
     elements.append({"tag": "div", "text": {"tag": "lark_md", "content": proc._channel_compare_text(candidate)}})
     elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**回款/投入分析**\n" + _cashflow_line(candidate)}})
     elements.append(
@@ -922,7 +978,7 @@ def validate_selection_confirmation_card(card: dict, candidates: list[dict]) -> 
             for action in DECISION_ACTIONS:
                 if action not in actions:
                     errors.append(f"{label}: missing decision action {action}")
-    for required in ("四个按钮怎么用", "竞品售价", "建议售价", "样本ASIN", "近似竞品月销", "类目新品月销", "样本", "建议采购", "数据可信度", "回款/投入分析", "三渠道对比", "Go", "条件推进", "暂缓", "淘汰"):
+    for required in ("四个按钮怎么用", "各站点建议", "🇩🇪 DE", "🇬🇧 UK", "📦 建议采购", "💶 竞品价", "🏷️ 建议价", "📈 月销依据", "样本ASIN", "近似竞品", "类目新品", "样本", "数据可信度", "回款/投入分析", "三渠道对比", "Go", "条件推进", "暂缓", "淘汰"):
         if required not in rendered:
             errors.append(f"card missing {required}")
     if '"tag": "form"' in rendered or "form_submit" in rendered:
