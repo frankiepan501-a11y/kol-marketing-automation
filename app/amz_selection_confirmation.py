@@ -667,15 +667,14 @@ def _site_line(row: dict) -> str:
     new_sales = _fmt_monthly(row.get("category_new_avg_monthly_sales"))
     new_sales_n = _fmt_num(row.get("category_new_sample_count"), 0)
     if product_comp == "待补" and category_comp != "待补":
-        product_part = f"产品竞品不足｜类目竞品中位 {category_comp}"
+        product_part = f"近似竞品月销：样本不足；类目可比竞品中位 {category_comp}"
     else:
-        product_part = f"产品竞品中位 {product_comp}/均值 {product_comp_avg}/n={product_comp_n}"
+        product_part = f"近似竞品月销：中位 {product_comp}，均值 {product_comp_avg}，样本 {product_comp_n} 个"
     return (
-        f"- {row['site']}: 竞品价 {sample}｜建议价 {suggested}｜"
-        f"样本月销 {sample_sales}｜{product_part}｜"
-        f"类目新品中位 {new_sales}/n={new_sales_n}｜"
-        f"参考月销 {ref}｜建议采购 {qty_text}｜{row.get('margin_text')}｜"
-        f"数据质量 {row.get('monthly_data_quality') or '待标注'}｜{row.get('reason')}"
+        f"- {row['site']}：竞品价 {sample}｜建议价 {suggested}｜建议采购 {qty_text}\n"
+        f"  月销：样本ASIN {sample_sales}｜{product_part}｜"
+        f"类目新品月销：中位 {new_sales}，样本 {new_sales_n} 个｜参考月销 {ref}\n"
+        f"  毛利/说明：{row.get('margin_text')}｜数据可信度 {row.get('monthly_data_quality') or '待标注'}｜{row.get('reason')}"
     )
 
 
@@ -806,7 +805,7 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
             ],
         }
     )
-    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**竞品售价、月销口径、建议售价与各站采购量**\n" + _site_price_summary(candidate)}})
+    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**竞品售价、月销来源、建议售价与各站采购量**\n" + _site_price_summary(candidate)}})
     elements.append({"tag": "div", "text": {"tag": "lark_md", "content": proc._channel_compare_text(candidate)}})
     elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**回款/投入分析**\n" + _cashflow_line(candidate)}})
     elements.append(
@@ -874,7 +873,7 @@ def build_selection_confirmation_card(candidates: list[dict], batch_id: str = ""
                 ),
             },
         },
-        {"tag": "note", "elements": [{"tag": "plain_text", "content": "首批采购量按参考月销、入场系数、覆盖天数和装箱倍数估算；参考月销优先用产品级竞品中位数，产品级样本不足时标注并回退到类目可比竞品。"}]},
+        {"tag": "note", "elements": [{"tag": "plain_text", "content": "月销样本=本次 Sorftime 命中的竞品数量；样本少于 3 个时，卡片会展示近似竞品数据，但采购量改用类目可比竞品估算。"}]},
     ]
     for candidate in candidates:
         elements.extend(_product_elements(candidate, record_ids))
@@ -923,7 +922,7 @@ def validate_selection_confirmation_card(card: dict, candidates: list[dict]) -> 
             for action in DECISION_ACTIONS:
                 if action not in actions:
                     errors.append(f"{label}: missing decision action {action}")
-    for required in ("四个按钮怎么用", "竞品售价", "建议售价", "样本月销", "产品竞品", "类目新品", "建议采购", "数据质量", "回款/投入分析", "三渠道对比", "Go", "条件推进", "暂缓", "淘汰"):
+    for required in ("四个按钮怎么用", "竞品售价", "建议售价", "样本ASIN", "近似竞品月销", "类目新品月销", "样本", "建议采购", "数据可信度", "回款/投入分析", "三渠道对比", "Go", "条件推进", "暂缓", "淘汰"):
         if required not in rendered:
             errors.append(f"card missing {required}")
     if '"tag": "form"' in rendered or "form_submit" in rendered:
