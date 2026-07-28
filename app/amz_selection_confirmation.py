@@ -34,6 +34,12 @@ ACTION_TO_DECISION = {
     ACTION_REJECT: "淘汰",
 }
 DECISION_ACTIONS = tuple(ACTION_TO_DECISION.keys())
+ACTION_BUTTON_LABEL = {
+    ACTION_GO: "通过入采购",
+    ACTION_CONDITIONAL: "条件采购复核",
+    ACTION_HOLD: "暂缓补资料",
+    ACTION_REJECT: "淘汰归档",
+}
 
 DEFAULT_BATCH_ID = os.environ.get("AMZ_SELECTION_CONFIRM_DEFAULT_BATCH_ID", "AMZ-EU-SELCONF-20260724-P0")
 DEFAULT_RECORD_IDS = [
@@ -798,11 +804,12 @@ def _row_has_data_gap(row: dict) -> bool:
 
 def _decision_help_text() -> str:
     return (
-        "**四个按钮怎么用**\n"
-        "- **Go**：同意进入采购阶段；采购只做 MOQ、交期、同款和供应商复核，不再退回选品。\n"
-        "- **条件推进**：只允许按卡片条件推进，比如限站点、压采购价、补月销量、复核套装件数；条件没达成不下单。\n"
-        "- **暂缓**：当前不采购，先补售价、月销、FBA费、合规或供应链资料后再重算。\n"
-        "- **淘汰**：从本批次移出，不进入采购阶段；除非重新跑选品，否则不再推进。"
+        "**运营要怎么点**\n"
+        "点击后系统会写回候选表，并把原卡更新成已处理状态。\n"
+        "- **通过入采购**：确认选品通过，进入采购阶段；采购只复核 MOQ、交期、同款和供应商。\n"
+        "- **条件采购复核**：有条件推进；采购必须按卡片条件处理，例如限站点、压价、补月销、复核套装，条件没达成不下单。\n"
+        "- **暂缓补资料**：本批先不采购；补售价、月销、FBA费、合规或供应链资料后重新计算。\n"
+        "- **淘汰归档**：本批移出；除非重新跑选品，否则不再进入采购。"
     )
 
 
@@ -822,6 +829,14 @@ def _payload(candidate: dict, card_record_ids: list[str], action: str) -> dict:
 def _completed(candidate: dict) -> bool:
     decision = _text(candidate.get("selection_decision"))
     return decision in ("已Go", "Go", "条件推进", "暂缓", "淘汰")
+
+
+def _decision_status_text(decision: str) -> str:
+    return (
+        f"确认动作：{decision}\n"
+        f"后续流向：{_decision_next_action(decision)}\n"
+        "此产品按钮已关闭，无需重复点击。"
+    )
 
 
 def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]:
@@ -887,21 +902,34 @@ def _product_elements(candidate: dict, card_record_ids: list[str]) -> list[dict]
         actions.append(_url_button("打开1688供应商", supplier))
     elements.append({"tag": "action", "actions": actions})
     if _completed(candidate):
+        decision = _text(candidate.get("selection_decision"))
         elements.append(
             {
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": f"**选品确认已处理**\n当前确认动作：{candidate.get('selection_decision')}"},
+                "text": {"tag": "lark_md", "content": f"**选品确认已处理**\n{_decision_status_text(decision)}"},
             }
         )
         return elements
     elements.append(
         {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    "**请选择本产品的最终处理动作**\n"
+                    "只点一个按钮；点完会写回候选表并更新原卡。"
+                ),
+            },
+        }
+    )
+    elements.append(
+        {
             "tag": "action",
             "actions": [
-                _button("Go", ACTION_GO, candidate, card_record_ids, "primary"),
-                _button("条件推进", ACTION_CONDITIONAL, candidate, card_record_ids, "default"),
-                _button("暂缓", ACTION_HOLD, candidate, card_record_ids, "default"),
-                _button("淘汰", ACTION_REJECT, candidate, card_record_ids, "danger"),
+                _button(ACTION_BUTTON_LABEL[ACTION_GO], ACTION_GO, candidate, card_record_ids, "primary"),
+                _button(ACTION_BUTTON_LABEL[ACTION_CONDITIONAL], ACTION_CONDITIONAL, candidate, card_record_ids, "default"),
+                _button(ACTION_BUTTON_LABEL[ACTION_HOLD], ACTION_HOLD, candidate, card_record_ids, "default"),
+                _button(ACTION_BUTTON_LABEL[ACTION_REJECT], ACTION_REJECT, candidate, card_record_ids, "danger"),
             ],
         }
     )
@@ -978,7 +1006,28 @@ def validate_selection_confirmation_card(card: dict, candidates: list[dict]) -> 
             for action in DECISION_ACTIONS:
                 if action not in actions:
                     errors.append(f"{label}: missing decision action {action}")
-    for required in ("四个按钮怎么用", "各站点建议", "🇩🇪 DE", "🇬🇧 UK", "📦 建议采购", "💶 竞品价", "🏷️ 建议价", "📈 月销依据", "样本ASIN", "近似竞品", "类目新品", "样本", "数据可信度", "回款/投入分析", "三渠道对比", "Go", "条件推进", "暂缓", "淘汰"):
+    for required in (
+        "运营要怎么点",
+        "请选择本产品的最终处理动作",
+        "通过入采购",
+        "条件采购复核",
+        "暂缓补资料",
+        "淘汰归档",
+        "各站点建议",
+        "🇩🇪 DE",
+        "🇬🇧 UK",
+        "📦 建议采购",
+        "💶 竞品价",
+        "🏷️ 建议价",
+        "📈 月销依据",
+        "样本ASIN",
+        "近似竞品",
+        "类目新品",
+        "样本",
+        "数据可信度",
+        "回款/投入分析",
+        "三渠道对比",
+    ):
         if required not in rendered:
             errors.append(f"card missing {required}")
     if '"tag": "form"' in rendered or "form_submit" in rendered:
@@ -1098,7 +1147,8 @@ async def _process_callback(event: dict) -> dict:
             await amz_assistant.update_card(msg_id, build_selection_confirmation_card(candidates, _text(value.get("batch_id"))))
         else:
             await amz_assistant.update_card(msg_id, build_selection_confirmation_card([candidate], _text(value.get("batch_id"))))
-    return _toast(f"本产品已确认：{ACTION_TO_DECISION[action]}")
+    decision = ACTION_TO_DECISION[action]
+    return _toast(f"已写回：{decision}；下一步：{fields['下一步动作']}")
 
 
 async def handle_callback(event: dict) -> dict:

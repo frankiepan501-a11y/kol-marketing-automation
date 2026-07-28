@@ -119,6 +119,12 @@ class AmzSelectionConfirmationTests(unittest.TestCase):
 
         self.assertIn("欧洲站选品结果确认", rendered)
         self.assertIn("不是上架验证卡，也不是固定50件试销卡", rendered)
+        self.assertIn("运营要怎么点", rendered)
+        self.assertIn("请选择本产品的最终处理动作", rendered)
+        self.assertIn("通过入采购", rendered)
+        self.assertIn("条件采购复核", rendered)
+        self.assertIn("暂缓补资料", rendered)
+        self.assertIn("淘汰归档", rendered)
         self.assertIn("各站点建议（售价 / 月销 / 采购量）", rendered)
         self.assertIn("🇩🇪 DE 德国｜采购结论", rendered)
         self.assertIn("🇬🇧 UK 英国｜采购结论", rendered)
@@ -141,6 +147,7 @@ class AmzSelectionConfirmationTests(unittest.TestCase):
         self.assertIn("打开1688供应商", rendered)
         for action in sel.DECISION_ACTIONS:
             self.assertIn(action, rendered)
+        self.assertNotIn("\"text\": {\"tag\": \"plain_text\", \"content\": \"Go\"}", rendered)
         self.assertNotIn('"tag": "form"', rendered)
         self.assertNotIn("form_submit", rendered)
         self.assertEqual([], sel.validate_selection_confirmation_card(card, [candidate]))
@@ -235,6 +242,8 @@ class AmzSelectionConfirmationTests(unittest.TestCase):
         self.assertIn("进入采购阶段", writes[0][1]["下一步动作"])
         self.assertIn("建议采购总量=10件", writes[0][1]["人审备注"])
         self.assertEqual("om_test", patches[0][0])
+        self.assertIn("已写回：Go", result["toast"]["content"])
+        self.assertIn("下一步：进入采购阶段", result["toast"]["content"])
 
     def test_amz_assistant_routes_selection_callbacks(self):
         original_handler = sel.handle_callback
