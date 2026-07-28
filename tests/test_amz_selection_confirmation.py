@@ -153,6 +153,29 @@ class AmzSelectionConfirmationTests(unittest.TestCase):
         self.assertNotIn("form_submit", rendered)
         self.assertEqual([], sel.validate_selection_confirmation_card(card, [candidate]))
 
+    def test_review_note_marks_previously_clicked_product_processed(self):
+        record = {
+            "record_id": "rec_done",
+            "fields": {
+                "ASIN": "B0CH1817WW",
+                "候选标题": "Dreame L20 Ultra replacement filter",
+                "当前状态": "待采购确认",
+                "综合结论": "Go",
+                "人审备注": "2026-07-29 tester: 选品结果确认=Go; 系统建议=Go; 建议采购总量=150件; 批次=batch-old.",
+            },
+        }
+        candidate = sel._candidate_from_record(record)
+        card = sel.build_selection_confirmation_card([candidate], "batch-test")
+        rendered = json.dumps(card, ensure_ascii=False)
+
+        self.assertEqual("Go", candidate["selection_decision"])
+        self.assertIn("选品确认已处理", rendered)
+        self.assertIn("确认动作：Go", rendered)
+        self.assertIn("已全部确认", rendered)
+        self.assertNotIn("请选择本产品的最终处理动作", rendered)
+        button_labels = [sel.proc._card_text(node.get("text")) for node in sel.proc._card_nodes(card) if node.get("tag") == "button"]
+        self.assertNotIn("通过入采购", button_labels)
+
     def test_site_snapshot_fallback_populates_non_de_price_and_margin(self):
         candidate = self._candidate()
         fields = candidate["raw_fields"]

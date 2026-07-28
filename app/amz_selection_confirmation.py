@@ -354,6 +354,8 @@ def _site_value(fields: dict, site: str, names: list[str]) -> Any:
 def _candidate_from_record(record: dict) -> dict:
     base = proc._candidate_from_record(record)
     fields = record.get("fields") or {}
+    review_note = _text(fields.get("人审备注"))
+    selection_decision = " / ".join(proc._list_values(fields.get("选品确认状态"))) or _selection_decision_from_review(review_note)
     base.update(
         {
             "raw_fields": fields,
@@ -365,8 +367,8 @@ def _candidate_from_record(record: dict) -> dict:
             "risk_note": _text(fields.get("侵权风险说明")),
             "data_gaps": proc._list_values(fields.get("数据缺口")),
             "next_action": " / ".join(proc._list_values(fields.get("下一步动作"))) or "-",
-            "review_note": _text(fields.get("人审备注")),
-            "selection_decision": " / ".join(proc._list_values(fields.get("选品确认状态"))) or "",
+            "review_note": review_note,
+            "selection_decision": selection_decision,
             "selection_batch_id": _text(fields.get("选品确认批次ID")),
             "selection_message_id": _text(fields.get("选品确认卡片消息ID")),
         }
@@ -374,6 +376,12 @@ def _candidate_from_record(record: dict) -> dict:
     base["site_suggestions"] = _build_site_suggestions(base)
     base["system_selection_decision"], base["system_selection_reason"] = _system_decision(base)
     return base
+
+
+def _selection_decision_from_review(review_note: str) -> str:
+    """Read prior card decisions from durable review notes for old records."""
+    matches = re.findall(r"选品结果确认=(Go|条件推进|暂缓|淘汰)", _text(review_note))
+    return matches[-1] if matches else ""
 
 
 def _recommended_channel(candidate: dict) -> dict:
