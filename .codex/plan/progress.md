@@ -144,3 +144,6 @@
 - 2026-07-29 Frankie 确认 `B0CNRH4GRJ / recvq1Quaar3h2` 按本本号 VAT 优势推进，已写回候选表：`当前状态=待采购复核`、`综合结论=条件推进`、`下一步动作=条件进入采购阶段：仅 DE 30 件 + ES 10 件，不五站铺开；采购复核 MOQ、同款、套装和供应商报价，条件不满足退回暂缓`，`人审备注` 追加确认记录。财务闸原有中企号缺口不覆盖，避免误读为全店铺类型通过。
 - 同步修正采购阶段预览卡口径：正式采购部卡/采购待办只允许展示 `Go` 和 `条件推进` 产品；`暂缓/淘汰` 只作为候选表留档或摘要计数，不生成采购产品区块、不要求采购部操作。`app/amz_procurement_preview.py` 已移除搜索暂缓记录的默认条件，并在卡片顶部补清 `本卡目的 / 采购部收到后要做 / 不会发给采购部 / 下一步`。
 - 本地验证通过：`py_compile app\amz_procurement_preview.py app\main.py`、`tests\test_amz_procurement_preview.py` 4 tests OK、`scripts\amz_procurement_preview_selftest.py`。真实 4 条候选 dry-run 返回 `count=4 / source_count=4`、分流 `直接入采购=2 / 条件采购复核=2 / 暂缓不发采购=0 / 淘汰归档=0`，`B0CNRH4GRJ` 已在预览卡中，且 `暂缓不发采购｜` 产品区块不存在。
+- 已提交并推送 `791555c fix: make AMZ procurement preview actionable only` 到 `master`。线上 `/health=ok`；Zeabur API Key 仍返回 401，改用 n8n 已授权 AMZ 工作流中的 Bearer 通道调用线上受保护 endpoint。
+- 线上 dry-run 批次 `AMZ-EU-PROCPREV-20260729-P2-ACTIONONLY` 通过：`ok=true`、`card_selftest=passed`、`count=4`、`source_count=4`、分流 `直接入采购=2 / 条件采购复核=2 / 暂缓=0 / 淘汰=0`，卡片含 `本卡目的 / 采购部收到后要做 / 不会发给采购部 / 下一步 / B0CNRH4GRJ`，且不含 `暂缓不发采购｜`。
+- 已线上 commit 发送 Frankie-only 修正版采购阶段预览卡：`message_id=om_x100b69acb16744a0de32e83f389a046`，`sent=true`、`frankie_only=true`、4 张产品图上传、2 条直接入采购、2 条条件采购复核。默认飞书 App 本地读回该 message 返回 `230002 Bot/User can NOT be out of the chat`，原因是消息由亚马逊助手 App 发送而本机缺该 App 凭据；不影响发送结果，但后续如需读回需用亚马逊助手 App 凭据或线上读回接口。
