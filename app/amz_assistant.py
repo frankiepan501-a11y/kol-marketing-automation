@@ -96,6 +96,25 @@ async def update_card(message_id: str, card: dict) -> bool:
         return False
 
 
+async def delete_message(message_id: str) -> dict[str, Any]:
+    """Recall a Feishu message sent by the Amazon assistant app."""
+    if not is_configured():
+        raise RuntimeError("FEISHU_AMZ_ASSISTANT_APP_ID/SECRET not configured")
+    if not message_id or not message_id.startswith("om_"):
+        raise ValueError("message_id must start with om_")
+    token = await _token()
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.delete(
+            f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"code": resp.status_code, "msg": resp.text[:200]}
+    return data
+
+
 async def upload_image_for_card(image_bytes: bytes, filename: str = "image.jpg", content_type: str = "image/jpeg") -> str:
     """Upload an image to Feishu IM resources and return an image_key for card img elements."""
     if not image_bytes:

@@ -1079,6 +1079,39 @@ async def run_amz_procurement_preview_card(authorization: str = Header(default="
         return {"ok": False, "error": str(e), "trace": tr}
 
 
+@app.post("/cs/amz-message/revoke")
+async def revoke_amz_message(authorization: str = Header(default=""),
+                             message_id: str = "",
+                             confirm: bool = False,
+                             reason: str = ""):
+    """撤回一条由亚马逊助手 App 发出的飞书消息.
+
+    This is intentionally protected and requires confirm=true because message
+    recall is irreversible from the operator's point of view.
+    """
+    _check_auth(authorization)
+    if not confirm:
+        raise HTTPException(400, "confirm=true is required")
+    if not message_id or not message_id.startswith("om_"):
+        raise HTTPException(400, "message_id must start with om_")
+    try:
+        data = await amz_assistant.delete_message(message_id)
+        ok = data.get("code") == 0
+        return {
+            "ok": ok,
+            "message_id": message_id,
+            "reason": reason,
+            "feishu_code": data.get("code"),
+            "feishu_msg": data.get("msg", ""),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/amz-message/revoke", str(e), tr)
+        return {"ok": False, "message_id": message_id, "error": str(e), "trace": tr}
+
+
 @app.post("/cs/amz-compliance-fit/send")
 async def run_amz_compliance_fit_card(authorization: str = Header(default=""),
                                       mode: str = "dry_run",
