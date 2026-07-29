@@ -33,12 +33,13 @@ ACTION_TO_DECISION = {
     ACTION_HOLD: "暂缓",
     ACTION_REJECT: "淘汰",
 }
+DECISION_TO_ACTION = {decision: action for action, decision in ACTION_TO_DECISION.items()}
 DECISION_ACTIONS = tuple(ACTION_TO_DECISION.keys())
 ACTION_BUTTON_LABEL = {
-    ACTION_GO: "通过入采购",
-    ACTION_CONDITIONAL: "条件采购复核",
-    ACTION_HOLD: "暂缓补资料",
-    ACTION_REJECT: "淘汰归档",
+    ACTION_GO: "Go｜通过入采购",
+    ACTION_CONDITIONAL: "条件推进｜采购复核",
+    ACTION_HOLD: "暂缓｜补资料",
+    ACTION_REJECT: "淘汰｜归档",
 }
 
 DEFAULT_BATCH_ID = os.environ.get("AMZ_SELECTION_CONFIRM_DEFAULT_BATCH_ID", "AMZ-EU-SELCONF-20260724-P0")
@@ -814,10 +815,10 @@ def _decision_help_text() -> str:
     return (
         "**运营要怎么点**\n"
         "点击后系统会写回候选表，并把原卡更新成已处理状态。\n"
-        "- **通过入采购**：确认选品通过，进入采购阶段；采购只复核 MOQ、交期、同款和供应商。\n"
-        "- **条件采购复核**：有条件推进；采购必须按卡片条件处理，例如限站点、压价、补月销、复核套装，条件没达成不下单。\n"
-        "- **暂缓补资料**：本批先不采购；补售价、月销、FBA费、合规或供应链资料后重新计算。\n"
-        "- **淘汰归档**：本批移出；除非重新跑选品，否则不再进入采购。"
+        "- **Go｜通过入采购**：确认选品通过，进入采购阶段；采购只复核 MOQ、交期、同款和供应商。\n"
+        "- **条件推进｜采购复核**：有条件推进；采购必须按卡片条件处理，例如限站点、压价、补月销、复核套装，条件没达成不下单。\n"
+        "- **暂缓｜补资料**：本批先不采购；补售价、月销、FBA费、合规或供应链资料后重新计算。\n"
+        "- **淘汰｜归档**：本批移出；除非重新跑选品，否则不再进入采购。"
     )
 
 
@@ -839,6 +840,19 @@ def _completed(candidate: dict) -> bool:
     return decision in ("已Go", "Go", "条件推进", "暂缓", "淘汰")
 
 
+def _recommended_action(candidate: dict) -> str:
+    decision = _text(candidate.get("system_selection_decision"))
+    return DECISION_TO_ACTION.get(decision, ACTION_HOLD)
+
+
+def _decision_button_type(action: str, recommended_action: str) -> str:
+    if action == recommended_action:
+        return "primary"
+    if action == ACTION_REJECT:
+        return "danger"
+    return "default"
+
+
 def _decision_status_text(decision: str) -> str:
     return (
         f"确认动作：{decision}\n"
@@ -854,6 +868,8 @@ def _product_elements(candidate: dict, card_record_ids: list[str], batch_id: str
     image = candidate.get("image_url")
     supplier = candidate.get("supplier_link")
     system_decision = candidate.get("system_selection_decision") or "暂缓"
+    recommended_action = _recommended_action(candidate)
+    recommended_label = ACTION_BUTTON_LABEL.get(recommended_action, "")
     elements: list[dict] = [
         {"tag": "hr"},
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**{title}**\n{proc._short(candidate.get('title'), 180)}"}},
@@ -925,7 +941,8 @@ def _product_elements(candidate: dict, card_record_ids: list[str], batch_id: str
                 "tag": "lark_md",
                 "content": (
                     "**请选择本产品的最终处理动作**\n"
-                    "只点一个按钮；点完会写回候选表并更新原卡。"
+                    f"系统建议：{system_decision}；建议优先点【{recommended_label}】。\n"
+                    "只点一个按钮；如需人工改判，再选择其他按钮。点完会写回候选表并更新原卡。"
                 ),
             },
         }
@@ -934,10 +951,10 @@ def _product_elements(candidate: dict, card_record_ids: list[str], batch_id: str
         {
             "tag": "action",
             "actions": [
-                _button(ACTION_BUTTON_LABEL[ACTION_GO], ACTION_GO, candidate, card_record_ids, "primary", batch_id),
-                _button(ACTION_BUTTON_LABEL[ACTION_CONDITIONAL], ACTION_CONDITIONAL, candidate, card_record_ids, "default", batch_id),
-                _button(ACTION_BUTTON_LABEL[ACTION_HOLD], ACTION_HOLD, candidate, card_record_ids, "default", batch_id),
-                _button(ACTION_BUTTON_LABEL[ACTION_REJECT], ACTION_REJECT, candidate, card_record_ids, "danger", batch_id),
+                _button(ACTION_BUTTON_LABEL[ACTION_GO], ACTION_GO, candidate, card_record_ids, _decision_button_type(ACTION_GO, recommended_action), batch_id),
+                _button(ACTION_BUTTON_LABEL[ACTION_CONDITIONAL], ACTION_CONDITIONAL, candidate, card_record_ids, _decision_button_type(ACTION_CONDITIONAL, recommended_action), batch_id),
+                _button(ACTION_BUTTON_LABEL[ACTION_HOLD], ACTION_HOLD, candidate, card_record_ids, _decision_button_type(ACTION_HOLD, recommended_action), batch_id),
+                _button(ACTION_BUTTON_LABEL[ACTION_REJECT], ACTION_REJECT, candidate, card_record_ids, _decision_button_type(ACTION_REJECT, recommended_action), batch_id),
             ],
         }
     )
@@ -1017,10 +1034,10 @@ def validate_selection_confirmation_card(card: dict, candidates: list[dict]) -> 
     for required in (
         "运营要怎么点",
         "请选择本产品的最终处理动作",
-        "通过入采购",
-        "条件采购复核",
-        "暂缓补资料",
-        "淘汰归档",
+        "Go｜通过入采购",
+        "条件推进｜采购复核",
+        "暂缓｜补资料",
+        "淘汰｜归档",
         "各站点建议",
         "🇩🇪 DE",
         "🇬🇧 UK",

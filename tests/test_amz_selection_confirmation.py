@@ -121,10 +121,12 @@ class AmzSelectionConfirmationTests(unittest.TestCase):
         self.assertIn("不是上架验证卡，也不是固定50件试销卡", rendered)
         self.assertIn("运营要怎么点", rendered)
         self.assertIn("请选择本产品的最终处理动作", rendered)
+        self.assertIn("系统建议：Go；建议优先点【Go｜通过入采购】", rendered)
+        self.assertIn("Go｜通过入采购", rendered)
         self.assertIn("通过入采购", rendered)
-        self.assertIn("条件采购复核", rendered)
-        self.assertIn("暂缓补资料", rendered)
-        self.assertIn("淘汰归档", rendered)
+        self.assertIn("条件推进｜采购复核", rendered)
+        self.assertIn("暂缓｜补资料", rendered)
+        self.assertIn("淘汰｜归档", rendered)
         self.assertIn("采购成本（单套）", rendered)
         self.assertIn("套装件数（每套内含）", rendered)
         self.assertIn("单套采购+物流投入", rendered)
@@ -155,6 +157,25 @@ class AmzSelectionConfirmationTests(unittest.TestCase):
         self.assertNotIn('"tag": "form"', rendered)
         self.assertNotIn("form_submit", rendered)
         self.assertEqual([], sel.validate_selection_confirmation_card(card, [candidate]))
+
+    def test_system_conditional_recommendation_marks_matching_button_primary(self):
+        candidate = self._candidate()
+        candidate["system_selection_decision"] = "条件推进"
+        card = sel.build_selection_confirmation_card([candidate], "batch-test")
+        rendered = json.dumps(card, ensure_ascii=False)
+
+        self.assertIn("系统建议：条件推进；建议优先点【条件推进｜采购复核】", rendered)
+        buttons = [
+            node
+            for node in sel.proc._card_nodes(card)
+            if node.get("tag") == "button"
+        ]
+        button_types = {
+            sel.proc._card_text(node.get("text")): node.get("type")
+            for node in buttons
+        }
+        self.assertEqual("primary", button_types["条件推进｜采购复核"])
+        self.assertEqual("default", button_types["Go｜通过入采购"])
 
     def test_review_note_marks_previously_clicked_product_processed(self):
         record = {
