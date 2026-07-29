@@ -121,6 +121,47 @@ class AmzProcurementPreviewTests(unittest.TestCase):
         self.assertNotIn("B0REJECT", rendered)
         self.assertEqual([], preview.validate_procurement_preview_card(card, candidates))
 
+    def test_procurement_audience_has_execution_wording(self):
+        candidates = [
+            self._candidate(rid="rec_go", decision="Go", qty=150),
+            self._candidate(rid="rec_cond", asin="B0CSCXSHPQ", decision="条件推进", qty=15, cost=40.1, current_status="待采购复核"),
+            self._candidate(rid="rec_hold", asin="B0HOLD", decision="暂缓", qty=0, current_status="暂缓"),
+        ]
+        card = preview.build_procurement_preview_card(candidates, "batch-proc", audience="procurement")
+        rendered = json.dumps(card, ensure_ascii=False)
+
+        self.assertIn("采购阶段执行清单", rendered)
+        self.assertIn("已确认口径，采购部执行", rendered)
+        self.assertIn("只包含需要采购部处理", rendered)
+        self.assertIn("不需要处理", rendered)
+        self.assertIn("条件未满足不下单", rendered)
+        self.assertNotIn("待 Frankie 确认", rendered)
+        self.assertNotIn("给 Frankie 确认", rendered)
+        self.assertNotIn("请在聊天里回复是否按本口径", rendered)
+        self.assertNotIn("暂缓不发采购｜", rendered)
+        self.assertNotIn("B0HOLD", rendered)
+        self.assertEqual([], preview.validate_procurement_preview_card(card, candidates, audience="procurement"))
+
+    def test_procurement_audience_requires_explicit_approval(self):
+        original_get_many = preview._get_candidates_by_ids
+
+        async def fake_get_many(record_ids):
+            return [self._candidate(rid=record_ids[0], decision="Go", qty=150)]
+
+        try:
+            preview._get_candidates_by_ids = fake_get_many
+            with self.assertRaises(ValueError):
+                asyncio.run(
+                    preview.send_procurement_preview_card(
+                        mode="dry_run",
+                        record_ids=["rec1"],
+                        frankie_only=False,
+                        audience="procurement",
+                    )
+                )
+        finally:
+            preview._get_candidates_by_ids = original_get_many
+
     def test_suggested_qty_prefers_confirmed_review_note(self):
         candidate = self._candidate(qty=60)
         self.assertEqual(60, candidate["suggested_procurement_qty"])
@@ -142,6 +183,32 @@ class AmzProcurementPreviewTests(unittest.TestCase):
         self.assertEqual([], result["would_write"])
         self.assertFalse(result["would_send_to_procurement"])
         self.assertIn("card", result)
+
+    def test_send_procurement_audience_dry_run_marks_procurement_send(self):
+        original_get_many = preview._get_candidates_by_ids
+
+        async def fake_get_many(record_ids):
+            return [self._candidate(rid=record_ids[0], decision="Go", qty=150)]
+
+        try:
+            preview._get_candidates_by_ids = fake_get_many
+            result = asyncio.run(
+                preview.send_procurement_preview_card(
+                    mode="dry_run",
+                    record_ids=["rec1"],
+                    frankie_only=False,
+                    audience="procurement",
+                    procurement_approved=True,
+                )
+            )
+        finally:
+            preview._get_candidates_by_ids = original_get_many
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("procurement", result["audience"])
+        self.assertFalse(result["frankie_only"])
+        self.assertTrue(result["would_send_to_procurement"])
+        self.assertEqual("passed", result["card_selftest"])
 
 
 if __name__ == "__main__":

@@ -1049,7 +1049,9 @@ async def run_amz_procurement_preview_card(authorization: str = Header(default="
                                            record_ids: str = "",
                                            frankie_only: bool = True,
                                            gray_union_ids: str = "",
-                                           gray_chat_ids: str = ""):
+                                           gray_chat_ids: str = "",
+                                           audience: str = "frankie",
+                                           procurement_approved: bool = False):
     """亚马逊欧洲采购阶段预览卡.
 
     P0 默认只发 Frankie。只读预览，不写采购阶段触发表，不发采购部，不改变候选表状态。
@@ -1067,6 +1069,8 @@ async def run_amz_procurement_preview_card(authorization: str = Header(default="
             frankie_only=frankie_only,
             gray_union_ids=gray_unions or None,
             gray_chat_ids=gray_chats or None,
+            audience=audience,
+            procurement_approved=procurement_approved,
         )
         return {"ok": True, **result}
     except Exception as e:

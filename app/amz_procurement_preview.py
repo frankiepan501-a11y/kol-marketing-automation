@@ -33,6 +33,7 @@ GRAY_CHAT_IDS = [x.strip() for x in os.environ.get("AMZ_PROCUREMENT_PREVIEW_GRAY
 
 DECISIONS = ("Go", "条件推进", "暂缓", "淘汰")
 ACTIVE_DECISIONS = ("Go", "条件推进")
+AUDIENCES = ("frankie", "procurement")
 ROUTE_LABEL = {
     "Go": "直接入采购",
     "条件推进": "条件采购复核",
@@ -234,14 +235,22 @@ def _route_template(candidates: list[dict]) -> str:
     return "green"
 
 
-def _workflow_text(candidates: list[dict]) -> str:
+def _workflow_text(candidates: list[dict], audience: str = "frankie") -> str:
     excluded = len(candidates) - len(_active_candidates(candidates))
-    lines = [
-        "**本卡目的**: 给 Frankie 确认采购部将收到哪些可执行产品；正式发采购部时只包含 Go / 条件推进。",
-        "**采购部收到后要做**: 直接入采购=复核 MOQ、交期、同款、套装和报价后下单；条件采购复核=先完成压价、限站点、补资料或套装复核，条件未满足不下单。",
-        "**不会发给采购部**: 暂缓/淘汰只留档，不生成采购待办，不要求采购操作。",
-        "**下一步**: Frankie 确认本口径后，再生成正式采购部卡/采购复核清单；采购完成复核后再回填采购阶段状态。",
-    ]
+    if audience == "procurement":
+        lines = [
+            "**本卡目的**: 这是已确认的欧洲站采购阶段执行清单，只包含需要采购部处理的 Go / 条件推进产品。",
+            "**采购部收到后要做**: 直接入采购=复核 MOQ、交期、同款、套装和报价后进入下单；条件采购复核=先完成压价、限站点、补资料或套装复核，条件未满足不下单。",
+            "**不需要处理**: 暂缓/淘汰产品不会出现在本卡，不生成采购待办。",
+            "**下一步**: 采购部完成供应商和报价复核后，回到候选表/采购阶段表更新复核结果；条件未满足的产品退回暂缓。",
+        ]
+    else:
+        lines = [
+            "**本卡目的**: 给 Frankie 确认采购部将收到哪些可执行产品；正式发采购部时只包含 Go / 条件推进。",
+            "**采购部收到后要做**: 直接入采购=复核 MOQ、交期、同款、套装和报价后下单；条件采购复核=先完成压价、限站点、补资料或套装复核，条件未满足不下单。",
+            "**不会发给采购部**: 暂缓/淘汰只留档，不生成采购待办，不要求采购操作。",
+            "**下一步**: Frankie 确认本口径后，再生成正式采购部卡/采购复核清单；采购完成复核后再回填采购阶段状态。",
+        ]
     if excluded:
         lines.append(f"**本批已剔除**: {excluded} 个暂缓/淘汰产品只保留在候选表，后续补数或重新选品后再重算。")
     return "\n".join(lines)
@@ -325,9 +334,21 @@ def _product_elements(candidate: dict) -> list[dict]:
     return elements
 
 
-def build_procurement_preview_card(candidates: list[dict], batch_id: str = "") -> dict:
+def build_procurement_preview_card(candidates: list[dict], batch_id: str = "", audience: str = "frankie") -> dict:
     batch = batch_id or DEFAULT_BATCH_ID
+    if audience not in AUDIENCES:
+        raise ValueError("audience must be frankie or procurement")
     active = _active_candidates(candidates)
+    if audience == "procurement":
+        status_text = "**状态**: 已确认口径，采购部执行\n"
+        explain_text = "**说明**: 本卡只发需要采购部处理的产品；不写采购阶段触发表，不包含暂缓/淘汰产品。"
+        note_text = "请按每个产品的采购阶段动作执行；条件采购复核未满足时不要下单，退回候选表备注原因。"
+        header_title = f"🟡 [AMZ·P0] 欧洲站采购阶段执行清单 · {len(active)}个待采购动作"
+    else:
+        status_text = "**状态**: 采购阶段预览，待 Frankie 确认\n"
+        explain_text = "**说明**: 本卡只预览采购阶段将如何派发，不写采购阶段触发表，不发采购部，不改变候选表状态。"
+        note_text = "请在聊天里回复是否按本口径进入采购阶段；预览卡不放业务决策按钮，避免误触发采购流程。"
+        header_title = f"🟡 [AMZ·P0] 采购阶段预览 · 待Frankie确认 {len(active)}个待采购动作"
     elements: list[dict] = [
         {
             "tag": "div",
@@ -335,19 +356,19 @@ def build_procurement_preview_card(candidates: list[dict], batch_id: str = "") -
                 "tag": "lark_md",
                 "content": (
                     f"**批次**: {batch}\n"
-                    "**状态**: 采购阶段预览，待 Frankie 确认\n"
+                    f"{status_text}"
                     f"**范围**: {_route_summary(candidates)}\n"
-                    "**说明**: 本卡只预览采购阶段将如何派发，不写采购阶段触发表，不发采购部，不改变候选表状态。"
+                    f"{explain_text}"
                 ),
             },
         },
-        {"tag": "div", "text": {"tag": "lark_md", "content": _workflow_text(candidates)}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": _workflow_text(candidates, audience)}},
         {
             "tag": "note",
             "elements": [
                 {
                     "tag": "plain_text",
-                    "content": "请在聊天里回复是否按本口径进入采购阶段；预览卡不放业务决策按钮，避免误触发采购流程。",
+                    "content": note_text,
                 }
             ],
         },
@@ -368,14 +389,16 @@ def build_procurement_preview_card(candidates: list[dict], batch_id: str = "") -
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "template": _route_template(candidates),
-            "title": {"tag": "plain_text", "content": f"🟡 [AMZ·P0] 采购阶段预览 · 待Frankie确认 {len(active)}个待采购动作"},
+            "title": {"tag": "plain_text", "content": header_title},
         },
         "elements": elements,
     }
 
 
-def validate_procurement_preview_card(card: dict, candidates: list[dict]) -> list[str]:
+def validate_procurement_preview_card(card: dict, candidates: list[dict], audience: str = "frankie") -> list[str]:
     errors: list[str] = []
+    if audience not in AUDIENCES:
+        errors.append("audience must be frankie or procurement")
     nodes = list(proc._card_nodes(card))
     rendered = json.dumps(card, ensure_ascii=False)
     buttons = [n for n in nodes if n.get("tag") == "button"]
@@ -408,28 +431,28 @@ def validate_procurement_preview_card(card: dict, candidates: list[dict]) -> lis
         if f"{route}｜" in rendered:
             label = candidate.get("asin") or candidate.get("record_id") or "unknown"
             errors.append(f"{label}: excluded decision rendered as procurement product")
-    base_required = (
-        "采购阶段预览",
-        "待 Frankie 确认",
+    base_required = [
         "不写采购阶段触发表",
-        "不发采购部",
         "本卡目的",
-        "正式发采购部时只包含",
         "采购部收到后要做",
-        "不会发给采购部",
-        "暂缓/淘汰只留档",
         "下一步",
         "直接入采购",
         "条件采购复核",
-        "请在聊天里回复",
-    )
+    ]
+    if audience == "procurement":
+        base_required.extend(("采购阶段执行清单", "采购部执行", "只包含需要采购部处理", "不需要处理"))
+        for forbidden in ("待 Frankie 确认", "给 Frankie 确认", "请在聊天里回复是否按本口径"):
+            if forbidden in rendered:
+                errors.append(f"procurement card must not contain {forbidden}")
+    else:
+        base_required.extend(("采购阶段预览", "待 Frankie 确认", "不发采购部", "正式发采购部时只包含", "不会发给采购部", "暂缓/淘汰只留档", "请在聊天里回复"))
     product_required = (
         "采购部下一步",
         "采购成本（单套）",
         "套装件数（每套内含）",
         "三渠道对比",
     )
-    for required in base_required + (product_required if active else ()):
+    for required in tuple(base_required) + (product_required if active else ()):
         if required not in rendered:
             errors.append(f"card missing {required}")
     if '"tag": "form"' in rendered or "form_submit" in rendered:
@@ -449,24 +472,34 @@ async def send_procurement_preview_card(
     frankie_only: bool = True,
     gray_union_ids: list[str] | None = None,
     gray_chat_ids: list[str] | None = None,
+    audience: str = "frankie",
+    procurement_approved: bool = False,
 ) -> dict:
     if mode not in ("dry_run", "commit"):
         raise ValueError("mode must be dry_run or commit")
+    if audience not in AUDIENCES:
+        raise ValueError("audience must be frankie or procurement")
     batch = batch_id or DEFAULT_BATCH_ID
     ids = record_ids if record_ids is not None else DEFAULT_RECORD_IDS
     candidates = await _get_candidates_by_ids(ids) if ids else await _search_candidates(limit=limit)
     active = _active_candidates(candidates)
     if mode == "commit":
         await _prepare_card_images(active)
-    card = build_procurement_preview_card(candidates, batch)
-    validation_errors = validate_procurement_preview_card(card, candidates)
+    card = build_procurement_preview_card(candidates, batch, audience=audience)
+    validation_errors = validate_procurement_preview_card(card, candidates, audience=audience)
     if validation_errors:
         raise RuntimeError("Procurement preview card self-test failed: " + "; ".join(validation_errors))
-    effective_frankie_only = bool(frankie_only or FRANKIE_ONLY)
+    if audience == "procurement" and frankie_only:
+        raise ValueError("procurement audience requires frankie_only=false")
+    if audience == "procurement" and not procurement_approved:
+        raise ValueError("procurement audience requires procurement_approved=true")
+    effective_frankie_only = bool(frankie_only or (FRANKIE_ONLY and not procurement_approved))
     result: dict[str, Any] = {
         "ok": True,
         "mode": mode,
         "frankie_only": effective_frankie_only,
+        "audience": audience,
+        "procurement_approved": bool(procurement_approved),
         "batch_id": batch,
         "count": len(active),
         "source_count": len(candidates),
@@ -479,7 +512,7 @@ async def send_procurement_preview_card(
     if mode == "dry_run":
         result["card"] = card
         result["would_write"] = []
-        result["would_send_to_procurement"] = False
+        result["would_send_to_procurement"] = bool(audience == "procurement" and not effective_frankie_only)
         return result
     message_ids: list[str] = []
     recipients: list[dict[str, str]] = []
