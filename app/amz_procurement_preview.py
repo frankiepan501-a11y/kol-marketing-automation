@@ -1,21 +1,25 @@
 # -*- coding: utf-8 -*-
-"""Amazon Europe procurement-stage preview cards.
+"""Amazon Europe procurement-stage cards.
 
-This card is a read-only handoff preview after selection confirmation. It is
-sent to Frankie first so the procurement-stage scope can be checked before a
-formal procurement card is sent to the purchasing team.
+Frankie cards remain read-only previews. Procurement cards collect one
+per-product supplier review so the next purchase-confirmation step has enough
+data without treating this stage as ERP product creation or purchase-order
+execution.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import time
 from typing import Any
 
 from . import amz_assistant, amz_procurement_quote as proc, amz_selection_confirmation as selection
 
 
 SOURCE = "amz_procurement_preview"
+ACTION_REVIEW_SUBMIT = "amz_proc_review_submit"
 
 DEFAULT_BATCH_ID = os.environ.get("AMZ_PROCUREMENT_PREVIEW_DEFAULT_BATCH_ID", "AMZ-EU-PROC-PREVIEW-20260729-P0")
 DEFAULT_RECORD_IDS = [
@@ -46,6 +50,13 @@ ROUTE_DESC = {
     "暂缓": "本批不发采购部执行，只留档；补售价、月销、FBA费、合规或供应链资料后再重算。",
     "淘汰": "本批归档，不进入采购阶段；除非重新跑选品，否则不再推进。",
 }
+SAME_MATCH_OPTIONS = ("同款可采购", "近似款需确认", "不同款/不建议采购")
+STOCK_OPTIONS = ("有现货", "无现货", "需询问")
+SUPPLIER_RESULT_OPTIONS = ("供应商可用", "供应商备选", "供应商不建议")
+PURCHASE_SUGGESTION_OPTIONS = ("可采购", "压价后采购", "换供应商", "补资料后复核", "暂缓采购")
+
+_bg_tasks: set[asyncio.Task] = set()
+_recent_callbacks: dict[str, float] = {}
 
 
 def _text(value: Any) -> str:
@@ -89,6 +100,10 @@ def _url_button(text: str, url: str, typ: str = "default") -> dict:
     return {"tag": "button", "text": {"tag": "plain_text", "content": text}, "type": typ, "url": url}
 
 
+def _button_option(text: str) -> dict:
+    return {"text": {"tag": "plain_text", "content": text}, "value": text}
+
+
 def _record_url(record_id: str) -> str:
     return proc._record_url(record_id)
 
@@ -113,6 +128,10 @@ async def _get_candidates_by_ids(record_ids: list[str]) -> list[dict]:
         if rid:
             out.append(await _get_candidate(rid))
     return out
+
+
+async def _update_candidate(record_id: str, fields: dict) -> None:
+    await proc._update_candidate(record_id, fields)
 
 
 async def _search_candidates(limit: int = 10) -> list[dict]:
@@ -193,11 +212,33 @@ def _risk_brief(candidate: dict) -> str:
     return proc._short(note, 500)
 
 
+def _latest_procurement_review(review_note: str) -> dict[str, str]:
+    latest: dict[str, str] = {}
+    for line in _text(review_note).splitlines():
+        if "采购复核回填=" not in line:
+            continue
+        parsed: dict[str, str] = {}
+        for part in line.split(";"):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key = re.sub(r"^.*采购复核回填", "采购复核回填", key).strip()
+            parsed[key] = value.strip().rstrip(".")
+        if parsed:
+            latest = parsed
+    return latest
+
+
 def _candidate_from_record(record: dict) -> dict:
     base = selection._candidate_from_record(record)
+    fields = record.get("fields") or {}
+    review = _latest_procurement_review(base.get("review_note", ""))
     base["final_decision"] = _final_decision(base)
     base["procurement_route"] = ROUTE_LABEL[base["final_decision"]]
     base["suggested_procurement_qty"] = _suggested_qty(base)
+    base["procurement_review"] = review
+    base["procurement_review_status"] = review.get("采购复核回填", "")
+    base["procurement_review_note"] = _text(fields.get("采购备注"))
     return base
 
 
@@ -239,10 +280,11 @@ def _workflow_text(candidates: list[dict], audience: str = "frankie") -> str:
     excluded = len(candidates) - len(_active_candidates(candidates))
     if audience == "procurement":
         lines = [
-            "**本卡目的**: 这是已确认的欧洲站采购阶段执行清单，只包含需要采购部处理的 Go / 条件推进产品。",
-            "**采购部收到后要做**: 直接入采购=复核 MOQ、交期、同款、套装和报价后进入下单；条件采购复核=先完成压价、限站点、补资料或套装复核，条件未满足不下单。",
-            "**不需要处理**: 暂缓/淘汰产品不会出现在本卡，不生成采购待办。",
-            "**下一步**: 采购部完成供应商和报价复核后，回到候选表/采购阶段表更新复核结果；条件未满足的产品退回暂缓。",
+            "**本卡目的**: 采购复核回填卡。只收集供应商、同款、价格、MOQ、交期、库存和箱规资料，给后续最终采购确认使用。",
+            "**采购部要做**: 每个产品逐项核对供应商页面和 Amazon 主图/套装，填完整本产品复核表，再点 `提交本产品复核`。每个产品单独提交，互不影响。",
+            "**现在不做**: 本卡不是 ERP 新品录入、不是采购下单、不是采购计划确认，也不是 Listing 上架；填完不会自动下单。",
+            "**下一步**: 全部产品复核完成后，系统再汇总成采购确认清单给 Frankie/运营确认。确认后才进入下游 ERP 新品/采购计划/下单节点。",
+            "**ERP资料口径**: 这张卡先收集 ERP 会用到的供应链资料；ERP 新品录入放在最终采购确认之后，不能在采购复核卡里直接触发。",
         ]
     else:
         lines = [
@@ -256,7 +298,124 @@ def _workflow_text(candidates: list[dict], audience: str = "frankie") -> str:
     return "\n".join(lines)
 
 
-def _product_elements(candidate: dict) -> list[dict]:
+def _review_payload(candidate: dict, card_record_ids: list[str], batch_id: str) -> dict:
+    return {
+        "source": SOURCE,
+        "action": ACTION_REVIEW_SUBMIT,
+        "record_id": candidate.get("record_id") or "",
+        "asin": candidate.get("asin") or "",
+        "batch_id": batch_id or DEFAULT_BATCH_ID,
+        "card_record_ids": card_record_ids,
+    }
+
+
+def _review_value(candidate: dict, key: str) -> str:
+    review = candidate.get("procurement_review") or {}
+    return _text(review.get(key))
+
+
+def _review_result_text(candidate: dict) -> str:
+    lines = [
+        f"- 同款确认: {_review_value(candidate, '同款确认') or '-'}",
+        f"- MOQ: {_review_value(candidate, 'MOQ') or '-'}",
+        f"- 阶梯价: {_review_value(candidate, '阶梯价') or '-'}",
+        f"- 交期: {_review_value(candidate, '交期') or '-'}",
+        f"- 箱规/尺寸重量: {_review_value(candidate, '箱规尺寸重量') or '-'}",
+        f"- 现货/库存: {_review_value(candidate, '现货') or '-'} / {_review_value(candidate, '库存数') or '-'}",
+        f"- 供应商结论: {_review_value(candidate, '供应商结论') or '-'}",
+        f"- 采购建议: {_review_value(candidate, '采购建议') or '-'}",
+    ]
+    note = _review_value(candidate, "备注") or _text(candidate.get("procurement_review_note"))
+    if note:
+        lines.append(f"- 备注: {note}")
+    return "\n".join(lines)
+
+
+def _review_form(candidate: dict, card_record_ids: list[str], batch_id: str) -> dict:
+    sid = proc._safe_id(candidate.get("record_id") or "")
+    return {
+        "tag": "form",
+        "name": f"proc_review_form_{sid}",
+        "elements": [
+            {
+                "tag": "select_static",
+                "name": f"proc_review_same_{sid}",
+                "placeholder": {"tag": "plain_text", "content": "同款确认"},
+                "options": [_button_option(x) for x in SAME_MATCH_OPTIONS],
+            },
+            {
+                "tag": "input",
+                "name": f"proc_review_moq_{sid}",
+                "label_position": "left",
+                "label": {"tag": "plain_text", "content": "MOQ"},
+                "placeholder": {"tag": "plain_text", "content": "例如 50套；若无MOQ填 无"},
+            },
+            {
+                "tag": "input",
+                "name": f"proc_review_tiers_{sid}",
+                "label_position": "left",
+                "label": {"tag": "plain_text", "content": "阶梯价"},
+                "placeholder": {"tag": "plain_text", "content": "例如 50套=12.5；100套=11.8；300套=10.9"},
+            },
+            {
+                "tag": "input",
+                "name": f"proc_review_leadtime_{sid}",
+                "label_position": "left",
+                "label": {"tag": "plain_text", "content": "交期"},
+                "placeholder": {"tag": "plain_text", "content": "现货1-2天 / 订做7天 / 需确认"},
+            },
+            {
+                "tag": "input",
+                "name": f"proc_review_carton_{sid}",
+                "label_position": "left",
+                "label": {"tag": "plain_text", "content": "箱规/尺寸重量"},
+                "placeholder": {"tag": "plain_text", "content": "单套包装、外箱尺寸、毛重、每箱数量"},
+            },
+            {
+                "tag": "select_static",
+                "name": f"proc_review_stock_{sid}",
+                "placeholder": {"tag": "plain_text", "content": "是否有现货库存"},
+                "options": [_button_option(x) for x in STOCK_OPTIONS],
+            },
+            {
+                "tag": "input",
+                "name": f"proc_review_stock_qty_{sid}",
+                "label_position": "left",
+                "label": {"tag": "plain_text", "content": "库存数"},
+                "placeholder": {"tag": "plain_text", "content": "有现货时填写数量；无现货可填0"},
+            },
+            {
+                "tag": "select_static",
+                "name": f"proc_review_supplier_{sid}",
+                "placeholder": {"tag": "plain_text", "content": "供应商结论"},
+                "options": [_button_option(x) for x in SUPPLIER_RESULT_OPTIONS],
+            },
+            {
+                "tag": "select_static",
+                "name": f"proc_review_suggestion_{sid}",
+                "placeholder": {"tag": "plain_text", "content": "采购建议"},
+                "options": [_button_option(x) for x in PURCHASE_SUGGESTION_OPTIONS],
+            },
+            {
+                "tag": "input",
+                "name": f"proc_review_note_{sid}",
+                "label_position": "left",
+                "label": {"tag": "plain_text", "content": "备注"},
+                "placeholder": {"tag": "plain_text", "content": "型号差异、颜色、Logo、报价口径、需补图片/样品"},
+            },
+            {
+                "tag": "button",
+                "action_type": "form_submit",
+                "name": f"proc_review_submit_{sid}",
+                "type": "primary",
+                "text": {"tag": "plain_text", "content": "提交本产品复核"},
+                "value": _review_payload(candidate, card_record_ids, batch_id),
+            },
+        ],
+    }
+
+
+def _product_elements(candidate: dict, audience: str = "frankie", batch_id: str = "", card_record_ids: list[str] | None = None) -> list[dict]:
     rid = candidate.get("record_id", "")
     decision = candidate.get("final_decision") or "暂缓"
     route = candidate.get("procurement_route") or ROUTE_LABEL[decision]
@@ -331,6 +490,37 @@ def _product_elements(candidate: dict) -> list[dict]:
     if supplier:
         actions.append(_url_button("打开1688供应商", supplier))
     elements.append({"tag": "action", "actions": actions})
+    if audience == "procurement":
+        if candidate.get("procurement_review_status"):
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            "**采购复核已提交**\n"
+                            f"{_review_result_text(candidate)}\n\n"
+                            "**后续流向**: 等本批产品全部复核后，系统汇总给 Frankie/运营做最终采购确认；本卡不会自动录 ERP 或下单。"
+                        ),
+                    },
+                }
+            )
+        else:
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            "**请采购回填本产品复核结果**\n"
+                            "- 同款确认必须看 Amazon 主图、套装件数、适配型号和供应商页。\n"
+                            "- MOQ、阶梯价、交期、库存、箱规会影响最终采购量、头程物流和 ERP 新品资料。\n"
+                            "- 如果不是同款或供应商条件不达标，请选 `暂缓采购` 或 `换供应商`，不要默认推进。"
+                        ),
+                    },
+                }
+            )
+            elements.append(_review_form(candidate, card_record_ids or [], batch_id))
     return elements
 
 
@@ -339,11 +529,14 @@ def build_procurement_preview_card(candidates: list[dict], batch_id: str = "", a
     if audience not in AUDIENCES:
         raise ValueError("audience must be frankie or procurement")
     active = _active_candidates(candidates)
+    card_record_ids = [c.get("record_id") for c in active if c.get("record_id")]
     if audience == "procurement":
-        status_text = "**状态**: 已确认口径，采购部执行\n"
-        explain_text = "**说明**: 本卡只发需要采购部处理的产品；不写采购阶段触发表，不包含暂缓/淘汰产品。"
-        note_text = "请按每个产品的采购阶段动作执行；条件采购复核未满足时不要下单，退回候选表备注原因。"
-        header_title = f"🟡 [AMZ·P0] 欧洲站采购阶段执行清单 · {len(active)}个待采购动作"
+        done = sum(1 for item in active if item.get("procurement_review_status"))
+        status_text = "**状态**: 采购复核回填中\n"
+        explain_text = "**说明**: 本卡只发需要采购部复核的 Go / 条件推进产品；暂缓/淘汰不出现在产品区块。"
+        note_text = "采购只需要核对并提交本产品复核资料；本卡不会自动录 ERP 新品、不会生成采购单、不会触发上架。"
+        suffix = "已全部复核" if active and done == len(active) else f"待复核 {len(active) - done}/{len(active)}"
+        header_title = f"🟡 [AMZ·P0] 欧洲站采购复核回填 · {suffix}"
     else:
         status_text = "**状态**: 采购阶段预览，待 Frankie 确认\n"
         explain_text = "**说明**: 本卡只预览采购阶段将如何派发，不写采购阶段触发表，不发采购部，不改变候选表状态。"
@@ -384,7 +577,7 @@ def build_procurement_preview_card(candidates: list[dict], batch_id: str = "", a
             }
         )
     for candidate in active:
-        elements.extend(_product_elements(candidate))
+        elements.extend(_product_elements(candidate, audience=audience, batch_id=batch, card_record_ids=card_record_ids))
     return {
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
@@ -431,20 +624,30 @@ def validate_procurement_preview_card(card: dict, candidates: list[dict], audien
         if f"{route}｜" in rendered:
             label = candidate.get("asin") or candidate.get("record_id") or "unknown"
             errors.append(f"{label}: excluded decision rendered as procurement product")
-    base_required = [
-        "不写采购阶段触发表",
-        "本卡目的",
-        "采购部收到后要做",
-        "下一步",
-        "直接入采购",
-        "条件采购复核",
-    ]
     if audience == "procurement":
-        base_required.extend(("采购阶段执行清单", "采购部执行", "只包含需要采购部处理", "不需要处理"))
+        base_required = [
+            "本卡目的",
+            "采购部要做",
+            "现在不做",
+            "下一步",
+            "ERP资料口径",
+            "直接入采购",
+            "条件采购复核",
+            "本卡只发需要采购部复核",
+            "暂缓/淘汰不出现在产品区块",
+        ]
         for forbidden in ("待 Frankie 确认", "给 Frankie 确认", "请在聊天里回复是否按本口径"):
             if forbidden in rendered:
                 errors.append(f"procurement card must not contain {forbidden}")
     else:
+        base_required = [
+            "不写采购阶段触发表",
+            "本卡目的",
+            "采购部收到后要做",
+            "下一步",
+            "直接入采购",
+            "条件采购复核",
+        ]
         base_required.extend(("采购阶段预览", "待 Frankie 确认", "不发采购部", "正式发采购部时只包含", "不会发给采购部", "暂缓/淘汰只留档", "请在聊天里回复"))
     product_required = (
         "采购部下一步",
@@ -455,12 +658,307 @@ def validate_procurement_preview_card(card: dict, candidates: list[dict], audien
     for required in tuple(base_required) + (product_required if active else ()):
         if required not in rendered:
             errors.append(f"card missing {required}")
-    if '"tag": "form"' in rendered or "form_submit" in rendered:
-        errors.append("procurement preview card must not contain forms")
-    action_buttons = [button for button in buttons if button.get("value") or button.get("action_type")]
-    if action_buttons:
-        errors.append("procurement preview card must use URL buttons only")
+    forms = {n.get("name"): n for n in nodes if n.get("tag") == "form" and n.get("name")}
+    if audience == "frankie":
+        if '"tag": "form"' in rendered or "form_submit" in rendered:
+            errors.append("Frankie procurement preview card must not contain forms")
+        action_buttons = [button for button in buttons if button.get("value") or button.get("action_type")]
+        if action_buttons:
+            errors.append("Frankie procurement preview card must use URL buttons only")
+    else:
+        has_pending = any(not c.get("procurement_review_status") for c in active)
+        required_procurement_text = [
+            "采购复核回填卡",
+            "不是 ERP 新品录入",
+            "不会自动下单",
+            "ERP 新品录入放在最终采购确认之后",
+        ]
+        if has_pending:
+            required_procurement_text.extend(
+                [
+                    "提交本产品复核",
+                    "同款确认",
+                    "MOQ",
+                    "阶梯价",
+                    "交期",
+                    "箱规/尺寸重量",
+                    "供应商结论",
+                    "采购建议",
+                    "是否有现货库存",
+                    "库存数",
+                ]
+            )
+        else:
+            required_procurement_text.append("采购复核已提交")
+        for required in required_procurement_text:
+            if required not in rendered:
+                errors.append(f"procurement review card missing {required}")
+        for candidate in active:
+            if candidate.get("procurement_review_status"):
+                continue
+            rid = candidate.get("record_id") or ""
+            label = candidate.get("asin") or rid or "unknown"
+            sid = proc._safe_id(rid)
+            form_name = f"proc_review_form_{sid}"
+            form = forms.get(form_name)
+            if not form:
+                errors.append(f"{label}: missing form {form_name}")
+                continue
+            form_elements = form.get("elements") or []
+            names = {x.get("name"): x.get("tag") for x in form_elements if isinstance(x, dict) and x.get("name")}
+            expected = {
+                f"proc_review_same_{sid}": "select_static",
+                f"proc_review_moq_{sid}": "input",
+                f"proc_review_tiers_{sid}": "input",
+                f"proc_review_leadtime_{sid}": "input",
+                f"proc_review_carton_{sid}": "input",
+                f"proc_review_stock_{sid}": "select_static",
+                f"proc_review_stock_qty_{sid}": "input",
+                f"proc_review_supplier_{sid}": "select_static",
+                f"proc_review_suggestion_{sid}": "select_static",
+                f"proc_review_note_{sid}": "input",
+            }
+            for name, tag in expected.items():
+                if names.get(name) != tag:
+                    errors.append(f"{label}: missing {tag} {name}")
+            submit = None
+            for item in form_elements:
+                if isinstance(item, dict) and item.get("tag") == "button" and item.get("action_type") == "form_submit":
+                    submit = item
+                    break
+            if not submit:
+                errors.append(f"{label}: missing form_submit button")
+                continue
+            value = submit.get("value") or {}
+            if _text(value.get("action")) != ACTION_REVIEW_SUBMIT:
+                errors.append(f"{label}: submit payload action is invalid")
+            if _text(value.get("record_id")) != rid:
+                errors.append(f"{label}: submit payload record_id is invalid")
+            payload_ids = [_text(x) for x in (value.get("card_record_ids") or []) if _text(x)]
+            expected_ids = [c.get("record_id") for c in active if c.get("record_id")]
+            if payload_ids != expected_ids:
+                errors.append(f"{label}: submit payload card_record_ids is invalid")
     return errors
+
+
+def _extract_action(event: dict) -> tuple[str, dict, dict]:
+    return proc._extract_action(event)
+
+
+def _form_value(form: dict, record_id: str, suffix: str) -> str:
+    return proc._form_value(form, record_id, f"review_{suffix}")
+
+
+def _message_id(event: dict) -> str:
+    return proc._message_id(event)
+
+
+def _operator_label(event: dict) -> str:
+    return proc._operator_label(event).replace("采购回填", "采购复核")
+
+
+def _toast(content: str, typ: str = "success") -> dict:
+    return proc._toast(content, typ)
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+def _callback_key(record_id: str, form: dict) -> str:
+    text = json.dumps(form or {}, ensure_ascii=False, sort_keys=True)
+    return f"{record_id}:{hash(text)}"
+
+
+def _recent_seen(key: str, ttl_sec: int = 300) -> bool:
+    now = time.time()
+    for old, ts in list(_recent_callbacks.items()):
+        if now - ts > ttl_sec:
+            _recent_callbacks.pop(old, None)
+    return key in _recent_callbacks and now - _recent_callbacks[key] <= ttl_sec
+
+
+def _review_from_form(form: dict, record_id: str) -> dict[str, str]:
+    return {
+        "same": _form_value(form, record_id, "same"),
+        "moq": _form_value(form, record_id, "moq"),
+        "tiers": _form_value(form, record_id, "tiers"),
+        "leadtime": _form_value(form, record_id, "leadtime"),
+        "carton": _form_value(form, record_id, "carton"),
+        "stock": _form_value(form, record_id, "stock"),
+        "stock_qty": _form_value(form, record_id, "stock_qty"),
+        "supplier": _form_value(form, record_id, "supplier"),
+        "suggestion": _form_value(form, record_id, "suggestion"),
+        "note": _form_value(form, record_id, "note"),
+    }
+
+
+def _validate_review(review: dict[str, str]) -> str:
+    labels = {
+        "same": "同款确认",
+        "moq": "MOQ",
+        "tiers": "阶梯价",
+        "leadtime": "交期",
+        "carton": "箱规/尺寸重量",
+        "stock": "是否有现货库存",
+        "supplier": "供应商结论",
+        "suggestion": "采购建议",
+    }
+    missing = [label for key, label in labels.items() if not _text(review.get(key))]
+    if missing:
+        return "请补齐：" + "、".join(missing)
+    if review.get("same") not in SAME_MATCH_OPTIONS:
+        return "同款确认选项无效，请重新选择"
+    if review.get("stock") not in STOCK_OPTIONS:
+        return "现货库存选项无效，请重新选择"
+    if review.get("supplier") not in SUPPLIER_RESULT_OPTIONS:
+        return "供应商结论选项无效，请重新选择"
+    if review.get("suggestion") not in PURCHASE_SUGGESTION_OPTIONS:
+        return "采购建议选项无效，请重新选择"
+    if review.get("stock") == "有现货" and not _text(review.get("stock_qty")):
+        return "已选择有现货，请填写库存数"
+    return ""
+
+
+def _review_line(candidate: dict, review: dict[str, str], actor: str, batch_id: str) -> str:
+    note = re.sub(r"\s+", " ", _text(review.get("note")))[:300]
+    return (
+        f"{proc._now_label()} {actor}: 采购复核回填=已提交; "
+        f"同款确认={review.get('same') or '-'}; "
+        f"MOQ={review.get('moq') or '-'}; "
+        f"阶梯价={review.get('tiers') or '-'}; "
+        f"交期={review.get('leadtime') or '-'}; "
+        f"箱规尺寸重量={review.get('carton') or '-'}; "
+        f"现货={review.get('stock') or '-'}; "
+        f"库存数={review.get('stock_qty') or '-'}; "
+        f"供应商结论={review.get('supplier') or '-'}; "
+        f"采购建议={review.get('suggestion') or '-'}; "
+        f"备注={note or '-'}; "
+        f"批次={batch_id or DEFAULT_BATCH_ID}."
+    )
+
+
+def _append_review_note(candidate: dict, review: dict[str, str], actor: str, batch_id: str) -> str:
+    line = _review_line(candidate, review, actor, batch_id)
+    old = _text(candidate.get("review_note"))
+    if not old:
+        return line
+    return old if line in old else f"{old}\n{line}"
+
+
+def _review_next_action(review: dict[str, str]) -> str:
+    suggestion = review.get("suggestion")
+    if suggestion == "可采购":
+        return "采购复核已提交：待Frankie/运营最终确认采购量，再进入ERP新品/采购计划节点"
+    if suggestion == "压价后采购":
+        return "采购复核待处理：采购继续压价，达到目标价后再提交最终采购确认"
+    if suggestion == "换供应商":
+        return "采购复核待处理：当前供应商不作为最终供应商，需重新找供应商后复核"
+    if suggestion == "补资料后复核":
+        return "采购复核待处理：补同款、箱规、库存、交期或报价资料后再复核"
+    return "采购暂缓：供应商或同款条件不满足，本批不进入下单"
+
+
+def _review_summary(review: dict[str, str]) -> str:
+    return (
+        f"采购复核已提交：同款确认={review.get('same') or '-'}｜"
+        f"MOQ={review.get('moq') or '-'}｜阶梯价={review.get('tiers') or '-'}｜"
+        f"交期={review.get('leadtime') or '-'}｜箱规/尺寸重量={review.get('carton') or '-'}｜"
+        f"现货={review.get('stock') or '-'}｜库存数={review.get('stock_qty') or '-'}｜"
+        f"供应商结论={review.get('supplier') or '-'}｜采购建议={review.get('suggestion') or '-'}｜"
+        f"备注={review.get('note') or '-'}"
+    )[:5000]
+
+
+async def _process_callback_background(event: dict, callback_key: str) -> None:
+    try:
+        result = await _process_callback(event)
+        if ((result.get("toast") or {}).get("type") or "") == "error":
+            _recent_callbacks.pop(callback_key, None)
+    except Exception as exc:
+        _recent_callbacks.pop(callback_key, None)
+        print(f"[amz_procurement_preview.callback_bg] {callback_key} fail: {exc}")
+
+
+async def _process_callback(event: dict) -> dict:
+    action, value, form = _extract_action(event)
+    if action != ACTION_REVIEW_SUBMIT:
+        return _toast("未知采购复核动作", "error")
+    record_id = _text(value.get("record_id"))
+    if not record_id:
+        return _toast("缺少候选记录ID", "error")
+    review = _review_from_form(form, record_id)
+    error = _validate_review(review)
+    if error:
+        return _toast(error, "error")
+
+    candidate = await _get_candidate(record_id)
+    msg_id = _message_id(event)
+    actor = _operator_label(event)
+    batch_id = _text(value.get("batch_id")) or DEFAULT_BATCH_ID
+    fields = {
+        "下一步动作": _review_next_action(review),
+        "采购备注": _review_summary(review),
+        "人审备注": _append_review_note(candidate, review, actor, batch_id),
+    }
+    await _update_candidate(record_id, fields)
+    candidate.update(
+        {
+            "next_action": fields["下一步动作"],
+            "procurement_review_note": fields["采购备注"],
+            "review_note": fields["人审备注"],
+            "procurement_review": _latest_procurement_review(fields["人审备注"]),
+            "procurement_review_status": "已提交",
+        }
+    )
+    record_ids = [x for x in (value.get("card_record_ids") or []) if _text(x)]
+    if msg_id:
+        if record_ids:
+            candidates = await _get_candidates_by_ids(record_ids)
+            for idx, item in enumerate(candidates):
+                if item.get("record_id") == record_id:
+                    candidates[idx] = candidate
+                    break
+            await _prepare_card_images(candidates)
+            await amz_assistant.update_card(msg_id, build_procurement_preview_card(candidates, batch_id, audience="procurement"))
+        else:
+            await amz_assistant.update_card(msg_id, build_procurement_preview_card([candidate], batch_id, audience="procurement"))
+    return _toast("本产品采购复核已提交")
+
+
+async def handle_callback(event: dict) -> dict:
+    action, value, form = _extract_action(event)
+    if action != ACTION_REVIEW_SUBMIT:
+        return {"ok": False, "ignored": True, "action": action}
+    record_id = _text(value.get("record_id"))
+    if not record_id:
+        return _toast("缺少候选记录ID", "error")
+    review = _review_from_form(form, record_id)
+    error = _validate_review(review)
+    if error:
+        return _toast(error, "error")
+    callback_key = _callback_key(record_id, form)
+    if _recent_seen(callback_key):
+        try:
+            current = await _get_candidate(record_id)
+            latest = current.get("procurement_review") or {}
+            if (
+                _text(latest.get("采购复核回填")) == "已提交"
+                and _text(latest.get("采购建议")) == review.get("suggestion")
+                and _text(latest.get("同款确认")) == review.get("same")
+            ):
+                return _toast("该产品采购复核已提交，无需重复点击")
+        except Exception as exc:
+            print(f"[amz_procurement_preview.callback_duplicate_check] {record_id} fail: {exc}")
+        _recent_callbacks.pop(callback_key, None)
+        _recent_callbacks[callback_key] = time.time()
+        _spawn(_process_callback_background(event, callback_key))
+        return _toast("已重新收到本产品采购复核，正在补写候选表并更新原卡")
+    _recent_callbacks[callback_key] = time.time()
+    _spawn(_process_callback_background(event, callback_key))
+    return _toast("已收到本产品采购复核，正在写回候选表并更新原卡")
 
 
 async def send_procurement_preview_card(
@@ -489,10 +987,8 @@ async def send_procurement_preview_card(
     validation_errors = validate_procurement_preview_card(card, candidates, audience=audience)
     if validation_errors:
         raise RuntimeError("Procurement preview card self-test failed: " + "; ".join(validation_errors))
-    if audience == "procurement" and frankie_only:
-        raise ValueError("procurement audience requires frankie_only=false")
-    if audience == "procurement" and not procurement_approved:
-        raise ValueError("procurement audience requires procurement_approved=true")
+    if audience == "procurement" and not frankie_only and not procurement_approved:
+        raise ValueError("sending procurement audience to non-Frankie recipients requires procurement_approved=true")
     effective_frankie_only = bool(frankie_only or (FRANKIE_ONLY and not procurement_approved))
     result: dict[str, Any] = {
         "ok": True,

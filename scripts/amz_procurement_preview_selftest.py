@@ -1,8 +1,10 @@
-"""Local self-test for AMZ procurement-stage preview cards.
+"""Local self-test for AMZ procurement-stage cards.
 
 This script does not write Feishu records and does not send messages. It checks
-that the preview card is read-only and contains the purchasing context needed
-before sending a formal card to the purchasing team.
+both:
+- Frankie preview cards stay read-only.
+- Procurement review cards contain per-product supplier-review fields and
+  submit controls.
 """
 from __future__ import annotations
 
@@ -104,15 +106,30 @@ async def main() -> dict[str, Any]:
     errors = preview.validate_procurement_preview_card(card, candidates)
     if errors:
         raise AssertionError("; ".join(errors))
-    rendered = json.dumps(card, ensure_ascii=False)
-    if "B FBA快速线（推荐）" in rendered:
+    preview_rendered = json.dumps(card, ensure_ascii=False)
+    if "B FBA快速线（推荐）" in preview_rendered:
         raise AssertionError("B FBA快速线 must not be marked recommended when fulfillment is FBA头程-经济线")
+    review_card = preview.build_procurement_preview_card(candidates, "selftest-batch", audience="procurement")
+    review_errors = preview.validate_procurement_preview_card(review_card, candidates, audience="procurement")
+    if review_errors:
+        raise AssertionError("; ".join(review_errors))
+    review_rendered = json.dumps(review_card, ensure_ascii=False)
+    if "form_submit" not in review_rendered or "提交本产品复核" not in review_rendered:
+        raise AssertionError("procurement review card must contain per-product submit forms")
     return {
         "ok": True,
         "card_selftest": "passed",
         "checked": [
-            "read-only card without forms",
-            "no callback payload buttons",
+            "Frankie preview card without forms",
+            "Frankie preview card without callback payload buttons",
+            "procurement review card with forms",
+            "procurement review card submit payloads",
+            "same-product confirmation field",
+            "MOQ / tier price / lead time fields",
+            "carton-size and weight field",
+            "stock and stock quantity fields",
+            "supplier conclusion and purchase suggestion fields",
+            "ERP boundary wording",
             "route summary",
             "product images",
             "Amazon Listing buttons",
@@ -122,7 +139,7 @@ async def main() -> dict[str, Any]:
             "three-channel margin comparison",
             "unit-cost wording",
         ],
-        "routes": {label: rendered.count(label) for label in preview.ROUTE_LABEL.values()},
+        "routes": {label: preview_rendered.count(label) for label in preview.ROUTE_LABEL.values()},
     }
 
 

@@ -244,6 +244,10 @@ async def handle_feishu_callback(payload: dict[str, Any]) -> dict:
         from . import amz_procurement_quote
 
         return await amz_procurement_quote.handle_callback(_card_event(payload))
+    if action.startswith("amz_proc_review_"):
+        from . import amz_procurement_preview
+
+        return await amz_procurement_preview.handle_callback(_card_event(payload))
     if action.startswith("amz_fit_check_"):
         from . import amz_compliance_fit_card
 

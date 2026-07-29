@@ -130,17 +130,55 @@ class AmzProcurementPreviewTests(unittest.TestCase):
         card = preview.build_procurement_preview_card(candidates, "batch-proc", audience="procurement")
         rendered = json.dumps(card, ensure_ascii=False)
 
-        self.assertIn("采购阶段执行清单", rendered)
-        self.assertIn("已确认口径，采购部执行", rendered)
-        self.assertIn("只包含需要采购部处理", rendered)
-        self.assertIn("不需要处理", rendered)
-        self.assertIn("条件未满足不下单", rendered)
+        self.assertIn("采购复核回填", rendered)
+        self.assertIn("采购复核回填卡", rendered)
+        self.assertIn("本卡只发需要采购部复核", rendered)
+        self.assertIn("暂缓/淘汰不出现在产品区块", rendered)
+        self.assertIn("提交本产品复核", rendered)
+        self.assertIn("同款确认", rendered)
+        self.assertIn("MOQ", rendered)
+        self.assertIn("阶梯价", rendered)
+        self.assertIn("交期", rendered)
+        self.assertIn("箱规/尺寸重量", rendered)
+        self.assertIn("供应商结论", rendered)
+        self.assertIn("采购建议", rendered)
+        self.assertIn("是否有现货库存", rendered)
+        self.assertIn("库存数", rendered)
+        self.assertIn("不是 ERP 新品录入", rendered)
+        self.assertIn("不会自动下单", rendered)
+        self.assertIn("ERP 新品录入放在最终采购确认之后", rendered)
+        self.assertIn("条件未满足前不要下单", rendered)
         self.assertNotIn("待 Frankie 确认", rendered)
         self.assertNotIn("给 Frankie 确认", rendered)
         self.assertNotIn("请在聊天里回复是否按本口径", rendered)
         self.assertNotIn("暂缓不发采购｜", rendered)
         self.assertNotIn("B0HOLD", rendered)
         self.assertEqual([], preview.validate_procurement_preview_card(card, candidates, audience="procurement"))
+
+    def test_completed_procurement_review_card_has_no_active_form(self):
+        candidate = self._candidate(rid="rec_done", decision="Go", qty=150)
+        candidate["procurement_review_status"] = "已提交"
+        candidate["procurement_review"] = {
+            "采购复核回填": "已提交",
+            "同款确认": "同款可采购",
+            "MOQ": "50套",
+            "阶梯价": "50套=4",
+            "交期": "现货1-2天",
+            "箱规尺寸重量": "外箱50套/6kg",
+            "现货": "有现货",
+            "库存数": "300套",
+            "供应商结论": "供应商可用",
+            "采购建议": "可采购",
+        }
+        card = preview.build_procurement_preview_card([candidate], "batch-done", audience="procurement")
+        rendered = json.dumps(card, ensure_ascii=False)
+
+        self.assertIn("已全部复核", rendered)
+        self.assertIn("采购复核已提交", rendered)
+        self.assertIn("同款确认: 同款可采购", rendered)
+        self.assertNotIn("proc_review_form_rec_done", rendered)
+        self.assertNotIn("form_submit", rendered)
+        self.assertEqual([], preview.validate_procurement_preview_card(card, [candidate], audience="procurement"))
 
     def test_procurement_audience_requires_explicit_approval(self):
         original_get_many = preview._get_candidates_by_ids
@@ -161,6 +199,31 @@ class AmzProcurementPreviewTests(unittest.TestCase):
                 )
         finally:
             preview._get_candidates_by_ids = original_get_many
+
+    def test_procurement_audience_allows_frankie_only_review_sample(self):
+        original_get_many = preview._get_candidates_by_ids
+
+        async def fake_get_many(record_ids):
+            return [self._candidate(rid=record_ids[0], decision="Go", qty=150)]
+
+        try:
+            preview._get_candidates_by_ids = fake_get_many
+            result = asyncio.run(
+                preview.send_procurement_preview_card(
+                    mode="dry_run",
+                    record_ids=["rec1"],
+                    frankie_only=True,
+                    audience="procurement",
+                )
+            )
+        finally:
+            preview._get_candidates_by_ids = original_get_many
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["frankie_only"])
+        self.assertFalse(result["would_send_to_procurement"])
+        rendered = json.dumps(result["card"], ensure_ascii=False)
+        self.assertIn("提交本产品复核", rendered)
 
     def test_suggested_qty_prefers_confirmed_review_note(self):
         candidate = self._candidate(qty=60)
@@ -209,6 +272,89 @@ class AmzProcurementPreviewTests(unittest.TestCase):
         self.assertFalse(result["frankie_only"])
         self.assertTrue(result["would_send_to_procurement"])
         self.assertEqual("passed", result["card_selftest"])
+
+    def test_procurement_review_callback_writes_current_product_and_patches_card(self):
+        candidate = self._candidate(rid="rec1", decision="Go", qty=150)
+        updates = {}
+        patched = {}
+        original_get = preview._get_candidate
+        original_update = preview._update_candidate
+        original_get_many = preview._get_candidates_by_ids
+        original_prepare = preview._prepare_card_images
+        original_update_card = preview.amz_assistant.update_card
+
+        async def fake_get(record_id):
+            return dict(candidate)
+
+        async def fake_update(record_id, fields):
+            updates["record_id"] = record_id
+            updates.update(fields)
+
+        async def fake_get_many(record_ids):
+            item = dict(candidate)
+            if updates.get("人审备注"):
+                item["review_note"] = updates["人审备注"]
+                item["procurement_review"] = preview._latest_procurement_review(updates["人审备注"])
+                item["procurement_review_status"] = "已提交"
+            return [item]
+
+        async def fake_prepare(candidates):
+            return None
+
+        async def fake_update_card(message_id, card):
+            patched["message_id"] = message_id
+            patched["card"] = card
+            return True
+
+        event = {
+            "open_message_id": "om_proc_review_test",
+            "operator": {"name": "郭嘉美"},
+            "action": {
+                "value": {
+                    "action": preview.ACTION_REVIEW_SUBMIT,
+                    "record_id": "rec1",
+                    "batch_id": "batch-review",
+                    "card_record_ids": ["rec1"],
+                },
+                "form_value": {
+                    "proc_review_same_rec1": "同款可采购",
+                    "proc_review_moq_rec1": "50套",
+                    "proc_review_tiers_rec1": "50套=4；100套=3.8",
+                    "proc_review_leadtime_rec1": "现货1-2天",
+                    "proc_review_carton_rec1": "单套12.9*5.5*3.6cm/50g；外箱50套/6kg",
+                    "proc_review_stock_rec1": "有现货",
+                    "proc_review_stock_qty_rec1": "300套",
+                    "proc_review_supplier_rec1": "供应商可用",
+                    "proc_review_suggestion_rec1": "可采购",
+                    "proc_review_note_rec1": "需确认无Logo，按2件套报价",
+                },
+            },
+        }
+        try:
+            preview._get_candidate = fake_get
+            preview._update_candidate = fake_update
+            preview._get_candidates_by_ids = fake_get_many
+            preview._prepare_card_images = fake_prepare
+            preview.amz_assistant.update_card = fake_update_card
+            result = asyncio.run(preview._process_callback(event))
+        finally:
+            preview._get_candidate = original_get
+            preview._update_candidate = original_update
+            preview._get_candidates_by_ids = original_get_many
+            preview._prepare_card_images = original_prepare
+            preview.amz_assistant.update_card = original_update_card
+
+        self.assertIn("本产品采购复核已提交", (result.get("toast") or {}).get("content", ""))
+        self.assertEqual("rec1", updates["record_id"])
+        self.assertIn("采购复核已提交", updates["采购备注"])
+        self.assertIn("同款确认=同款可采购", updates["采购备注"])
+        self.assertIn("MOQ=50套", updates["人审备注"])
+        self.assertIn("阶梯价=50套=4；100套=3.8", updates["人审备注"])
+        self.assertIn("待Frankie/运营最终确认采购量", updates["下一步动作"])
+        self.assertEqual("om_proc_review_test", patched["message_id"])
+        rendered = json.dumps(patched["card"], ensure_ascii=False)
+        self.assertIn("采购复核已提交", rendered)
+        self.assertNotIn("proc_review_form_rec1", rendered)
 
 
 if __name__ == "__main__":

@@ -1052,9 +1052,10 @@ async def run_amz_procurement_preview_card(authorization: str = Header(default="
                                            gray_chat_ids: str = "",
                                            audience: str = "frankie",
                                            procurement_approved: bool = False):
-    """亚马逊欧洲采购阶段预览卡.
+    """亚马逊欧洲采购阶段卡.
 
-    P0 默认只发 Frankie。只读预览，不写采购阶段触发表，不发采购部，不改变候选表状态。
+    audience=frankie 为只读预览；audience=procurement 为采购复核回填卡。
+    采购复核卡只收集供应商/MOQ/交期/箱规等资料，不直接录 ERP 或下单。
     """
     _check_auth(authorization)
     try:
