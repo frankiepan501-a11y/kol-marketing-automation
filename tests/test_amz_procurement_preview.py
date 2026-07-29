@@ -76,9 +76,16 @@ class AmzProcurementPreviewTests(unittest.TestCase):
         self.assertIn("待 Frankie 确认", rendered)
         self.assertIn("不写采购阶段触发表", rendered)
         self.assertIn("不发采购部", rendered)
+        self.assertIn("本卡目的", rendered)
+        self.assertIn("正式发采购部时只包含", rendered)
+        self.assertIn("采购部收到后要做", rendered)
+        self.assertIn("不会发给采购部", rendered)
+        self.assertIn("暂缓/淘汰只留档", rendered)
+        self.assertIn("下一步", rendered)
+        self.assertIn("正式采购产品 2 个", rendered)
         self.assertIn("直接入采购 1 个", rendered)
         self.assertIn("条件采购复核 1 个", rendered)
-        self.assertIn("暂缓不发采购 1 个", rendered)
+        self.assertIn("暂缓/淘汰不发采购 1 个", rendered)
         self.assertIn("采购部下一步", rendered)
         self.assertIn("采购成本（单套）", rendered)
         self.assertIn("套装件数（每套内含）", rendered)
@@ -90,9 +97,28 @@ class AmzProcurementPreviewTests(unittest.TestCase):
         self.assertIn("查看主图原图", rendered)
         self.assertIn("打开候选表记录", rendered)
         self.assertIn("打开1688供应商", rendered)
+        self.assertNotIn("暂缓不发采购｜", rendered)
+        self.assertNotIn("B0CNRH4GRJ", rendered)
         self.assertNotIn('"tag": "form"', rendered)
         self.assertNotIn("form_submit", rendered)
         self.assertNotIn('"value": {"source":', rendered)
+        self.assertEqual([], preview.validate_procurement_preview_card(card, candidates))
+
+    def test_hold_and_reject_products_are_summary_only(self):
+        candidates = [
+            self._candidate(rid="rec_hold", asin="B0HOLD", decision="暂缓", qty=0, current_status="暂缓"),
+            self._candidate(rid="rec_reject", asin="B0REJECT", decision="淘汰", qty=0, current_status="淘汰"),
+        ]
+        card = preview.build_procurement_preview_card(candidates, "batch-preview")
+        rendered = json.dumps(card, ensure_ascii=False)
+
+        self.assertIn("正式采购产品 0 个", rendered)
+        self.assertIn("暂缓/淘汰不发采购 2 个", rendered)
+        self.assertIn("本批没有需要采购部处理的产品", rendered)
+        self.assertNotIn("暂缓不发采购｜", rendered)
+        self.assertNotIn("淘汰归档｜", rendered)
+        self.assertNotIn("B0HOLD", rendered)
+        self.assertNotIn("B0REJECT", rendered)
         self.assertEqual([], preview.validate_procurement_preview_card(card, candidates))
 
     def test_suggested_qty_prefers_confirmed_review_note(self):

@@ -32,6 +32,7 @@ GRAY_UNION_IDS = [x.strip() for x in os.environ.get("AMZ_PROCUREMENT_PREVIEW_GRA
 GRAY_CHAT_IDS = [x.strip() for x in os.environ.get("AMZ_PROCUREMENT_PREVIEW_GRAY_CHAT_IDS", "").split(",") if x.strip()]
 
 DECISIONS = ("Go", "条件推进", "暂缓", "淘汰")
+ACTIVE_DECISIONS = ("Go", "条件推进")
 ROUTE_LABEL = {
     "Go": "直接入采购",
     "条件推进": "条件采购复核",
@@ -121,7 +122,6 @@ async def _search_candidates(limit: int = 10) -> list[dict]:
             "conditions": [
                 {"field_name": "当前状态", "operator": "contains", "value": ["待采购确认"]},
                 {"field_name": "当前状态", "operator": "contains", "value": ["待采购复核"]},
-                {"field_name": "综合结论", "operator": "contains", "value": ["暂缓"]},
             ],
         },
     }
@@ -200,24 +200,51 @@ def _candidate_from_record(record: dict) -> dict:
     return base
 
 
+def _is_procurement_actionable(candidate: dict) -> bool:
+    return (candidate.get("final_decision") or "暂缓") in ACTIVE_DECISIONS
+
+
+def _active_candidates(candidates: list[dict]) -> list[dict]:
+    return [candidate for candidate in candidates if _is_procurement_actionable(candidate)]
+
+
 def _route_summary(candidates: list[dict]) -> str:
     counts = {label: 0 for label in ROUTE_LABEL.values()}
+    excluded = 0
     for candidate in candidates:
-        counts[candidate.get("procurement_route") or ROUTE_LABEL["暂缓"]] += 1
+        if _is_procurement_actionable(candidate):
+            counts[candidate.get("procurement_route") or ROUTE_LABEL["暂缓"]] += 1
+        else:
+            excluded += 1
+    active_total = counts["直接入采购"] + counts["条件采购复核"]
     return (
+        f"正式采购产品 {active_total} 个｜"
         f"直接入采购 {counts['直接入采购']} 个｜"
         f"条件采购复核 {counts['条件采购复核']} 个｜"
-        f"暂缓不发采购 {counts['暂缓不发采购']} 个｜"
-        f"淘汰归档 {counts['淘汰归档']} 个"
+        f"暂缓/淘汰不发采购 {excluded} 个"
     )
 
 
 def _route_template(candidates: list[dict]) -> str:
-    if any(c.get("final_decision") == "条件推进" for c in candidates):
+    active = _active_candidates(candidates)
+    if any(c.get("final_decision") == "条件推进" for c in active):
         return "yellow"
-    if any(c.get("final_decision") in ("暂缓", "淘汰") for c in candidates):
+    if not active:
         return "yellow"
     return "green"
+
+
+def _workflow_text(candidates: list[dict]) -> str:
+    excluded = len(candidates) - len(_active_candidates(candidates))
+    lines = [
+        "**本卡目的**: 给 Frankie 确认采购部将收到哪些可执行产品；正式发采购部时只包含 Go / 条件推进。",
+        "**采购部收到后要做**: 直接入采购=复核 MOQ、交期、同款、套装和报价后下单；条件采购复核=先完成压价、限站点、补资料或套装复核，条件未满足不下单。",
+        "**不会发给采购部**: 暂缓/淘汰只留档，不生成采购待办，不要求采购操作。",
+        "**下一步**: Frankie 确认本口径后，再生成正式采购部卡/采购复核清单；采购完成复核后再回填采购阶段状态。",
+    ]
+    if excluded:
+        lines.append(f"**本批已剔除**: {excluded} 个暂缓/淘汰产品只保留在候选表，后续补数或重新选品后再重算。")
+    return "\n".join(lines)
 
 
 def _product_elements(candidate: dict) -> list[dict]:
@@ -300,6 +327,7 @@ def _product_elements(candidate: dict) -> list[dict]:
 
 def build_procurement_preview_card(candidates: list[dict], batch_id: str = "") -> dict:
     batch = batch_id or DEFAULT_BATCH_ID
+    active = _active_candidates(candidates)
     elements: list[dict] = [
         {
             "tag": "div",
@@ -309,10 +337,11 @@ def build_procurement_preview_card(candidates: list[dict], batch_id: str = "") -
                     f"**批次**: {batch}\n"
                     "**状态**: 采购阶段预览，待 Frankie 确认\n"
                     f"**范围**: {_route_summary(candidates)}\n"
-                    "**说明**: 本卡只预览采购阶段将如何派发，不写采购阶段触发表，不发采购部，不改变候选表状态。确认后再生成正式采购部卡。"
+                    "**说明**: 本卡只预览采购阶段将如何派发，不写采购阶段触发表，不发采购部，不改变候选表状态。"
                 ),
             },
         },
+        {"tag": "div", "text": {"tag": "lark_md", "content": _workflow_text(candidates)}},
         {
             "tag": "note",
             "elements": [
@@ -323,13 +352,23 @@ def build_procurement_preview_card(candidates: list[dict], batch_id: str = "") -
             ],
         },
     ]
-    for candidate in candidates:
+    if not active:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "**本批没有需要采购部处理的产品**\n全部产品都已被暂缓或淘汰，只留候选表归档。",
+                },
+            }
+        )
+    for candidate in active:
         elements.extend(_product_elements(candidate))
     return {
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "template": _route_template(candidates),
-            "title": {"tag": "plain_text", "content": f"🟡 [AMZ·P0] 采购阶段预览 · 待Frankie确认 {len(candidates)}个产品"},
+            "title": {"tag": "plain_text", "content": f"🟡 [AMZ·P0] 采购阶段预览 · 待Frankie确认 {len(active)}个待采购动作"},
         },
         "elements": elements,
     }
@@ -350,7 +389,8 @@ def validate_procurement_preview_card(card: dict, candidates: list[dict]) -> lis
                 return True
         return False
 
-    for candidate in candidates:
+    active = _active_candidates(candidates)
+    for candidate in active:
         rid = candidate.get("record_id") or ""
         label = candidate.get("asin") or rid or "unknown"
         if candidate.get("amazon_url") and not url_button_exists("打开 Listing", candidate["amazon_url"]):
@@ -361,20 +401,35 @@ def validate_procurement_preview_card(card: dict, candidates: list[dict]) -> lis
             errors.append(f"{label}: missing or invalid candidate-record button")
         if candidate.get("supplier_link") and not url_button_exists("打开1688供应商", candidate["supplier_link"]):
             errors.append(f"{label}: missing or invalid supplier button")
-    for required in (
+    for candidate in candidates:
+        if _is_procurement_actionable(candidate):
+            continue
+        route = candidate.get("procurement_route") or ROUTE_LABEL.get(candidate.get("final_decision") or "暂缓", ROUTE_LABEL["暂缓"])
+        if f"{route}｜" in rendered:
+            label = candidate.get("asin") or candidate.get("record_id") or "unknown"
+            errors.append(f"{label}: excluded decision rendered as procurement product")
+    base_required = (
         "采购阶段预览",
         "待 Frankie 确认",
         "不写采购阶段触发表",
         "不发采购部",
+        "本卡目的",
+        "正式发采购部时只包含",
+        "采购部收到后要做",
+        "不会发给采购部",
+        "暂缓/淘汰只留档",
+        "下一步",
         "直接入采购",
         "条件采购复核",
-        "暂缓不发采购",
+        "请在聊天里回复",
+    )
+    product_required = (
         "采购部下一步",
         "采购成本（单套）",
         "套装件数（每套内含）",
         "三渠道对比",
-        "请在聊天里回复",
-    ):
+    )
+    for required in base_required + (product_required if active else ()):
         if required not in rendered:
             errors.append(f"card missing {required}")
     if '"tag": "form"' in rendered or "form_submit" in rendered:
@@ -400,8 +455,9 @@ async def send_procurement_preview_card(
     batch = batch_id or DEFAULT_BATCH_ID
     ids = record_ids if record_ids is not None else DEFAULT_RECORD_IDS
     candidates = await _get_candidates_by_ids(ids) if ids else await _search_candidates(limit=limit)
+    active = _active_candidates(candidates)
     if mode == "commit":
-        await _prepare_card_images(candidates)
+        await _prepare_card_images(active)
     card = build_procurement_preview_card(candidates, batch)
     validation_errors = validate_procurement_preview_card(card, candidates)
     if validation_errors:
@@ -412,11 +468,13 @@ async def send_procurement_preview_card(
         "mode": mode,
         "frankie_only": effective_frankie_only,
         "batch_id": batch,
-        "count": len(candidates),
-        "record_ids": [c.get("record_id") for c in candidates],
+        "count": len(active),
+        "source_count": len(candidates),
+        "record_ids": [c.get("record_id") for c in active],
+        "source_record_ids": [c.get("record_id") for c in candidates],
         "routes": {label: sum(1 for c in candidates if c.get("procurement_route") == label) for label in ROUTE_LABEL.values()},
         "card_selftest": "passed",
-        **proc._card_media_stats(candidates),
+        **proc._card_media_stats(active),
     }
     if mode == "dry_run":
         result["card"] = card
