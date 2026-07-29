@@ -85,6 +85,7 @@ class AmzProcurementQuoteTests(unittest.TestCase):
         self.assertIn("img_test_key", rendered)
         self.assertIn("三渠道对比", rendered)
         self.assertIn("A FBA经济线（推荐）", rendered)
+        self.assertNotIn("B FBA快速线（推荐）", rendered)
         self.assertIn("B FBA快速线", rendered)
         self.assertIn("C FBM-4PX", rendered)
         self.assertIn("采购后 73.73 RMB / 39.5%", rendered)

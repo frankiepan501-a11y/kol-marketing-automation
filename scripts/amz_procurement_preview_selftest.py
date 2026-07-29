@@ -105,6 +105,8 @@ async def main() -> dict[str, Any]:
     if errors:
         raise AssertionError("; ".join(errors))
     rendered = json.dumps(card, ensure_ascii=False)
+    if "B FBA快速线（推荐）" in rendered:
+        raise AssertionError("B FBA快速线 must not be marked recommended when fulfillment is FBA头程-经济线")
     return {
         "ok": True,
         "card_selftest": "passed",

@@ -83,6 +83,8 @@ class AmzProcurementPreviewTests(unittest.TestCase):
         self.assertIn("采购成本（单套）", rendered)
         self.assertIn("套装件数（每套内含）", rendered)
         self.assertIn("三渠道对比", rendered)
+        self.assertIn("A FBA经济线（推荐）", rendered)
+        self.assertNotIn("B FBA快速线（推荐）", rendered)
         self.assertIn("请在聊天里回复", rendered)
         self.assertIn("打开 Listing", rendered)
         self.assertIn("查看主图原图", rendered)

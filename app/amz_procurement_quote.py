@@ -241,7 +241,10 @@ def _recommended_suffix(channel: dict, fulfillment: Any) -> str:
     text = _text(fulfillment)
     if not text or text == "-":
         return ""
-    candidates = [channel.get("code"), channel.get("label"), *(channel.get("aliases") or [])]
+    code = _text(channel.get("code"))
+    if code and text == code:
+        return "（推荐）"
+    candidates = [channel.get("label"), *(channel.get("aliases") or [])]
     return "（推荐）" if any(_text(item) and _text(item) in text for item in candidates) else ""
 
 
