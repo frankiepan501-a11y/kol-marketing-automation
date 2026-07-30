@@ -137,9 +137,11 @@ class AmzProcurementPreviewTests(unittest.TestCase):
         self.assertIn("提交本产品复核", rendered)
         self.assertIn("同款确认", rendered)
         self.assertIn("MOQ", rendered)
-        self.assertIn("阶梯价", rendered)
+        self.assertIn("阶梯价（选填）", rendered)
         self.assertIn("交期", rendered)
-        self.assertIn("箱规/尺寸重量", rendered)
+        self.assertIn("箱规/尺寸重量（选填）", rendered)
+        self.assertIn("必填：同款、MOQ、交期、现货/库存、供应商结论、采购建议", rendered)
+        self.assertIn("可先提交，系统会带到下一步待补资料", rendered)
         self.assertIn("供应商结论", rendered)
         self.assertIn("采购建议", rendered)
         self.assertIn("是否有现货库存", rendered)
@@ -272,6 +274,26 @@ class AmzProcurementPreviewTests(unittest.TestCase):
         self.assertFalse(result["frankie_only"])
         self.assertTrue(result["would_send_to_procurement"])
         self.assertEqual("passed", result["card_selftest"])
+
+    def test_procurement_review_allows_optional_tiers_and_carton(self):
+        review = {
+            "same": "同款可采购",
+            "moq": "2套",
+            "tiers": "",
+            "leadtime": "7天",
+            "carton": "",
+            "stock": "有现货",
+            "stock_qty": "20套",
+            "supplier": "供应商可用",
+            "suggestion": "可采购",
+            "note": "1688链接已填，阶梯价和箱规后补",
+        }
+
+        self.assertEqual("", preview._validate_review(review))
+        self.assertEqual("阶梯价、箱规/尺寸重量", preview._optional_gap_text(review))
+        self.assertIn("后续待补=阶梯价、箱规/尺寸重量", preview._review_summary(review))
+        self.assertIn("可进入最终采购确认", preview._review_next_action(review))
+        self.assertIn("ERP新品和物流复算前必须补齐", preview._review_next_action(review))
 
     def test_procurement_review_callback_writes_current_product_and_patches_card(self):
         candidate = self._candidate(rid="rec1", decision="Go", qty=150)

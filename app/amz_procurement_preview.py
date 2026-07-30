@@ -324,6 +324,7 @@ def _review_result_text(candidate: dict) -> str:
         f"- 现货/库存: {_review_value(candidate, '现货') or '-'} / {_review_value(candidate, '库存数') or '-'}",
         f"- 供应商结论: {_review_value(candidate, '供应商结论') or '-'}",
         f"- 采购建议: {_review_value(candidate, '采购建议') or '-'}",
+        f"- 后续待补: {_review_value(candidate, '后续待补') or '无'}",
     ]
     note = _review_value(candidate, "备注") or _text(candidate.get("procurement_review_note"))
     if note:
@@ -354,8 +355,8 @@ def _review_form(candidate: dict, card_record_ids: list[str], batch_id: str) -> 
                 "tag": "input",
                 "name": f"proc_review_tiers_{sid}",
                 "label_position": "left",
-                "label": {"tag": "plain_text", "content": "阶梯价"},
-                "placeholder": {"tag": "plain_text", "content": "例如 50套=12.5；100套=11.8；300套=10.9"},
+                "label": {"tag": "plain_text", "content": "阶梯价（选填）"},
+                "placeholder": {"tag": "plain_text", "content": "可后补；例如 50套=12.5；100套=11.8"},
             },
             {
                 "tag": "input",
@@ -368,8 +369,8 @@ def _review_form(candidate: dict, card_record_ids: list[str], batch_id: str) -> 
                 "tag": "input",
                 "name": f"proc_review_carton_{sid}",
                 "label_position": "left",
-                "label": {"tag": "plain_text", "content": "箱规/尺寸重量"},
-                "placeholder": {"tag": "plain_text", "content": "单套包装、外箱尺寸、毛重、每箱数量"},
+                "label": {"tag": "plain_text", "content": "箱规/尺寸重量（选填）"},
+                "placeholder": {"tag": "plain_text", "content": "可后补；单套包装、外箱尺寸、毛重、每箱数量"},
             },
             {
                 "tag": "select_static",
@@ -514,7 +515,8 @@ def _product_elements(candidate: dict, audience: str = "frankie", batch_id: str 
                         "content": (
                             "**请采购回填本产品复核结果**\n"
                             "- 同款确认必须看 Amazon 主图、套装件数、适配型号和供应商页。\n"
-                            "- MOQ、阶梯价、交期、库存、箱规会影响最终采购量、头程物流和 ERP 新品资料。\n"
+                            "- 必填：同款、MOQ、交期、现货/库存、供应商结论、采购建议。\n"
+                            "- 选填：阶梯价、箱规/尺寸重量；可先提交，系统会带到下一步待补资料。\n"
                             "- 如果不是同款或供应商条件不达标，请选 `暂缓采购` 或 `换供应商`，不要默认推进。"
                         ),
                     },
@@ -799,9 +801,7 @@ def _validate_review(review: dict[str, str]) -> str:
     labels = {
         "same": "同款确认",
         "moq": "MOQ",
-        "tiers": "阶梯价",
         "leadtime": "交期",
-        "carton": "箱规/尺寸重量",
         "stock": "是否有现货库存",
         "supplier": "供应商结论",
         "suggestion": "采购建议",
@@ -822,8 +822,18 @@ def _validate_review(review: dict[str, str]) -> str:
     return ""
 
 
+def _optional_gap_text(review: dict[str, str]) -> str:
+    gaps = []
+    if not _text(review.get("tiers")):
+        gaps.append("阶梯价")
+    if not _text(review.get("carton")):
+        gaps.append("箱规/尺寸重量")
+    return "、".join(gaps) if gaps else "无"
+
+
 def _review_line(candidate: dict, review: dict[str, str], actor: str, batch_id: str) -> str:
     note = re.sub(r"\s+", " ", _text(review.get("note")))[:300]
+    optional_gaps = _optional_gap_text(review)
     return (
         f"{proc._now_label()} {actor}: 采购复核回填=已提交; "
         f"同款确认={review.get('same') or '-'}; "
@@ -835,6 +845,7 @@ def _review_line(candidate: dict, review: dict[str, str], actor: str, batch_id: 
         f"库存数={review.get('stock_qty') or '-'}; "
         f"供应商结论={review.get('supplier') or '-'}; "
         f"采购建议={review.get('suggestion') or '-'}; "
+        f"后续待补={optional_gaps}; "
         f"备注={note or '-'}; "
         f"批次={batch_id or DEFAULT_BATCH_ID}."
     )
@@ -850,7 +861,10 @@ def _append_review_note(candidate: dict, review: dict[str, str], actor: str, bat
 
 def _review_next_action(review: dict[str, str]) -> str:
     suggestion = review.get("suggestion")
+    optional_gaps = _optional_gap_text(review)
     if suggestion == "可采购":
+        if optional_gaps != "无":
+            return f"采购复核已提交：可进入最终采购确认；待补资料={optional_gaps}，箱规/尺寸重量在ERP新品和物流复算前必须补齐"
         return "采购复核已提交：待Frankie/运营最终确认采购量，再进入ERP新品/采购计划节点"
     if suggestion == "压价后采购":
         return "采购复核待处理：采购继续压价，达到目标价后再提交最终采购确认"
@@ -862,12 +876,14 @@ def _review_next_action(review: dict[str, str]) -> str:
 
 
 def _review_summary(review: dict[str, str]) -> str:
+    optional_gaps = _optional_gap_text(review)
     return (
         f"采购复核已提交：同款确认={review.get('same') or '-'}｜"
         f"MOQ={review.get('moq') or '-'}｜阶梯价={review.get('tiers') or '-'}｜"
         f"交期={review.get('leadtime') or '-'}｜箱规/尺寸重量={review.get('carton') or '-'}｜"
         f"现货={review.get('stock') or '-'}｜库存数={review.get('stock_qty') or '-'}｜"
         f"供应商结论={review.get('supplier') or '-'}｜采购建议={review.get('suggestion') or '-'}｜"
+        f"后续待补={optional_gaps}｜"
         f"备注={review.get('note') or '-'}"
     )[:5000]
 
