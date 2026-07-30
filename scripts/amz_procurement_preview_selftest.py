@@ -116,6 +116,10 @@ async def main() -> dict[str, Any]:
     review_rendered = json.dumps(review_card, ensure_ascii=False)
     if "form_submit" not in review_rendered or "提交本产品复核" not in review_rendered:
         raise AssertionError("procurement review card must contain per-product submit forms")
+    if "库存数" in review_rendered or "proc_review_stock_qty_" in review_rendered:
+        raise AssertionError("procurement review card must not contain stock quantity input")
+    if "供应商1688链接" not in review_rendered or "proc_review_supplier_link_" not in review_rendered:
+        raise AssertionError("procurement review card must contain supplier 1688 link input")
     return {
         "ok": True,
         "card_selftest": "passed",
@@ -128,7 +132,8 @@ async def main() -> dict[str, Any]:
             "required MOQ / lead time fields",
             "optional tier price field",
             "optional carton-size and weight field",
-            "stock and stock quantity fields",
+            "stock availability field without stock quantity input",
+            "supplier 1688 link input",
             "supplier conclusion and purchase suggestion fields",
             "ERP boundary wording",
             "route summary",

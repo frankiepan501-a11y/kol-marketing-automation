@@ -140,12 +140,15 @@ class AmzProcurementPreviewTests(unittest.TestCase):
         self.assertIn("阶梯价（选填）", rendered)
         self.assertIn("交期", rendered)
         self.assertIn("箱规/尺寸重量（选填）", rendered)
-        self.assertIn("必填：同款、MOQ、交期、现货/库存、供应商结论、采购建议", rendered)
+        self.assertIn("必填：同款、MOQ、交期、是否有现货、供应商结论、采购建议", rendered)
+        self.assertIn("供应商1688链接", rendered)
+        self.assertIn("如采购已换成更合适的供应商", rendered)
         self.assertIn("可先提交，系统会带到下一步待补资料", rendered)
         self.assertIn("供应商结论", rendered)
         self.assertIn("采购建议", rendered)
-        self.assertIn("是否有现货库存", rendered)
-        self.assertIn("库存数", rendered)
+        self.assertIn("是否有现货", rendered)
+        self.assertNotIn("库存数", rendered)
+        self.assertNotIn("proc_review_stock_qty_", rendered)
         self.assertIn("不是 ERP 新品录入", rendered)
         self.assertIn("不会自动下单", rendered)
         self.assertIn("ERP 新品录入放在最终采购确认之后", rendered)
@@ -168,7 +171,7 @@ class AmzProcurementPreviewTests(unittest.TestCase):
             "交期": "现货1-2天",
             "箱规尺寸重量": "外箱50套/6kg",
             "现货": "有现货",
-            "库存数": "300套",
+            "供应商1688链接": "https://detail.1688.com/offer/done.html",
             "供应商结论": "供应商可用",
             "采购建议": "可采购",
         }
@@ -283,8 +286,8 @@ class AmzProcurementPreviewTests(unittest.TestCase):
             "leadtime": "7天",
             "carton": "",
             "stock": "有现货",
-            "stock_qty": "20套",
             "supplier": "供应商可用",
+            "supplier_link": "",
             "suggestion": "可采购",
             "note": "1688链接已填，阶梯价和箱规后补",
         }
@@ -345,7 +348,7 @@ class AmzProcurementPreviewTests(unittest.TestCase):
                     "proc_review_leadtime_rec1": "现货1-2天",
                     "proc_review_carton_rec1": "单套12.9*5.5*3.6cm/50g；外箱50套/6kg",
                     "proc_review_stock_rec1": "有现货",
-                    "proc_review_stock_qty_rec1": "300套",
+                    "proc_review_supplier_link_rec1": "https://detail.1688.com/offer/new-supplier.html",
                     "proc_review_supplier_rec1": "供应商可用",
                     "proc_review_suggestion_rec1": "可采购",
                     "proc_review_note_rec1": "需确认无Logo，按2件套报价",
@@ -370,8 +373,11 @@ class AmzProcurementPreviewTests(unittest.TestCase):
         self.assertEqual("rec1", updates["record_id"])
         self.assertIn("采购复核已提交", updates["采购备注"])
         self.assertIn("同款确认=同款可采购", updates["采购备注"])
+        self.assertEqual({"link": "https://detail.1688.com/offer/new-supplier.html", "text": "https://detail.1688.com/offer/new-supplier.html"}, updates["1688供应商链接"])
+        self.assertEqual({"link": "https://detail.1688.com/offer/new-supplier.html", "text": "https://detail.1688.com/offer/new-supplier.html"}, updates["采购链接"])
         self.assertIn("MOQ=50套", updates["人审备注"])
         self.assertIn("阶梯价=50套=4；100套=3.8", updates["人审备注"])
+        self.assertIn("供应商1688链接=https://detail.1688.com/offer/new-supplier.html", updates["人审备注"])
         self.assertIn("待Frankie/运营最终确认采购量", updates["下一步动作"])
         self.assertEqual("om_proc_review_test", patched["message_id"])
         rendered = json.dumps(patched["card"], ensure_ascii=False)

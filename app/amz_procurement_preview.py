@@ -321,7 +321,8 @@ def _review_result_text(candidate: dict) -> str:
         f"- 阶梯价: {_review_value(candidate, '阶梯价') or '-'}",
         f"- 交期: {_review_value(candidate, '交期') or '-'}",
         f"- 箱规/尺寸重量: {_review_value(candidate, '箱规尺寸重量') or '-'}",
-        f"- 现货/库存: {_review_value(candidate, '现货') or '-'} / {_review_value(candidate, '库存数') or '-'}",
+        f"- 现货状态: {_review_value(candidate, '现货') or '-'}",
+        f"- 供应商1688链接: {_review_value(candidate, '供应商1688链接') or candidate.get('supplier_link') or '-'}",
         f"- 供应商结论: {_review_value(candidate, '供应商结论') or '-'}",
         f"- 采购建议: {_review_value(candidate, '采购建议') or '-'}",
         f"- 后续待补: {_review_value(candidate, '后续待补') or '无'}",
@@ -375,15 +376,15 @@ def _review_form(candidate: dict, card_record_ids: list[str], batch_id: str) -> 
             {
                 "tag": "select_static",
                 "name": f"proc_review_stock_{sid}",
-                "placeholder": {"tag": "plain_text", "content": "是否有现货库存"},
+                "placeholder": {"tag": "plain_text", "content": "是否有现货"},
                 "options": [_button_option(x) for x in STOCK_OPTIONS],
             },
             {
                 "tag": "input",
-                "name": f"proc_review_stock_qty_{sid}",
+                "name": f"proc_review_supplier_link_{sid}",
                 "label_position": "left",
-                "label": {"tag": "plain_text", "content": "库存数"},
-                "placeholder": {"tag": "plain_text", "content": "有现货时填写数量；无现货可填0"},
+                "label": {"tag": "plain_text", "content": "供应商1688链接"},
+                "placeholder": {"tag": "plain_text", "content": "如已换供应商，请粘贴新1688链接；不填则保留原链接"},
             },
             {
                 "tag": "select_static",
@@ -515,7 +516,8 @@ def _product_elements(candidate: dict, audience: str = "frankie", batch_id: str 
                         "content": (
                             "**请采购回填本产品复核结果**\n"
                             "- 同款确认必须看 Amazon 主图、套装件数、适配型号和供应商页。\n"
-                            "- 必填：同款、MOQ、交期、现货/库存、供应商结论、采购建议。\n"
+                            "- 必填：同款、MOQ、交期、是否有现货、供应商结论、采购建议。\n"
+                            "- 供应商1688链接：如采购已换成更合适的供应商，请粘贴新链接；不填则保留候选表原链接。\n"
                             "- 选填：阶梯价、箱规/尺寸重量；可先提交，系统会带到下一步待补资料。\n"
                             "- 如果不是同款或供应商条件不达标，请选 `暂缓采购` 或 `换供应商`，不要默认推进。"
                         ),
@@ -686,8 +688,8 @@ def validate_procurement_preview_card(card: dict, candidates: list[dict], audien
                     "箱规/尺寸重量",
                     "供应商结论",
                     "采购建议",
-                    "是否有现货库存",
-                    "库存数",
+                    "是否有现货",
+                    "供应商1688链接",
                 ]
             )
         else:
@@ -715,7 +717,7 @@ def validate_procurement_preview_card(card: dict, candidates: list[dict], audien
                 f"proc_review_leadtime_{sid}": "input",
                 f"proc_review_carton_{sid}": "input",
                 f"proc_review_stock_{sid}": "select_static",
-                f"proc_review_stock_qty_{sid}": "input",
+                f"proc_review_supplier_link_{sid}": "input",
                 f"proc_review_supplier_{sid}": "select_static",
                 f"proc_review_suggestion_{sid}": "select_static",
                 f"proc_review_note_{sid}": "input",
@@ -791,6 +793,7 @@ def _review_from_form(form: dict, record_id: str) -> dict[str, str]:
         "carton": _form_value(form, record_id, "carton"),
         "stock": _form_value(form, record_id, "stock"),
         "stock_qty": _form_value(form, record_id, "stock_qty"),
+        "supplier_link": _form_value(form, record_id, "supplier_link"),
         "supplier": _form_value(form, record_id, "supplier"),
         "suggestion": _form_value(form, record_id, "suggestion"),
         "note": _form_value(form, record_id, "note"),
@@ -802,7 +805,7 @@ def _validate_review(review: dict[str, str]) -> str:
         "same": "同款确认",
         "moq": "MOQ",
         "leadtime": "交期",
-        "stock": "是否有现货库存",
+        "stock": "是否有现货",
         "supplier": "供应商结论",
         "suggestion": "采购建议",
     }
@@ -817,8 +820,9 @@ def _validate_review(review: dict[str, str]) -> str:
         return "供应商结论选项无效，请重新选择"
     if review.get("suggestion") not in PURCHASE_SUGGESTION_OPTIONS:
         return "采购建议选项无效，请重新选择"
-    if review.get("stock") == "有现货" and not _text(review.get("stock_qty")):
-        return "已选择有现货，请填写库存数"
+    supplier_link = _text(review.get("supplier_link"))
+    if supplier_link and not supplier_link.startswith(("http://", "https://")):
+        return "请填写可打开的1688供应商链接"
     return ""
 
 
@@ -834,6 +838,7 @@ def _optional_gap_text(review: dict[str, str]) -> str:
 def _review_line(candidate: dict, review: dict[str, str], actor: str, batch_id: str) -> str:
     note = re.sub(r"\s+", " ", _text(review.get("note")))[:300]
     optional_gaps = _optional_gap_text(review)
+    supplier_link = re.sub(r"\s+", "", _text(review.get("supplier_link")))[:1000]
     return (
         f"{proc._now_label()} {actor}: 采购复核回填=已提交; "
         f"同款确认={review.get('same') or '-'}; "
@@ -842,7 +847,7 @@ def _review_line(candidate: dict, review: dict[str, str], actor: str, batch_id: 
         f"交期={review.get('leadtime') or '-'}; "
         f"箱规尺寸重量={review.get('carton') or '-'}; "
         f"现货={review.get('stock') or '-'}; "
-        f"库存数={review.get('stock_qty') or '-'}; "
+        f"供应商1688链接={supplier_link or '-'}; "
         f"供应商结论={review.get('supplier') or '-'}; "
         f"采购建议={review.get('suggestion') or '-'}; "
         f"后续待补={optional_gaps}; "
@@ -881,7 +886,7 @@ def _review_summary(review: dict[str, str]) -> str:
         f"采购复核已提交：同款确认={review.get('same') or '-'}｜"
         f"MOQ={review.get('moq') or '-'}｜阶梯价={review.get('tiers') or '-'}｜"
         f"交期={review.get('leadtime') or '-'}｜箱规/尺寸重量={review.get('carton') or '-'}｜"
-        f"现货={review.get('stock') or '-'}｜库存数={review.get('stock_qty') or '-'}｜"
+        f"现货={review.get('stock') or '-'}｜供应商1688链接={review.get('supplier_link') or '-'}｜"
         f"供应商结论={review.get('supplier') or '-'}｜采购建议={review.get('suggestion') or '-'}｜"
         f"后续待补={optional_gaps}｜"
         f"备注={review.get('note') or '-'}"
@@ -919,6 +924,10 @@ async def _process_callback(event: dict) -> dict:
         "采购备注": _review_summary(review),
         "人审备注": _append_review_note(candidate, review, actor, batch_id),
     }
+    supplier_link = _text(review.get("supplier_link"))
+    if supplier_link:
+        fields["1688供应商链接"] = proc._url_cell(supplier_link)
+        fields["采购链接"] = proc._url_cell(supplier_link)
     await _update_candidate(record_id, fields)
     candidate.update(
         {
@@ -927,6 +936,7 @@ async def _process_callback(event: dict) -> dict:
             "review_note": fields["人审备注"],
             "procurement_review": _latest_procurement_review(fields["人审备注"]),
             "procurement_review_status": "已提交",
+            "supplier_link": supplier_link or candidate.get("supplier_link"),
         }
     )
     record_ids = [x for x in (value.get("card_record_ids") or []) if _text(x)]
