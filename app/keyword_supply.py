@@ -25,6 +25,7 @@ MARKETS = [
     {"lang": "de", "countries": ["DE"],        "target": 6, "name": "German (Deutsch)"},
     {"lang": "fr", "countries": ["FR"],        "target": 6, "name": "French (Français)"},
     {"lang": "es", "countries": ["ES", "MX"],  "target": 6, "name": "Spanish (Español)"},
+    {"lang": "pt", "countries": ["BR"],        "target": 6, "name": "Portuguese (Brasil)"},
 ]
 
 _AXES = """5 轴交叉生成:
@@ -35,13 +36,35 @@ _AXES = """5 轴交叉生成:
   ④ 场景/美学: cozy gaming room / aesthetic gaming setup / battlestation / desk makeover 等
   × 内容形式: themed gaming / setup / room / collection / fan / review / unboxing / haul / setup tour"""
 
+_LOCALIZATION_MARKERS = {
+    "pt": (
+        "jogador", "jogos", "quarto", "coleção", "colecao",
+        "análise", "analise", "avaliação", "avaliacao", "portátil", "portatil",
+        "configuração", "configuracao", "dicas", "melhores", "acessórios", "acessorios",
+        "em português", "em portugues",
+    ),
+}
 
-def _build_prompt(market: dict, n: int, existing_sample: str) -> str:
+
+def _is_localized(word: str, market: dict) -> bool:
+    markers = _LOCALIZATION_MARKERS.get(market["lang"])
+    if not markers:
+        return True
+    normalized = word.casefold()
+    return any(marker in normalized for marker in markers)
+
+
+def _build_prompt(market: dict, n: int, existing_sample: str, strict_retry: bool = False) -> str:
     lang_line = (
         "全小写英文自然短语。"
         if market["lang"] == "en"
         else f"**用 {market['name']} 书写**这些搜索词(游戏 IP 专有名保留通用拼写如 Zelda/Mario/Pokemon, 其余词本地化成 {market['name']}), 抓 {market['name']} 母语游戏创作者。"
     )
+    pt_guard = ""
+    if market["lang"] == "pt":
+        pt_guard = """\n- 每个词必须含巴西葡语，不接受整句英文。可参考自然结构：quarto gamer Zelda、coleção Mario Brasil、análise Steam Deck em português、jogador de Nintendo Switch。"""
+        if strict_retry:
+            pt_guard += "\n- 上一批因全英文被系统拒绝；这次除游戏 IP 外，其余描述必须使用 Português do Brasil。"
     return f"""你是 KOL 达人发现的关键词拓展助手。为游戏配件品牌(Switch/PS/PC 手柄/收纳包/充电底座/RGB灯饰)
 抓取 **YouTube 游戏创作者**, 生成 {n} 个长尾搜索词。
 
@@ -49,7 +72,7 @@ def _build_prompt(market: dict, n: int, existing_sample: str) -> str:
 - 按"受众/IP/主题向"拓词, **绝不用产品词**。产品词(switch dock/controller 等)实测新增=0; 受众/IP/主题词平均新增 78.6/词。
 - {_AXES}
 - **IP 轴优先**(高产+喂 IP 匹配评分)。
-- {lang_line}
+- {lang_line}{pt_guard}
 - 不带 # 号。**不要和这些已有词重复**: {existing_sample}
 
 只返回 JSON: {{"keywords": ["...", "..."]}} 共 {n} 个。"""
@@ -83,25 +106,48 @@ async def run(dry_run: bool = False) -> dict:
             summary["markets"][m["lang"]] = {"pending": pend, "skip": "队列充足"}
             continue
         need = m["target"] - pend
-        prompt = _build_prompt(m, need * 2, ", ".join(list(existing)[:40]))
-        try:
-            res = await deepseek.chat_json(prompt, max_tokens=900, temperature=0.7)
-        except Exception as e:
-            summary["markets"][m["lang"]] = {"error": f"deepseek: {str(e)[:80]}"}
-            continue
-        words = (res or {}).get("keywords") or []
         fresh, seen = [], set()
-        for w in words:
-            wn = (w or "").strip().lstrip("#").lower()
-            if wn and wn not in existing and wn not in seen and 2 <= len(wn) <= 60:
-                seen.add(wn)
-                fresh.append(wn)
+        rejected_localization = 0
+        last_error = ""
+        for attempt in range(2):
+            remaining = need - len(fresh)
+            prompt = _build_prompt(
+                m, max(remaining * 2, 2), ", ".join(list(existing | seen)[:40]),
+                strict_retry=attempt > 0,
+            )
+            try:
+                res = await deepseek.chat_json(prompt, max_tokens=900, temperature=0.7)
+            except Exception as e:
+                last_error = f"deepseek: {str(e)[:80]}"
+                continue
+            words = (res or {}).get("keywords") or []
+            for w in words:
+                wn = (w or "").strip().lstrip("#").lower()
+                if wn and wn not in existing and wn not in seen and 2 <= len(wn) <= 60:
+                    if _is_localized(wn, m):
+                        seen.add(wn)
+                        fresh.append(wn)
+                    else:
+                        rejected_localization += 1
+                if len(fresh) >= need:
+                    break
             if len(fresh) >= need:
                 break
+        if not fresh:
+            error = last_error or (
+                f"localization: rejected {rejected_localization} non-{m['lang']} keywords after 2 attempts"
+            )
+            summary["markets"][m["lang"]] = {
+                "pending": pend, "need": need, "error": error,
+            }
+            continue
         existing |= seen   # 跨市场防重复
 
         if dry_run:
-            summary["markets"][m["lang"]] = {"pending": pend, "need": need, "would_add": fresh}
+            summary["markets"][m["lang"]] = {
+                "pending": pend, "need": need, "would_add": fresh,
+                "rejected_localization": rejected_localization,
+            }
             continue
 
         created, errors = 0, []
@@ -121,7 +167,14 @@ async def run(dry_run: bool = False) -> dict:
                 created += 1
             except Exception as e:
                 errors.append(f"{w}: {str(e)[:50]}")
-        summary["markets"][m["lang"]] = {"pending_before": pend, "added": created, "keywords": fresh, "errors": errors[:3]}
+        summary["markets"][m["lang"]] = {
+            "pending_before": pend, "added": created, "keywords": fresh,
+            "errors": errors[:3], "rejected_localization": rejected_localization,
+        }
         summary["total_added"] += created
 
-    return {"ok": True, **summary}
+    ok = not any(
+        "error" in market_result or bool(market_result.get("errors"))
+        for market_result in summary["markets"].values()
+    )
+    return {"ok": ok, **summary}
