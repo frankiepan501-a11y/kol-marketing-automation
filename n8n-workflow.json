@@ -1,0 +1,130 @@
+{
+  "name": "SocialEcho - NYXI YouTube Incremental (Mon + Launch Wed/Fri)",
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Mon Wed Fri 09:30 BJ",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [260, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 9 * * 1,3,5"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "start",
+      "name": "Start NYXI Incremental",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZXizvNMCsLYit2lg",
+          "name": "SocialEcho YouTube Incremental Auth"
+        }
+      },
+      "parameters": {
+        "method": "POST",
+        "url": "https://socialecho-youtube-incremental.zeabur.app/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={\"brand\":\"NYXI\",\"platform\":\"YouTube\",\"mode\":\"commit\",\"force\":false}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "wait",
+      "name": "Wait 4 Minutes",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [740, 300],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 4,
+        "unit": "minutes"
+      }
+    },
+    {
+      "id": "assert",
+      "name": "Assert Collection Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [980, 300],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 30000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZXizvNMCsLYit2lg",
+          "name": "SocialEcho YouTube Incremental Auth"
+        }
+      },
+      "parameters": {
+        "method": "GET",
+        "url": "=https://socialecho-youtube-incremental.zeabur.app/runs/{{ $(\"Start NYXI Incremental\").item.json.job_id }}/assert",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Mon Wed Fri 09:30 BJ": {
+      "main": [
+        [
+          {
+            "node": "Start NYXI Incremental",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start NYXI Incremental": {
+      "main": [
+        [
+          {
+            "node": "Wait 4 Minutes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 4 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Assert Collection Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Shanghai",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true
+  }
+}

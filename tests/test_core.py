@@ -63,6 +63,15 @@ class ScheduleTests(unittest.TestCase):
         ]
         self.assertFalse(schedule_decision(now, rows, brand="NYXI").should_run)
 
+    def test_feishu_select_lists_and_millisecond_dates_are_supported(self):
+        now = datetime(2026, 8, 12, 9, 30, tzinfo=BEIJING)
+        launch = int(datetime(2026, 8, 5, tzinfo=BEIJING).timestamp() * 1000)
+        row = event(launch)
+        row["竞品品牌"] = ["NYXI"]
+        row["来源类型"] = ["官方确认"]
+        row["人工确认状态"] = ["已确认"]
+        self.assertTrue(schedule_decision(now, [row], brand="NYXI").should_run)
+
 
 class IncrementalTests(unittest.TestCase):
     def test_window_overlaps_last_success_by_48_hours(self):

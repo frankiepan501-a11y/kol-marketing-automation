@@ -146,5 +146,8 @@ def assert_finished(
     if job.get("status") == "running":
         raise HTTPException(status_code=409, detail="job is still running")
     if job.get("status") == "failed":
-        raise HTTPException(status_code=500, detail={"job_id": job_id, "error_type": job.get("error_type")})
+        raise HTTPException(
+            status_code=500,
+            detail={"job_id": job_id, "error_type": job.get("error_type")},
+        )
     return job

@@ -394,7 +394,8 @@ class IncrementalCollector:
                 "最近新增帖子数": len(new_rows),
                 "最近新增KOL候选数": len(new_channels),
                 "YouTube历史进度": (
-                    f"云端增量完成；窗口={rfc3339(start)}/{rfc3339(end)}；"
+                    "云端增量完成；调度=周一09:30+新品期周三/周五09:30；"
+                    f"窗口={rfc3339(start)}/{rfc3339(end)}；"
                     f"新增={len(new_rows)}；公开数据更新={len(updates)}；不可用={len(set(requested_ids) - found_ids)}"
                 ),
                 "错误摘要": "",

@@ -21,3 +21,19 @@
 ## 环境变量
 
 `YOUTUBE_API_KEY`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`SERVICE_AUTH_TOKEN`、`COMMIT_ENABLED`、`BUILD_VERSION`。
+
+## 生产资源（2026-08-12）
+
+- Zeabur 服务：`socialecho-youtube-incremental`，service id `6a7c2e3159162869e08f8437`。
+- 健康检查：`https://socialecho-youtube-incremental.zeabur.app/health`。
+- n8n 工作流：`Yi5owIF2FolWJp79`，名称 `SocialEcho - NYXI YouTube Incremental (Mon + Launch Wed/Fri)`。
+- n8n 定时器只在周一、周三、周五触发；服务端二次判断周三、周五是否处于已确认 E1 正式开售日 ±30 天。
+- 飞书配置：Base `KINabIENjak8fRsB6AHcIDALntc`，关键词配置 `tblgWfvdPgbkq541`，帖子库 `tblCDbvLtnLzdxEp`，营销事件 `tblpZaWYEWy54Sll`。
+
+## 查看、回放与停用
+
+- 查看服务版本：`GET /admin/version`；查看一次运行：`GET /runs/{job_id}`。
+- 单条回放：带授权调用 `POST /run`，用 `preview` 不写飞书；只有明确要写时才用 `commit`。
+- 紧急停写：把 Zeabur `COMMIT_ENABLED` 改为 `0` 并重新部署，服务会拒绝正式写入。
+- 停止定时：停用 n8n 工作流 `Yi5owIF2FolWJp79`；不要删除飞书历史帖子和 7 个 E1 事件。
+- 服务不含 KOL 主表 ID，也不含邮件、私聊或群消息目的地；候选 KOL 数只回写配置表的数字。

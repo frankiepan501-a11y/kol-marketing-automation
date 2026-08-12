@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
+
 BEIJING = timezone(timedelta(hours=8), name="Asia/Shanghai")
 VIDEO_ID = re.compile(r"^[0-9A-Za-z_-]{11}$")
 
