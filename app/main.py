@@ -14,6 +14,7 @@ from .clients import FeishuClient, YouTubeClient
 from .collector import IncrementalCollector
 from .constants import BASE_TOKEN, CONFIG_RECORD_ID, TABLES
 from .core import is_youtube_video_id
+from .job_status import durable_job_snapshot, finished_status
 
 BUILD_VERSION = os.environ.get("BUILD_VERSION", "dev")
 COMMIT_ENABLED = os.environ.get("COMMIT_ENABLED", "0") == "1"
@@ -39,22 +40,6 @@ class RunRequest(BaseModel):
 
 class ReplayRequest(BaseModel):
     mode: Literal["preview", "commit"] = "preview"
-
-
-def finished_status(job: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
-    """Map an in-memory job to an HTTP status without requiring FastAPI in tests."""
-    if not job:
-        return 404, {"detail": "job not found"}
-    if job.get("status") == "running":
-        return 409, {"detail": "job is still running"}
-    if job.get("status") == "failed":
-        return 500, {
-            "detail": {
-                "job_id": job.get("job_id"),
-                "error_type": job.get("error_type"),
-            }
-        }
-    return 200, job
 
 
 def _authorized(authorization: str | None) -> None:
@@ -187,6 +172,11 @@ def assert_finished(
     """Return 2xx only after a successful completion or an intentional skip."""
     _authorized(authorization)
     job = _jobs.get(job_id)
+    if not job:
+        config = FeishuClient().get_record(
+            BASE_TOKEN, TABLES["keyword_config"], CONFIG_RECORD_ID
+        )
+        job = durable_job_snapshot(job_id, config)
     status_code, payload = finished_status(job)
     if status_code != 200:
         raise HTTPException(status_code=status_code, detail=payload["detail"])

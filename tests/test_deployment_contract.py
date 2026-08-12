@@ -40,13 +40,8 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn('@app.get("/status")', main)
 
     def test_assert_endpoint_distinguishes_all_job_states(self):
-        source = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
-        namespace = {}
-        function_source = source[
-            source.index("def finished_status(") : source.index("\n\ndef _authorized(")
-        ]
-        exec(function_source, {"Any": object}, namespace)
-        finished_status = namespace["finished_status"]
+        from app.job_status import finished_status
+
         self.assertEqual(finished_status(None)[0], 404)
         self.assertEqual(finished_status({"status": "running"})[0], 409)
         self.assertEqual(

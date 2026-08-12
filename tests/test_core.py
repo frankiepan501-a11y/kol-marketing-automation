@@ -2,7 +2,15 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from app.clients import ApiError
-from app.collector import build_update, index_youtube_rows_by_post_id, post_unique_key
+from app.collector import (
+    IncrementalCollector,
+    build_update,
+    index_rows_by_unique_key,
+    index_youtube_rows_by_post_id,
+    is_nyxi_youtube_identity,
+    post_unique_key,
+    repair_interrupted_insert_fields,
+)
 from app.core import (
     BEIJING,
     active_launch_events,
@@ -18,6 +26,29 @@ class FakeJobTests(unittest.TestCase):
 
         source = (Path(__file__).parents[1] / "app" / "main.py").read_text(encoding="utf-8")
         self.assertIn('@app.get("/runs/{job_id}/assert")', source)
+
+    def test_durable_assert_recovers_completed_skipped_failed_and_running(self):
+        from app.job_status import durable_job_snapshot, finished_status
+
+        for prefix, expected_code in (
+            ("云端增量完成", 200),
+            ("云端增量跳过", 200),
+            ("云端增量失败", 500),
+            ("云端增量运行中", 409),
+        ):
+            job = durable_job_snapshot(
+                "ytinc-abc", {"YouTube历史进度": f"{prefix}；job=ytinc-abc；x"}
+            )
+            self.assertEqual(finished_status(job)[0], expected_code)
+
+    def test_durable_assert_does_not_match_a_job_id_prefix(self):
+        from app.job_status import durable_job_snapshot
+
+        self.assertIsNone(
+            durable_job_snapshot(
+                "ytinc-abc", {"YouTube历史进度": "云端增量完成；job=ytinc-abcd；x"}
+            )
+        )
 
 
 def event(day, *, source="官方确认", confirmed="已确认", brand="NYXI"):
@@ -103,6 +134,32 @@ class IncrementalTests(unittest.TestCase):
                 rows, target_ids={"dQw4w9WgXcQ"}
             )
 
+    def test_duplicate_unique_key_fails_closed(self):
+        with self.assertRaises(ApiError):
+            index_rows_by_unique_key(
+                [{"唯一键": "5:dQw4w9WgXcQ"}, {"唯一键": "5:dQw4w9WgXcQ"}]
+            )
+
+    def test_unrelated_duplicate_unique_key_does_not_block_target(self):
+        target = {"唯一键": "5:dQw4w9WgXcQ"}
+        indexed = index_rows_by_unique_key(
+            [target, {"唯一键": "other"}, {"唯一键": "other"}],
+            target_keys={"5:dQw4w9WgXcQ"},
+        )
+        self.assertIs(indexed["5:dQw4w9WgXcQ"], target)
+
+    def test_partial_insert_is_included_in_next_refresh(self):
+        self.assertTrue(
+            is_nyxi_youtube_identity(
+                {
+                    "竞品品牌": "NYXI",
+                    "唯一键": "5:dQw4w9WgXcQ",
+                    "平台": "",
+                    "帖子ID": "dQw4w9WgXcQ",
+                }
+            )
+        )
+
     def test_query_matrix_is_grouped_and_deduplicated(self):
         config = {
             "竞品品牌": "NYXI",
@@ -175,6 +232,53 @@ class IncrementalTests(unittest.TestCase):
             },
         )
         self.assertEqual(update, {})
+
+    def test_interrupted_insert_repairs_only_missing_selects_for_nyxi(self):
+        old = {
+            "竞品品牌": "NYXI",
+            "唯一键": "5:dQw4w9WgXcQ",
+            "平台": "",
+            "合作信号": "A",
+        }
+        incoming = {
+            "唯一键": "5:dQw4w9WgXcQ",
+            "平台": "YouTube",
+            "合作信号": "待分析",
+            "人工复核状态": "待复核",
+        }
+        repair = repair_interrupted_insert_fields(old, incoming)
+        self.assertEqual(repair["平台"], "YouTube")
+        self.assertEqual(repair["人工复核状态"], "待复核")
+        self.assertNotIn("合作信号", repair)
+
+    def test_reviewed_row_never_enters_interrupted_insert_repair(self):
+        self.assertEqual(
+            repair_interrupted_insert_fields(
+                {
+                    "竞品品牌": "NYXI",
+                    "唯一键": "5:dQw4w9WgXcQ",
+                    "平台": "YouTube",
+                },
+                {
+                    "唯一键": "5:dQw4w9WgXcQ",
+                    "平台": "YouTube",
+                    "人工复核状态": "待复核",
+                },
+            ),
+            {},
+        )
+
+    def test_success_marks_normal_before_advancing_waterline(self):
+        class FakeFeishu:
+            def __init__(self):
+                self.calls = []
+
+            def batch_update(self, app_token, table_id, records):
+                self.calls.append(records[0][1])
+
+        fake = FakeFeishu()
+        IncrementalCollector(fake, None).mark_success({"最近采集水位": "new"})
+        self.assertEqual(fake.calls, [{"运行状态": "正常"}, {"最近采集水位": "new"}])
 
 
 if __name__ == "__main__":
