@@ -24,9 +24,6 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [500, 300],
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 5000,
       "credentials": {
         "httpHeaderAuth": {
           "id": "ZXizvNMCsLYit2lg",
@@ -49,25 +46,25 @@
     },
     {
       "id": "wait",
-      "name": "Wait 4 Minutes",
+      "name": "Wait 2 Minutes",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [740, 300],
       "parameters": {
         "resume": "timeInterval",
-        "amount": 4,
+        "amount": 2,
         "unit": "minutes"
       }
     },
     {
-      "id": "assert",
-      "name": "Assert Collection Result",
+      "id": "poll",
+      "name": "Poll Until Finished",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [980, 300],
       "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 30000,
+      "maxTries": 15,
+      "waitBetweenTries": 120000,
       "credentials": {
         "httpHeaderAuth": {
           "id": "ZXizvNMCsLYit2lg",
@@ -101,18 +98,18 @@
       "main": [
         [
           {
-            "node": "Wait 4 Minutes",
+            "node": "Wait 2 Minutes",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Wait 4 Minutes": {
+    "Wait 2 Minutes": {
       "main": [
         [
           {
-            "node": "Assert Collection Result",
+            "node": "Poll Until Finished",
             "type": "main",
             "index": 0
           }

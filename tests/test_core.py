@@ -1,7 +1,8 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from app.collector import build_update
+from app.clients import ApiError
+from app.collector import build_update, index_youtube_rows_by_post_id, post_unique_key
 from app.core import (
     BEIJING,
     active_launch_events,
@@ -82,6 +83,26 @@ class IncrementalTests(unittest.TestCase):
         self.assertEqual(start, datetime(2026, 8, 9, 13, 45, 39, tzinfo=timezone.utc))
         self.assertEqual(end, now)
 
+    def test_unique_key_encodes_youtube_and_post_id(self):
+        self.assertEqual(post_unique_key("dQw4w9WgXcQ"), "5:dQw4w9WgXcQ")
+
+    def test_platform_and_post_id_dedup_does_not_depend_on_unique_key(self):
+        row = {"平台": ["YouTube"], "帖子ID": "dQw4w9WgXcQ", "唯一键": ""}
+        indexed = index_youtube_rows_by_post_id(
+            [row], target_ids={"dQw4w9WgXcQ"}
+        )
+        self.assertIs(indexed["dQw4w9WgXcQ"], row)
+
+    def test_duplicate_platform_and_post_id_fails_closed(self):
+        rows = [
+            {"平台": "YouTube", "帖子ID": "dQw4w9WgXcQ"},
+            {"平台": "YouTube", "帖子ID": "dQw4w9WgXcQ"},
+        ]
+        with self.assertRaises(ApiError):
+            index_youtube_rows_by_post_id(
+                rows, target_ids={"dQw4w9WgXcQ"}
+            )
+
     def test_query_matrix_is_grouped_and_deduplicated(self):
         config = {
             "竞品品牌": "NYXI",
@@ -120,6 +141,40 @@ class IncrementalTests(unittest.TestCase):
         self.assertEqual(update["曝光量"], 110)
         self.assertNotIn("合作信号", update)
         self.assertNotIn("人工复核状态", update)
+
+    def test_existing_post_refresh_is_limited_to_public_metrics_and_author_snapshot(self):
+        old = {
+            "帖子标题": "Human-reviewed title",
+            "帖子内容": "Human-reviewed content",
+            "视频标签": "reviewed-tag",
+            "曝光量": 100,
+        }
+        incoming = {
+            "帖子标题": "Changed upstream title",
+            "帖子内容": "Changed upstream content",
+            "视频标签": "changed-tag",
+            "曝光量": 110,
+            "抓取时间": "2026-08-12 09:30:00",
+            "采集批次ID": "batch",
+            "原始数据哈希": "hash",
+        }
+        update = build_update(old, incoming)
+        self.assertEqual(update["曝光量"], 110)
+        self.assertNotIn("帖子标题", update)
+        self.assertNotIn("帖子内容", update)
+        self.assertNotIn("视频标签", update)
+
+    def test_blank_existing_review_fields_are_not_auto_filled(self):
+        update = build_update(
+            {"曝光量": 100},
+            {
+                "曝光量": 100,
+                "合作信号": "待分析",
+                "营销阶段": "待分析",
+                "人工复核状态": "待复核",
+            },
+        )
+        self.assertEqual(update, {})
 
 
 if __name__ == "__main__":

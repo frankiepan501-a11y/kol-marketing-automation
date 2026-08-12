@@ -35,25 +35,35 @@ _DURATION = re.compile(
     r"^P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?$"
 )
 _COUNTER_FIELDS = ("粉丝数快照", "帖子数快照", "曝光量", "点赞数", "评论数")
-_REFRESH_FIELDS = (
-    "帖子标题",
-    "帖子内容",
-    "发布时间",
-    "帖子URL",
-    "缩略图URL",
-    "附件类型",
-    "KOL平台ID",
-    "KOL账号名",
-    "KOL账号Handle",
-    "KOL主页URL",
-    *_COUNTER_FIELDS,
-    "采集来源",
-    "YouTube命中查询词",
-    "YouTube查询时间窗",
-    "视频时长秒",
-    "字幕可用",
-    "视频标签",
-)
+_REFRESH_FIELDS = _COUNTER_FIELDS
+
+
+def post_unique_key(video_id: str) -> str:
+    """Return the existing Feishu identity encoding for YouTube + post_id."""
+    if not is_youtube_video_id(video_id):
+        raise ValueError("invalid YouTube video id")
+    return f"5:{video_id}"
+
+
+def index_youtube_rows_by_post_id(
+    rows: list[dict[str, Any]], *, target_ids: set[str]
+) -> dict[str, dict[str, Any]]:
+    """Index only requested YouTube IDs and fail closed on an existing duplicate."""
+    indexed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if _text(row.get("平台")) != PLATFORM:
+            continue
+        post_id = _text(row.get("帖子ID"))
+        if post_id not in target_ids:
+            continue
+        if post_id in indexed:
+            raise ApiError(
+                "feishu",
+                "duplicate_post_id",
+                f"multiple YouTube records have post id {post_id}",
+            )
+        indexed[post_id] = row
+    return indexed
 
 
 def _text(value: Any) -> str:
@@ -140,7 +150,7 @@ def normalize_video(
     sources = list(dict.fromkeys([*(evidence.get("sources") or []), "YouTube API"]))
     raw = {"video": video, "channel": channel, "evidence": evidence}
     fields: dict[str, Any] = {
-        "唯一键": f"5:{video_id}",
+        "唯一键": post_unique_key(video_id),
         "竞品品牌": BRAND,
         "命中关键词": KEYWORD,
         "平台": PLATFORM,
@@ -214,9 +224,6 @@ def build_update(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str
             new = unique_lines(existing.get(name), new)
         if new not in (None, "") and new != _old_value(existing, name):
             update[name] = new
-    for name in POST_SINGLE_SELECT_FIELDS:
-        if not scalar(existing.get(name)) and incoming.get(name):
-            update[name] = incoming[name]
     if update:
         for name in ("抓取时间", "采集批次ID", "原始数据哈希"):
             if incoming.get(name) not in (None, ""):
@@ -236,6 +243,29 @@ class IncrementalCollector:
         if _text(config.get("平台")) != PLATFORM or _text(config.get("关键词")).casefold() != KEYWORD:
             raise ValueError("NYXI YouTube config identity mismatch")
         return {name: config.get(name) for name in CONFIG_READ_FIELDS} | {"_record_id": CONFIG_RECORD_ID}
+
+    def mark_started(self, *, job_id: str, now: datetime) -> None:
+        self.feishu.batch_update(
+            BASE_TOKEN,
+            TABLES["keyword_config"],
+            [
+                (
+                    CONFIG_RECORD_ID,
+                    {
+                        "YouTube历史进度": (
+                            f"云端增量运行中；job={job_id}；开始={display_datetime(now)}；"
+                            "最近成功水位暂不变"
+                        ),
+                        "错误摘要": "",
+                    },
+                )
+            ],
+        )
+        self.feishu.batch_update(
+            BASE_TOKEN,
+            TABLES["keyword_config"],
+            [(CONFIG_RECORD_ID, {"运行状态": "待运行"})],
+        )
 
     def _search(
         self, config: dict[str, Any], start: datetime, end: datetime
@@ -276,7 +306,14 @@ class IncrementalCollector:
                         raise ApiError("youtube", "incremental_page_cap", f"query exceeded 10 pages: {query}")
         return evidence, calls
 
-    def run(self, *, now: datetime, commit: bool, force: bool = False) -> dict[str, Any]:
+    def run(
+        self,
+        *,
+        now: datetime,
+        commit: bool,
+        force: bool = False,
+        job_id: str = "",
+    ) -> dict[str, Any]:
         config = self._config()
         events = self.feishu.list_records(
             BASE_TOKEN, TABLES["marketing_events"], field_names=EVENT_READ_FIELDS
@@ -291,6 +328,9 @@ class IncrementalCollector:
                 "mode": "commit" if commit else "preview",
             }
 
+        if commit:
+            self.mark_started(job_id=job_id or "direct-run", now=now)
+
         start, end = incremental_window(config, now)
         evidence, search_calls = self._search(config, start, end)
         all_rows = self.feishu.list_records(
@@ -304,7 +344,7 @@ class IncrementalCollector:
         ]
         existing = {
             _text(row.get("唯一键")): row
-            for row in existing_rows
+            for row in all_rows
             if _text(row.get("唯一键"))
         }
         current_ids = {
@@ -313,6 +353,9 @@ class IncrementalCollector:
             if is_youtube_video_id(_text(row.get("帖子ID")))
         }
         requested_ids = sorted(current_ids | set(evidence))
+        existing_by_post_id = index_youtube_rows_by_post_id(
+            all_rows, target_ids=set(requested_ids)
+        )
         videos = self.youtube.videos(requested_ids)
         found_ids = {str(video.get("id") or "") for video in videos}
         channel_ids = sorted(
@@ -341,10 +384,17 @@ class IncrementalCollector:
                 )
             )
 
-        new_rows = [row for row in normalized if row["唯一键"] not in existing]
+        new_rows = [
+            row
+            for row in normalized
+            if row["唯一键"] not in existing
+            and str(row.get("帖子ID") or "") not in existing_by_post_id
+        ]
         updates: list[tuple[str, dict[str, Any]]] = []
         for row in normalized:
-            old = existing.get(row["唯一键"])
+            old = existing.get(row["唯一键"]) or existing_by_post_id.get(
+                str(row.get("帖子ID") or "")
+            )
             if not old:
                 continue
             change = build_update(old, row)
@@ -395,6 +445,7 @@ class IncrementalCollector:
                 "最近新增KOL候选数": len(new_channels),
                 "YouTube历史进度": (
                     "云端增量完成；调度=周一09:30+新品期周三/周五09:30；"
+                    f"job={job_id or batch_id}；batch={batch_id}；"
                     f"窗口={rfc3339(start)}/{rfc3339(end)}；"
                     f"新增={len(new_rows)}；公开数据更新={len(updates)}；不可用={len(set(requested_ids) - found_ids)}"
                 ),
@@ -432,12 +483,114 @@ class IncrementalCollector:
             "outbound_messages": 0,
         }
 
-    def mark_failure(self, error: Exception) -> None:
+    def replay_video(
+        self, video_id: str, *, now: datetime, commit: bool = False
+    ) -> dict[str, Any]:
+        """Re-run one public video without advancing the incremental waterline."""
+        if not is_youtube_video_id(video_id):
+            raise ValueError("invalid YouTube video id")
+        config = self._config()
+        rows = self.feishu.list_records(
+            BASE_TOKEN, TABLES["competitor_posts"], field_names=POST_READ_FIELDS
+        )
+        matches = [
+            row
+            for row in rows
+            if _text(row.get("竞品品牌")).casefold() == BRAND.casefold()
+            and _text(row.get("平台")) == PLATFORM
+            and _text(row.get("帖子ID")) == video_id
+        ]
+        if len(matches) > 1:
+            raise ApiError(
+                "feishu",
+                "duplicate_post_id",
+                f"multiple NYXI YouTube records have post id {video_id}",
+            )
+        existing = matches[0] if matches else None
+        videos = self.youtube.videos([video_id])
+        if not videos:
+            return {
+                "ok": True,
+                "status": "unavailable",
+                "mode": "commit" if commit else "preview",
+                "video_id": video_id,
+                "existing_before": existing is not None,
+                "waterline_advanced": False,
+                "kol_master_writes": 0,
+                "outbound_messages": 0,
+            }
+        video = videos[0]
+        snippet = video.get("snippet") if isinstance(video.get("snippet"), dict) else {}
+        channel_id = str(snippet.get("channelId") or "")
+        channels = self.youtube.channels([channel_id]) if channel_id else []
+        channel = channels[0] if channels else None
+        batch_id = f"ytreplay-{now.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        incoming = normalize_video(
+            video,
+            channel,
+            config=config,
+            evidence={"sources": ["YouTube API"], "queries": [], "windows": []},
+            batch_id=batch_id,
+            captured_at=now,
+        )
+        change = build_update(existing, incoming) if existing else incoming
+        if commit and change:
+            if existing:
+                self.feishu.batch_update(
+                    BASE_TOKEN,
+                    TABLES["competitor_posts"],
+                    [(str(existing["_record_id"]), change)],
+                )
+            else:
+                base_fields = {
+                    name: value
+                    for name, value in incoming.items()
+                    if name not in POST_SINGLE_SELECT_FIELDS
+                }
+                select_fields = {
+                    name: value
+                    for name, value in incoming.items()
+                    if name in POST_SINGLE_SELECT_FIELDS
+                }
+                record_id = self.feishu.batch_create(
+                    BASE_TOKEN, TABLES["competitor_posts"], [base_fields]
+                )[0]
+                if select_fields:
+                    self.feishu.batch_update(
+                        BASE_TOKEN,
+                        TABLES["competitor_posts"],
+                        [(record_id, select_fields)],
+                    )
+        return {
+            "ok": True,
+            "status": "completed",
+            "mode": "commit" if commit else "preview",
+            "video_id": video_id,
+            "existing_before": existing is not None,
+            "created": bool(commit and not existing),
+            "changed_fields": sorted(change),
+            "waterline_advanced": False,
+            "kol_master_writes": 0,
+            "outbound_messages": 0,
+        }
+
+    def mark_failure(self, error: Exception, *, job_id: str = "") -> None:
         code = error.code if isinstance(error, ApiError) else type(error).__name__
         self.feishu.batch_update(
             BASE_TOKEN,
             TABLES["keyword_config"],
-            [(CONFIG_RECORD_ID, {"错误摘要": f"云端增量失败：{code}"})],
+            [
+                (
+                    CONFIG_RECORD_ID,
+                    {
+                        "错误摘要": f"云端增量失败：{code}",
+                        "YouTube历史进度": (
+                            f"云端增量失败；job={job_id or 'unknown'}；错误类型={code}；"
+                            "最近成功水位未推进"
+                        ),
+                    },
+                )
+            ],
         )
         self.feishu.batch_update(
             BASE_TOKEN,
