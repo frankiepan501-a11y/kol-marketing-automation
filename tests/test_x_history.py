@@ -99,6 +99,13 @@ class XHistoryCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(window.start == start and window.end == end for window in windows))
         self.assertEqual([0, 1], [window.index for window in windows])
 
+    def test_default_brand_query_requires_gaming_context_and_uses_three_groups(self):
+        self.assertEqual(3, len(x_history.QUERY_SPECS))
+        brand_query = x_history.QUERY_SPECS[0].query
+        self.assertIn("controller", brand_query)
+        self.assertIn("nyxigame.com", brand_query)
+        self.assertNotEqual('"NYXI" -is:retweet', brand_query)
+
     def test_rate_limit_delay_uses_x_reset_header(self):
         self.assertEqual(
             31,

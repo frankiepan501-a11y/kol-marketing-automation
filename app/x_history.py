@@ -28,7 +28,7 @@ X_API = "https://api.x.com/2"
 PLATFORM_APP_ID = "7"
 BRAND = "NYXI"
 OFFICIAL_HANDLES = {"nyxigaming"}
-HISTORY_VERSION = "nyxi-x-full-v2"
+HISTORY_VERSION = "nyxi-x-full-v3"
 POST_TABLE_ID = os.environ.get("X_HISTORY_POST_TABLE_ID", "tblCDbvLtnLzdxEp")
 CONFIG_TABLE_ID = os.environ.get("X_HISTORY_CONFIG_TABLE_ID", "tblgWfvdPgbkq541")
 CONFIG_RECORD_ID = os.environ.get("X_HISTORY_CONFIG_RECORD_ID", "recvrM7WSAjzCF")
@@ -85,8 +85,12 @@ class SearchWindow:
 
 
 QUERY_SPECS = (
-    QuerySpec("brand", "NYXI品牌词", '("NYXI" OR "#NYXI" OR "#NYXIGAME") -is:retweet'),
-    QuerySpec("domain", "NYXI官网链接", "url:nyxigame.com -is:retweet"),
+    QuerySpec(
+        "brand_domain",
+        "NYXI品牌/官网词",
+        '((("NYXI" OR "@NyxiGaming") (controller OR controllers OR joycon OR "joy-con" OR gamepad OR gaming OR "Nintendo Switch" OR Switch)) '
+        'OR url:nyxigame.com) -is:retweet',
+    ),
     QuerySpec(
         "hyperion_wizard_warrior",
         "Hyperion/Wizard/Warrior型号词",
@@ -99,7 +103,6 @@ QUERY_SPECS = (
         '("Master P1" OR "Chaos Pro" OR "NJ12" OR "NYXI Flexi" OR "NYXI Athena" OR "NYXI Striker" OR "NYXI Imperial") '
         '(controller OR joycon OR "joy-con" OR gamepad OR "Nintendo Switch" OR NYXI) -is:retweet',
     ),
-    QuerySpec("official", "NYXI官方账号", "from:NyxiGaming -is:retweet"),
 )
 
 
