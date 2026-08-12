@@ -87,6 +87,25 @@ class XHistoryCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("2023-06-01T00:00:00Z", windows[0].start_iso)
         self.assertEqual("2025-02-01T00:00:00Z", windows[-1].end_iso)
 
+    def test_archive_windows_use_one_full_range_per_query_group(self):
+        specs = [
+            x_history.QuerySpec("brand", "NYXI品牌词", '"NYXI" -is:retweet'),
+            x_history.QuerySpec("official", "NYXI官方账号", "from:NyxiGaming -is:retweet"),
+        ]
+        start = datetime(2006, 3, 21, tzinfo=timezone.utc)
+        end = datetime(2026, 8, 12, tzinfo=timezone.utc)
+        windows = x_history.build_archive_windows(start, end, specs)
+        self.assertEqual(2, len(windows))
+        self.assertTrue(all(window.start == start and window.end == end for window in windows))
+        self.assertEqual([0, 1], [window.index for window in windows])
+
+    def test_rate_limit_delay_uses_x_reset_header(self):
+        self.assertEqual(
+            31,
+            x_history.rate_limit_delay({"x-rate-limit-reset": "1030"}, now_ts=1000),
+        )
+        self.assertEqual(60, x_history.rate_limit_delay({}, now_ts=1000))
+
     async def test_collect_window_paginates_and_enriches_author(self):
         pages = [
             {

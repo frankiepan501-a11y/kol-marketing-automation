@@ -28,7 +28,7 @@ X_API = "https://api.x.com/2"
 PLATFORM_APP_ID = "7"
 BRAND = "NYXI"
 OFFICIAL_HANDLES = {"nyxigaming"}
-HISTORY_VERSION = "nyxi-x-full-v1"
+HISTORY_VERSION = "nyxi-x-full-v2"
 POST_TABLE_ID = os.environ.get("X_HISTORY_POST_TABLE_ID", "tblCDbvLtnLzdxEp")
 CONFIG_TABLE_ID = os.environ.get("X_HISTORY_CONFIG_TABLE_ID", "tblgWfvdPgbkq541")
 CONFIG_RECORD_ID = os.environ.get("X_HISTORY_CONFIG_RECORD_ID", "recvrM7WSAjzCF")
@@ -48,6 +48,7 @@ EXCLUSION_TERMS = ("nyxi leon", "nyxi vex", "lady nyxi", "ergonomic office chair
 router = APIRouter(prefix="/x-history", tags=["x-history"])
 _jobs: dict[str, dict[str, Any]] = {}
 _JOB_TTL = 48 * 3600
+_rate_limit_state: dict[str, Any] = {"waiting": False, "retry_after_seconds": 0, "reset_at": ""}
 
 
 @dataclass(frozen=True)
@@ -161,15 +162,56 @@ def _error_category(status_code: int) -> str:
 
 
 async def _x_search_all(params: dict[str, Any]) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.get(
-            f"{X_API}/tweets/search/all",
-            params=params,
-            headers=_x_headers(),
-        )
-    if response.status_code >= 400:
-        raise XApiError(response.status_code, _error_category(response.status_code))
-    return response.json()
+    max_wait = max(0, int(os.environ.get("X_HISTORY_MAX_RATE_WAIT_SECONDS", "930") or 930))
+    for attempt in range(4):
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(
+                f"{X_API}/tweets/search/all",
+                params=params,
+                headers=_x_headers(),
+            )
+        if response.status_code != 429:
+            _set_rate_limit_wait(0)
+            if response.status_code >= 400:
+                raise XApiError(response.status_code, _error_category(response.status_code))
+            return response.json()
+        delay = rate_limit_delay(dict(response.headers))
+        if attempt >= 3 or delay > max_wait:
+            _set_rate_limit_wait(0)
+            raise XApiError(429, "rate_limited", f"retry_after_seconds={delay}")
+        _set_rate_limit_wait(delay)
+        await asyncio.sleep(delay)
+    raise XApiError(429, "rate_limited")
+
+
+def rate_limit_delay(headers: dict[str, Any], now_ts: float | None = None) -> int:
+    now = time.time() if now_ts is None else now_ts
+    try:
+        reset = float(headers.get("x-rate-limit-reset") or 0)
+    except (TypeError, ValueError):
+        reset = 0
+    if reset > now:
+        return max(1, int(reset - now) + 1)
+    try:
+        retry_after = int(float(headers.get("retry-after") or 0))
+    except (TypeError, ValueError):
+        retry_after = 0
+    return max(1, retry_after or 60)
+
+
+def _set_rate_limit_wait(delay: int) -> None:
+    _rate_limit_state["waiting"] = delay > 0
+    _rate_limit_state["retry_after_seconds"] = max(0, delay)
+    _rate_limit_state["reset_at"] = (
+        _iso(datetime.now(UTC) + timedelta(seconds=delay)) if delay > 0 else ""
+    )
+    for job in _jobs.values():
+        if job.get("status") == "running":
+            progress = dict(job.get("progress") or {})
+            progress["waiting_rate_limit"] = delay > 0
+            progress["retry_after_seconds"] = max(0, delay)
+            progress["rate_limit_reset_at"] = _rate_limit_state["reset_at"]
+            job["progress"] = progress
 
 
 def build_year_windows(
@@ -191,6 +233,19 @@ def build_year_windows(
             windows.append(SearchWindow(len(windows), spec, cursor, window_end))
             cursor = window_end
     return windows
+
+
+def build_archive_windows(
+    start: datetime,
+    end: datetime,
+    specs: Iterable[QuerySpec] = QUERY_SPECS,
+) -> list[SearchWindow]:
+    """Use one full-history window per query group; pagination handles volume."""
+    start = start.astimezone(UTC)
+    end = end.astimezone(UTC)
+    if end <= start:
+        raise ValueError("end must be after start")
+    return [SearchWindow(index, spec, start, end) for index, spec in enumerate(specs)]
 
 
 def _stable_hash(value: Any) -> str:
@@ -600,7 +655,7 @@ async def run_history(
     captured_at = _iso(datetime.now(UTC))
     batch_id = "xhist-" + datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     end = history_end()
-    windows = build_year_windows(DEFAULT_START, end)
+    windows = build_archive_windows(DEFAULT_START, end)
     checkpoint = await _load_checkpoint() if commit and resume else 0
     effective_start = max(0, start_index, checkpoint)
     selected = windows[effective_start:]
@@ -829,6 +884,7 @@ async def history_status(authorization: str = Header(default="")) -> dict[str, A
         "running_job_id": running_id,
         "running": bool(running),
         "progress": (running or {}).get("progress") or {},
+        "rate_limit": dict(_rate_limit_state),
         "post_table": POST_TABLE_ID,
         "config_record": CONFIG_RECORD_ID,
         "kol_master_write_enabled": False,
