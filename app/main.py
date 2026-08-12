@@ -133,3 +133,18 @@ def status(job_id: str, authorization: str | None = Header(default=None)) -> dic
         raise HTTPException(status_code=404, detail="job not found")
     return job
 
+
+@app.get("/runs/{job_id}/assert")
+def assert_finished(
+    job_id: str, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
+    """Return 2xx only after a successful completion or an intentional skip."""
+    _authorized(authorization)
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.get("status") == "running":
+        raise HTTPException(status_code=409, detail="job is still running")
+    if job.get("status") == "failed":
+        raise HTTPException(status_code=500, detail={"job_id": job_id, "error_type": job.get("error_type")})
+    return job

@@ -14,10 +14,10 @@
 - `GET /admin/version`：部署版本哨兵。
 - `POST /run`：异步启动，body 为 `{"brand":"NYXI","platform":"YouTube","mode":"commit"}`。
 - `GET /runs/{job_id}`：查看一次运行输入窗口、结果数量和错误类型。
+- `GET /runs/{job_id}/assert`：n8n 等待后验收；仍在运行或失败时返回非 2xx，让 n8n 执行明确失败。
 
 `/run` 与 `/runs/*` 使用 `Authorization: Bearer <SERVICE_AUTH_TOKEN>`。
 
 ## 环境变量
 
 `YOUTUBE_API_KEY`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`SERVICE_AUTH_TOKEN`、`COMMIT_ENABLED`、`BUILD_VERSION`。
-

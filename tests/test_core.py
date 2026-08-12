@@ -11,6 +11,14 @@ from app.core import (
 )
 
 
+class FakeJobTests(unittest.TestCase):
+    def test_assert_endpoint_contract_is_present(self):
+        from pathlib import Path
+
+        source = (Path(__file__).parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('@app.get("/runs/{job_id}/assert")', source)
+
+
 def event(day, *, source="官方确认", confirmed="已确认", brand="NYXI"):
     return {
         "事件名称": "Launch",
@@ -107,4 +115,3 @@ class IncrementalTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
