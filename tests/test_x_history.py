@@ -158,6 +158,7 @@ class XHistoryCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Reviewer", rows[0]["KOL账号名"])
         self.assertEqual(1200, rows[0]["粉丝数快照"])
         self.assertEqual(80, rows[0]["曝光量"])
+        self.assertEqual(500, search.await_args_list[0].args[0]["max_results"])
         self.assertEqual("page-2", search.await_args_list[1].args[0]["next_token"])
 
     def test_merge_candidates_unions_query_and_window_evidence(self):

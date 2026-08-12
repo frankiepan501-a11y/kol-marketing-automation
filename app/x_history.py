@@ -398,7 +398,10 @@ async def collect_window(
             "query": window.spec.query,
             "start_time": window.start_iso,
             "end_time": window.end_iso,
-            "max_results": 100,
+            # X Full Archive allows up to 500 results per page. Use the
+            # maximum because this account has a very small 15-minute
+            # request allowance and pagination tokens are short-lived.
+            "max_results": 500,
             "expansions": "author_id,attachments.media_keys",
             "tweet.fields": "id,text,author_id,created_at,public_metrics,lang,entities,attachments",
             "user.fields": "id,name,username,created_at,description,location,public_metrics,url,verified,verified_type",
