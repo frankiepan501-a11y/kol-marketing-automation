@@ -116,6 +116,12 @@ def _iso(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def history_end(now: datetime | None = None) -> datetime:
+    """Stay behind X server time so the current partial window is accepted."""
+    current = (now or datetime.now(UTC)).astimezone(UTC)
+    return current - timedelta(seconds=30)
+
+
 def _parse_datetime(value: Any) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -593,7 +599,7 @@ async def run_history(
 ) -> dict[str, Any]:
     captured_at = _iso(datetime.now(UTC))
     batch_id = "xhist-" + datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    end = datetime.now(UTC) + timedelta(minutes=1)
+    end = history_end()
     windows = build_year_windows(DEFAULT_START, end)
     checkpoint = await _load_checkpoint() if commit and resume else 0
     effective_start = max(0, start_index, checkpoint)

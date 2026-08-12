@@ -68,6 +68,13 @@ class XHistoryProbeTests(unittest.TestCase):
 
 
 class XHistoryCollectorTests(unittest.IsolatedAsyncioTestCase):
+    def test_history_end_stays_behind_x_server_clock(self):
+        now = datetime(2026, 8, 12, 15, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            datetime(2026, 8, 12, 14, 59, 30, tzinfo=timezone.utc),
+            x_history.history_end(now),
+        )
+
     def test_year_windows_are_contiguous_and_end_exclusive(self):
         windows = x_history.build_year_windows(
             datetime(2023, 6, 1, tzinfo=timezone.utc),
