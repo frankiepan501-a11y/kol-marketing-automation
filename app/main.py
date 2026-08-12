@@ -22,10 +22,12 @@ from . import b2b_linkedin_discovery  # B2B 外部搜索/Snov 候选公司补给
 from . import b2b_linkedin_async_audit  # B2B n8n async ACK 后台 job 产出巡检
 from . import b2b_outreach_email  # B2B LinkedIn 转 Email 开发信队列 + dry-run sender
 from . import invest  # 投资助手: X 帖子抓取 → A股观察映射 → 投资助手 App 推送
+from . import x_history  # 竞品 X 历史补采: 独立只读探测/分窗采集，不触碰 KOL 主表
 from . import kol_roi_mapping  # KOL ROI 归因缺口卡 + 映射回填
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
 app.include_router(invest.router)
+app.include_router(x_history.router)
 
 # Endpoint 失败告警 dedup: {endpoint: last_alert_ts} (60 min 内同 endpoint 只告 1 次)
 _alert_last = {}
