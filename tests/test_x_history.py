@@ -1,6 +1,6 @@
 import os
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
@@ -113,6 +113,39 @@ class XHistoryCollectorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(60, x_history.rate_limit_delay({}, now_ts=1000))
 
+    def test_incremental_window_overlaps_last_success_by_48_hours(self):
+        now = datetime(2026, 8, 17, 1, 30, tzinfo=timezone.utc)
+        start, end = x_history.incremental_window(
+            {"最近成功采集时间": int(datetime(2026, 8, 10, 1, 30, tzinfo=timezone.utc).timestamp() * 1000)},
+            now,
+        )
+        self.assertEqual(datetime(2026, 8, 8, 1, 30, tzinfo=timezone.utc), start)
+        self.assertEqual(now - timedelta(seconds=30), end)
+
+    def test_schedule_runs_monday_and_launch_window_wed_fri(self):
+        monday = datetime(2026, 8, 17, 1, 30, tzinfo=timezone.utc)
+        wednesday = datetime(2026, 8, 19, 1, 30, tzinfo=timezone.utc)
+        event = {
+            "fields": {
+                "事件名称": "Hyperion 3 Ultra",
+                "竞品品牌": "NYXI",
+                "正式开售日期": int(datetime(2026, 8, 5, tzinfo=timezone.utc).timestamp() * 1000),
+                "来源类型": "官方确认",
+                "人工确认状态": "已确认",
+            }
+        }
+        self.assertEqual("weekly_monday", x_history.schedule_decision(monday, []).reason)
+        decision = x_history.schedule_decision(wednesday, [event])
+        self.assertTrue(decision.should_run)
+        self.assertEqual("launch_window", decision.reason)
+        self.assertEqual(("Hyperion 3 Ultra",), decision.active_events)
+
+    def test_schedule_skips_midweek_without_confirmed_launch(self):
+        wednesday = datetime(2026, 10, 21, 1, 30, tzinfo=timezone.utc)
+        decision = x_history.schedule_decision(wednesday, [])
+        self.assertFalse(decision.should_run)
+        self.assertEqual("no_confirmed_launch_window", decision.reason)
+
     async def test_collect_window_paginates_and_enriches_author(self):
         pages = [
             {
@@ -205,6 +238,66 @@ class XHistoryCollectorTests(unittest.IsolatedAsyncioTestCase):
         create.assert_not_awaited()
         payload = update.await_args.args[0][0]
         self.assertEqual(["SocialEcho", "X API"], payload["fields"]["采集来源"])
+
+    async def test_credits_alert_is_suppressed_for_24_hours(self):
+        now = datetime(2026, 8, 13, 7, 0, tzinfo=timezone.utc)
+        state = {
+            "version": x_history.STATE_VERSION,
+            "incremental": {
+                "version": x_history.INCREMENTAL_VERSION,
+                "last_credits_alert_at": "2026-08-13T06:00:00Z",
+            },
+        }
+        with patch("app.x_history._load_progress", new=AsyncMock(return_value=state)), patch(
+            "app.x_history.feishu.send_card_message", new=AsyncMock()
+        ) as send:
+            sent = await x_history._send_credits_alert(now, "xinc-test")
+        self.assertFalse(sent)
+        send.assert_not_awaited()
+
+    async def test_credits_alert_goes_only_to_frankie(self):
+        old_users = x_history.config.NOTIFY_USERS
+        x_history.config.NOTIFY_USERS = [
+            ("潘志聪-Frankie", "ou_frankie"),
+            ("运营", "ou_operator"),
+        ]
+        try:
+            with patch("app.x_history._load_progress", new=AsyncMock(return_value={})), patch(
+                "app.x_history.feishu.send_card_message", new=AsyncMock(return_value="om_1")
+            ) as send:
+                sent = await x_history._send_credits_alert(
+                    datetime(2026, 8, 13, 7, 0, tzinfo=timezone.utc), "xinc-test"
+                )
+            self.assertTrue(sent)
+            self.assertEqual(1, send.await_count)
+            self.assertEqual("ou_frankie", send.await_args.args[1])
+            self.assertEqual("AUDIT", send.await_args.kwargs["biz"])
+            self.assertEqual("P1", send.await_args.kwargs["level"])
+        finally:
+            x_history.config.NOTIFY_USERS = old_users
+
+    async def test_incremental_credits_failure_performs_no_post_or_kol_write(self):
+        with patch("app.x_history._load_config_fields", new=AsyncMock(return_value={})), patch(
+            "app.x_history._load_event_rows", new=AsyncMock(return_value=[])
+        ), patch(
+            "app.x_history.collect_window",
+            new=AsyncMock(side_effect=x_history.XApiError(402, "credits_required")),
+        ), patch("app.x_history.upsert_rows", new=AsyncMock()) as upsert:
+            with self.assertRaises(x_history.XApiError):
+                await x_history.run_incremental(commit=False, force=True)
+        upsert.assert_not_awaited()
+
+    async def test_incremental_midweek_skip_writes_no_posts(self):
+        now = datetime(2026, 10, 21, 1, 30, tzinfo=timezone.utc)
+        with patch("app.x_history._load_config_fields", new=AsyncMock(return_value={})), patch(
+            "app.x_history._load_event_rows", new=AsyncMock(return_value=[])
+        ), patch("app.x_history.collect_window", new=AsyncMock()) as collect, patch(
+            "app.x_history.upsert_rows", new=AsyncMock()
+        ) as upsert:
+            result = await x_history.run_incremental(commit=False, force=False, now=now)
+        self.assertEqual("skipped", result["status"])
+        collect.assert_not_awaited()
+        upsert.assert_not_awaited()
 
     def test_commit_rejects_page_cap_that_would_skip_history(self):
         old_token = x_history.config.INTERNAL_TOKEN

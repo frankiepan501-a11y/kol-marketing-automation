@@ -1,4 +1,4 @@
-"""NYXI X full-history collector.
+"""NYXI X full-history and scheduled incremental collector.
 
 This module is isolated from the outreach pipeline. It reads public X data and
 writes only the existing competitor-post/config tables. The KOL master table is
@@ -29,9 +29,13 @@ PLATFORM_APP_ID = "7"
 BRAND = "NYXI"
 OFFICIAL_HANDLES = {"nyxigaming"}
 HISTORY_VERSION = "nyxi-x-full-v3"
+INCREMENTAL_VERSION = "nyxi-x-incremental-v1"
+STATE_VERSION = "nyxi-x-state-v1"
 POST_TABLE_ID = os.environ.get("X_HISTORY_POST_TABLE_ID", "tblCDbvLtnLzdxEp")
 CONFIG_TABLE_ID = os.environ.get("X_HISTORY_CONFIG_TABLE_ID", "tblgWfvdPgbkq541")
 CONFIG_RECORD_ID = os.environ.get("X_HISTORY_CONFIG_RECORD_ID", "recvrM7WSAjzCF")
+EVENT_TABLE_ID = os.environ.get("X_HISTORY_EVENT_TABLE_ID", "tblpZaWYEWy54Sll")
+BEIJING = timezone(timedelta(hours=8), name="Asia/Shanghai")
 PROBE_QUERY = "from:NyxiGaming -is:retweet"
 PROBE_START = "2024-01-01T00:00:00Z"
 PROBE_END = "2024-01-02T00:00:00Z"
@@ -49,6 +53,10 @@ router = APIRouter(prefix="/x-history", tags=["x-history"])
 _jobs: dict[str, dict[str, Any]] = {}
 _JOB_TTL = 48 * 3600
 _rate_limit_state: dict[str, Any] = {"waiting": False, "retry_after_seconds": 0, "reset_at": ""}
+
+EVENT_READ_FIELDS = [
+    "事件名称", "竞品品牌", "产品系列", "正式开售日期", "来源类型", "人工确认状态",
+]
 
 
 @dataclass(frozen=True)
@@ -82,6 +90,13 @@ class SearchWindow:
         ):
             return str(self.start.year)
         return f"{self.start:%Y-%m-%d}~{(self.end - timedelta(seconds=1)):%Y-%m-%d}"
+
+
+@dataclass(frozen=True)
+class ScheduleDecision:
+    should_run: bool
+    reason: str
+    active_events: tuple[str, ...] = ()
 
 
 QUERY_SPECS = (
@@ -139,6 +154,78 @@ def _parse_datetime(value: Any) -> datetime | None:
 def _millis(value: Any) -> int | None:
     parsed = _parse_datetime(value)
     return int(parsed.timestamp() * 1000) if parsed else None
+
+
+def _datetime_value(value: Any, *, fallback: datetime | None = None) -> datetime:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = value / 1000 if value > 10_000_000_000 else value
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    parsed = _parse_datetime(_field_text(value))
+    if parsed:
+        return parsed
+    if fallback is not None:
+        return fallback
+    raise ValueError("datetime value is missing or invalid")
+
+
+def incremental_window(config_fields: dict[str, Any], now: datetime) -> tuple[datetime, datetime]:
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    last_success = _datetime_value(
+        config_fields.get("最近成功采集时间"), fallback=now - timedelta(days=7)
+    )
+    end = history_end(now)
+    start = last_success.astimezone(UTC) - timedelta(hours=48)
+    if start >= end:
+        start = end - timedelta(hours=48)
+    return start, end
+
+
+def _select_text(value: Any) -> str:
+    return _field_text(value).strip()
+
+
+def active_launch_events(
+    rows: Iterable[dict[str, Any]], now: datetime, *, brand: str = BRAND
+) -> tuple[str, ...]:
+    today = now.astimezone(BEIJING).date()
+    active: list[str] = []
+    for raw in rows:
+        row = raw.get("fields") if isinstance(raw.get("fields"), dict) else raw
+        if _select_text(row.get("竞品品牌")).casefold() != brand.casefold():
+            continue
+        if _select_text(row.get("来源类型")) != "官方确认":
+            continue
+        if _select_text(row.get("人工确认状态")) != "已确认":
+            continue
+        try:
+            launch_date = _datetime_value(row.get("正式开售日期")).astimezone(BEIJING).date()
+        except ValueError:
+            continue
+        if abs((today - launch_date).days) <= 30:
+            name = _select_text(row.get("事件名称")) or launch_date.isoformat()
+            if name not in active:
+                active.append(name)
+    return tuple(active)
+
+
+def schedule_decision(
+    now: datetime,
+    event_rows: Iterable[dict[str, Any]],
+    *,
+    force: bool = False,
+) -> ScheduleDecision:
+    if force:
+        return ScheduleDecision(True, "manual_force")
+    weekday = now.astimezone(BEIJING).weekday()
+    if weekday == 0:
+        return ScheduleDecision(True, "weekly_monday")
+    if weekday not in {2, 4}:
+        return ScheduleDecision(False, "not_scheduled_day")
+    events = active_launch_events(event_rows, now)
+    if events:
+        return ScheduleDecision(True, "launch_window", events)
+    return ScheduleDecision(False, "no_confirmed_launch_window")
 
 
 def _check_auth(authorization: str) -> None:
@@ -614,11 +701,48 @@ async def _table_total(table_id: str) -> int:
     return int((response.get("data") or {}).get("total") or 0)
 
 
+async def _load_config_fields() -> dict[str, Any]:
+    record = await feishu.get_record(CONFIG_TABLE_ID, CONFIG_RECORD_ID)
+    return dict(record.get("fields") or {})
+
+
+def _decode_progress(raw: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(_field_text(raw)) if _field_text(raw) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+async def _load_progress() -> dict[str, Any]:
+    try:
+        fields = await _load_config_fields()
+        return _decode_progress(fields.get("X历史进度"))
+    except Exception:
+        return {}
+
+
+async def _save_progress(section: str, data: dict[str, Any]) -> None:
+    current = await _load_progress()
+    if current.get("version") == STATE_VERSION:
+        state = dict(current)
+    else:
+        state = {"version": STATE_VERSION}
+        if current.get("version") == HISTORY_VERSION:
+            state["history"] = current
+        elif current.get("version") == INCREMENTAL_VERSION:
+            state["incremental"] = current
+    state[section] = data
+    await _update_config({
+        "X历史进度": json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+    })
+
+
 async def _load_checkpoint() -> int:
     try:
-        record = await feishu.get_record(CONFIG_TABLE_ID, CONFIG_RECORD_ID)
-        raw = _field_text((record.get("fields") or {}).get("X历史进度"))
-        data = json.loads(raw) if raw else {}
+        data = await _load_progress()
+        if data.get("version") == STATE_VERSION:
+            data = data.get("history") if isinstance(data.get("history"), dict) else {}
         if data.get("version") == HISTORY_VERSION:
             return max(0, int(data.get("next_index") or 0))
     except Exception:
@@ -705,11 +829,8 @@ async def run_history(
                 "last_window": f"{window.spec.slug}:{window.label}",
                 "updated_at": captured_at,
             }
-            await _update_config({
-                "X历史进度": json.dumps(checkpoint_data, ensure_ascii=False, separators=(",", ":")),
-                "运行状态": "正常",
-                "错误摘要": "",
-            })
+            await _save_progress("history", checkpoint_data)
+            await _update_config({"运行状态": "正常", "错误摘要": ""})
         if job_id and job_id in _jobs:
             _jobs[job_id]["progress"] = {
                 "window": position,
@@ -775,6 +896,279 @@ async def run_history(
             if row.get("KOL平台ID") and str(row.get("KOL账号Handle") or "").casefold() not in OFFICIAL_HANDLES
         }),
         "writes_performed": (len(created_keys) + len(updated_keys)) if commit else 0,
+    }
+
+
+async def _load_event_rows() -> list[dict[str, Any]]:
+    return await feishu.fetch_all_records(
+        EVENT_TABLE_ID, field_names=EVENT_READ_FIELDS, page_size=500
+    )
+
+
+def _progress_section(progress: dict[str, Any], section: str) -> dict[str, Any]:
+    if progress.get("version") == STATE_VERSION:
+        value = progress.get(section)
+        return dict(value) if isinstance(value, dict) else {}
+    if progress.get("version") == INCREMENTAL_VERSION and section == "incremental":
+        return dict(progress)
+    return {}
+
+
+async def _send_credits_alert(now: datetime, job_id: str) -> bool:
+    progress = await _load_progress()
+    incremental = _progress_section(progress, "incremental")
+    last_alert = _parse_datetime(incremental.get("last_credits_alert_at"))
+    if last_alert and now.astimezone(UTC) - last_alert < timedelta(hours=24):
+        return False
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": "X API credits 已用完"},
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": (
+                "**影响**\nNYXI 的 X 定时增量本轮没有采集，成功水位未推进；飞书历史数据不会被删除或覆盖。\n\n"
+                "**需要 Frankie 做什么**\n请到 X Developer Console 的 Billing / Usage 购买 credits，并设置自动充值阈值与月度支出上限。\n\n"
+                "**系统会怎么处理**\n充值后下一次周一任务会自动续跑；新品期周三、周五也会自动运行。"
+            )}},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": f"job_id={job_id or 'direct-run'}；错误=HTTP 402 credits_required；24 小时内不重复提醒"}]},
+        ],
+    }
+    sent = False
+    for name, open_id in config.NOTIFY_USERS:
+        if not name.startswith("潘"):
+            continue
+        await feishu.send_card_message(
+            "open_id", open_id, card, biz="AUDIT", level="P1"
+        )
+        sent = True
+    return sent
+
+
+async def _record_incremental_failure(
+    exc: Exception, *, job_id: str, now: datetime
+) -> bool:
+    category = exc.category if isinstance(exc, XApiError) else "incremental_error"
+    http_status = exc.status_code if isinstance(exc, XApiError) else 0
+    alert_sent = False
+    if category == "credits_required":
+        try:
+            alert_sent = await _send_credits_alert(now, job_id)
+        except Exception:
+            alert_sent = False
+    previous = _progress_section(await _load_progress(), "incremental")
+    failure = {
+        **previous,
+        "version": INCREMENTAL_VERSION,
+        "status": category,
+        "job_id": job_id or "direct-run",
+        "failed_at": _iso(now),
+        "http_status": http_status,
+        "error": str(exc)[:300],
+    }
+    if alert_sent:
+        failure["last_credits_alert_at"] = _iso(now)
+    try:
+        await _save_progress("incremental", failure)
+        await _update_config({"运行状态": "失败", "错误摘要": str(exc)[:500]})
+    except Exception:
+        pass
+    return alert_sent
+
+
+async def run_incremental(
+    *,
+    commit: bool,
+    force: bool,
+    job_id: str = "",
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    started = (now or datetime.now(UTC)).astimezone(UTC)
+    config_fields = await _load_config_fields()
+    event_rows = await _load_event_rows()
+    decision = schedule_decision(started, event_rows, force=force)
+    if not decision.should_run:
+        result = {
+            "ok": True,
+            "status": "skipped",
+            "reason": decision.reason,
+            "active_events": list(decision.active_events),
+            "commit": commit,
+            "job_id": job_id or "direct-run",
+            "writes_performed": 0,
+            "kol_master_write_enabled": False,
+        }
+        if commit:
+            await _save_progress("incremental", {
+                "version": INCREMENTAL_VERSION,
+                "status": "skipped",
+                "job_id": job_id or "direct-run",
+                "reason": decision.reason,
+                "finished_at": _iso(started),
+            })
+            await _update_config({"运行状态": "正常", "错误摘要": ""})
+        return result
+
+    start, end = incremental_window(config_fields, started)
+    batch_id = "xinc-" + started.strftime("%Y%m%d-%H%M%S")
+    captured_at = _iso(started)
+    if commit:
+        await _save_progress("incremental", {
+            "version": INCREMENTAL_VERSION,
+            "status": "running",
+            "job_id": job_id or "direct-run",
+            "started_at": captured_at,
+            "window_start": _iso(start),
+            "window_end": _iso(end),
+            "schedule_reason": decision.reason,
+            "active_events": list(decision.active_events),
+        })
+
+    rows: list[dict[str, Any]] = []
+    total_calls = 0
+    windows = build_archive_windows(start, end)
+    for position, window in enumerate(windows, start=1):
+        if job_id and (_jobs.get(job_id) or {}).get("cancel_requested"):
+            return {
+                "ok": False,
+                "status": "cancelled",
+                "job_id": job_id,
+                "query_groups_completed": position - 1,
+                "writes_performed": 0,
+            }
+        found, calls = await collect_window(window, batch_id, captured_at)
+        rows.extend(found)
+        total_calls += calls
+        if job_id and job_id in _jobs:
+            _jobs[job_id]["progress"] = {
+                "query_group": window.spec.slug,
+                "query_groups_completed": position,
+                "query_groups_total": len(windows),
+                "query_calls": total_calls,
+                "candidate_occurrences": len(rows),
+                "window_start": _iso(start),
+                "window_end": _iso(end),
+            }
+
+    unique_rows = merge_candidate_rows(rows)
+    existing, duplicate_keys = await _load_existing_index()
+    existing_before = len(existing)
+    kol_before = await _table_total(config.T_KOL) if config.T_KOL else 0
+    written = await upsert_rows(unique_rows, existing, commit=commit)
+    created_keys = set(written.get("created_keys") or [])
+    created_authors = {
+        str(row.get("KOL平台ID"))
+        for row in unique_rows
+        if row.get("唯一键") in created_keys
+        and row.get("KOL平台ID")
+        and str(row.get("KOL账号Handle") or "").casefold() not in OFFICIAL_HANDLES
+    }
+    kol_after = await _table_total(config.T_KOL) if config.T_KOL else 0
+    result = {
+        "ok": True,
+        "status": "success",
+        "incremental_version": INCREMENTAL_VERSION,
+        "job_id": job_id or "direct-run",
+        "batch_id": batch_id,
+        "commit": commit,
+        "schedule_reason": decision.reason,
+        "active_events": list(decision.active_events),
+        "window_start": _iso(start),
+        "window_end": _iso(end),
+        "query_groups": len(windows),
+        "query_calls": total_calls,
+        "unique_posts": len(unique_rows),
+        "would_create": written["would_create"],
+        "would_update": written["would_update"],
+        "created": written["created"],
+        "updated": written["updated"],
+        "unchanged": written["unchanged"],
+        "existing_x_posts_before": existing_before,
+        "existing_duplicate_keys": duplicate_keys,
+        "new_nonofficial_authors": len(created_authors),
+        "kol_master_before": kol_before,
+        "kol_master_after": kol_after,
+        "kol_master_unchanged": kol_before == kol_after,
+        "kol_master_write_enabled": False,
+        "writes_performed": written["created"] + written["updated"],
+    }
+    if commit:
+        completed = {
+            "version": INCREMENTAL_VERSION,
+            "status": "success",
+            "job_id": job_id or "direct-run",
+            "finished_at": _iso(datetime.now(UTC)),
+            "window_start": _iso(start),
+            "window_end": _iso(end),
+            "schedule_reason": decision.reason,
+            "active_events": list(decision.active_events),
+            "query_calls": total_calls,
+            "unique_posts": len(unique_rows),
+            "created": written["created"],
+            "updated": written["updated"],
+            "new_nonofficial_authors": len(created_authors),
+        }
+        await _save_progress("incremental", completed)
+        await _update_config({
+            "最近成功采集时间": int(started.timestamp() * 1000),
+            "最近采集水位": int(end.timestamp() * 1000),
+            "最近新增帖子数": written["created"],
+            "最近新增KOL候选数": len(created_authors),
+            "运行状态": "正常",
+            "错误摘要": "",
+        })
+    return result
+
+
+async def _run_incremental_job(job_id: str, params: dict[str, Any]) -> None:
+    try:
+        result = await run_incremental(job_id=job_id, **params)
+        _jobs[job_id].update(
+            status=result.get("status", "success"),
+            finished_at=_iso(datetime.now(UTC)),
+            result=result,
+        )
+    except Exception as exc:
+        now = datetime.now(UTC)
+        alert_sent = await _record_incremental_failure(exc, job_id=job_id, now=now)
+        category = exc.category if isinstance(exc, XApiError) else "error"
+        _jobs[job_id].update(
+            status=category,
+            finished_at=_iso(now),
+            error=str(exc),
+            result={
+                "ok": False,
+                "status": category,
+                "http_status": exc.status_code if isinstance(exc, XApiError) else 0,
+                "credits_alert_sent": alert_sent,
+                "writes_performed": 0,
+            },
+        )
+
+
+async def _persisted_incremental_job(job_id: str) -> dict[str, Any] | None:
+    incremental = _progress_section(await _load_progress(), "incremental")
+    if str(incremental.get("job_id") or "") != job_id:
+        return None
+    status = str(incremental.get("status") or "")
+    if not status:
+        return None
+    result = {
+        "ok": status in {"success", "skipped"},
+        **incremental,
+        "writes_performed": int(incremental.get("created") or 0)
+        + int(incremental.get("updated") or 0),
+        "recovered_from_feishu": True,
+    }
+    return {
+        "status": status,
+        "job_type": "incremental",
+        "started_at": incremental.get("started_at") or "",
+        "finished_at": incremental.get("finished_at") or incremental.get("failed_at") or "",
+        "result": result,
+        "error": incremental.get("error") or "",
+        "recovered_from_feishu": True,
     }
 
 
@@ -858,14 +1252,69 @@ async def start_history_job(
     return {"ok": True, "accepted": True, "already_running": False, "job_id": job_id}
 
 
+@router.post("/incremental/run")
+async def start_incremental_job(
+    authorization: str = Header(default=""),
+    commit: bool = Query(False),
+    force: bool = Query(False),
+    async_mode: bool = Query(True),
+) -> dict[str, Any]:
+    _check_auth(authorization)
+    params = {"commit": commit, "force": force}
+    if not async_mode:
+        try:
+            return await run_incremental(**params)
+        except Exception as exc:
+            if commit:
+                await _record_incremental_failure(exc, job_id="direct-run", now=datetime.now(UTC))
+            raise
+    running_id, running = _running_job()
+    if running:
+        return {"ok": True, "accepted": True, "already_running": True, "job_id": running_id}
+    job_id = "xinc-" + uuid.uuid4().hex[:12]
+    _jobs[job_id] = {
+        "status": "running",
+        "started_ts": time.time(),
+        "started_at": _iso(datetime.now(UTC)),
+        "params": params,
+        "cancel_requested": False,
+        "job_type": "incremental",
+    }
+    asyncio.create_task(_run_incremental_job(job_id, params))
+    return {"ok": True, "accepted": True, "already_running": False, "job_id": job_id}
+
+
 @router.get("/jobs/{job_id}")
 async def get_history_job(job_id: str, authorization: str = Header(default="")) -> dict[str, Any]:
     _check_auth(authorization)
     _cleanup_jobs()
     job = _jobs.get(job_id)
     if not job:
+        job = await _persisted_incremental_job(job_id)
+    if not job:
         raise HTTPException(404, "job not found")
     return {"ok": True, "job_id": job_id, **job}
+
+
+@router.get("/jobs/{job_id}/assert")
+async def assert_history_job(job_id: str, authorization: str = Header(default="")) -> dict[str, Any]:
+    _check_auth(authorization)
+    _cleanup_jobs()
+    job = _jobs.get(job_id)
+    if not job:
+        job = await _persisted_incremental_job(job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    status = str(job.get("status") or "")
+    if status == "running":
+        raise HTTPException(409, "job still running")
+    if status in {"success", "skipped"}:
+        return {"ok": True, "job_id": job_id, **job}
+    raise HTTPException(503, {
+        "job_id": job_id,
+        "status": status or "error",
+        "error": str(job.get("error") or "job failed")[:300],
+    })
 
 
 @router.post("/jobs/{job_id}/stop")
@@ -886,12 +1335,15 @@ async def history_status(authorization: str = Header(default="")) -> dict[str, A
     return {
         "ok": True,
         "history_version": HISTORY_VERSION,
+        "incremental_version": INCREMENTAL_VERSION,
+        "state_version": STATE_VERSION,
         "query_groups": [spec.slug for spec in QUERY_SPECS],
         "running_job_id": running_id,
         "running": bool(running),
         "progress": (running or {}).get("progress") or {},
         "rate_limit": dict(_rate_limit_state),
         "post_table": POST_TABLE_ID,
+        "event_table": EVENT_TABLE_ID,
         "config_record": CONFIG_RECORD_ID,
         "kol_master_write_enabled": False,
     }
