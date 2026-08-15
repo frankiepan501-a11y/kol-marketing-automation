@@ -239,6 +239,35 @@ class XHistoryCollectorTests(unittest.IsolatedAsyncioTestCase):
         payload = update.await_args.args[0][0]
         self.assertEqual(["SocialEcho", "X API"], payload["fields"]["采集来源"])
 
+    async def test_batch_create_converts_url_fields_to_feishu_link_objects(self):
+        rows = [{
+            "唯一键": "7:100",
+            "帖子URL": "https://x.com/reviewer/status/100",
+            "缩略图URL": "https://pbs.twimg.com/media/image.jpg",
+            "KOL主页URL": "https://x.com/reviewer",
+        }]
+        with patch(
+            "app.x_history._feishu_json_once",
+            new=AsyncMock(return_value={"data": {"records": [{"record_id": "rec1"}]}}),
+        ) as write:
+            ids = await x_history._batch_create_once(rows)
+
+        self.assertEqual(["rec1"], ids)
+        body = write.await_args.args[2]
+        fields = body["records"][0]["fields"]
+        self.assertEqual(
+            {"link": "https://x.com/reviewer/status/100", "text": "https://x.com/reviewer/status/100"},
+            fields["帖子URL"],
+        )
+        self.assertEqual(
+            {"link": "https://pbs.twimg.com/media/image.jpg", "text": "https://pbs.twimg.com/media/image.jpg"},
+            fields["缩略图URL"],
+        )
+        self.assertEqual(
+            {"link": "https://x.com/reviewer", "text": "https://x.com/reviewer"},
+            fields["KOL主页URL"],
+        )
+
     async def test_credits_alert_is_suppressed_for_24_hours(self):
         now = datetime(2026, 8, 13, 7, 0, tzinfo=timezone.utc)
         state = {

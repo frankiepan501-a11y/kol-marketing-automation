@@ -41,6 +41,7 @@ PROBE_START = "2024-01-01T00:00:00Z"
 PROBE_END = "2024-01-02T00:00:00Z"
 DEFAULT_START = datetime(2006, 3, 21, tzinfo=UTC)
 DELIMITER = "；"
+URL_FIELDS = {"帖子URL", "缩略图URL", "KOL主页URL"}
 
 PRODUCT_TERMS = (
     "Hyperion 3", "Hyperion 2", "Hyperion Pro", "Hyperion", "Wizard 2 TMR",
@@ -606,6 +607,26 @@ async def _feishu_json_once(method: str, path: str, body: dict[str, Any]) -> dic
     return payload
 
 
+def _feishu_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Convert local row values to the Feishu API shape at the write boundary."""
+    converted: dict[str, Any] = {}
+    for name, value in fields.items():
+        if value is None:
+            continue
+        if name in URL_FIELDS:
+            if isinstance(value, dict):
+                link = str(value.get("link") or "")
+                text = str(value.get("text") or link)
+            else:
+                link = str(value or "")
+                text = link
+            if link:
+                converted[name] = {"link": link, "text": text}
+            continue
+        converted[name] = value
+    return converted
+
+
 async def _batch_create_once(rows: list[dict[str, Any]]) -> list[str]:
     record_ids: list[str] = []
     for start in range(0, len(rows), 100):
@@ -613,7 +634,7 @@ async def _batch_create_once(rows: list[dict[str, Any]]) -> list[str]:
         payload = await _feishu_json_once(
             "POST",
             f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{POST_TABLE_ID}/records/batch_create",
-            {"records": [{"fields": row} for row in chunk]},
+            {"records": [{"fields": _feishu_fields(row)} for row in chunk]},
         )
         records = (payload.get("data") or {}).get("records") or []
         ids = [str(record.get("record_id") or record.get("id") or "") for record in records]
@@ -629,7 +650,15 @@ async def _batch_update_once(records: list[dict[str, Any]]) -> None:
         await _feishu_json_once(
             "POST",
             f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{POST_TABLE_ID}/records/batch_update",
-            {"records": chunk},
+            {
+                "records": [
+                    {
+                        "record_id": item["record_id"],
+                        "fields": _feishu_fields(item.get("fields") or {}),
+                    }
+                    for item in chunk
+                ]
+            },
         )
 
 
