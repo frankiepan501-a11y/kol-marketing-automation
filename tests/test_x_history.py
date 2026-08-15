@@ -268,6 +268,21 @@ class XHistoryCollectorTests(unittest.IsolatedAsyncioTestCase):
             fields["KOL主页URL"],
         )
 
+    async def test_batch_create_converts_link_fields_to_record_id_arrays(self):
+        rows = [{
+            "唯一键": "7:100",
+            "关联监控任务": [{"id": "rec_config"}],
+        }]
+        with patch(
+            "app.x_history._feishu_json_once",
+            new=AsyncMock(return_value={"data": {"records": [{"record_id": "rec1"}]}}),
+        ) as write:
+            ids = await x_history._batch_create_once(rows)
+
+        self.assertEqual(["rec1"], ids)
+        body = write.await_args.args[2]
+        self.assertEqual(["rec_config"], body["records"][0]["fields"]["关联监控任务"])
+
     async def test_credits_alert_is_suppressed_for_24_hours(self):
         now = datetime(2026, 8, 13, 7, 0, tzinfo=timezone.utc)
         state = {

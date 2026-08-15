@@ -42,6 +42,7 @@ PROBE_END = "2024-01-02T00:00:00Z"
 DEFAULT_START = datetime(2006, 3, 21, tzinfo=UTC)
 DELIMITER = "；"
 URL_FIELDS = {"帖子URL", "缩略图URL", "KOL主页URL"}
+RELATION_FIELDS = {"关联监控任务"}
 
 PRODUCT_TERMS = (
     "Hyperion 3", "Hyperion 2", "Hyperion Pro", "Hyperion", "Wizard 2 TMR",
@@ -600,7 +601,13 @@ async def _feishu_json_once(method: str, path: str, body: dict[str, Any]) -> dic
             json=body,
         )
     if response.status_code >= 400:
-        raise RuntimeError(f"Feishu write {method} {path} -> HTTP {response.status_code}")
+        detail = ""
+        try:
+            payload = response.json()
+            detail = f" code {payload.get('code')} msg {payload.get('msg') or payload.get('message')}"
+        except ValueError:
+            pass
+        raise RuntimeError(f"Feishu write {method} {path} -> HTTP {response.status_code}{detail}")
     payload = response.json()
     if int(payload.get("code") or 0) != 0:
         raise RuntimeError(f"Feishu write {method} {path} -> code {payload.get('code')}")
@@ -622,6 +629,19 @@ def _feishu_fields(fields: dict[str, Any]) -> dict[str, Any]:
                 text = link
             if link:
                 converted[name] = {"link": link, "text": text}
+            continue
+        if name in RELATION_FIELDS:
+            values = value if isinstance(value, list) else []
+            record_ids: list[str] = []
+            for item in values:
+                if isinstance(item, dict):
+                    record_id = str(item.get("id") or item.get("record_id") or "")
+                else:
+                    record_id = str(item or "")
+                if record_id and record_id not in record_ids:
+                    record_ids.append(record_id)
+            if record_ids:
+                converted[name] = record_ids
             continue
         converted[name] = value
     return converted
