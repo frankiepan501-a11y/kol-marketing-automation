@@ -4,6 +4,14 @@ from scripts import apply_launch_evidence_schema as schema
 
 
 class LaunchSchemaTests(unittest.TestCase):
+    def test_node_schema_covers_every_runtime_written_field(self):
+        names = {field["field_name"] for field in schema.NODE_FIELDS}
+        self.assertTrue({
+            "节点状态", "节点阻塞说明", "竞品品牌", "目标证据配置版本",
+            "待确认竞品帖子", "待确认竞品事件", "调查提交版本",
+            "调查提交时间", "调查提交说明",
+        }.issubset(names))
+
     def test_same_name_and_type_is_reused(self):
         desired = [schema.text("活动ID"), schema.number("版本")]
         diff = schema.diff_fields([

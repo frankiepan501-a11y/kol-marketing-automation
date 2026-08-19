@@ -1,6 +1,6 @@
 # KOL 活动竞品证据与参与记录交接
 
-状态：本地代码与测试完成，尚未执行生产表结构迁移、部署或真实外联。
+状态：本地代码、测试和 G1 生产表结构只读预检完成；尚未执行生产表结构写入、部署或真实外联。
 
 ## 已实现
 
@@ -22,10 +22,19 @@
 - 未修改 `auto_send`、`reply_monitor`、`followup`、`ship_recon` 或 `sla_check`。
 - 本次没有运行 `scripts/apply_launch_evidence_schema.py` 连接生产飞书。
 
+## G1 生产表结构只读预检
+
+- 报告：`docs/launch_evidence_schema_dry_run_2026-08-19.md`。
+- 活动影子表存在，需新增 19 个字段；节点影子表存在，需新增 9 个字段；参与记录表尚不存在，需新建 26 个字段。
+- 全部为新增项：同名同类型复用 0、同名异类型冲突 0、删除 0、改名 0。
+- 发现节点迁移定义漏了 `节点状态 / 节点阻塞说明 / 竞品品牌 / 目标证据配置版本`，已先修正本地脚本并补测试。
+- 按生产实际字段补齐稳定身份匹配：KOL 使用 `YouTube频道ID / 主链接`，竞品帖子使用 `KOL平台ID / KOL主页URL / KOL账号Handle`。
+- G1 全程只读；活动表仍为 2 行/rev 12，节点表仍为 16 行/rev 1，全库仍为 27 张表。
+
 ## 本地验证
 
-- 活动专项：`test_launch_*.py` 58/58 全部通过。
-- 全仓：272 项中 271 项通过；唯一失败为本次未改动的 `test_zeabur_watchdog.ZeaburWatchdogTests.test_run_once_alerts_any_project_service_failed_deployment`。单独重跑仍失败，相关文件相对实施前固定点无 diff。
+- 活动专项：`test_launch_*.py` 60/60 全部通过。
+- 全仓：274 项中 273 项通过；唯一失败为本次未改动的 `test_zeabur_watchdog.ZeaburWatchdogTests.test_run_once_alerts_any_project_service_failed_deployment`。该失败与 G1 前一致。
 - `py_compile` 通过。
 - `git diff --check` 通过（仅有仓库现有 LF/CRLF 提示）。
 
@@ -38,8 +47,8 @@
 
 ## 生产执行闸门
 
-1. G1：先运行 schema dry-run，把新增表/字段和类型差异交 Frankie 确认。
-2. G2：获准后写表结构，只开启证据开关；确认 Dave 本次引用的 NYXI 帖子。
+1. G1：已完成。只读确认活动表新增 19 字段、节点表新增 9 字段、参与记录表新建 26 字段；无冲突、无生产写入。
+2. G2：待 Frankie 明确批准。获准后写表结构，只开启证据开关；确认 Dave 本次引用的 NYXI 帖子。
 3. G3：再单独确认首个影子 KOL 名单，临时开启参与记录写入并回读后关闭。
 4. G4：真实开发信、付费、寄样和运营群卡片仍需新的明确授权。
 

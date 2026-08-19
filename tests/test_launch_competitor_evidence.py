@@ -52,6 +52,32 @@ class LaunchCompetitorEvidenceTests(unittest.TestCase):
         self.assertEqual(88, result["final_priority"])
         self.assertEqual([], result["matched_post_ids"])
 
+    def test_matches_current_base_creator_id_fields_without_relation(self):
+        contact = {
+            "record_id": "kol1",
+            "fields": {
+                "主平台": "YouTube", "账号名": "Creator One",
+                "YouTube频道ID": "UC-current-schema",
+                "主链接": "https://youtube.com/@creatorone",
+            },
+        }
+        post = {
+            "record_id": "post1",
+            "fields": {
+                "平台": "YouTube", "内容类型": "评测", "曝光量": 50000,
+                "人工复核状态": "已确认", "相关性": "相关", "合作信号": "明确合作",
+                "KOL平台ID": "UC-current-schema",
+                "KOL主页URL": "https://youtube.com/@creatorone",
+                "KOL账号Handle": "creatorone",
+            },
+        }
+
+        result = evidence.rank_contact_evidence(contact, [post], base_score=88)
+
+        self.assertEqual("C", result["evidence_level"])
+        self.assertEqual(["platform_creator_id"], result["identity_paths"])
+        self.assertEqual(["youtube|creator:UC-current-schema"], result["stable_identity_keys"])
+
 
 if __name__ == "__main__":
     unittest.main()

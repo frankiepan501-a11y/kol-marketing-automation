@@ -80,6 +80,8 @@ ACTIVITY_FIELDS = [
 ]
 
 NODE_FIELDS = [
+    select("节点状态", ["待执行", "执行中", "待活动提交", "待人工确认", "已确认", "已阻塞"]),
+    text("节点阻塞说明"), text("竞品品牌"), number("目标证据配置版本"),
     relation("待确认竞品帖子", config.T_COMPETITOR_POST),
     relation("待确认竞品事件", config.T_COMPETITOR_EVENT),
     number("调查提交版本"), datetime_field("调查提交时间"), text("调查提交说明"),

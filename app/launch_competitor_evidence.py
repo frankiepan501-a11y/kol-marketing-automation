@@ -123,18 +123,28 @@ def match_post_identity(contact: dict, post: dict) -> str:
     if not contact_platform or contact_platform != post_platform:
         return ""
 
-    contact_creator = _first(contact_fields, ("平台creator_id", "creator_id", "作者ID", "频道ID"))
-    post_creator = _first(post_fields, ("平台creator_id", "creator_id", "作者ID", "频道ID"))
+    contact_creator = _first(contact_fields, (
+        "YouTube频道ID", "平台creator_id", "creator_id", "作者ID", "频道ID", "KOL平台ID",
+    ))
+    post_creator = _first(post_fields, (
+        "KOL平台ID", "平台creator_id", "creator_id", "作者ID", "频道ID",
+    ))
     if contact_creator and contact_creator == post_creator:
         return "platform_creator_id"
 
-    contact_url = normalize_url(_first(contact_fields, ("主页URL", "账号主页", "主页链接", "频道链接")))
-    post_url = normalize_url(_first(post_fields, ("作者主页", "主页URL", "账号主页", "频道链接")))
+    contact_url = normalize_url(_first(contact_fields, (
+        "主链接", "主页URL", "账号主页", "主页链接", "频道链接",
+    )))
+    post_url = normalize_url(_first(post_fields, (
+        "KOL主页URL", "作者主页", "主页URL", "账号主页", "频道链接",
+    )))
     if contact_url and contact_url == post_url:
         return "profile_url"
 
     contact_handle = normalize_handle(_first(contact_fields, ("账号Handle", "Handle", "账号名")))
-    post_handle = normalize_handle(_first(post_fields, ("作者Handle", "Handle", "作者账号")))
+    post_handle = normalize_handle(_first(post_fields, (
+        "KOL账号Handle", "KOL账号名", "作者Handle", "Handle", "作者账号",
+    )))
     if contact_handle and contact_handle == post_handle:
         return "platform_handle"
     return ""
@@ -147,10 +157,14 @@ def identity_key(contact: dict, post: dict, path: str) -> str:
     if path == "linked_kol":
         return f"kol_record:{contact.get('record_id', '')}"
     if path == "platform_creator_id":
-        value = _first(contact_fields, ("平台creator_id", "creator_id", "作者ID", "频道ID"))
+        value = _first(contact_fields, (
+            "YouTube频道ID", "平台creator_id", "creator_id", "作者ID", "频道ID", "KOL平台ID",
+        ))
         return f"{platform}|creator:{value}"
     if path == "profile_url":
-        value = normalize_url(_first(contact_fields, ("主页URL", "账号主页", "主页链接", "频道链接")))
+        value = normalize_url(_first(contact_fields, (
+            "主链接", "主页URL", "账号主页", "主页链接", "频道链接",
+        )))
         return f"{platform}|url:{value}"
     if path == "platform_handle":
         value = normalize_handle(_first(contact_fields, ("账号Handle", "Handle", "账号名")))
