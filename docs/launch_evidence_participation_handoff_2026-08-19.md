@@ -1,6 +1,6 @@
 # KOL 活动竞品证据与参与记录交接
 
-状态：G2 已完成；候选预览已改为可查询后台任务。G3 已获授权，待新版本部署验证后写入首个影子名单；所有真实外联保持关闭。
+状态：G3 已完成；候选预览已改为可查询后台任务，Dave 首个 20 人影子名单已锁定；所有真实外联保持关闭。
 
 ## 已实现
 
@@ -22,7 +22,7 @@
 - `LAUNCH_PARTICIPATION_WRITE_ENABLED` 默认 `0`。
 - 本期没有创建 KOL/媒体人任务、邮件草稿、卡片、寄样单或真实邮件的代码路径。
 - 未修改 `auto_send`、`reply_monitor`、`followup`、`ship_recon` 或 `sla_check`。
-- 生产环境仅开启 `LAUNCH_EVIDENCE_ENABLED=1`；`LAUNCH_PARTICIPATION_WRITE_ENABLED=0`，因此仍不能写活动参与名单。
+- 生产环境长期只开启 `LAUNCH_EVIDENCE_ENABLED=1`；`LAUNCH_PARTICIPATION_WRITE_ENABLED=0`，公开接口不能写活动参与名单。G3 只在受控本地进程中临时覆盖该开关，进程退出即恢复，云端值从未改为 `1`。
 
 ## G1 生产表结构只读预检
 
@@ -41,14 +41,14 @@
 ## G2 生产状态
 
 - 活动表已新增 19 个字段，节点表已新增 9 个字段。
-- 活动参与记录表已创建：`tblt0zD4hDb7sFqn`，26 个字段，当前 0 行。
+- 活动参与记录表已创建：`tblt0zD4hDb7sFqn`，26 个字段；G3 后 Dave 当前名单为 20 行。
 - 生产环境已设置 `T_LAUNCH_PARTICIPANT=tblt0zD4hDb7sFqn`。
 - NYXI 全部 3,423 条帖子中，已识别官方渠道 435 条、非官方 2,988 条；首轮只读测试从非官方记录中选择 60 条高曝光帖子，覆盖 40 位创作者，同一创作者最多 3 条。
 
 ## 本地验证
 
-- 活动专项：`test_launch_*.py` 70/70 全部通过（另有 3 个子测试通过）。
-- 全仓：291 项中 290 项通过（另有 3 个子测试通过）；唯一失败为本次未改动的 `test_zeabur_watchdog.ZeaburWatchdogTests.test_run_once_alerts_any_project_service_failed_deployment`。该失败与 G1 前一致。
+- 活动专项：`test_launch_*.py` 72/72 全部通过。
+- 全仓：286 项中 285 项通过；唯一失败为本次未改动的 `test_zeabur_watchdog.ZeaburWatchdogTests.test_run_once_alerts_any_project_service_failed_deployment`。该失败与 G1 前一致。
 - `py_compile` 通过。
 - `git diff --check` 通过（仅有仓库现有 LF/CRLF 提示）。
 
@@ -63,7 +63,7 @@
 
 1. G1：已完成。只读确认活动表新增 19 字段、节点表新增 9 字段、参与记录表新建 26 字段；无冲突、无生产写入。
 2. G2：已完成。Dave 活动为 `引用历史证据 / 已就绪 / evidence-v1 / 配置版本1`，三组只读对照均为 `writes=0`。
-3. G3：已获授权。新预览版本部署验证后，临时开启参与记录写入，只提交一份 Dave 影子 KOL 名单，回读后立即关闭。
+3. G3：已完成。提交 Dave 影子 KOL 名单 20 人，名单版本 `evidence-v1`、批次 `g3-dave-evidence-v1-20260819b`；19 条新建、1 条失败保护后原位恢复。写后立即关闭名单授权。
 4. G4：真实开发信、付费、寄样和运营群卡片仍需新的明确授权。
 
 ## 回滚
@@ -78,4 +78,8 @@
 - 参与表 ID：`tblt0zD4hDb7sFqn`。
 - 新增字段：活动 19、节点 9、参与记录 26，均已回读验证。
 - Dave 证据配置版本：`1`；排序版本：`evidence-v1`；关联帖子 60、营销事件 7。
-- Dave 首个名单版本：未写生产。
+- Dave 首个名单版本：`evidence-v1`，20 人，16 人走“同线程激活”、4 人走“新开发”；竞品证据等级 A=2、B=1、无加分=17。
+- G3 首次批次 `g3-dave-evidence-v1-20260819a` 在第 1 条回读时因飞书数字字段返回字符串而被保护中止；该条被标记“锁定失败”，其余 19 条未写。修复 `754aeb38227c8688b1bf3e97b6ea9de45c6de9fe` 统一数字回读比较后，用新批次完成，失败记录保留审计轨迹后原位恢复。
+- G3 回读：20 个参与唯一键、20 个 KOL 关联，批次和版本均一致；关联 KOL 任务、媒体人任务、邮件草稿全部为 0。
+- G3 收口：`名单锁定授权=false`，KOL 阻塞/失败批次/待处理字段为空；发送邮件、样品寄送、付费承诺、储备金释放授权均为 `false`；云端 `LAUNCH_PARTICIPATION_WRITE_ENABLED=0`。
+- G3 回读修复已部署：commit `754aeb38227c8688b1bf3e97b6ea9de45c6de9fe`，Zeabur deployment `6a857bcd764188cac9d7771c` 为 `RUNNING`，`/health=ok`；生产名单写接口返回 HTTP 403“活动参与记录写入开关未开启”。

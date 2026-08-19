@@ -40,6 +40,7 @@
 ## 2026-08-19 生产验收
 
 - 生产版本：`189ed9260fe6911387bc56b685d0fce3ac8069b9`；Zeabur deployment `6a8539ff3f743f07b5220cc2`，状态 `RUNNING`，`/health=ok`。
+- 后台预览版本：`8b2298c0688085eae9152adc8a7298342b67b769`；Zeabur deployment `6a8576b0764188cac9d77574`。Dave 实测 POST 在约 1.2 秒内返回 `job_id=launchpreview-7127380d00b6`，后台约 3.1 分钟完成 1,544 人全池计算，最终 `read_only=true / writes=0`。
 - 食人花二代：真实双链接 cold 草稿 `recvlrgEQvjWFS`，只发 `frankiepan501@gmail.com`；9 项 raw 校验全部通过，飞书业务表写入 0。
 - 戴夫联名款：真实 cold 草稿 `recvkNpBRMAyNV`；首次校验暴露“仅剩 1 个有效关键词却固定要求命中 2 个”的规则缺陷。修复并重启后，沿用同一 `run_key` 回查原邮件，返回 `reused=true`，没有补发；9 项 raw 校验全部通过，飞书业务表写入 0。
 - `EMAIL_DRY_RUN_TO` 已用单变量方式清空；清空前后环境变量均为 150 项，关键凭据项完整。清空并重启后再次调用端点返回 HTTP 400：`EMAIL_DRY_RUN_TO 未设置；禁止执行邮件测试`。
