@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from app import launch_outreach
 from app import auto_send
+from app import enrich
 
 
 class LaunchOutreachTests(unittest.TestCase):
@@ -19,6 +20,11 @@ class LaunchOutreachTests(unittest.TestCase):
         with patch.dict(os.environ, {"EMAIL_DRY_RUN_TO": "frankie@example.com"}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "DRY-RUN"):
                 launch_outreach.require_real_one_only("REAL_ONE_ONLY")
+
+    def test_subscriber_count_accepts_feishu_numeric_strings(self):
+        self.assertEqual(86_300_000, enrich._subscriber_count("86300000"))
+        self.assertEqual(86_300_000, enrich._subscriber_count("86,300,000"))
+        self.assertEqual(0, enrich._subscriber_count("unknown"))
 
     def test_participant_gate_requires_human_approval_and_exact_profile(self):
         activity = {

@@ -345,13 +345,21 @@ async def filter_kols(task_fields: dict, product_rid: str = "", brand: str = "",
 
 
 # ===== 4. DeepSeek 仅生草稿(打分本地完成) =====
+def _subscriber_count(value) -> int:
+    """飞书数字字段偶尔以字符串返回；统一成可安全格式化的整数。"""
+    try:
+        return max(0, int(float(str(value or 0).replace(",", "").strip())))
+    except (TypeError, ValueError):
+        return 0
+
+
 async def gen_draft(kol_record: dict, product: dict, brand: str,
                     signature: str, breakdown: dict, total: float) -> dict:
     k = kol_record["fields"]
     kol_name = ext(k.get("账号名"))
     kol_country = ext(k.get("国家"))
     kol_country_cn = ext(k.get("国家原文"))
-    kol_sub = k.get("粉丝数", 0) or 0
+    kol_sub = _subscriber_count(k.get("粉丝数", 0))
     kol_styles = ext(k.get("内容风格"))
     kol_ip = ext(k.get("IP喜好"))
     # 2026-05-16: 清洗 multi-email / "dm" / "待补" 等异常邮箱
