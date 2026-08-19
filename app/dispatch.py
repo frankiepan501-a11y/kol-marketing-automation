@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 from . import config, feishu, product_naming
 from .feishu import ext
+from .product_dispatch_mode import partition_regular_products
 from .scoring import _parse_multiselect
 
 
@@ -70,7 +71,14 @@ async def fetch_main_push_products() -> list:
         {"field_name": "派单-价格OK", "operator": "is", "value": ["true"]},
         {"field_name": "派单-展示链接OK", "operator": "is", "value": ["true"]},
     ])
-    return items
+    regular, locked = partition_regular_products(items)
+    for item in locked:
+        print(
+            "[dispatch] regular dispatch skipped by product lock "
+            f"rid={item['record_id']} mode={item['mode']} "
+            f"merge_key={item['merge_key'] or '-'} product={item['product_name'] or '-'}"
+        )
+    return regular
 
 
 async def fetch_mapping_for_product(category: str, hosts: list) -> dict:

@@ -21,6 +21,7 @@ import re
 from . import config, feishu, deepseek, draft_router
 from . import utm as _utm
 from .feishu import ext, xrid
+from .product_dispatch_mode import partition_regular_products
 
 
 SECONDARY_INTERVAL_DAYS = 30  # 距上次二次接触 ≥ 30 天
@@ -114,10 +115,17 @@ async def _find_main_products() -> list:
     items = await feishu.search_records(config.T_PRODUCT, [
         {"field_name": "上架状态", "operator": "contains", "value": ["主推"]},
     ])
-    ready = [p for p in items if (
+    regular_items, locked = partition_regular_products(items)
+    for item in locked:
+        print(
+            "[secondary_outreach] product skipped by product lock "
+            f"rid={item['record_id']} mode={item['mode']} "
+            f"merge_key={item['merge_key'] or '-'} product={item['product_name'] or '-'}"
+        )
+    ready = [p for p in regular_items if (
         p["fields"].get("派单-库存OK") and p["fields"].get("派单-素材OK") and
         p["fields"].get("派单-文案OK") and p["fields"].get("派单-价格OK"))]
-    return ready or items
+    return ready or regular_items
 
 
 async def _eligible_kols():
