@@ -100,3 +100,4 @@
 - G3 回读修复已部署：commit `754aeb38227c8688b1bf3e97b6ea9de45c6de9fe`，Zeabur deployment `6a857bcd764188cac9d7771c` 为 `RUNNING`，`/health=ok`；生产名单写接口返回 HTTP 403“活动参与记录写入开关未开启”。
 - P0 受控重锁：批次 `p0-review-v2-20260819g`，20 条复用升级、3 条取消；活动 `KOL已锁定名单版本=evidence-v2`，锁定授权/阻塞/失败批次/待处理均已清空。
 - P0 外部动作核对：20 条当前参与记录的 KOL 任务、媒体人任务、邮件草稿关联全部为 0；活动的发送邮件、样品寄送、付费承诺、储备金释放授权全部为 `false`。
+- P0/P1 人审实现已部署：commit `3a7b156925689df541aab3fcaeb991a7e7b53a96`，Zeabur deployment `6a858f11764188cac9d77c15` 为 `RUNNING`，`/health=ok`；云端 `LAUNCH_PARTICIPATION_WRITE_ENABLED=0`，生产名单写接口仍返回 HTTP 403。
