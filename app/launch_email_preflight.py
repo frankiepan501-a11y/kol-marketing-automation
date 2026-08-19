@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import os
 import re
@@ -17,6 +18,12 @@ PLACEHOLDER_MARKERS = (
     "[QUANTITY", "[xxx", "[XXX", "待填",
 )
 DEFAULT_TEST_EMAIL_ALLOWLIST = {"frankiepan501@gmail.com"}
+_RUN_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+_RUN_STATES: dict[tuple[str, str], dict] = {}
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 class RawValidationError(RuntimeError):
@@ -70,6 +77,30 @@ def _text_values(value) -> list[str]:
     return [text] if text else []
 
 
+def _identity_rules(product_fields: dict, product_name: str) -> dict:
+    ip_markers = [x for x in _text_values(product_fields.get("适配IP"))
+                  if re.search(r"[A-Za-z]", x) and len(x.split()) >= 2]
+    keyword = ext(product_fields.get("主关键词(英文)"))
+    stop = {"the", "and", "for", "with", "edition", "official", "switch", "controller", "dock"}
+    keyword_tokens = [x.lower() for x in re.findall(r"[A-Za-z]{3,}", str(keyword or ""))
+                      if x.lower() not in stop]
+    return {
+        "exact_name": product_name,
+        "ip_markers": ip_markers,
+        "keyword_tokens": sorted(set(keyword_tokens)),
+    }
+
+
+def _product_identity_present(raw_text: str, rules: dict) -> bool:
+    text = raw_text.lower()
+    exact = (rules.get("exact_name") or "").lower()
+    if exact and exact in text:
+        return True
+    ip_ok = any(marker.lower() in text for marker in rules.get("ip_markers") or [])
+    keyword_hits = sum(1 for token in rules.get("keyword_tokens") or [] if token in text)
+    return ip_ok and keyword_hits >= 2
+
+
 def build_test_email(product: dict, draft: dict, brand: str, run_key: str) -> dict:
     """读取真实 cold 草稿，不另造一套测试模板。"""
     product_fields = product.get("fields") or {}
@@ -95,9 +126,7 @@ def build_test_email(product: dict, draft: dict, brand: str, run_key: str) -> di
         "original_subject": subject,
         "body": body,
         "product_name": product_name,
-        "product_markers": [product_name]
-                           + _text_values(product_fields.get("主关键词(英文)"))
-                           + _text_values(product_fields.get("适配IP")),
+        "product_identity_rules": _identity_rules(product_fields, product_name),
         "links": links,
         "brand": brand,
         "from_address": config.BRAND_CONFIG[brand]["alias_from"],
@@ -119,8 +148,8 @@ def validate_raw_content(*, raw_subject: str, raw_body: str, actual_to: str,
         "dry_run_subject_prefix": "[DRY-RUN" in (raw_subject or ""),
         "body_not_truncated": len(raw_text) >= max(50, int(len(expected_text) * 0.7)),
         "html_rendered": bool(re.search(r"<(p|div|br|a|strong)[\s>/]", raw_body or "", re.I)),
-        "product_name_present": any(
-            marker.lower() in raw_text.lower() for marker in expected.get("product_markers") or []
+        "product_identity_present": _product_identity_present(
+            raw_text, expected.get("product_identity_rules") or {}
         ),
         "all_links_present": all(url in normalized_body for url in expected.get("links") or []),
         "placeholder_free": not any(marker in (raw_subject or "") + raw_text for marker in PLACEHOLDER_MARKERS),
@@ -131,13 +160,14 @@ def validate_raw_content(*, raw_subject: str, raw_body: str, actual_to: str,
     }
 
 
-def _find_sent(messages: list[dict], expected: dict, target: str) -> dict | None:
+def _find_sent(messages: list[dict], expected: dict, target: str, run_key: str) -> dict | None:
     expected_from, _ = feishu.clean_email(expected.get("from_address") or "")
+    marker = f"[Launch preflight:{run_key}]"
     for message in messages:
         subject = message.get("subject") or ""
         actual_to, _ = feishu.clean_email(message.get("toAddress") or "")
         actual_from, _ = feishu.clean_email(message.get("fromAddress") or "")
-        if (expected["subject"] in subject and actual_to == target
+        if (marker in subject and actual_to == target
                 and actual_from == expected_from):
             return message
     return None
@@ -163,41 +193,57 @@ async def send_and_validate(product_id: str, draft_id: str, brand: str, *, confi
     if draft_brand != brand:
         raise RuntimeError(f"草稿发件品牌={draft_brand or '未识别'}，不能作为 {brand} 测试样本")
     expected = build_test_email(product, draft, brand, run_key)
+    fingerprint = hashlib.sha256(
+        f"{product_id}|{draft_id}|{expected['subject']}|{expected['body']}".encode("utf-8")
+    ).hexdigest()
+    state_key = (brand, run_key)
+    lock = _RUN_LOCKS.setdefault(state_key, asyncio.Lock())
+    async with lock:
+        state = _RUN_STATES.get(state_key)
+        if state and state.get("fingerprint") != fingerprint:
+            raise RuntimeError("run_key 已绑定另一份产品/草稿；禁止复用")
 
-    _, sent_folder_id = await zoho._get_folder_ids(brand)
-    sent = await zoho.list_sent_messages(brand, limit=100)
-    existing = _find_sent(sent.get("messages", []), expected, target)
-    reused = bool(existing)
-    if existing:
-        message_id = str(existing.get("messageId") or "")
-    else:
-        # 原始收件人是保留域名；Zoho 全局 dry-run 必须把它改投白名单测试邮箱。
-        message_id = await zoho.send_email(
-            brand, "launch-preflight@example.invalid", expected["subject"], expected["body"]
+        _, sent_folder_id = await zoho._get_folder_ids(brand)
+        sent = await zoho.list_sent_messages(brand, limit=100)
+        existing = _find_sent(sent.get("messages", []), expected, target, run_key)
+        reused = bool(existing or state)
+        message_id = str((existing or {}).get("messageId") or (state or {}).get("message_id") or "")
+        if not state:
+            # 在任何发送 await 之前占位。同实例并发或超时重试只能回查，不能再次发送。
+            state = {"fingerprint": fingerprint, "message_id": "", "claimed_at": time.time()}
+            _RUN_STATES[state_key] = state
+        if not existing and not message_id and not reused:
+            try:
+                message_id = await zoho.send_email(
+                    brand, "launch-preflight@example.invalid", expected["subject"], expected["body"]
+                )
+                state["message_id"] = message_id
+            except Exception as exc:
+                # 发送结果可能不确定，保留 claim；同 run_key 后续只回查，绝不补发。
+                raise RawValidationError("测试发送结果不确定；已锁定 run_key，禁止自动重发") from exc
+
+        raw_body = ""
+        hit = existing
+        deadline = _monotonic() + 50
+        while _monotonic() < deadline:
+            sent = await zoho.list_sent_messages(brand, limit=100)
+            hit = next((m for m in sent.get("messages", []) if message_id and str(m.get("messageId")) == str(message_id)), None)
+            hit = hit or _find_sent(sent.get("messages", []), expected, target, run_key)
+            if hit:
+                raw_body = await _raw_for_message(brand, hit, sent_folder_id)
+            if hit and raw_body:
+                break
+            await asyncio.sleep(5)
+        if not hit or not raw_body:
+            raise RawValidationError("测试邮件在 50 秒内未完整出现；run_key 已锁定，只允许回查，禁止自动补发")
+
+        validation = validate_raw_content(
+            raw_subject=hit.get("subject") or "", raw_body=raw_body,
+            actual_to=hit.get("toAddress") or "", actual_from=hit.get("fromAddress") or "",
+            expected_to=target, expected=expected,
         )
-
-    raw_body = ""
-    hit = existing
-    deadline = time.monotonic() + 50
-    while time.monotonic() < deadline:
-        sent = await zoho.list_sent_messages(brand, limit=30)
-        hit = next((m for m in sent.get("messages", []) if str(m.get("messageId")) == str(message_id)), None)
-        hit = hit or _find_sent(sent.get("messages", []), expected, target)
-        if hit:
-            raw_body = await _raw_for_message(brand, hit, sent_folder_id)
-        if hit and raw_body:
-            break
-        await asyncio.sleep(5)
-    if not hit or not raw_body:
-        raise RawValidationError("测试邮件在 50 秒内未完整出现在 Zoho 已发送箱")
-
-    validation = validate_raw_content(
-        raw_subject=hit.get("subject") or "", raw_body=raw_body,
-        actual_to=hit.get("toAddress") or "", actual_from=hit.get("fromAddress") or "",
-        expected_to=target, expected=expected,
-    )
-    if not validation["passed"]:
-        raise RawValidationError(f"测试邮箱 raw 内容校验失败: {validation['checks']}")
+        if not validation["passed"]:
+            raise RawValidationError(f"测试邮箱 raw 内容校验失败: {validation['checks']}")
     return {
         "ok": True, "test_only": True, "brand": brand, "product_id": product_id,
         "draft_id": draft_id, "run_key": run_key, "message_id": message_id,

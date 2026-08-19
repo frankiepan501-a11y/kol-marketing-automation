@@ -7,6 +7,10 @@ from app import launch_email_preflight as preflight
 
 
 class LaunchEmailPreflightTests(unittest.TestCase):
+    def setUp(self):
+        preflight._RUN_LOCKS.clear()
+        preflight._RUN_STATES.clear()
+
     def test_requires_global_dry_run_target(self):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "EMAIL_DRY_RUN_TO"):
@@ -30,7 +34,11 @@ class LaunchEmailPreflightTests(unittest.TestCase):
             "subject": "[Launch preflight:run-0001] FUNLAB Dave the Diver Controller",
             "body": '<p>FUNLAB Dave the Diver Controller launch preview.</p><p><a href="https://example.com/p">Product page</a></p>',
             "product_name": "FUNLAB Dave the Diver Controller",
-            "product_markers": ["FUNLAB Dave the Diver Controller", "Dave the Diver"],
+            "product_identity_rules": {
+                "exact_name": "FUNLAB Dave the Diver Controller",
+                "ip_markers": ["Dave the Diver"],
+                "keyword_tokens": ["pro", "hall"],
+            },
             "links": ["https://example.com/p"],
             "from_address": "partner@fireflyfunlab.com",
         }
@@ -54,6 +62,16 @@ class LaunchEmailPreflightTests(unittest.TestCase):
         )
         self.assertFalse(bad["passed"])
         self.assertIn("placeholder_free", bad["checks"])
+
+        generic = preflight.validate_raw_content(
+            raw_subject="[DRY-RUN] " + expected["subject"],
+            raw_body='<p>A great controller with the correct link https://example.com/p</p>',
+            actual_to="test@example.com",
+            actual_from="partner@fireflyfunlab.com",
+            expected_to="test@example.com",
+            expected=expected,
+        )
+        self.assertFalse(generic["checks"]["product_identity_present"])
 
     def test_send_and_validate_is_test_only_and_writes_no_bitable_rows(self):
         product = {
@@ -95,26 +113,118 @@ class LaunchEmailPreflightTests(unittest.TestCase):
         )
 
         with patch.dict(os.environ, {"EMAIL_DRY_RUN_TO": "frankiepan501@gmail.com"}, clear=False), \
-             patch.object(preflight.feishu, "get_record", new=AsyncMock(side_effect=[product, draft])), \
+             patch.object(preflight.feishu, "get_record", new=AsyncMock(side_effect=[product, draft, product, draft])), \
              patch.object(preflight.zoho, "send_email", new=AsyncMock(return_value="msg1")) as send_mock, \
              patch.object(preflight.zoho, "_get_folder_ids", new=AsyncMock(return_value=("drafts", "sent"))), \
              patch.object(preflight.zoho, "get_message_content", new=AsyncMock(return_value=raw_body)), \
              patch.object(preflight.zoho, "list_sent_messages", new=AsyncMock(side_effect=[
                  {"messages": []}, {"messages": [sent_message]},
+                 {"messages": [sent_message]}, {"messages": [sent_message]},
              ])), \
              patch.object(preflight.feishu, "create_record", new=AsyncMock()) as create_mock, \
              patch.object(preflight.feishu, "update_record", new=AsyncMock()) as update_mock:
             result = asyncio.run(preflight.send_and_validate(
                 "product1", "draft1", "FUNLAB", confirm="TEST_ONLY", run_key="run-0001"
             ))
+            reused = asyncio.run(preflight.send_and_validate(
+                "product1", "draft1", "FUNLAB", confirm="TEST_ONLY", run_key="run-0001"
+            ))
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["validation"]["passed"])
         self.assertEqual(0, result["production_draft_rows_written"])
+        self.assertTrue(reused["reused"])
         send_mock.assert_awaited_once()
         self.assertEqual("launch-preflight@example.invalid", send_mock.await_args.args[1])
         create_mock.assert_not_awaited()
         update_mock.assert_not_awaited()
+
+    def test_concurrent_same_run_key_sends_once(self):
+        product = {
+            "record_id": "product1",
+            "fields": {
+                "产品英文名": "Piranha Plant Switch 2 Dock", "品牌": "POWKONG",
+                "官网链接": {"link": "https://example.com/plant", "text": "Plant"},
+            },
+        }
+        draft = {
+            "record_id": "draft1",
+            "fields": {
+                "关联产品": {"link_record_ids": ["product1"]}, "邮件草稿来源": "cold",
+                "发送邮箱": "partner@powkong.com", "邮件主题": "A dock for your setup",
+                "邮件正文": '<p>Piranha Plant Switch 2 Dock is ready for review.</p>'
+                            '<p><a href="https://example.com/plant">See it</a></p>',
+            },
+        }
+        sent_message = {
+            "messageId": "msg-concurrent",
+            "subject": "[DRY-RUN→launch-preflight@example.invalid] "
+                       "[Launch preflight:run-concurrent] A dock for your setup",
+            "toAddress": "frankiepan501@gmail.com", "fromAddress": "partner@powkong.com",
+        }
+        sent_messages = []
+        send_count = 0
+
+        async def fake_get_record(table_id, record_id):
+            return product if record_id == "product1" else draft
+
+        async def fake_send(*args, **kwargs):
+            nonlocal send_count
+            send_count += 1
+            await asyncio.sleep(0.01)
+            sent_messages.append(sent_message)
+            return "msg-concurrent"
+
+        async def fake_list(*args, **kwargs):
+            return {"messages": list(sent_messages)}
+
+        async def run_both():
+            return await asyncio.gather(*[
+                preflight.send_and_validate(
+                    "product1", "draft1", "POWKONG", confirm="TEST_ONLY", run_key="run-concurrent"
+                ) for _ in range(2)
+            ])
+
+        with patch.dict(os.environ, {"EMAIL_DRY_RUN_TO": "frankiepan501@gmail.com"}, clear=False), \
+             patch.object(preflight.feishu, "get_record", new=fake_get_record), \
+             patch.object(preflight.zoho, "send_email", new=fake_send), \
+             patch.object(preflight.zoho, "_get_folder_ids", new=AsyncMock(return_value=("drafts", "sent"))), \
+             patch.object(preflight.zoho, "get_message_content", new=AsyncMock(return_value=draft["fields"]["邮件正文"])), \
+             patch.object(preflight.zoho, "list_sent_messages", new=fake_list):
+            results = asyncio.run(run_both())
+
+        self.assertEqual(1, send_count)
+        self.assertEqual([False, True], [x["reused"] for x in results])
+
+    def test_timeout_retry_same_run_key_does_not_resend(self):
+        product = {
+            "record_id": "product1",
+            "fields": {
+                "产品英文名": "Piranha Plant Switch 2 Dock", "品牌": "POWKONG",
+                "官网链接": {"link": "https://example.com/plant", "text": "Plant"},
+            },
+        }
+        draft = {
+            "record_id": "draft1",
+            "fields": {
+                "关联产品": {"link_record_ids": ["product1"]}, "邮件草稿来源": "cold",
+                "发送邮箱": "partner@powkong.com", "邮件主题": "A dock for your setup",
+                "邮件正文": '<p>Piranha Plant Switch 2 Dock is ready for review.</p>'
+                            '<p><a href="https://example.com/plant">See it</a></p>',
+            },
+        }
+        with patch.dict(os.environ, {"EMAIL_DRY_RUN_TO": "frankiepan501@gmail.com"}, clear=False), \
+             patch.object(preflight.feishu, "get_record", new=AsyncMock(side_effect=[product, draft, product, draft])), \
+             patch.object(preflight.zoho, "send_email", new=AsyncMock(return_value="msg-timeout")) as send_mock, \
+             patch.object(preflight.zoho, "_get_folder_ids", new=AsyncMock(return_value=("drafts", "sent"))), \
+             patch.object(preflight.zoho, "list_sent_messages", new=AsyncMock(return_value={"messages": []})), \
+             patch.object(preflight, "_monotonic", side_effect=[0, 60, 70, 130]):
+            for _ in range(2):
+                with self.assertRaisesRegex(preflight.RawValidationError, "禁止自动"):
+                    asyncio.run(preflight.send_and_validate(
+                        "product1", "draft1", "POWKONG", confirm="TEST_ONLY", run_key="run-timeout"
+                    ))
+        send_mock.assert_awaited_once()
 
     def test_rejects_brand_mismatch_before_send(self):
         product = {

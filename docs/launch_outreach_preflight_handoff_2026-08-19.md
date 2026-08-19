@@ -26,13 +26,13 @@
 1. 用 Zeabur 单变量方式设置 `EMAIL_DRY_RUN_TO=frankiepan501@gmail.com` 并重新部署。
 2. 对食人花二代和戴夫手柄分别运行候选预览，确认 `read_only=true`、`writes=0`。
 3. 各选 1 条候选做单条回放，核对证据草稿 ID 与处理路线。
-4. 从两款产品各选 1 条真实 cold 草稿，传 `draft_id` 与唯一 `run_key`；POWKONG、FUNLAB 各执行 1 次 `test-raw`，必须全部校验通过。同一个 `run_key` 重试只回查原邮件，不重复发送。
+4. 从两款产品各选 1 条真实 cold 草稿，传 `draft_id` 与唯一 `run_key`；POWKONG、FUNLAB 各执行 1 次 `test-raw`，必须全部校验通过。当前生产单实例内，同一个 `run_key` 会先占位；并发、超时重试只回查原邮件，不重复发送。服务重启后仍先按 `run_key` 查 Zoho 已发送箱。
 5. 只允许白名单中的单个规范测试邮箱；删除 `EMAIL_DRY_RUN_TO` 并重新部署后，再次调用 `test-raw` 应被硬拒绝。
 6. 首封真实开发信仍需单独授权，不由本次 P0 自动触发。
 
 ## 验证记录
 
-- 新品集中上稿相关专项测试：23/23 通过。
+- 新品集中上稿相关专项测试：25/25 通过（含并发同 key、索引超时后重试不补发）。
 - 全仓测试：233 项中 232 通过；唯一失败为既有 `test_zeabur_watchdog`，与本次 KOL 改动无关。
 - `git diff --check`：通过。
 
