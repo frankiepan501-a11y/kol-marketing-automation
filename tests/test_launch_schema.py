@@ -51,6 +51,7 @@ class LaunchSchemaTests(unittest.TestCase):
             "内容与活跃摘要", "内容数据更新时间", "历史关系与触达摘要",
             "竞品证据摘要", "主证据帖子", "系统审核分流", "系统审核说明",
             "审核结论", "审核原因", "审核人", "审核时间",
+            "活动分池",
         }.issubset(names))
 
     def test_participant_relation_cardinality_uses_base_v3_default(self):

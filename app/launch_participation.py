@@ -50,13 +50,71 @@ _FIELDS = {
         "link": "关联媒体人",
     },
 }
-_ELIGIBLE_DECISIONS = {"eligible_new_cold", "reactivation_same_thread"}
+_ELIGIBLE_DECISIONS = {"eligible_new_cold"}
 _PRE_OUTREACH_STATES = {"锁定准备中", "已入围"}
 
 
 def participant_key(campaign_id: str, product_family_id: str,
                     object_type: str, contact_id: str) -> str:
     return "|".join((campaign_id, product_family_id, object_type, contact_id))
+
+
+def plan_review_backfill(participants: list[dict], candidates: list[dict], *,
+                         field_map: dict, target_count: int) -> dict:
+    """把已审名单整理为纯新开发池，并按预览顺序补足待审候选。"""
+    target_count = max(0, int(target_count))
+    candidate_by_id = {x.get("contact_id", ""): x for x in candidates}
+    seen_participants = set()
+    retained = []
+    human_excluded = []
+    existing_pipeline = []
+    republish = []
+    other_outflow = []
+    for row in participants:
+        fields = row.get("fields") or {}
+        contact_id = _contact_id(fields, field_map)
+        if not contact_id:
+            continue
+        seen_participants.add(contact_id)
+        decision = (candidate_by_id.get(contact_id) or {}).get("decision")
+        review = ext(fields.get("审核结论"))
+        entry = ext(fields.get("进入方式"))
+        if review == "排除":
+            human_excluded.append(contact_id)
+        elif decision == "republish_requires_commitment":
+            republish.append(contact_id)
+        elif decision in {"existing_pipeline_same_thread", "hold_active_or_recent"} or entry != "新开发":
+            existing_pipeline.append(contact_id)
+        elif (
+            ext(fields.get("参与状态")) in _PRE_OUTREACH_STATES
+            and decision == "eligible_new_cold"
+        ):
+            retained.append(contact_id)
+        else:
+            other_outflow.append(contact_id)
+
+    replacements = []
+    for candidate in candidates:
+        contact_id = candidate.get("contact_id", "")
+        if (
+            len(retained) + len(replacements) >= target_count
+            or not contact_id or contact_id in seen_participants
+            or candidate.get("decision") != "eligible_new_cold"
+        ):
+            continue
+        replacements.append(contact_id)
+    selected = (retained + replacements)[:target_count]
+    missing = max(0, target_count - len(selected))
+    return {
+        "selected_contact_ids": selected,
+        "retained_contact_ids": retained[:target_count],
+        "replacement_contact_ids": replacements[:max(0, target_count - len(retained))],
+        "human_excluded_contact_ids": human_excluded,
+        "existing_pipeline_contact_ids": existing_pipeline,
+        "republish_contact_ids": republish,
+        "other_outflow_contact_ids": other_outflow,
+        "shortfall_count": missing,
+    }
 
 
 def _link_ids(value) -> list[str]:
@@ -221,12 +279,23 @@ def _url_cell(value: str, label: str):
     return {"link": url, "text": label} if url else None
 
 
+def _can_preserve_review(fields: dict, candidate: dict) -> bool:
+    """候选资格和关键快照未变时，保留运营已完成的“通过”签名。"""
+    return bool(
+        ext(fields.get("进入方式")) == "新开发"
+        and ext(fields.get("审核结论")) == "通过"
+        and candidate.get("decision") == "eligible_new_cold"
+        and ext(fields.get("国家快照")) == ext(candidate.get("country"))
+        and ext(fields.get("语言快照")) == ext(candidate.get("language"))
+        and feishu.ext_url(fields.get("达人主页")).strip()
+        == str(candidate.get("profile_url") or "").strip()
+    )
+
+
 def _ranking_fields(candidate: dict, ranking_version: str) -> dict:
     fields = {
-        "进入方式": (
-            "同线程激活" if candidate.get("decision") == "reactivation_same_thread"
-            else "新开发"
-        ),
+        "进入方式": "新开发",
+        "活动分池": "新开发池",
         "基础评分快照": candidate.get("score") or 0,
         "竞品证据等级": candidate.get("evidence_level") or "无加分",
         "关联竞品帖子": candidate.get("matched_post_ids") or [],
@@ -332,7 +401,7 @@ def _definitely_not_committed(exc: Exception) -> bool:
 async def lock_participants(
     *, campaign_id: str, product_family_id: str, object_type: str,
     contact_ids: list[str], expected_ranking_version: str, lock_batch_id: str,
-    recovery_of_batch_id: str = "",
+    recovery_of_batch_id: str = "", _preview_result: dict | None = None,
 ) -> dict:
     if not config.LAUNCH_PARTICIPATION_WRITE_ENABLED:
         raise ParticipantValidationError("LAUNCH_PARTICIPATION_WRITE_ENABLED 未开启")
@@ -359,7 +428,7 @@ async def lock_participants(
             activity_fields, field_map, recovery_of_batch_id=recovery_of_batch_id,
         )
 
-        preview = await launch_candidate_preview.preview_candidates(
+        preview = _preview_result or await launch_candidate_preview.preview_candidates(
             product_family_id, object_type=object_type, campaign_id=campaign_id,
             internal_full=True,
         )
@@ -418,7 +487,7 @@ async def lock_participants(
                 old = {
                     name: fields.get(name) for name in (
                         "参与记录ID", "参与状态", "名单版本", "锁定批次ID",
-                        "取消原因代码", "排序快照历史", "进入方式", "基础评分快照",
+                        "取消原因代码", "排序快照历史", "进入方式", "活动分池", "基础评分快照",
                         "竞品证据等级", "关联竞品帖子", "最终优先级", "选择原因", "排序版本",
                         "达人主页", "主平台快照", "国家快照", "语言快照", "粉丝数快照",
                         "内容与活跃摘要", "内容数据更新时间", "历史关系与触达摘要",
@@ -430,6 +499,10 @@ async def lock_participants(
                     _history(fields.get("排序快照历史")),
                     ensure_ascii=False, separators=(",", ":"),
                 )
+                ranking_fields = _ranking_fields(candidate, expected_ranking_version)
+                if _can_preserve_review(fields, candidate):
+                    for name in ("审核结论", "审核原因", "审核人", "审核时间"):
+                        ranking_fields.pop(name, None)
                 update = {
                     "参与记录ID": participant_key(
                         campaign_id, product_family_id, object_type, contact_id,
@@ -437,7 +510,7 @@ async def lock_participants(
                     "参与状态": "已入围", "名单版本": expected_ranking_version,
                     "锁定批次ID": lock_batch_id, "取消原因代码": "",
                     "排序快照历史": _with_snapshot(fields, candidate, expected_ranking_version),
-                    **_ranking_fields(candidate, expected_ranking_version),
+                    **ranking_fields,
                 }
                 prepared.append(("update", contact_id, record, old, update))
             else:

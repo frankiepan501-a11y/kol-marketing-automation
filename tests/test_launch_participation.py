@@ -182,6 +182,54 @@ class LaunchParticipationTests(unittest.TestCase):
         self.assertIsNone(fields["审核人"])
         self.assertIsNone(fields["审核时间"])
 
+    def test_only_new_cold_is_eligible_for_executable_lock(self):
+        self.assertEqual({"eligible_new_cold"}, launch_participation._ELIGIBLE_DECISIONS)
+
+    def test_review_backfill_removes_excluded_and_historical_pools(self):
+        participants = [
+            {"fields": {"联系人记录ID": "new-pass-1", "进入方式": "新开发",
+                        "参与状态": "已入围", "审核结论": "通过"}},
+            {"fields": {"联系人记录ID": "new-excluded", "进入方式": "新开发",
+                        "参与状态": "已入围", "审核结论": "排除"}},
+            {"fields": {"联系人记录ID": "old-talk", "进入方式": "同线程激活",
+                        "参与状态": "已入围", "审核结论": "通过"}},
+            {"fields": {"联系人记录ID": "old-posted", "进入方式": "同线程激活",
+                        "参与状态": "已入围", "审核结论": "待补资料"}},
+        ]
+        candidates = [
+            {"contact_id": "new-pass-1", "decision": "eligible_new_cold"},
+            {"contact_id": "new-excluded", "decision": "eligible_new_cold"},
+            {"contact_id": "old-talk", "decision": "existing_pipeline_same_thread"},
+            {"contact_id": "old-posted", "decision": "republish_requires_commitment"},
+            {"contact_id": "fresh-1", "decision": "eligible_new_cold"},
+            {"contact_id": "fresh-2", "decision": "eligible_new_cold"},
+            {"contact_id": "fresh-3", "decision": "hold_market_conflict"},
+        ]
+
+        plan = launch_participation.plan_review_backfill(
+            participants, candidates, field_map={"link": "关联KOL"}, target_count=3,
+        )
+
+        self.assertEqual(["new-pass-1", "fresh-1", "fresh-2"], plan["selected_contact_ids"])
+        self.assertEqual(["fresh-1", "fresh-2"], plan["replacement_contact_ids"])
+        self.assertEqual(["new-excluded"], plan["human_excluded_contact_ids"])
+        self.assertEqual(["old-talk"], plan["existing_pipeline_contact_ids"])
+        self.assertEqual(["old-posted"], plan["republish_contact_ids"])
+        self.assertEqual(0, plan["shortfall_count"])
+
+    def test_existing_approved_new_candidate_keeps_human_audit_on_version_upgrade(self):
+        fields = {
+            "进入方式": "新开发", "审核结论": "通过", "审核原因": "内容适配",
+            "审核人": [{"id": "ou_reviewer"}], "审核时间": 1_800_000_000_000,
+            "国家快照": "US", "语言快照": "en",
+            "达人主页": {"link": "https://youtube.com/@creator", "text": "打开达人主页"},
+        }
+        candidate = {
+            "decision": "eligible_new_cold", "country": "US", "language": "en",
+            "profile_url": "https://youtube.com/@creator",
+        }
+        self.assertTrue(launch_participation._can_preserve_review(fields, candidate))
+
     def test_full_replacement_cancels_omitted_kol_without_touching_media_version(self):
         activity = {
             "record_id": "act1",
@@ -213,7 +261,7 @@ class LaunchParticipationTests(unittest.TestCase):
         preview = {"candidates": [
             {"contact_id": "kol1", "decision": "eligible_new_cold", "score": 90,
              "final_priority": 90, "evidence_level": "无加分", "matched_post_ids": []},
-            {"contact_id": "kol3", "decision": "reactivation_same_thread", "score": 88,
+            {"contact_id": "kol3", "decision": "eligible_new_cold", "score": 88,
              "final_priority": 88, "evidence_level": "无加分", "matched_post_ids": []},
         ]}
 

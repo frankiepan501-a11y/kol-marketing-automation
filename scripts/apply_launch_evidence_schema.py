@@ -107,6 +107,7 @@ PARTICIPANT_FIELDS = [
     relation("关联KOL", T_KOL),
     relation("关联媒体人", T_EDITOR),
     text("产品家族ID"), select("进入方式", ["新开发", "同线程激活", "继续洽谈"]),
+    select("活动分池", ["新开发池", "现有流程贡献池", "二次发布池", "已排除"]),
     number("基础评分快照"), select("竞品证据等级", ["A", "B", "C", "无加分", "待人工匹配"]),
     relation("关联竞品帖子", config.T_COMPETITOR_POST), number("最终优先级"),
     text("选择原因"), text("排序版本"), text("排序快照历史"),

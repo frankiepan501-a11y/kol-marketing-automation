@@ -168,7 +168,7 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertEqual("main", family["canonical_product_id"])
         self.assertEqual({"main", "alias"}, set(family["product_ids"]))
 
-    def test_prior_same_product_routes_positive_contact_to_reactivation(self):
+    def test_prior_same_product_routes_positive_contact_to_existing_pipeline_pool(self):
         contact = {
             "record_id": "kol1",
             "fields": {"邮箱": "Creator@Example.com", "合作状态": "已合作-免费"},
@@ -194,7 +194,36 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
             email_owners={"creator@example.com": {("KOL", "kol1")}},
             now_ms=1_800_000_000_000,
         )
-        self.assertEqual("reactivation_same_thread", result["decision"])
+        self.assertEqual("existing_pipeline_same_thread", result["decision"])
+        self.assertEqual("existing_pipeline", result["campaign_pool"])
+        self.assertFalse(result["allowed_as_new_cold"])
+
+    def test_prior_same_product_with_upload_routes_to_republish_pool(self):
+        contact = {
+            "record_id": "kol1",
+            "fields": {
+                "邮箱": "creator@example.com", "合作状态": "已合作-免费",
+                "上稿日期": 1_790_000_000_000,
+            },
+        }
+        drafts = [{
+            "record_id": "draft1",
+            "fields": {
+                "关联KOL": {"link_record_ids": ["kol1"]},
+                "关联产品": {"link_record_ids": ["main"]},
+                "邮件草稿来源": "cold", "邮件草稿状态": "已发送",
+                "发送状态": "已发", "发送邮箱": "partner@fireflyfunlab.com",
+                "是否回复": True,
+            },
+        }]
+        result = preview.precheck_contact(
+            contact, object_type="KOL", brand="FUNLAB", product_ids={"main"},
+            drafts=drafts,
+            email_owners={"creator@example.com": {("KOL", "kol1")}},
+            now_ms=1_800_000_000_000,
+        )
+        self.assertEqual("republish_requires_commitment", result["decision"])
+        self.assertEqual("republish", result["campaign_pool"])
         self.assertFalse(result["allowed_as_new_cold"])
 
     def test_non_cold_history_also_blocks_new_cold(self):
@@ -222,8 +251,32 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
             email_owners={"creator@example.com": {("KOL", "kol1")}},
             now_ms=1_800_000_000_000,
         )
-        self.assertEqual("reactivation_same_thread", result["decision"])
+        self.assertEqual("existing_pipeline_same_thread", result["decision"])
+        self.assertEqual("existing_pipeline", result["campaign_pool"])
         self.assertFalse(result["allowed_as_new_cold"])
+
+    def test_repeated_recent_malaysia_content_holds_structured_uk_candidate(self):
+        result = preview.market_consistency_check(
+            {
+                "国家": "UK", "语言": "en",
+                "近期视频标题": (
+                    "Nintendo Switch Malaysia launch\n"
+                    "Best controller deals in Malaysia\n"
+                    "Malaysia gaming setup"
+                ),
+            },
+            target_countries={"US", "UK", "DE", "FR", "ES"},
+        )
+        self.assertFalse(result["passed"])
+        self.assertEqual("hold_market_conflict", result["decision"])
+        self.assertIn("Malaysia", result["reasons"][0])
+
+    def test_single_foreign_country_mention_does_not_rewrite_creator_market(self):
+        result = preview.market_consistency_check(
+            {"国家": "US", "近期视频标题": "Controller launch in Japan"},
+            target_countries={"US", "UK", "DE", "FR", "ES"},
+        )
+        self.assertTrue(result["passed"])
 
     def test_cross_table_same_email_is_manual_hold(self):
         contact = {

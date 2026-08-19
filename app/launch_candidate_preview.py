@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections import Counter, defaultdict
 
@@ -30,11 +31,55 @@ PRODUCT_FIELDS = [
     "适配主机", "适配IP", "活动归并键", "活动主记录ID", "活动主记录",
 ]
 KOL_FIELDS = [
-    "账号名", "邮箱", "合作状态", "主平台", "国家", "语言", "粉丝数",
+    "账号名", "邮箱", "合作状态", "主平台", "国家", "国家原文", "语言", "粉丝数",
     "内容风格", "IP喜好", "合作竞品", "竞品帖子证据", "邮箱验真状态",
     "YouTube频道ID", "主链接", "近期视频标题", "近期视频抓取时间",
     "上次二次接触时间", "上稿日期", "上稿标题", "寄样次数", "KOL级别", "合作报价",
 ]
+
+# 这里只拦“近期内容反复指向活动范围外地区”的强信号。单条标题可能只是
+# 评测某个海外版本，不能据此改写达人国家；重复出现才进入人工冻结。
+RECENT_CONTENT_MARKET_CUES = {
+    "MY": ("malaysia", "malaysian"),
+    "SG": ("singapore", "singaporean"),
+    "PH": ("philippines", "filipino"),
+    "ID": ("indonesia", "indonesian"),
+    "IN": ("india", "indian"),
+    "JP": ("japan", "japanese"),
+    "KR": ("south korea", "korean"),
+    "BR": ("brazil", "brazilian"),
+    "MX": ("mexico", "mexican"),
+    "CA": ("canada", "canadian"),
+    "AU": ("australia", "australian"),
+    "NZ": ("new zealand",),
+}
+
+
+def market_consistency_check(fields: dict, *, target_countries: set[str] | None) -> dict:
+    """核对结构化国家与近期内容；冲突时冻结，不自动改主表国家。"""
+    if target_countries is None:
+        return {"passed": True, "decision": "market_consistent", "reasons": []}
+    recent = ext(fields.get("近期视频标题")).lower()
+    if not recent:
+        return {"passed": True, "decision": "market_consistent", "reasons": []}
+    structured_country = ext(fields.get("国家")).strip()
+    for country, cues in RECENT_CONTENT_MARKET_CUES.items():
+        hits = sum(len(re.findall(rf"\b{re.escape(cue)}\b", recent)) for cue in cues)
+        if hits >= 2 and country not in target_countries and structured_country != country:
+            label = cues[0].title()
+            return {
+                "passed": False,
+                "decision": "hold_market_conflict",
+                "campaign_pool": "held",
+                "allowed_as_new_cold": False,
+                "recommended_route": "verify_market_before_contact",
+                "reasons": [
+                    f"近期内容反复出现 {label}（{hits}次），与结构化国家 "
+                    f"{structured_country or '空'} 及本次目标市场不一致"
+                ],
+                "evidence_draft_ids": [],
+            }
+    return {"passed": True, "decision": "market_consistent", "reasons": []}
 EDITOR_FIELDS = [
     "媒体人姓名", "所属媒体", "主要媒体", "邮箱", "合作状态", "国家", "语言",
     "媒体类型", "媒体集团", "报道品类", "邮箱验真状态",
@@ -181,6 +226,7 @@ def precheck_contact(
     if reasons:
         return {
             "decision": "blocked", "allowed_as_new_cold": False,
+            "campaign_pool": "excluded",
             "recommended_route": "exclude", "reasons": reasons,
             "evidence_draft_ids": [], "email": _masked_email(email),
         }
@@ -189,6 +235,7 @@ def precheck_contact(
     if len(owners) > 1:
         return {
             "decision": "hold_duplicate_identity", "allowed_as_new_cold": False,
+            "campaign_pool": "held",
             "recommended_route": "merge_identity_before_contact",
             "reasons": [f"同一邮箱对应 {len(owners)} 个 KOL/媒体人身份"],
             "evidence_draft_ids": [], "email": _masked_email(email),
@@ -232,14 +279,25 @@ def precheck_contact(
     any_reply = any(bool((d.get("fields") or {}).get("是否回复")) for d in same_product)
     if same_product:
         if coop in POSITIVE_RELATION_STATES or any_reply:
+            if object_type == "KOL" and fields.get("上稿日期") not in (None, "", 0):
+                return {
+                    "decision": "republish_requires_commitment",
+                    "campaign_pool": "republish",
+                    "allowed_as_new_cold": False,
+                    "recommended_route": "request_republish_commitment_in_existing_thread",
+                    "reasons": ["同一活动产品家族已有触达且联系人已有上稿记录；仅在明确承诺本次窗口二次发布后计入"],
+                    "evidence_draft_ids": evidence_drafts[:10], "email": _masked_email(email),
+                }
             return {
-                "decision": "reactivation_same_thread", "allowed_as_new_cold": False,
+                "decision": "existing_pipeline_same_thread",
+                "campaign_pool": "existing_pipeline", "allowed_as_new_cold": False,
                 "recommended_route": "continue_existing_thread",
                 "reasons": ["同一活动产品家族已有触达记录，且存在正向关系/回复"],
                 "evidence_draft_ids": evidence_drafts[:10], "email": _masked_email(email),
             }
         return {
             "decision": "blocked_prior_same_product", "allowed_as_new_cold": False,
+            "campaign_pool": "excluded",
             "recommended_route": "do_not_resend_cold",
             "reasons": ["同一活动产品家族已有有效 cold/follow-up 记录"],
             "evidence_draft_ids": evidence_drafts[:10], "email": _masked_email(email),
@@ -248,6 +306,7 @@ def precheck_contact(
     if same_email_other_record:
         return {
             "decision": "hold_duplicate_identity", "allowed_as_new_cold": False,
+            "campaign_pool": "held",
             "recommended_route": "merge_identity_before_contact",
             "reasons": ["历史草稿命中同邮箱的另一条 KOL/媒体人记录"],
             "evidence_draft_ids": evidence_drafts[:10], "email": _masked_email(email),
@@ -256,6 +315,7 @@ def precheck_contact(
     if same_brand_active:
         return {
             "decision": "hold_active_or_recent", "allowed_as_new_cold": False,
+            "campaign_pool": "existing_pipeline",
             "recommended_route": "wait_or_continue_existing_thread",
             "reasons": [f"同品牌 {RECENT_SAME_BRAND_DAYS} 天内已有触达或仍在流程中"],
             "evidence_draft_ids": evidence_drafts[:10], "email": _masked_email(email),
@@ -263,6 +323,7 @@ def precheck_contact(
 
     return {
         "decision": "eligible_new_cold", "allowed_as_new_cold": True,
+        "campaign_pool": "new_development",
         "recommended_route": "activity_cold_pool", "reasons": ["全局重复触达预检通过"],
         "evidence_draft_ids": [], "email": _masked_email(email),
     }
@@ -389,8 +450,14 @@ def build_review_snapshot(fields: dict, evidence_rank: dict, *, now_ms: int,
         operator_reasons.append("近期内容数据缺失或超过180天")
     if coop in POSITIVE_RELATION_STATES:
         operator_reasons.append(f"历史关系={coop}，需确认本次重新合作语境")
-    if precheck and precheck.get("decision") == "reactivation_same_thread":
+    if precheck and precheck.get("decision") in {
+        "reactivation_same_thread", "existing_pipeline_same_thread",
+    }:
         operator_reasons.append("已命中历史触达/回复，需确认沿用原邮件线程的复联语境")
+    if precheck and precheck.get("decision") == "republish_requires_commitment":
+        operator_reasons.append("已有上稿记录；必须先确认愿意在本次窗口二次发布，未承诺不计入目标")
+    if precheck and precheck.get("decision") == "hold_market_conflict":
+        operator_reasons.extend(precheck.get("reasons") or ["近期内容地区与主表国家冲突"])
 
     if frankie_reasons:
         route = "Frankie例外审核"
@@ -622,6 +689,14 @@ async def preview_candidates(
             drafts=_drafts_for_contact(record, object_type, ctx["draft_index"]),
             email_owners=ctx["owners"], now_ms=now_ms,
         )
+        if object_type == "KOL":
+            market_check = market_consistency_check(
+                fields,
+                target_countries=(activity_ctx or {}).get("target_countries"),
+            )
+            if not market_check["passed"]:
+                market_check["email"] = check.get("email", "")
+                check = market_check
         evidence_rank = (
             launch_competitor_evidence.rank_contact_evidence(
                 record, activity_ctx["competitor_posts"], base_score=score,
@@ -653,9 +728,10 @@ async def preview_candidates(
         })
 
     decision_order = {
-        "reactivation_same_thread": 0, "eligible_new_cold": 1,
-        "hold_active_or_recent": 2, "hold_duplicate_identity": 3,
-        "blocked_prior_same_product": 4, "blocked": 5,
+        "eligible_new_cold": 0, "existing_pipeline_same_thread": 1,
+        "republish_requires_commitment": 2, "hold_active_or_recent": 3,
+        "hold_market_conflict": 4, "hold_duplicate_identity": 5,
+        "blocked_prior_same_product": 6, "blocked": 7,
     }
     candidates.sort(key=lambda x: (
         decision_order.get(x["decision"], 9),
@@ -684,8 +760,10 @@ async def preview_candidates(
         "summary": {
             "pool_records": len(records), "base_filter_excluded": filtered_out,
             "evaluated": len(candidates), "eligible_new_cold": counts["eligible_new_cold"],
-            "reactivation_same_thread": counts["reactivation_same_thread"],
-            "held_or_blocked": len(candidates) - counts["eligible_new_cold"] - counts["reactivation_same_thread"],
+            "existing_pipeline": counts["existing_pipeline_same_thread"],
+            "republish": counts["republish_requires_commitment"],
+            "held_or_blocked": len(candidates) - counts["eligible_new_cold"]
+            - counts["existing_pipeline_same_thread"] - counts["republish_requires_commitment"],
             "by_decision": dict(counts),
         },
         "candidates": candidates if internal_full else candidates[:limit],
