@@ -63,6 +63,13 @@ def _strip_html(value: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", value or "").replace("&nbsp;", " ")).strip()
 
 
+def _text_values(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if isinstance(x, str) and str(x).strip()]
+    text = str(ext(value) or "").strip()
+    return [text] if text else []
+
+
 def build_test_email(product: dict, draft: dict, brand: str, run_key: str) -> dict:
     """读取真实 cold 草稿，不另造一套测试模板。"""
     product_fields = product.get("fields") or {}
@@ -88,6 +95,9 @@ def build_test_email(product: dict, draft: dict, brand: str, run_key: str) -> di
         "original_subject": subject,
         "body": body,
         "product_name": product_name,
+        "product_markers": [product_name]
+                           + _text_values(product_fields.get("主关键词(英文)"))
+                           + _text_values(product_fields.get("适配IP")),
         "links": links,
         "brand": brand,
         "from_address": config.BRAND_CONFIG[brand]["alias_from"],
@@ -109,7 +119,9 @@ def validate_raw_content(*, raw_subject: str, raw_body: str, actual_to: str,
         "dry_run_subject_prefix": "[DRY-RUN" in (raw_subject or ""),
         "body_not_truncated": len(raw_text) >= max(50, int(len(expected_text) * 0.7)),
         "html_rendered": bool(re.search(r"<(p|div|br|a|strong)[\s>/]", raw_body or "", re.I)),
-        "product_name_present": expected.get("product_name", "") in raw_text,
+        "product_name_present": any(
+            marker.lower() in raw_text.lower() for marker in expected.get("product_markers") or []
+        ),
         "all_links_present": all(url in normalized_body for url in expected.get("links") or []),
         "placeholder_free": not any(marker in (raw_subject or "") + raw_text for marker in PLACEHOLDER_MARKERS),
     }

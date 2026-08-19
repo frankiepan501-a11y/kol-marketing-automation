@@ -30,6 +30,7 @@ class LaunchEmailPreflightTests(unittest.TestCase):
             "subject": "[Launch preflight:run-0001] FUNLAB Dave the Diver Controller",
             "body": '<p>FUNLAB Dave the Diver Controller launch preview.</p><p><a href="https://example.com/p">Product page</a></p>',
             "product_name": "FUNLAB Dave the Diver Controller",
+            "product_markers": ["FUNLAB Dave the Diver Controller", "Dave the Diver"],
             "links": ["https://example.com/p"],
             "from_address": "partner@fireflyfunlab.com",
         }
