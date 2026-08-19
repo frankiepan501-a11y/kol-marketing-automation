@@ -8,7 +8,7 @@ import uuid
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
@@ -2038,6 +2038,75 @@ async def zoho_sent_check(authorization: str = Header(default=""),
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-500:]}
+
+
+@app.post("/launch/candidates/preview")
+async def launch_candidates_preview(
+    authorization: str = Header(default=""),
+    product_id: str = "",
+    object_type: str = "KOL",
+    limit: int = 100,
+):
+    """活动候选只读预览：不建任务、不生草稿、不发邮件、不写飞书。"""
+    _check_auth(authorization)
+    if not product_id:
+        raise HTTPException(status_code=400, detail="product_id required")
+    try:
+        return {"ok": True, **(await launch_candidate_preview.preview_candidates(
+            product_id, object_type=object_type, limit=limit,
+        ))}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/launch/candidates/preview", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.get("/launch/candidates/replay")
+async def launch_candidate_replay(
+    authorization: str = Header(default=""),
+    product_id: str = "",
+    contact_id: str = "",
+    object_type: str = "KOL",
+):
+    """单条候选回放：解释为什么入选、转二次激活、暂缓或排除。"""
+    _check_auth(authorization)
+    if not product_id or not contact_id:
+        raise HTTPException(status_code=400, detail="product_id and contact_id required")
+    try:
+        return {"ok": True, **(await launch_candidate_preview.replay_candidate(
+            product_id, contact_id, object_type=object_type,
+        ))}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/launch/candidates/replay", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/launch/email/test-raw")
+async def launch_email_test_raw(
+    authorization: str = Header(default=""),
+    product_id: str = "",
+    brand: str = "FUNLAB",
+    confirm: str = "",
+):
+    """只发测试邮箱并回查 sent raw；全局 dry-run 未开启时硬拒绝。"""
+    _check_auth(authorization)
+    if not product_id:
+        raise HTTPException(status_code=400, detail="product_id required")
+    try:
+        return await launch_email_preflight.send_and_validate(
+            product_id, brand, confirm=confirm,
+        )
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/launch/email/test-raw", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
 
 
 @app.post("/sla/check")
