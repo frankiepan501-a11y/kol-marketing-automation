@@ -7,6 +7,7 @@ import json
 import re
 import time
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 
 from . import config, feishu, launch_candidate_preview, launch_evidence
 from .feishu import ext
@@ -77,8 +78,21 @@ def _assert_readback(actual: dict, expected: dict) -> None:
         if isinstance(value, list):
             if _link_ids(fields.get(name)) != sorted(value):
                 raise ParticipantManualReviewError(f"参与记录回读不一致: {name}")
-        elif ext(fields.get(name)) != ext(value):
+        elif not _same_readback_value(fields.get(name), value):
             raise ParticipantManualReviewError(f"参与记录回读不一致: {name}")
+
+
+def _same_readback_value(actual, expected) -> bool:
+    """Compare Feishu readback without confusing number strings with text drift."""
+    if isinstance(expected, (int, float, Decimal)) and not isinstance(expected, bool):
+        actual_value = actual if (
+            isinstance(actual, (int, float, Decimal)) and not isinstance(actual, bool)
+        ) else ext(actual)
+        try:
+            return Decimal(str(actual_value)) == Decimal(str(expected))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+    return ext(actual) == ext(expected)
 
 
 def _history(value) -> list[dict]:

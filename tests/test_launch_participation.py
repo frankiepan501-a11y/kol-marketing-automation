@@ -6,6 +6,19 @@ from app import launch_participation
 
 
 class LaunchParticipationTests(unittest.TestCase):
+    def test_readback_accepts_feishu_numeric_strings_for_numeric_fields(self):
+        launch_participation._assert_readback(
+            {"fields": {"基础评分快照": "84", "最终优先级": "3084.00", "零分": 0}},
+            {"基础评分快照": 84, "最终优先级": 3084, "零分": 0},
+        )
+
+    def test_readback_still_rejects_different_numeric_values(self):
+        with self.assertRaises(launch_participation.ParticipantManualReviewError):
+            launch_participation._assert_readback(
+                {"fields": {"基础评分快照": "85"}},
+                {"基础评分快照": 84},
+            )
+
     def test_participant_key_is_stable(self):
         self.assertEqual(
             launch_participation.participant_key("c", "p", "KOL", "k"),
