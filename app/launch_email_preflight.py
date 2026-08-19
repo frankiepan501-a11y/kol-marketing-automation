@@ -84,10 +84,15 @@ def _identity_rules(product_fields: dict, product_name: str) -> dict:
     stop = {"the", "and", "for", "with", "edition", "official", "switch", "controller", "dock"}
     keyword_tokens = [x.lower() for x in re.findall(r"[A-Za-z]{3,}", str(keyword or ""))
                       if x.lower() not in stop]
+    product_type_tokens = sorted(set(re.findall(
+        r"\b(controller|dock|charger|case|headset|keyboard|grip|joy-?con|accessory)\b",
+        str(product_name or "").lower(),
+    )))
     return {
         "exact_name": product_name,
         "ip_markers": ip_markers,
         "keyword_tokens": sorted(set(keyword_tokens)),
+        "product_type_tokens": product_type_tokens,
     }
 
 
@@ -99,11 +104,17 @@ def _product_identity_present(raw_text: str, rules: dict) -> bool:
     ip_ok = any(marker.lower() in text for marker in rules.get("ip_markers") or [])
     keyword_tokens = rules.get("keyword_tokens") or []
     keyword_hits = sum(1 for token in keyword_tokens if token in text)
+    product_type_ok = any(
+        re.search(rf"\b{re.escape(token)}\b", text)
+        for token in rules.get("product_type_tokens") or []
+    )
     # Some valid product keywords collapse to one distinctive token after generic
     # words (Switch/controller/dock/etc.) are removed. Requiring two hits made
     # those products impossible to validate even when the licensed IP matched.
     required_hits = min(2, len(keyword_tokens))
-    return bool(ip_ok and required_hits and keyword_hits >= required_hits)
+    return bool(ip_ok and (
+        product_type_ok or (required_hits and keyword_hits >= required_hits)
+    ))
 
 
 def build_test_email(product: dict, draft: dict, brand: str, run_key: str) -> dict:

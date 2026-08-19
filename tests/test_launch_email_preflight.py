@@ -86,6 +86,20 @@ class LaunchEmailPreflightTests(unittest.TestCase):
             "Official Dave the Diver collectible with charging dock.", rules
         ))
 
+    def test_product_identity_accepts_ip_plus_product_type_without_model_modifier(self):
+        product_name = "FUNLAB Luminex Dave THE DIVER Edition - Switch 2 Pro Controller"
+        rules = preflight._identity_rules({
+            "适配IP": ["Dave the Diver"],
+            "主关键词(英文)": "Switch 2 Pro Controller",
+        }, product_name)
+        self.assertTrue(preflight._product_identity_present(
+            "We've made an officially licensed Dave the Diver controller for Switch 2.",
+            rules,
+        ))
+        self.assertFalse(preflight._product_identity_present(
+            "A collector item for Dave the Diver fans.", rules,
+        ))
+
     def test_send_and_validate_is_test_only_and_writes_no_bitable_rows(self):
         product = {
             "record_id": "product1",
