@@ -172,7 +172,7 @@ def _profile_url(fields: dict, *, contact: bool) -> str:
         if contact else
         ("KOL主页URL", "作者主页", "主页URL", "账号主页", "频道链接")
     )
-    return normalize_url(_first(fields, names))
+    return normalize_url(_first_url(fields, names))
 
 
 def _handle(fields: dict, *, contact: bool) -> str:
@@ -184,22 +184,48 @@ def _handle(fields: dict, *, contact: bool) -> str:
     return normalize_handle(_first(fields, names))
 
 
-def _post_author_key(post: dict) -> str:
+def _post_author_aliases(post: dict) -> set[str]:
     fields = post.get("fields") or {}
     platform = _platform(fields)
+    aliases = {f"kol_record:{record_id}" for record_id in _ids(fields.get("关联KOL"))}
     creator = _creator_id(fields, contact=False)
     if platform and creator:
-        return f"{platform}|creator:{creator}"
+        aliases.add(f"{platform}|creator:{creator}")
     url = _profile_url(fields, contact=False)
     if platform and url:
-        return f"{platform}|url:{url}"
+        aliases.add(f"{platform}|url:{url}")
     handle = _handle(fields, contact=False)
     if platform and handle:
-        return f"{platform}|handle:{handle}"
-    linked = sorted(_ids(fields.get("关联KOL")))
-    if linked:
-        return f"kol_record:{linked[0]}"
-    return f"post:{post.get('record_id', '')}"
+        aliases.add(f"{platform}|handle:{handle}")
+    return aliases or {f"post:{post.get('record_id', '')}"}
+
+
+def _canonical_authors(post_aliases: dict[str, set[str]]) -> tuple[set[str], dict[str, str]]:
+    parent: dict[str, str] = {}
+
+    def find(key: str) -> str:
+        parent.setdefault(key, key)
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    for aliases in post_aliases.values():
+        ordered = sorted(aliases)
+        for alias in ordered:
+            find(alias)
+        for alias in ordered[1:]:
+            union(ordered[0], alias)
+    canonical = {alias: find(alias) for alias in parent}
+    author_by_post = {
+        post_id: canonical[sorted(aliases)[0]] for post_id, aliases in post_aliases.items()
+    }
+    return set(author_by_post.values()), author_by_post
 
 
 def build_evidence_index(posts: list[dict]) -> dict:
@@ -212,8 +238,7 @@ def build_evidence_index(posts: list[dict]) -> dict:
     by_creator = defaultdict(list)
     by_url = defaultdict(list)
     by_handle = defaultdict(list)
-    author_keys = set()
-    author_by_post = {}
+    post_aliases = {}
 
     for post in posts:
         fields = post.get("fields") or {}
@@ -225,9 +250,7 @@ def build_evidence_index(posts: list[dict]) -> dict:
             continue
         valid_posts.append(post)
         post_id = post.get("record_id", "")
-        author_key = _post_author_key(post)
-        author_keys.add(author_key)
-        author_by_post[post_id] = author_key
+        post_aliases[post_id] = _post_author_aliases(post)
         for linked_id in _ids(fields.get("关联KOL")):
             by_linked[linked_id].append(post)
         platform = _platform(fields)
@@ -241,6 +264,7 @@ def build_evidence_index(posts: list[dict]) -> dict:
         if platform and handle:
             by_handle[(platform, handle)].append(post)
 
+    author_keys, author_by_post = _canonical_authors(post_aliases)
     return {
         "linked_posts_total": len(posts),
         "valid_posts": valid_posts,
@@ -311,33 +335,23 @@ def match_post_identity(contact: dict, post: dict) -> str:
     if contact_id and contact_id in _ids(post_fields.get("关联KOL")):
         return "linked_kol"
 
-    contact_platform = _first(contact_fields, ("主平台", "平台")).lower()
-    post_platform = _first(post_fields, ("平台", "主平台")).lower()
+    contact_platform = _platform(contact_fields)
+    post_platform = _platform(post_fields)
     if not contact_platform or contact_platform != post_platform:
         return ""
 
-    contact_creator = _first(contact_fields, (
-        "YouTube频道ID", "平台creator_id", "creator_id", "作者ID", "频道ID", "KOL平台ID",
-    ))
-    post_creator = _first(post_fields, (
-        "KOL平台ID", "平台creator_id", "creator_id", "作者ID", "频道ID",
-    ))
+    contact_creator = _creator_id(contact_fields, contact=True)
+    post_creator = _creator_id(post_fields, contact=False)
     if contact_creator and contact_creator == post_creator:
         return "platform_creator_id"
 
-    contact_url = normalize_url(_first(contact_fields, (
-        "主链接", "主页URL", "账号主页", "主页链接", "频道链接",
-    )))
-    post_url = normalize_url(_first(post_fields, (
-        "KOL主页URL", "作者主页", "主页URL", "账号主页", "频道链接",
-    )))
+    contact_url = _profile_url(contact_fields, contact=True)
+    post_url = _profile_url(post_fields, contact=False)
     if contact_url and contact_url == post_url:
         return "profile_url"
 
-    contact_handle = normalize_handle(_first(contact_fields, ("账号Handle", "Handle", "账号名")))
-    post_handle = normalize_handle(_first(post_fields, (
-        "KOL账号Handle", "KOL账号名", "作者Handle", "Handle", "作者账号",
-    )))
+    contact_handle = _handle(contact_fields, contact=True)
+    post_handle = _handle(post_fields, contact=False)
     if contact_handle and contact_handle == post_handle:
         return "platform_handle"
     return ""
@@ -346,21 +360,17 @@ def match_post_identity(contact: dict, post: dict) -> str:
 def identity_key(contact: dict, post: dict, path: str) -> str:
     contact_fields = contact.get("fields") or {}
     post_fields = post.get("fields") or {}
-    platform = _first(contact_fields, ("主平台", "平台")).lower()
+    platform = _platform(contact_fields)
     if path == "linked_kol":
         return f"kol_record:{contact.get('record_id', '')}"
     if path == "platform_creator_id":
-        value = _first(contact_fields, (
-            "YouTube频道ID", "平台creator_id", "creator_id", "作者ID", "频道ID", "KOL平台ID",
-        ))
+        value = _creator_id(contact_fields, contact=True)
         return f"{platform}|creator:{value}"
     if path == "profile_url":
-        value = normalize_url(_first(contact_fields, (
-            "主链接", "主页URL", "账号主页", "主页链接", "频道链接",
-        )))
+        value = _profile_url(contact_fields, contact=True)
         return f"{platform}|url:{value}"
     if path == "platform_handle":
-        value = normalize_handle(_first(contact_fields, ("账号Handle", "Handle", "账号名")))
+        value = _handle(contact_fields, contact=True)
         return f"{platform}|handle:{value}"
     return f"post:{post.get('record_id', '')}|unknown"
 

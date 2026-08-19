@@ -11,7 +11,7 @@ import json
 import re
 import subprocess
 import sys
-from datetime import datetime
+import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -114,7 +114,40 @@ def author_keys(fields: dict, *, contact: bool) -> set[str]:
         keys.add(f"{p}|url:{url}")
     if p and handle:
         keys.add(f"{p}|handle:{handle}")
+    if not contact:
+        keys.update(f"kol_record:{record_id}" for record_id in link_ids(fields.get("关联KOL")))
     return keys
+
+
+def canonical_author_components(rows: list[dict]) -> tuple[dict[str, set[str]], dict[str, str]]:
+    parent: dict[str, str] = {}
+
+    def find(key: str) -> str:
+        parent.setdefault(key, key)
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    aliases_by_post = {}
+    for row in rows:
+        aliases = author_keys(row["fields"], contact=False) or {f"post:{row['record_id']}"}
+        aliases_by_post[row["record_id"]] = aliases
+        ordered = sorted(aliases)
+        for alias in ordered:
+            find(alias)
+        for alias in ordered[1:]:
+            union(ordered[0], alias)
+    components: dict[str, set[str]] = {}
+    for aliases in aliases_by_post.values():
+        root = find(sorted(aliases)[0])
+        components.setdefault(root, set()).update(aliases)
+    return components, {alias: find(alias) for alias in parent}
 
 
 def is_official(fields: dict) -> bool:
@@ -133,6 +166,56 @@ def get_activity() -> dict:
     return (lark(["api", "GET", path]).get("data") or {}).get("record") or {}
 
 
+def link_ids(value) -> list[str]:
+    if isinstance(value, dict):
+        direct = value.get("id")
+        return ([direct] if direct else []) + list(
+            value.get("record_ids") or value.get("link_record_ids") or []
+        )
+    if isinstance(value, list):
+        ids = []
+        for item in value:
+            if isinstance(item, str):
+                ids.append(item)
+            elif isinstance(item, dict):
+                if item.get("id"):
+                    ids.append(item["id"])
+                ids.extend(item.get("record_ids") or item.get("link_record_ids") or [])
+        return ids
+    return []
+
+
+def activity_write_fields(fields: dict, partner_ids: list[str], *, snapshot_ms: int) -> dict:
+    return {
+        "竞品证据模式": "引用历史证据",
+        "竞品分析状态": "已就绪",
+        "竞品品牌": "NYXI",
+        "关联竞品帖子": partner_ids,
+        "关联竞品营销事件": link_ids(fields.get("关联竞品营销事件")),
+        "证据配置版本": 2,
+        "证据排序版本": "evidence-v4",
+        "证据快照时间": snapshot_ms,
+        "证据等待/变更说明": (
+            "NYXI 3423 条帖子中排除 435 条官方渠道，接入 2988 条非官方合作证据；"
+            "仅用于本次 Dave 活动排序。"
+        ),
+    }
+
+
+def restore_fields(fields: dict) -> dict:
+    return {
+        "竞品证据模式": first(fields.get("竞品证据模式")),
+        "竞品分析状态": first(fields.get("竞品分析状态")),
+        "竞品品牌": first(fields.get("竞品品牌")),
+        "关联竞品帖子": link_ids(fields.get("关联竞品帖子")),
+        "关联竞品营销事件": link_ids(fields.get("关联竞品营销事件")),
+        "证据配置版本": int(fields.get("证据配置版本") or 0),
+        "证据排序版本": first(fields.get("证据排序版本")),
+        "证据快照时间": fields.get("证据快照时间"),
+        "证据等待/变更说明": first(fields.get("证据等待/变更说明")),
+    }
+
+
 def run(*, commit: bool) -> dict:
     posts = list_records(POST_TABLE, POST_FIELDS)
     nyxi = [row for row in posts if first(row["fields"].get("竞品品牌")).strip().upper() == "NYXI"]
@@ -140,14 +223,12 @@ def run(*, commit: bool) -> dict:
     partner = [row for row in nyxi if not is_official(row["fields"])]
     kols = list_records(KOL_TABLE, KOL_FIELDS)
 
-    authors = {}
-    for row in partner:
-        keys = author_keys(row["fields"], contact=False)
-        canonical = sorted(keys)[0] if keys else f"post:{row['record_id']}"
-        authors.setdefault(canonical, set()).update(keys or {canonical})
+    authors, _ = canonical_author_components(partner)
     kol_key_to_ids = {}
     for row in kols:
-        for key in author_keys(row["fields"], contact=True):
+        keys = author_keys(row["fields"], contact=True)
+        keys.add(f"kol_record:{row['record_id']}")
+        for key in keys:
             kol_key_to_ids.setdefault(key, set()).add(row["record_id"])
     matched_author_keys = {
         author for author, keys in authors.items() if any(key in kol_key_to_ids for key in keys)
@@ -187,30 +268,26 @@ def run(*, commit: bool) -> dict:
     if len(nyxi) != 3423 or len(official) != 435 or len(partner) != 2988:
         raise RuntimeError("NYXI 证据数量与已审定口径不一致，停止写入")
 
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
-    body = {"fields": {
-        "竞品证据模式": "引用历史证据",
-        "竞品分析状态": "已就绪",
-        "竞品品牌": "NYXI",
-        "关联竞品帖子": [{"id": row["record_id"]} for row in partner],
-        "关联竞品营销事件": [],
-        "证据配置版本": 2,
-        "证据排序版本": "evidence-v4",
-        "证据快照时间": now,
-        "证据等待/变更说明": "NYXI 3423 条帖子中排除 435 条官方渠道，接入 2988 条非官方合作证据；仅用于本次 Dave 活动排序。",
-    }}
+    body = {"fields": activity_write_fields(
+        fields, [row["record_id"] for row in partner],
+        snapshot_ms=int(time.time() * 1000),
+    )}
+    rollback = {"fields": restore_fields(fields)}
     path = f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{ACTIVITY_TABLE}/records/{ACTIVITY_RECORD}"
     lark(["api", "PUT", path, "--data", "-"], stdin=json.dumps(body, ensure_ascii=False))
-    readback = get_activity().get("fields") or {}
-    linked = readback.get("关联竞品帖子") or []
-    result.update({
-        "dry_run": False,
-        "written_ranking_version": first(readback.get("证据排序版本")),
-        "written_config_version": int(readback.get("证据配置版本") or 0),
-        "written_linked_posts": len(linked),
-    })
-    if result["written_ranking_version"] != "evidence-v4" or result["written_linked_posts"] != 2988:
-        raise RuntimeError("写入后回读校验失败")
+    try:
+        readback = get_activity().get("fields") or {}
+        result.update({
+            "dry_run": False,
+            "written_ranking_version": first(readback.get("证据排序版本")),
+            "written_config_version": int(readback.get("证据配置版本") or 0),
+            "written_linked_posts": len(link_ids(readback.get("关联竞品帖子"))),
+        })
+        if result["written_ranking_version"] != "evidence-v4" or result["written_linked_posts"] != 2988:
+            raise RuntimeError("写入后回读校验失败")
+    except Exception:
+        lark(["api", "PUT", path, "--data", "-"], stdin=json.dumps(rollback, ensure_ascii=False))
+        raise
     return result
 
 

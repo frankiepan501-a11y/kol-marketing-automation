@@ -190,6 +190,43 @@ class LaunchCompetitorEvidenceTests(unittest.TestCase):
         self.assertEqual(1, coverage["matched_authors"])
         self.assertEqual(1, coverage["unmatched_authors"])
 
+    def test_profile_url_identity_uses_link_not_display_text(self):
+        contact = {"record_id": "kol1", "fields": {
+            "主平台": "YouTube",
+            "主链接": {"text": "打开达人主页", "link": "https://youtube.com/@creatorone"},
+        }}
+        post = {"record_id": "post1", "fields": {
+            "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+            "KOL主页URL": {"text": "来源主页", "link": "https://youtube.com/@creatorone"},
+            "曝光量": 100,
+        }}
+
+        result = evidence.rank_contact_evidence(contact, [post], base_score=80)
+
+        self.assertEqual(["profile_url"], result["identity_paths"])
+        self.assertEqual(
+            ["youtube|url:https://youtube.com/@creatorone"],
+            result["stable_identity_keys"],
+        )
+
+    def test_coverage_merges_partial_aliases_for_same_author(self):
+        posts = [
+            {"record_id": "post1", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL平台ID": "UC-one", "KOL主页URL": "https://youtube.com/@creatorone",
+            }},
+            {"record_id": "post2", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL主页URL": "https://youtube.com/@creatorone",
+            }},
+        ]
+
+        coverage = evidence.summarize_evidence_coverage(
+            evidence.build_evidence_index(posts), [],
+        )
+
+        self.assertEqual(1, coverage["distinct_authors"])
+
 
 if __name__ == "__main__":
     unittest.main()

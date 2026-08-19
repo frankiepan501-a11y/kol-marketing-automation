@@ -202,6 +202,31 @@ class LaunchEvidenceContractTests(unittest.TestCase):
         self.assertEqual(post_ids, [row["record_id"] for row in validated])
         self.assertEqual(101, get.await_count)
 
+    def test_confirm_analysis_keeps_ranking_version_monotonic(self):
+        activity = {"record_id": "act1", "fields": {
+            "活动ID": "campaign-1", "证据配置版本": 1,
+            "证据排序版本": "evidence-v3", "竞品品牌": "NYXI",
+            "竞品证据模式": "发起新分析", "竞品分析状态": "待人工确认",
+        }}
+        node = {"record_id": "node1", "fields": {
+            "调查提交版本": 1, "待确认竞品帖子": ["post1"], "待确认竞品事件": [],
+        }}
+        with patch.object(launch_evidence.config, "LAUNCH_EVIDENCE_ENABLED", True), \
+             patch.object(launch_evidence.config, "T_LAUNCH_CAMPAIGN", "activities"), \
+             patch.object(launch_evidence.config, "T_LAUNCH_NODE", "nodes"), \
+             patch.object(launch_evidence.feishu, "search_records", new=AsyncMock(
+                 side_effect=[[activity], [node]],
+             )), \
+             patch.object(launch_evidence, "_validate_linked_records", new=AsyncMock(return_value=([], []))), \
+             patch.object(launch_evidence.feishu, "update_record", new=AsyncMock()) as update:
+            result = asyncio.run(launch_evidence.confirm_analysis(
+                campaign_id="campaign-1", confirmed_post_ids=["post1"],
+                expected_config_version=1,
+            ))
+
+        self.assertEqual("evidence-v4", result["ranking_version"])
+        self.assertEqual("evidence-v4", update.await_args_list[1].args[2]["证据排序版本"])
+
     def test_reuse_accepts_nyxi_non_official_rule_inference(self):
         activity = {
             "record_id": "act1",

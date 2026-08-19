@@ -499,7 +499,9 @@ async def confirm_analysis(
             competitor_brand=brand, post_record_ids=posts, event_record_ids=events,
         )
         new_version = current + 1
-        ranking_version = f"evidence-v{new_version}"
+        ranking_version = _next_ranking_version(
+            fields, prefix="evidence", config_version=new_version,
+        )
         await feishu.update_record(config.T_LAUNCH_NODE, node["record_id"], {
             "节点状态": "待活动提交", "目标证据配置版本": new_version,
         })
