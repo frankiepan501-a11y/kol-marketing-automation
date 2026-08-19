@@ -39,6 +39,11 @@ class LaunchSchemaTests(unittest.TestCase):
         self.assertEqual("参与记录ID", schema.PARTICIPANT_FIELDS[0]["field_name"])
         self.assertEqual(1, schema.PARTICIPANT_FIELDS[0]["type"])
 
+    def test_participant_relation_cardinality_uses_base_v3_default(self):
+        by_name = {field["field_name"]: field for field in schema.PARTICIPANT_FIELDS}
+        for name in ("关联活动", "关联KOL", "关联媒体人"):
+            self.assertNotIn("multiple", by_name[name]["property"])
+
     def test_existing_participant_table_rejects_wrong_primary(self):
         with self.assertRaises(schema.SchemaConflict):
             schema.validate_participant_primary([
@@ -47,11 +52,11 @@ class LaunchSchemaTests(unittest.TestCase):
             ])
 
     def test_relation_target_drift_is_a_conflict(self):
-        desired = [schema.relation("关联活动", "expected", multiple=False)]
+        desired = [schema.relation("关联活动", "expected")]
         current = [{"field_name": "关联活动", "type": 18,
                     "property": {"table_id": "wrong", "multiple": False}}]
         diff = schema.diff_fields(current, desired)
-        self.assertEqual("关联目标表或是否多选不一致", diff["conflicts"][0]["reason"])
+        self.assertEqual("关联目标表不一致", diff["conflicts"][0]["reason"])
 
 
 if __name__ == "__main__":

@@ -31,10 +31,15 @@
 - 按生产实际字段补齐稳定身份匹配：KOL 使用 `YouTube频道ID / 主链接`，竞品帖子使用 `KOL平台ID / KOL主页URL / KOL账号Handle`。
 - G1 全程只读；活动表仍为 2 行/rev 12，节点表仍为 16 行/rev 1，全库仍为 27 张表。
 
+## G2 表结构兼容说明
+
+- Base v3 服务端不接受关联字段的旧 `multiple` 创建参数；第一次提交在第 5 个字段被拒绝并立即停止，前 4 个普通字段已保留，未写业务记录。
+- 修正后所有关联字段按飞书当前默认关系类型创建。`关联活动 / 关联KOL / 关联媒体人` 的业务单值与唯一性继续由 `参与记录ID`、活动级进程锁、创建后唯一键回查和人工阻塞规则强制保证，不依赖 UI 字段基数。
+
 ## 本地验证
 
-- 活动专项：`test_launch_*.py` 60/60 全部通过。
-- 全仓：274 项中 273 项通过；唯一失败为本次未改动的 `test_zeabur_watchdog.ZeaburWatchdogTests.test_run_once_alerts_any_project_service_failed_deployment`。该失败与 G1 前一致。
+- 活动专项：`test_launch_*.py` 61/61 全部通过（另有 3 个子测试通过）。
+- 全仓：282 项中 281 项通过（另有 3 个子测试通过）；唯一失败为本次未改动的 `test_zeabur_watchdog.ZeaburWatchdogTests.test_run_once_alerts_any_project_service_failed_deployment`。该失败与 G1 前一致。
 - `py_compile` 通过。
 - `git diff --check` 通过（仅有仓库现有 LF/CRLF 提示）。
 

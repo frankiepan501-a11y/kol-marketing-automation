@@ -57,9 +57,10 @@ def url(name):
     return {"field_name": name, "type": 15}
 
 
-def relation(name, table_id, *, multiple=True):
+def relation(name, table_id):
+    # Base v3 创建关联字段时不接受 legacy `multiple` 参数。
     return {"field_name": name, "type": 18,
-            "property": {"table_id": table_id, "multiple": multiple}}
+            "property": {"table_id": table_id}}
 
 
 ACTIVITY_FIELDS = [
@@ -88,10 +89,12 @@ NODE_FIELDS = [
 ]
 
 PARTICIPANT_FIELDS = [
-    text("参与记录ID"), text("活动ID"), relation("关联活动", config.T_LAUNCH_CAMPAIGN, multiple=False),
+    # Base v3 不接受关联字段的 legacy `multiple` 创建参数；生产字段按平台默认关系类型创建。
+    # 业务上的单值与唯一性由 参与记录ID + 写后唯一键回查强制保证。
+    text("参与记录ID"), text("活动ID"), relation("关联活动", config.T_LAUNCH_CAMPAIGN),
     select("对象类型", ["KOL", "媒体人"]),
-    relation("关联KOL", T_KOL, multiple=False),
-    relation("关联媒体人", T_EDITOR, multiple=False),
+    relation("关联KOL", T_KOL),
+    relation("关联媒体人", T_EDITOR),
     text("产品家族ID"), select("进入方式", ["新开发", "同线程激活", "继续洽谈"]),
     number("基础评分快照"), select("竞品证据等级", ["A", "B", "C", "无加分", "待人工匹配"]),
     relation("关联竞品帖子", config.T_COMPETITOR_POST), number("最终优先级"),
@@ -129,14 +132,12 @@ def diff_fields(existing: list[dict], desired: list[dict]) -> dict:
         elif definition.get("type") == 18 and (
             (current.get("property") or {}).get("table_id")
             != (definition.get("property") or {}).get("table_id")
-            or bool((current.get("property") or {}).get("multiple"))
-            != bool((definition.get("property") or {}).get("multiple"))
         ):
             conflicts.append({
                 "field_name": definition["field_name"],
                 "expected_type": definition.get("type"),
                 "actual_type": current.get("type"),
-                "reason": "关联目标表或是否多选不一致",
+                "reason": "关联目标表不一致",
             })
         elif definition.get("type") == 3 and not {
             option.get("name") for option in (definition.get("property") or {}).get("options") or []
