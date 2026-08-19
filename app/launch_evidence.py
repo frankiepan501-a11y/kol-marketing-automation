@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 from . import config, feishu, launch_competitor_evidence
@@ -31,6 +32,13 @@ class EvidenceVersionConflict(RuntimeError):
 
 
 _ACTIVITY_LOCKS: dict[str, asyncio.Lock] = {}
+_BULK_VALIDATE_THRESHOLD = 100
+_POST_VALIDATION_FIELDS = [
+    "竞品品牌", "品牌", "竞品", "采集来源", "KOL平台ID", "KOL账号Handle",
+    "KOL账号名", "KOL主页URL", "关联KOL", "平台", "内容类型", "曝光量", "覆盖量",
+    "发布时间", "帖子URL", "内容链接", "视频链接", "帖子标题", "内容标题", "视频标题",
+    "人工复核状态", "人工确认状态", "相关性", "合作信号",
+]
 
 
 def _ids(value) -> list[str]:
@@ -65,10 +73,37 @@ async def get_activity(campaign_id: str) -> dict:
 async def _validate_linked_records(
     *, competitor_brand: str, post_record_ids: list[str], event_record_ids: list[str]
 ) -> tuple[list[dict], list[dict]]:
+    post_map = {}
+    if len(post_record_ids) > _BULK_VALIDATE_THRESHOLD:
+        rows = await feishu.fetch_all_records(
+            config.T_COMPETITOR_POST, field_names=_POST_VALIDATION_FIELDS, page_size=500,
+        )
+        requested = set(post_record_ids)
+        post_map = {row.get("record_id", ""): row for row in rows if row.get("record_id") in requested}
+        missing = [record_id for record_id in post_record_ids if record_id not in post_map]
+        if missing:
+            # Base 行级权限可能允许“按已知 ID 读取”，却不允许机器人列出整表。
+            # 有界并发补读缺失项，既不漏证据，也不退回 2,988 次串行等待。
+            semaphore = asyncio.Semaphore(12)
+
+            async def fetch_one(record_id: str) -> tuple[str, dict]:
+                async with semaphore:
+                    try:
+                        row = await feishu.get_record(config.T_COMPETITOR_POST, record_id)
+                    except Exception as exc:
+                        raise EvidenceNotFoundError(f"竞品帖子不存在: {record_id}") from exc
+                    return record_id, row
+
+            for record_id, row in await asyncio.gather(*(fetch_one(record_id) for record_id in missing)):
+                post_map[record_id] = row
     posts = []
     for record_id in post_record_ids:
         try:
-            record = await feishu.get_record(config.T_COMPETITOR_POST, record_id)
+            record = post_map.get(record_id) if post_map else await feishu.get_record(
+                config.T_COMPETITOR_POST, record_id,
+            )
+            if not record:
+                raise KeyError(record_id)
         except Exception as exc:
             raise EvidenceNotFoundError(f"竞品帖子不存在: {record_id}") from exc
         fields = record.get("fields") or {}
@@ -94,6 +129,13 @@ async def _validate_linked_records(
             raise EvidenceValidationError(f"竞品营销事件尚未确认: {record_id}")
         events.append(record)
     return posts, events
+
+
+def _next_ranking_version(activity_fields: dict, *, prefix: str, config_version: int) -> str:
+    current = ext(activity_fields.get("证据排序版本"))
+    match = re.fullmatch(r"(?:evidence|base)-v(\d+)", current)
+    current_number = int(match.group(1)) if match else 0
+    return f"{prefix}-v{max(int(config_version), current_number + 1)}"
 
 
 def build_config_target(
@@ -165,7 +207,8 @@ async def configure_evidence(
     lock = _ACTIVITY_LOCKS.setdefault(campaign_id, asyncio.Lock())
     async with lock:
         activity = await get_activity(campaign_id)
-        current = int((activity.get("fields") or {}).get("证据配置版本") or 0)
+        activity_fields = activity.get("fields") or {}
+        current = int(activity_fields.get("证据配置版本") or 0)
         if current != int(expected_config_version):
             raise EvidenceVersionConflict(f"证据配置版本冲突: current={current}")
 
@@ -200,7 +243,9 @@ async def configure_evidence(
         if mode in {MODE_REUSE, MODE_NONE}:
             target["证据快照时间"] = int(time.time() * 1000)
             prefix = "evidence" if mode == MODE_REUSE else "base"
-            target["证据排序版本"] = f"{prefix}-v{new_version}"
+            target["证据排序版本"] = _next_ranking_version(
+                activity_fields, prefix=prefix, config_version=new_version,
+            )
         try:
             await feishu.update_record(
                 config.T_LAUNCH_CAMPAIGN, activity["record_id"], target,

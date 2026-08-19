@@ -141,6 +141,67 @@ class LaunchEvidenceContractTests(unittest.TestCase):
         self.assertEqual(5, written["证据配置版本"])
         self.assertEqual(["post1"], written["关联竞品帖子"])
 
+    def test_ranking_version_never_regresses_when_config_counter_lags(self):
+        activity = {
+            "record_id": "act1",
+            "fields": {
+                "活动ID": "campaign-1", "证据配置版本": 1,
+                "证据排序版本": "evidence-v3",
+            },
+        }
+        post = {"record_id": "post1", "fields": {
+            "竞品品牌": "NYXI", "KOL平台ID": "UC-creator",
+        }}
+        with patch.object(launch_evidence.config, "LAUNCH_EVIDENCE_ENABLED", True), \
+             patch.object(launch_evidence.config, "T_LAUNCH_CAMPAIGN", "activities"), \
+             patch.object(launch_evidence.config, "T_COMPETITOR_POST", "posts"), \
+             patch.object(launch_evidence.feishu, "search_records", new=AsyncMock(return_value=[activity])), \
+             patch.object(launch_evidence.feishu, "get_record", new=AsyncMock(return_value=post)), \
+             patch.object(launch_evidence.feishu, "update_record", new=AsyncMock()) as update:
+            result = asyncio.run(launch_evidence.configure_evidence(
+                campaign_id="campaign-1", mode="引用历史证据", competitor_brand="NYXI",
+                post_record_ids=["post1"], expected_config_version=1,
+            ))
+
+        self.assertEqual("evidence-v4", result["ranking_version"])
+        self.assertEqual("evidence-v4", update.await_args.args[2]["证据排序版本"])
+
+    def test_large_reuse_validation_reads_post_table_once(self):
+        posts = [{"record_id": f"post{i}", "fields": {
+            "竞品品牌": "NYXI", "KOL平台ID": f"UC-{i}",
+        }} for i in range(101)]
+        with patch.object(launch_evidence.config, "T_COMPETITOR_POST", "posts"), \
+             patch.object(launch_evidence.feishu, "fetch_all_records", new=AsyncMock(return_value=posts)) as fetch, \
+             patch.object(launch_evidence.feishu, "get_record", new=AsyncMock()) as get:
+            validated, events = asyncio.run(launch_evidence._validate_linked_records(
+                competitor_brand="NYXI",
+                post_record_ids=[row["record_id"] for row in posts],
+                event_record_ids=[],
+            ))
+
+        self.assertEqual(101, len(validated))
+        self.assertEqual([], events)
+        fetch.assert_awaited_once()
+        get.assert_not_awaited()
+
+    def test_large_validation_falls_back_to_bounded_direct_reads_when_list_scope_is_empty(self):
+        post_ids = [f"post{i}" for i in range(101)]
+
+        async def fake_get(table_id, record_id):
+            return {"record_id": record_id, "fields": {
+                "竞品品牌": "NYXI", "KOL平台ID": f"UC-{record_id}",
+            }}
+
+        with patch.object(launch_evidence.config, "T_COMPETITOR_POST", "posts"), \
+             patch.object(launch_evidence.feishu, "fetch_all_records", new=AsyncMock(return_value=[])), \
+             patch.object(launch_evidence.feishu, "get_record", new=AsyncMock(side_effect=fake_get)) as get:
+            validated, _ = asyncio.run(launch_evidence._validate_linked_records(
+                competitor_brand="NYXI", post_record_ids=post_ids, event_record_ids=[],
+            ))
+
+        self.assertEqual(post_ids, [row["record_id"] for row in validated])
+        self.assertEqual(101, get.await_count)
+
     def test_reuse_accepts_nyxi_non_official_rule_inference(self):
         activity = {
             "record_id": "act1",

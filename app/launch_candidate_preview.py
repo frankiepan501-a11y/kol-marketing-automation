@@ -659,6 +659,20 @@ async def preview_candidates(
     now_ms = int(time.time() * 1000)
     candidates = []
     filtered_out = 0
+    evidence_index = (
+        launch_competitor_evidence.build_evidence_index(activity_ctx["competitor_posts"])
+        if activity_ctx and activity_ctx["competitor_evidence_applied"] and object_type == "KOL"
+        else None
+    )
+    evidence_coverage = (
+        launch_competitor_evidence.summarize_evidence_coverage(evidence_index, records)
+        if evidence_index else {
+            "linked_posts_total": 0, "valid_partner_posts": 0,
+            "official_excluded": 0, "invalid_excluded": 0,
+            "distinct_authors": 0, "matched_contacts": 0,
+            "matched_authors": 0, "unmatched_authors": 0,
+        }
+    )
 
     for record in records:
         fields = record.get("fields") or {}
@@ -698,10 +712,10 @@ async def preview_candidates(
                 market_check["email"] = check.get("email", "")
                 check = market_check
         evidence_rank = (
-            launch_competitor_evidence.rank_contact_evidence(
-                record, activity_ctx["competitor_posts"], base_score=score,
+            launch_competitor_evidence.rank_contact_evidence_from_index(
+                record, evidence_index, base_score=score,
             )
-            if activity_ctx and activity_ctx["competitor_evidence_applied"] and object_type == "KOL"
+            if evidence_index
             else {
                 "evidence_level": "无加分", "final_priority": score,
                 "long_term": False, "long_term_span_days": 0,
@@ -757,6 +771,7 @@ async def preview_candidates(
         "competitor_evidence_applied": (
             activity_ctx["competitor_evidence_applied"] if activity_ctx else False
         ),
+        "evidence_coverage": evidence_coverage,
         "summary": {
             "pool_records": len(records), "base_filter_excluded": filtered_out,
             "evaluated": len(candidates), "eligible_new_cold": counts["eligible_new_cold"],

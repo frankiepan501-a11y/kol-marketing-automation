@@ -153,6 +153,157 @@ def _p75_thresholds(posts: list[dict]) -> tuple[dict[str, float], dict[str, int]
     return thresholds, samples
 
 
+def _platform(fields: dict) -> str:
+    return _first(fields, ("主平台", "平台")).lower()
+
+
+def _creator_id(fields: dict, *, contact: bool) -> str:
+    names = (
+        ("YouTube频道ID", "平台creator_id", "creator_id", "作者ID", "频道ID", "KOL平台ID")
+        if contact else
+        ("KOL平台ID", "平台creator_id", "creator_id", "作者ID", "频道ID")
+    )
+    return _first(fields, names)
+
+
+def _profile_url(fields: dict, *, contact: bool) -> str:
+    names = (
+        ("主链接", "主页URL", "账号主页", "主页链接", "频道链接")
+        if contact else
+        ("KOL主页URL", "作者主页", "主页URL", "账号主页", "频道链接")
+    )
+    return normalize_url(_first(fields, names))
+
+
+def _handle(fields: dict, *, contact: bool) -> str:
+    names = (
+        ("账号Handle", "Handle", "账号名")
+        if contact else
+        ("KOL账号Handle", "KOL账号名", "作者Handle", "Handle", "作者账号")
+    )
+    return normalize_handle(_first(fields, names))
+
+
+def _post_author_key(post: dict) -> str:
+    fields = post.get("fields") or {}
+    platform = _platform(fields)
+    creator = _creator_id(fields, contact=False)
+    if platform and creator:
+        return f"{platform}|creator:{creator}"
+    url = _profile_url(fields, contact=False)
+    if platform and url:
+        return f"{platform}|url:{url}"
+    handle = _handle(fields, contact=False)
+    if platform and handle:
+        return f"{platform}|handle:{handle}"
+    linked = sorted(_ids(fields.get("关联KOL")))
+    if linked:
+        return f"kol_record:{linked[0]}"
+    return f"post:{post.get('record_id', '')}"
+
+
+def build_evidence_index(posts: list[dict]) -> dict:
+    """一次建立活动证据索引，避免每名候选重复扫描全部帖子。"""
+    thresholds, samples = _p75_thresholds(posts)
+    valid_posts = []
+    official_excluded = 0
+    invalid_excluded = 0
+    by_linked = defaultdict(list)
+    by_creator = defaultdict(list)
+    by_url = defaultdict(list)
+    by_handle = defaultdict(list)
+    author_keys = set()
+    author_by_post = {}
+
+    for post in posts:
+        fields = post.get("fields") or {}
+        if is_nyxi_official_post(fields):
+            official_excluded += 1
+            continue
+        if not _valid_post(fields):
+            invalid_excluded += 1
+            continue
+        valid_posts.append(post)
+        post_id = post.get("record_id", "")
+        author_key = _post_author_key(post)
+        author_keys.add(author_key)
+        author_by_post[post_id] = author_key
+        for linked_id in _ids(fields.get("关联KOL")):
+            by_linked[linked_id].append(post)
+        platform = _platform(fields)
+        creator = _creator_id(fields, contact=False)
+        url = _profile_url(fields, contact=False)
+        handle = _handle(fields, contact=False)
+        if platform and creator:
+            by_creator[(platform, creator)].append(post)
+        if platform and url:
+            by_url[(platform, url)].append(post)
+        if platform and handle:
+            by_handle[(platform, handle)].append(post)
+
+    return {
+        "linked_posts_total": len(posts),
+        "valid_posts": valid_posts,
+        "official_excluded": official_excluded,
+        "invalid_excluded": invalid_excluded,
+        "thresholds": thresholds,
+        "samples": samples,
+        "by_linked": by_linked,
+        "by_creator": by_creator,
+        "by_url": by_url,
+        "by_handle": by_handle,
+        "author_keys": author_keys,
+        "author_by_post": author_by_post,
+    }
+
+
+def _indexed_matches(contact: dict, index: dict) -> list[tuple[dict, str]]:
+    fields = contact.get("fields") or {}
+    platform = _platform(fields)
+    buckets = [
+        (index["by_linked"].get(contact.get("record_id", ""), []), "linked_kol"),
+        (index["by_creator"].get((platform, _creator_id(fields, contact=True)), []), "platform_creator_id"),
+        (index["by_url"].get((platform, _profile_url(fields, contact=True)), []), "profile_url"),
+        (index["by_handle"].get((platform, _handle(fields, contact=True)), []), "platform_handle"),
+    ]
+    matched = []
+    seen = set()
+    for posts, path in buckets:
+        for post in posts:
+            post_id = post.get("record_id", "")
+            if post_id in seen:
+                continue
+            seen.add(post_id)
+            matched.append((post, path))
+    return matched
+
+
+def summarize_evidence_coverage(index: dict, contacts: list[dict]) -> dict:
+    matched_contacts = 0
+    matched_authors = set()
+    for contact in contacts:
+        matches = _indexed_matches(contact, index)
+        if not matches:
+            continue
+        matched_contacts += 1
+        matched_authors.update(
+            index["author_by_post"].get(post.get("record_id", ""), "")
+            for post, _ in matches
+        )
+    matched_authors.discard("")
+    all_authors = set(index["author_keys"])
+    return {
+        "linked_posts_total": index["linked_posts_total"],
+        "valid_partner_posts": len(index["valid_posts"]),
+        "official_excluded": index["official_excluded"],
+        "invalid_excluded": index["invalid_excluded"],
+        "distinct_authors": len(all_authors),
+        "matched_contacts": matched_contacts,
+        "matched_authors": len(matched_authors),
+        "unmatched_authors": len(all_authors - matched_authors),
+    }
+
+
 def match_post_identity(contact: dict, post: dict) -> str:
     contact_id = contact.get("record_id", "")
     contact_fields = contact.get("fields") or {}
@@ -214,18 +365,13 @@ def identity_key(contact: dict, post: dict, path: str) -> str:
     return f"post:{post.get('record_id', '')}|unknown"
 
 
-def rank_contact_evidence(contact: dict, posts: list[dict], *, base_score: float) -> dict:
-    """只使用调用方传入的活动直接关联帖子，不扫描品牌的其他证据。"""
-    thresholds, samples = _p75_thresholds(posts)
+def rank_contact_evidence_from_index(contact: dict, index: dict, *, base_score: float) -> dict:
+    """使用已建立的活动证据索引为一名候选排序。"""
+    thresholds, samples = index["thresholds"], index["samples"]
     matched = []
     match_paths = []
-    for post in posts:
+    for post, path in _indexed_matches(contact, index):
         fields = post.get("fields") or {}
-        if not _valid_post(fields):
-            continue
-        path = match_post_identity(contact, post)
-        if not path:
-            continue
         metric_name, metric_value = _metric(fields)
         key = _group_key(fields)
         high = bool(
@@ -279,3 +425,10 @@ def rank_contact_evidence(contact: dict, posts: list[dict], *, base_score: float
         "p75_thresholds": thresholds,
         "p75_samples": samples,
     }
+
+
+def rank_contact_evidence(contact: dict, posts: list[dict], *, base_score: float) -> dict:
+    """兼容单条回放；批量预览应复用 build_evidence_index 的结果。"""
+    return rank_contact_evidence_from_index(
+        contact, build_evidence_index(posts), base_score=base_score,
+    )

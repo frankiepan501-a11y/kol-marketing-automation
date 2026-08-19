@@ -414,6 +414,8 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertEqual("A", result["candidates"][0]["evidence_level"])
         self.assertEqual("evidence-v3", result["ranking_version"])
         self.assertFalse(result["evidence_pending"])
+        self.assertEqual(8, result["evidence_coverage"]["valid_partner_posts"])
+        self.assertEqual(1, result["evidence_coverage"]["matched_contacts"])
         create_mock.assert_not_awaited()
         update_mock.assert_not_awaited()
 

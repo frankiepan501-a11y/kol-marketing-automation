@@ -148,6 +148,48 @@ class LaunchCompetitorEvidenceTests(unittest.TestCase):
             result["evidence_posts"][0]["post_url"],
         )
 
+    def test_indexed_rank_matches_legacy_rank_and_reports_coverage(self):
+        contacts = [{
+            "record_id": "kol1",
+            "fields": {
+                "主平台": "YouTube", "YouTube频道ID": "UC-one",
+                "账号名": "Creator One", "主链接": "https://youtube.com/@creatorone",
+            },
+        }]
+        posts = [
+            {"record_id": "post1", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL平台ID": "UC-one", "KOL账号Handle": "creatorone",
+                "KOL主页URL": "https://youtube.com/@creatorone", "曝光量": 100,
+            }},
+            {"record_id": "post2", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL平台ID": "UC-two", "KOL账号Handle": "creatortwo",
+                "KOL主页URL": "https://youtube.com/@creatortwo", "曝光量": 200,
+            }},
+            {"record_id": "official", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL平台ID": "UCIY4yC2qUCPcM7ws-xTARYg", "KOL账号Handle": "nyxigaming",
+                "曝光量": 999,
+            }},
+        ]
+
+        index = evidence.build_evidence_index(posts)
+        indexed = evidence.rank_contact_evidence_from_index(
+            contacts[0], index, base_score=80,
+        )
+        legacy = evidence.rank_contact_evidence(contacts[0], posts, base_score=80)
+        coverage = evidence.summarize_evidence_coverage(index, contacts)
+
+        self.assertEqual(legacy["matched_post_ids"], indexed["matched_post_ids"])
+        self.assertEqual(3, coverage["linked_posts_total"])
+        self.assertEqual(2, coverage["valid_partner_posts"])
+        self.assertEqual(1, coverage["official_excluded"])
+        self.assertEqual(2, coverage["distinct_authors"])
+        self.assertEqual(1, coverage["matched_contacts"])
+        self.assertEqual(1, coverage["matched_authors"])
+        self.assertEqual(1, coverage["unmatched_authors"])
+
 
 if __name__ == "__main__":
     unittest.main()
