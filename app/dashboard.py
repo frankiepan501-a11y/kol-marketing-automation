@@ -7,6 +7,8 @@ from .feishu import ext, xrid
 
 POSITIVE = {"感兴趣", "要报价"}
 NEGATIVE = {"委婉拒绝", "退订"}
+BJ_TZ = timezone(timedelta(hours=8))
+DASH_DAILY_RETENTION_DAYS = 30
 
 
 def score_band(s):
@@ -32,8 +34,110 @@ def multi_vals(f):
     return [str(f)]
 
 
+def _snapshot_day(value):
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000, BJ_TZ).date()
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=BJ_TZ)
+            return parsed.astimezone(BJ_TZ).date()
+        except ValueError:
+            return None
+    return None
+
+
+def plan_snapshot_retention(existing, now, daily_days=DASH_DAILY_RETENTION_DAYS):
+    """Keep 30 days of all dimensions; older history keeps weekly/monthly overview checkpoints."""
+    today = now.astimezone(BJ_TZ).date()
+    cutoff = today - timedelta(days=daily_days - 1)
+    dated = []
+    invalid = 0
+    for record in existing:
+        day = _snapshot_day((record.get("fields") or {}).get("统计日期"))
+        if day is None:
+            invalid += 1
+            continue
+        dated.append((record, day))
+
+    older_days = {day for _, day in dated if day < cutoff}
+    week_latest = {}
+    month_latest = {}
+    for day in older_days:
+        iso = day.isocalendar()
+        week_key = (iso.year, iso.week)
+        month_key = (day.year, day.month)
+        week_latest[week_key] = max(day, week_latest.get(week_key, day))
+        month_latest[month_key] = max(day, month_latest.get(month_key, day))
+    weekly_dates = set(week_latest.values())
+    monthly_dates = set(month_latest.values())
+
+    historical_delete_ids = []
+    today_delete_ids = []
+    kept_daily_detail = 0
+    kept_weekly_overview = 0
+    kept_monthly_overview = 0
+    for record, day in dated:
+        record_id = record.get("record_id")
+        if day == today:
+            if record_id:
+                today_delete_ids.append(record_id)
+            continue
+        if day >= cutoff:
+            kept_daily_detail += 1
+            continue
+        is_overview = ext((record.get("fields") or {}).get("维度类型")) == "总览"
+        keep_weekly = is_overview and day in weekly_dates
+        keep_monthly = is_overview and day in monthly_dates
+        if keep_weekly or keep_monthly:
+            kept_weekly_overview += int(keep_weekly)
+            kept_monthly_overview += int(keep_monthly and not keep_weekly)
+        elif record_id:
+            historical_delete_ids.append(record_id)
+    return {
+        "cutoff_date": cutoff.isoformat(),
+        "historical_delete_ids": historical_delete_ids,
+        "today_delete_ids": today_delete_ids,
+        "invalid_date_records": invalid,
+        "kept_daily_detail": kept_daily_detail,
+        "kept_weekly_overview": kept_weekly_overview,
+        "kept_monthly_overview": kept_monthly_overview,
+    }
+
+
+async def _delete_dashboard_records(record_ids):
+    for i in range(0, len(record_ids), 500):
+        await feishu.api("POST",
+            f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{config.T_DASH}/records/batch_delete",
+            {"records": record_ids[i:i+500]})
+
+
+async def cleanup_retention(commit=False):
+    """Preview or apply historical cleanup without replacing today's snapshot."""
+    now = datetime.now(BJ_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    existing = await feishu.fetch_all_records(config.T_DASH)
+    retention = plan_snapshot_retention(existing, now)
+    historical_ids = retention["historical_delete_ids"]
+    if commit:
+        await _delete_dashboard_records(historical_ids)
+    return {
+        "commit": commit,
+        "records_before": len(existing),
+        "cutoff_date": retention["cutoff_date"],
+        "planned_historical_delete": len(historical_ids),
+        "deleted": len(historical_ids) if commit else 0,
+        "expected_records_after": len(existing) - (len(historical_ids) if commit else 0),
+        "today_records_untouched": len(retention["today_delete_ids"]),
+        "invalid_date_records": retention["invalid_date_records"],
+        "kept_daily_detail": retention["kept_daily_detail"],
+        "kept_weekly_overview": retention["kept_weekly_overview"],
+        "kept_monthly_overview": retention["kept_monthly_overview"],
+    }
+
+
 async def run():
-    now = datetime.now(timezone(timedelta(hours=8))).replace(hour=0, minute=0, second=0, microsecond=0)
+    now = datetime.now(BJ_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     today_ms = int(now.timestamp() * 1000)
 
     drafts = await feishu.fetch_all_records(config.T_DRAFT)
@@ -198,16 +302,11 @@ async def run():
     # 全局对比
     add("全部", "总览", "全 KOL+编辑", "全部", enriched_kol + enriched_ed)
 
-    # 删今日旧快照
+    # 容量治理：近 30 天保留完整维度；更早仅保留每周/月最后一次的总览行。
+    # 先删历史冗余，再创建今日快照，最后删旧的今日快照；即使创建失败也不会丢掉今日旧快照。
     existing = await feishu.fetch_all_records(config.T_DASH)
-    del_ids = [r["record_id"] for r in existing
-               if isinstance(r["fields"].get("统计日期"), (int, float))
-               and abs(r["fields"]["统计日期"] - today_ms) < 86400000]
-    if del_ids:
-        for i in range(0, len(del_ids), 500):
-            await feishu.api("POST",
-                f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{config.T_DASH}/records/batch_delete",
-                {"records": del_ids[i:i+500]})
+    retention = plan_snapshot_retention(existing, now)
+    await _delete_dashboard_records(retention["historical_delete_ids"])
 
     # 写新快照
     records = [{"fields": s} for s in snapshots]
@@ -215,6 +314,16 @@ async def run():
         await feishu.api("POST",
             f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{config.T_DASH}/records/batch_create",
             {"records": records[i:i+500]})
+    await _delete_dashboard_records(retention["today_delete_ids"])
 
     return {"snapshots": len(snapshots), "kol_drafts": len(kol_drafts), "editor_drafts": len(editor_drafts),
-            "tasks_stat_written": task_written}
+            "tasks_stat_written": task_written,
+            "retention": {
+                "cutoff_date": retention["cutoff_date"],
+                "historical_deleted": len(retention["historical_delete_ids"]),
+                "today_replaced": len(retention["today_delete_ids"]),
+                "invalid_date_records": retention["invalid_date_records"],
+                "kept_daily_detail": retention["kept_daily_detail"],
+                "kept_weekly_overview": retention["kept_weekly_overview"],
+                "kept_monthly_overview": retention["kept_monthly_overview"],
+            }}

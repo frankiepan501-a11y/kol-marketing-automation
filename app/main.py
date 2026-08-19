@@ -1286,6 +1286,20 @@ async def run_dashboard(authorization: str = Header(default=""), async_mode: boo
         return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-1000:]}
 
 
+@app.post("/dashboard/retention")
+async def run_dashboard_retention(
+    authorization: str = Header(default=""), mode: str = "dry_run"
+):
+    """KOL 看板容量维护；默认只预览，显式 mode=commit 才删除已规划的历史冗余。"""
+    _check_auth(authorization)
+    if mode not in {"dry_run", "commit"}:
+        raise HTTPException(status_code=400, detail="mode must be dry_run or commit")
+    try:
+        return {"ok": True, **(await dashboard.cleanup_retention(commit=mode == "commit"))}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-1000:]}
+
+
 @app.post("/followup/generate")
 async def run_followup(authorization: str = Header(default=""), async_mode: bool = True):
     """每日 10:00 扫无回复草稿 → 生成 D+7 第2封 / D+14 第3封 → 调 reviewer.
