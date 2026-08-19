@@ -95,18 +95,87 @@ def _same_readback_value(actual, expected) -> bool:
     return ext(actual) == ext(expected)
 
 
+async def _verified_readback(table_id: str, record_id: str, expected: dict,
+                             retry_delays: tuple[float, ...] = (1, 2, 4)) -> dict:
+    """飞书写成功后偶发立即读到旧值；短暂重读后才判定冲突。"""
+    last_error: ParticipantManualReviewError | None = None
+    for attempt in range(len(retry_delays) + 1):
+        actual = await feishu.get_record(table_id, record_id)
+        try:
+            _assert_readback(actual, expected)
+            return actual
+        except ParticipantManualReviewError as exc:
+            last_error = exc
+            if attempt >= len(retry_delays):
+                raise
+            await asyncio.sleep(retry_delays[attempt])
+    raise last_error or ParticipantManualReviewError("参与记录回读失败")
+
+
+async def _update_and_verify(table_id: str, record_id: str, fields: dict) -> dict:
+    """先验证 PUT 的权威响应；旧 mock/旧封装无记录时再回退 GET。"""
+    updated = await feishu.update_record(table_id, record_id, fields)
+    if isinstance(updated, dict) and isinstance(updated.get("fields"), dict):
+        _assert_readback(updated, fields)
+        return updated
+    if isinstance(updated, dict) and (updated.get("record_id") or updated.get("id")) == record_id:
+        return {"record": updated, "_deferred_verification": True}
+    return await _verified_readback(table_id, record_id, fields)
+
+
+async def _update_and_confirm(table_id: str, record_id: str, fields: dict) -> dict:
+    """回滚/清理必须确认最终状态，不能把“API 已接受”当成已完成。"""
+    result = await _update_and_verify(table_id, record_id, fields)
+    if result.get("_deferred_verification"):
+        return await _verified_readback(table_id, record_id, fields)
+    return result
+
+
+async def _verify_deferred_batch(expected_records: list[tuple[str, dict]],
+                                 retry_delays: tuple[float, ...] = (5, 10, 20)) -> None:
+    last_error: ParticipantManualReviewError | None = None
+    for delay in retry_delays:
+        await asyncio.sleep(delay)
+        try:
+            for record_id, expected in expected_records:
+                actual = await feishu.get_record(config.T_LAUNCH_PARTICIPANT, record_id)
+                _assert_readback(actual, expected)
+            return
+        except ParticipantManualReviewError as exc:
+            last_error = exc
+    raise last_error or ParticipantManualReviewError("延迟批量回读失败")
+
+
 def _history(value) -> list[dict]:
     if not value:
         return []
     if isinstance(value, list):
-        return [x for x in value if isinstance(x, dict)]
+        snapshots = [
+            x for x in value
+            if isinstance(x, dict) and "ranking_version" in x
+        ]
+        if snapshots and len(snapshots) == len(value):
+            return snapshots
+        # 飞书文本字段在 search/get 中会返回 [{text,type}]，
+        # 这些是 JSON 文本片段，不是快照对象。
+        value = ext(value)
     try:
         parsed = json.loads(str(value))
     except (TypeError, ValueError, json.JSONDecodeError):
         raise ParticipantValidationError("排序快照历史不是有效 JSON")
     if not isinstance(parsed, list) or not all(isinstance(x, dict) for x in parsed):
         raise ParticipantValidationError("排序快照历史必须是 JSON 数组")
-    return parsed
+    normalized = []
+    for item in parsed:
+        if "ranking_version" in item:
+            normalized.append(item)
+            continue
+        nested_text = item.get("text")
+        if nested_text:
+            normalized.extend(_history(nested_text))
+    if parsed and not normalized:
+        raise ParticipantValidationError("排序快照历史缺少 ranking_version")
+    return normalized
 
 
 def _snapshot(candidate: dict, ranking_version: str) -> dict:
@@ -147,8 +216,13 @@ def _selection_reason(candidate: dict) -> str:
     return reason
 
 
+def _url_cell(value: str, label: str):
+    url = str(value or "").strip()
+    return {"link": url, "text": label} if url else None
+
+
 def _ranking_fields(candidate: dict, ranking_version: str) -> dict:
-    return {
+    fields = {
         "进入方式": (
             "同线程激活" if candidate.get("decision") == "reactivation_same_thread"
             else "新开发"
@@ -160,10 +234,36 @@ def _ranking_fields(candidate: dict, ranking_version: str) -> dict:
         "选择原因": _selection_reason(candidate),
         "排序版本": ranking_version,
     }
+    review_fields = {
+        "达人主页": _url_cell(candidate.get("profile_url"), "打开达人主页"),
+        "主平台快照": candidate.get("platform") or "",
+        "国家快照": candidate.get("country") or "",
+        "语言快照": candidate.get("language") or "",
+        "粉丝数快照": candidate.get("followers") or 0,
+        "内容与活跃摘要": candidate.get("content_summary") or "",
+        "历史关系与触达摘要": candidate.get("relationship_summary") or "",
+        "竞品证据摘要": candidate.get("evidence_summary") or "",
+        "主证据帖子": _url_cell(candidate.get("primary_evidence_url"), "打开主证据帖子"),
+        # 审核快照缺失必须 fail-closed；否则媒体人或字段漂移会被误标为系统通过。
+        "系统审核分流": candidate.get("review_route") or "KOL运营审核",
+        "系统审核说明": candidate.get("review_instruction") or "审核资料未生成，请补齐后再判断",
+        "审核结论": candidate.get("review_decision") or "待审核",
+        # 新排序版本重新生成结论时，旧人工签名不能继续挂在新结论上。
+        "审核原因": "",
+        "审核人": None,
+        "审核时间": None,
+    }
+    if candidate.get("content_updated_at"):
+        review_fields["内容数据更新时间"] = candidate["content_updated_at"]
+    fields.update(review_fields)
+    return fields
 
 
 def _with_snapshot(fields: dict, candidate: dict, ranking_version: str) -> str:
-    history = _history(fields.get("排序快照历史"))
+    by_version = {}
+    for item in _history(fields.get("排序快照历史")):
+        by_version[item.get("ranking_version")] = item
+    history = [item for version, item in by_version.items() if version != ranking_version]
     if len(history) >= 10:
         raise ParticipantValidationError("排序快照历史已达 10 个版本，需先人工归档")
     history.append(_snapshot(candidate, ranking_version))
@@ -301,6 +401,7 @@ async def lock_participants(
         changed_existing: list[tuple[dict, dict]] = []
         created_ids: list[str] = []
         selected_record_ids: list[str] = []
+        deferred_readbacks: list[tuple[str, dict]] = []
 
         # 先把整批业务规则和快照容量校验完，再做第一笔写入。
         # 这样后续某条业务校验失败时，不会让前面的联系人提前换版本。
@@ -319,8 +420,16 @@ async def lock_participants(
                         "参与记录ID", "参与状态", "名单版本", "锁定批次ID",
                         "取消原因代码", "排序快照历史", "进入方式", "基础评分快照",
                         "竞品证据等级", "关联竞品帖子", "最终优先级", "选择原因", "排序版本",
+                        "达人主页", "主平台快照", "国家快照", "语言快照", "粉丝数快照",
+                        "内容与活跃摘要", "内容数据更新时间", "历史关系与触达摘要",
+                        "竞品证据摘要", "主证据帖子", "系统审核分流", "系统审核说明",
+                        "审核结论", "审核原因", "审核人", "审核时间",
                     )
                 }
+                old["排序快照历史"] = json.dumps(
+                    _history(fields.get("排序快照历史")),
+                    ensure_ascii=False, separators=(",", ":"),
+                )
                 update = {
                     "参与记录ID": participant_key(
                         campaign_id, product_family_id, object_type, contact_id,
@@ -355,11 +464,11 @@ async def lock_participants(
             for action, contact_id, record, old, fields in prepared:
                 if action == "update":
                     changed_existing.append((record, old))
-                    await feishu.update_record(config.T_LAUNCH_PARTICIPANT, record["record_id"], fields)
-                    _assert_readback(
-                        await feishu.get_record(config.T_LAUNCH_PARTICIPANT, record["record_id"]),
-                        fields,
+                    write_result = await _update_and_verify(
+                        config.T_LAUNCH_PARTICIPANT, record["record_id"], fields,
                     )
+                    if write_result.get("_deferred_verification"):
+                        deferred_readbacks.append((record["record_id"], fields))
                     selected_record_ids.append(record["record_id"])
                 else:
                     unique_key = fields["参与记录ID"]
@@ -389,9 +498,8 @@ async def lock_participants(
                         record_id = matches[0]["record_id"]
                     created_ids.append(record_id)
                     selected_record_ids.append(record_id)
-                    _assert_readback(
-                        await feishu.get_record(config.T_LAUNCH_PARTICIPANT, record_id),
-                        fields,
+                    await _verified_readback(
+                        config.T_LAUNCH_PARTICIPANT, record_id, fields,
                     )
                     try:
                         matches = await _participants_by_unique_key(unique_key)
@@ -409,6 +517,9 @@ async def lock_participants(
                             "参与记录ID创建后唯一性回查失败",
                             pending_ids=match_ids or [f"key:{unique_key}"],
                         )
+
+            if deferred_readbacks:
+                await _verify_deferred_batch(deferred_readbacks)
 
             activity_commit_started = True
             await feishu.update_record(config.T_LAUNCH_CAMPAIGN, activity["record_id"], {
@@ -434,14 +545,14 @@ async def lock_participants(
                 rollback_failed = []
                 for record, old in reversed(changed_existing):
                     try:
-                        await feishu.update_record(
+                        await _update_and_confirm(
                             config.T_LAUNCH_PARTICIPANT, record["record_id"], old,
                         )
                     except Exception:
                         rollback_failed.append(record["record_id"])
                 for record_id in created_ids:
                     try:
-                        await feishu.update_record(config.T_LAUNCH_PARTICIPANT, record_id, {
+                        await _update_and_confirm(config.T_LAUNCH_PARTICIPANT, record_id, {
                             "参与状态": "已取消", "取消原因代码": "锁定失败",
                         })
                     except Exception:
@@ -476,7 +587,7 @@ async def lock_participants(
                     and ext(fields.get("名单版本")) == old_version
                     and ext(fields.get("参与状态")) in _PRE_OUTREACH_STATES
                 ):
-                    await feishu.update_record(config.T_LAUNCH_PARTICIPANT, record["record_id"], {
+                    await _update_and_confirm(config.T_LAUNCH_PARTICIPANT, record["record_id"], {
                         "参与状态": "已取消", "取消原因代码": "不再符合",
                     })
                     cancelled.append(record["record_id"])

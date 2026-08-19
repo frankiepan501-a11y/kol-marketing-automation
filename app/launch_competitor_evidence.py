@@ -7,7 +7,7 @@ import re
 from collections import defaultdict
 from urllib.parse import urlsplit, urlunsplit
 
-from .feishu import ext
+from .feishu import ext, ext_url
 
 
 MIN_P75_SAMPLE = 8
@@ -37,6 +37,14 @@ def _ids(value) -> set[str]:
 def _first(fields: dict, names: tuple[str, ...]) -> str:
     for name in names:
         value = ext(fields.get(name)).strip()
+        if value:
+            return value
+    return ""
+
+
+def _first_url(fields: dict, names: tuple[str, ...]) -> str:
+    for name in names:
+        value = ext_url(fields.get(name)).strip()
         if value:
             return value
     return ""
@@ -226,6 +234,8 @@ def rank_contact_evidence(contact: dict, posts: list[dict], *, base_score: float
         )
         matched.append({
             "post_id": post.get("record_id", ""),
+            "post_url": _first_url(fields, ("帖子URL", "内容链接", "视频链接")),
+            "post_title": _first(fields, ("帖子标题", "内容标题", "视频标题")),
             "platform": ext(fields.get("平台")),
             "content_type": ext(fields.get("内容类型")),
             "published_at": _timestamp(fields.get("发布时间")),

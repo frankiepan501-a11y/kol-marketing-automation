@@ -6,6 +6,81 @@ from app import launch_participation
 
 
 class LaunchParticipationTests(unittest.TestCase):
+    def test_readback_retries_feishu_eventual_consistency_before_blocking(self):
+        stale = {"fields": {"锁定批次ID": "old"}}
+        fresh = {"fields": {"锁定批次ID": "new"}}
+        with patch.object(
+            launch_participation.feishu, "get_record",
+            new=AsyncMock(side_effect=[stale, fresh]),
+        ) as get_mock, patch.object(
+            launch_participation.asyncio, "sleep", new=AsyncMock()
+        ) as sleep_mock:
+            actual = asyncio.run(launch_participation._verified_readback(
+                "participants", "part1", {"锁定批次ID": "new"},
+            ))
+
+        self.assertEqual(fresh, actual)
+        self.assertEqual(2, get_mock.await_count)
+        sleep_mock.assert_awaited_once()
+
+    def test_update_uses_authoritative_put_response_instead_of_stale_followup_get(self):
+        updated = {"record_id": "part1", "fields": {"锁定批次ID": "new"}}
+        with patch.object(
+            launch_participation.feishu, "update_record",
+            new=AsyncMock(return_value=updated),
+        ) as update_mock, patch.object(
+            launch_participation.feishu, "get_record", new=AsyncMock()
+        ) as get_mock:
+            actual = asyncio.run(launch_participation._update_and_verify(
+                "participants", "part1", {"锁定批次ID": "new"},
+            ))
+
+        self.assertEqual(updated, actual)
+        update_mock.assert_awaited_once()
+        get_mock.assert_not_awaited()
+
+    def test_partial_put_response_is_marked_for_deferred_batch_readback(self):
+        accepted = {"record_id": "part1"}
+        with patch.object(
+            launch_participation.feishu, "update_record",
+            new=AsyncMock(return_value=accepted),
+        ), patch.object(
+            launch_participation.feishu, "get_record", new=AsyncMock()
+        ) as get_mock:
+            actual = asyncio.run(launch_participation._update_and_verify(
+                "participants", "part1", {"锁定批次ID": "new"},
+            ))
+        self.assertTrue(actual["_deferred_verification"])
+        get_mock.assert_not_awaited()
+
+    def test_update_and_confirm_reads_back_accepted_response_before_returning(self):
+        accepted = {"record_id": "part1", "_deferred_verification": True}
+        fresh = {"record_id": "part1", "fields": {"参与状态": "已取消"}}
+        with patch.object(
+            launch_participation, "_update_and_verify", new=AsyncMock(return_value=accepted),
+        ), patch.object(
+            launch_participation, "_verified_readback", new=AsyncMock(return_value=fresh),
+        ) as readback_mock:
+            actual = asyncio.run(launch_participation._update_and_confirm(
+                "participants", "part1", {"参与状态": "已取消"},
+            ))
+
+        self.assertEqual(fresh, actual)
+        readback_mock.assert_awaited_once()
+
+    def test_deferred_batch_readback_waits_then_verifies_all_expected_fields(self):
+        fresh = {"record_id": "part1", "fields": {"锁定批次ID": "new"}}
+        with patch.object(
+            launch_participation.feishu, "get_record",
+            new=AsyncMock(return_value=fresh),
+        ), patch.object(
+            launch_participation.asyncio, "sleep", new=AsyncMock()
+        ) as sleep_mock:
+            asyncio.run(launch_participation._verify_deferred_batch([
+                ("part1", {"锁定批次ID": "new"}),
+            ]))
+        sleep_mock.assert_awaited_once_with(5)
+
     def test_readback_accepts_feishu_numeric_strings_for_numeric_fields(self):
         launch_participation._assert_readback(
             {"fields": {"基础评分快照": "84", "最终优先级": "3084.00", "零分": 0}},
@@ -47,6 +122,65 @@ class LaunchParticipationTests(unittest.TestCase):
         self.assertEqual(600, snapshot["p75_thresholds"]["YouTube|长视频"])
         self.assertTrue(snapshot["base_filter_passed"])
         self.assertEqual(["country_match", "language_match"], snapshot["base_filter_reasons"])
+
+    def test_history_parses_feishu_rich_text_segments_instead_of_treating_them_as_snapshots(self):
+        value = [{"text": '[{"ranking_version":"evidence-v1","final_priority":84}]',
+                  "type": "text"}]
+        history = launch_participation._history(value)
+        self.assertEqual(1, len(history))
+        self.assertEqual("evidence-v1", history[0]["ranking_version"])
+
+    def test_history_recovers_previously_nested_feishu_text_wrapper(self):
+        nested = '[{"text":"[{\\"ranking_version\\":\\"evidence-v1\\",\\"final_priority\\":84}]","type":"text"},{"ranking_version":"evidence-v2","final_priority":95}]'
+        history = launch_participation._history(nested)
+        self.assertEqual(["evidence-v1", "evidence-v2"], [
+            item["ranking_version"] for item in history
+        ])
+
+    def test_with_snapshot_replaces_same_ranking_version_instead_of_growing_forever(self):
+        existing = '[{"ranking_version":"evidence-v2","final_priority":80}]'
+        updated = launch_participation._with_snapshot(
+            {"排序快照历史": existing},
+            {"score": 90, "final_priority": 95, "evidence_level": "B"},
+            "evidence-v2",
+        )
+        parsed = launch_participation._history(updated)
+        self.assertEqual(1, len(parsed))
+        self.assertEqual(95, parsed[0]["final_priority"])
+
+    def test_ranking_fields_include_actionable_human_review_snapshot(self):
+        fields = launch_participation._ranking_fields({
+            "decision": "eligible_new_cold", "score": 84, "final_priority": 3084,
+            "evidence_level": "A", "matched_post_ids": ["post1"],
+            "profile_url": "https://youtube.com/@creator", "platform": "YouTube",
+            "country": "US", "language": "en", "followers": 100000,
+            "content_summary": "Controller review", "content_updated_at": 1_800_000_000_000,
+            "relationship_summary": "合作状态=未建联",
+            "evidence_summary": "NYXI证据1条",
+            "primary_evidence_url": "https://youtube.com/watch?v=nyxi",
+            "review_route": "KOL运营审核",
+            "review_instruction": "请打开主页确认内容适配性",
+            "review_decision": "待审核",
+        }, "evidence-v2")
+
+        self.assertEqual("https://youtube.com/@creator", fields["达人主页"]["link"])
+        self.assertEqual("KOL运营审核", fields["系统审核分流"])
+        self.assertEqual("待审核", fields["审核结论"])
+        self.assertIn("主页", fields["系统审核说明"])
+        self.assertEqual("https://youtube.com/watch?v=nyxi", fields["主证据帖子"]["link"])
+
+    def test_missing_review_snapshot_fails_closed_and_clears_old_audit_signature(self):
+        fields = launch_participation._ranking_fields({
+            "decision": "eligible_new_cold", "score": 84, "final_priority": 84,
+            "evidence_level": "无加分", "matched_post_ids": [],
+        }, "evidence-v2")
+
+        self.assertEqual("KOL运营审核", fields["系统审核分流"])
+        self.assertEqual("待审核", fields["审核结论"])
+        self.assertIn("未生成", fields["系统审核说明"])
+        self.assertEqual("", fields["审核原因"])
+        self.assertIsNone(fields["审核人"])
+        self.assertIsNone(fields["审核时间"])
 
     def test_full_replacement_cancels_omitted_kol_without_touching_media_version(self):
         activity = {

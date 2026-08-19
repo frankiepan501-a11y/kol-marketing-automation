@@ -32,7 +32,8 @@ PRODUCT_FIELDS = [
 KOL_FIELDS = [
     "账号名", "邮箱", "合作状态", "主平台", "国家", "语言", "粉丝数",
     "内容风格", "IP喜好", "合作竞品", "竞品帖子证据", "邮箱验真状态",
-    "YouTube频道ID", "主链接",
+    "YouTube频道ID", "主链接", "近期视频标题", "近期视频抓取时间",
+    "上次二次接触时间", "上稿日期", "上稿标题", "寄样次数", "KOL级别", "合作报价",
 ]
 EDITOR_FIELDS = [
     "媒体人姓名", "所属媒体", "主要媒体", "邮箱", "合作状态", "国家", "语言",
@@ -267,10 +268,20 @@ def precheck_contact(
     }
 
 
-def _base_filter_kol(fields: dict, product_fields: dict, mapping: dict) -> tuple[bool, list[str]]:
+def _base_filter_kol(
+    fields: dict, product_fields: dict, mapping: dict, *,
+    target_countries: set[str] | None = None,
+    target_languages: set[str] | None = None,
+) -> tuple[bool, list[str]]:
     reasons = []
-    countries = _parse_multiselect(product_fields.get("销售国家"))
-    languages = {lang for country in countries for lang in dispatch.COUNTRY_TO_LANGS.get(country, [])}
+    product_countries = _parse_multiselect(product_fields.get("销售国家"))
+    countries = (
+        set(target_countries) if target_countries is not None else product_countries
+    )
+    languages = (
+        set(target_languages) if target_languages is not None else
+        {lang for country in countries for lang in dispatch.COUNTRY_TO_LANGS.get(country, [])}
+    )
     language_iso = {"英语": "en", "德语": "de", "西班牙语": "es", "法语": "fr", "葡萄牙语": "pt"}
     languages = {language_iso.get(x, x) for x in languages}
     platforms = set(dispatch.CATEGORY_PLATFORMS.get(ext(product_fields.get("品类")), []))
@@ -280,10 +291,14 @@ def _base_filter_kol(fields: dict, product_fields: dict, mapping: dict) -> tuple
         fans = int(fields.get("粉丝数") or 0)
     except (TypeError, ValueError):
         fans = 0
-    if countries and ext(fields.get("国家")) not in countries:
-        reasons.append("国家不在销售市场")
-    if languages and ext(fields.get("语言")) not in languages:
-        reasons.append("语言不匹配")
+    if target_countries is not None and not countries:
+        reasons.append("活动目标国家未配置")
+    elif countries and ext(fields.get("国家")) not in countries:
+        reasons.append("国家不在活动目标市场" if target_countries else "国家不在销售市场")
+    if target_languages is not None and not languages:
+        reasons.append("活动目标语言未配置")
+    elif languages and ext(fields.get("语言")) not in languages:
+        reasons.append("语言不在活动目标范围" if target_languages else "语言不匹配")
     if platforms and ext(fields.get("主平台")) not in platforms:
         reasons.append("主平台不匹配")
     if fans < fans_min or (fans_max and fans > fans_max):
@@ -291,6 +306,126 @@ def _base_filter_kol(fields: dict, product_fields: dict, mapping: dict) -> tuple
     if expected_styles and not (_parse_multiselect(fields.get("内容风格")) & expected_styles):
         reasons.append("内容风格不匹配")
     return not reasons, reasons
+
+
+def _numeric(value) -> float:
+    try:
+        return float(str(value or 0).replace(",", "").replace("¥", "").replace("$", "").strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _timestamp_ms(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def build_review_snapshot(fields: dict, evidence_rank: dict, *, now_ms: int,
+                          precheck: dict | None = None) -> dict:
+    """生成运营可直接审核的快照和分流说明。"""
+    profile_url = feishu.ext_url(fields.get("主链接")).strip()
+    recent_titles = ext(fields.get("近期视频标题")).strip()
+    content_updated_at = _timestamp_ms(fields.get("近期视频抓取时间"))
+    language = ext(fields.get("语言")).strip()
+    coop = ext(fields.get("合作状态")).strip() or "未标记"
+    kol_level = ext(fields.get("KOL级别")).strip()
+    quote = _numeric(fields.get("合作报价"))
+    stale_cutoff = now_ms - 180 * 86_400_000
+
+    posts = sorted(
+        evidence_rank.get("evidence_posts") or [],
+        key=lambda post: (
+            not bool(post.get("is_high_performance")),
+            -_numeric(post.get("metric_value")),
+            -_timestamp_ms(post.get("published_at")),
+        ),
+    )
+    primary = posts[0] if posts else {}
+    primary_url = str(primary.get("post_url") or "").strip()
+    evidence_level = evidence_rank.get("evidence_level") or "无加分"
+    evidence_summary = f"等级={evidence_level}；命中帖子={len(posts)}条"
+    if posts:
+        evidence_summary += (
+            f"；主证据={primary.get('platform') or '未知平台'}"
+            f"/{primary.get('post_title') or primary.get('post_id') or '未命名'}"
+        )
+        if primary.get("metric_value") is not None:
+            evidence_summary += f"；{primary.get('metric_name') or '效果值'}={primary.get('metric_value')}"
+        evidence_summary += f"；归因依据={primary.get('evidence_basis') or '未标记'}"
+
+    relationship_parts = [
+        f"合作状态={coop}",
+        f"邮箱验真={ext(fields.get('邮箱验真状态')).strip() or '未验'}",
+    ]
+    if precheck:
+        relationship_parts.append(f"重复触达预检={precheck.get('decision') or '未知'}")
+    if kol_level:
+        relationship_parts.append(f"KOL级别={kol_level}")
+    if quote > 0:
+        relationship_parts.append(f"合作报价={quote:g}")
+    for label, field_name in (
+        ("寄样次数", "寄样次数"), ("历史上稿日期", "上稿日期"),
+        ("上次二次接触", "上次二次接触时间"),
+    ):
+        value = fields.get(field_name)
+        if value not in (None, "", 0):
+            relationship_parts.append(f"{label}={ext(value)}")
+
+    frankie_reasons = []
+    if "头部" in kol_level:
+        frankie_reasons.append("头部KOL")
+    if quote > 0:
+        frankie_reasons.append("已有合作报价，涉及预算取舍")
+    operator_reasons = []
+    if language in {"de", "es"}:
+        operator_reasons.append(f"辅助语言={language}，需确认实际内容语言")
+    if not profile_url:
+        operator_reasons.append("缺少可打开的达人主页")
+    if not recent_titles:
+        operator_reasons.append("缺少近期内容标题")
+    if not content_updated_at or content_updated_at < stale_cutoff:
+        operator_reasons.append("近期内容数据缺失或超过180天")
+    if coop in POSITIVE_RELATION_STATES:
+        operator_reasons.append(f"历史关系={coop}，需确认本次重新合作语境")
+    if precheck and precheck.get("decision") == "reactivation_same_thread":
+        operator_reasons.append("已命中历史触达/回复，需确认沿用原邮件线程的复联语境")
+
+    if frankie_reasons:
+        route = "Frankie例外审核"
+        decision = "待审核"
+        instruction = (
+            "请打开达人主页和主证据帖子，只判断是否值得使用例外预算/"
+            "重点关系：" + "；".join(frankie_reasons)
+        )
+    elif operator_reasons:
+        route = "KOL运营审核"
+        decision = "待审核"
+        instruction = (
+            "请打开达人主页，确认近3个月仍以游戏硬件/手柄内容为主，"
+            "内容语言符合本次活动，且没有明显品牌冲突。待确认点：" + "；".join(operator_reasons)
+        )
+    else:
+        route = "系统建议通过"
+        decision = "通过"
+        instruction = (
+            "系统已检查活动国家/语言、平台、粉丝量级、内容风格、邮箱和全局重复触达；"
+            "无需逐条人工审核，可抽检。"
+        )
+
+    return {
+        "profile_url": profile_url,
+        "followers": int(_numeric(fields.get("粉丝数"))),
+        "content_summary": recent_titles[:1000],
+        "content_updated_at": content_updated_at,
+        "relationship_summary": "；".join(relationship_parts)[:1000],
+        "evidence_summary": evidence_summary[:1000],
+        "primary_evidence_url": primary_url,
+        "review_route": route,
+        "review_instruction": instruction[:1000],
+        "review_decision": decision,
+    }
 
 
 def _candidate_name(fields: dict, object_type: str) -> str:
@@ -332,6 +467,19 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
     post_ids = sorted(_link_ids(fields.get("关联竞品帖子")))
     event_ids = sorted(_link_ids(fields.get("关联竞品营销事件")))
     ranking_version = ext(fields.get("证据排序版本"))
+    # A legacy activity may predate these fields entirely.  Preserve the old
+    # product-level scope in that case, but fail closed when a current activity
+    # explicitly contains an empty target field.
+    target_countries = (
+        _parse_multiselect(fields.get("活动目标国家"))
+        if "活动目标国家" in fields
+        else None
+    )
+    target_languages = (
+        _parse_multiselect(fields.get("活动目标语言"))
+        if "活动目标语言" in fields
+        else None
+    )
     evidence_pending = bool(
         not mode or status == "配置无效"
         or (mode == launch_evidence.MODE_NEW and status != "已就绪")
@@ -381,6 +529,8 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
         "competitor_posts": posts if applicable else [],
         "competitor_evidence_applied": applicable,
         "evidence_error": evidence_error,
+        "target_countries": target_countries,
+        "target_languages": target_languages,
     }
 
 
@@ -446,7 +596,11 @@ async def preview_candidates(
     for record in records:
         fields = record.get("fields") or {}
         if object_type == "KOL":
-            matched, filter_reasons = _base_filter_kol(fields, product_fields, ctx["mapping"])
+            matched, filter_reasons = _base_filter_kol(
+                fields, product_fields, ctx["mapping"],
+                target_countries=(activity_ctx or {}).get("target_countries"),
+                target_languages=(activity_ctx or {}).get("target_languages"),
+            )
             if not matched:
                 filtered_out += 1
                 continue
@@ -482,6 +636,10 @@ async def preview_candidates(
                 "p75_thresholds": {}, "p75_samples": {},
             }
         )
+        review_snapshot = (
+            build_review_snapshot(fields, evidence_rank, now_ms=now_ms, precheck=check)
+            if object_type == "KOL" else {}
+        )
         candidates.append({
             "contact_id": record.get("record_id", ""),
             "name": _candidate_name(fields, object_type),
@@ -491,7 +649,7 @@ async def preview_candidates(
             "score": score, "breakdown": breakdown,
             "competitor_signal": (ext(fields.get("合作竞品"))[:300] if object_type == "KOL" else ""),
             "competitor_evidence": (ext(fields.get("竞品帖子证据"))[:500] if object_type == "KOL" else ""),
-            **check, **evidence_rank,
+            **check, **evidence_rank, **review_snapshot,
         })
 
     decision_order = {
@@ -518,6 +676,8 @@ async def preview_candidates(
         "evidence_status": activity_ctx["evidence_status"] if activity_ctx else "",
         "evidence_pending": activity_ctx["evidence_pending"] if activity_ctx else False,
         "ranking_version": activity_ctx["ranking_version"] if activity_ctx else "",
+        "target_countries": sorted(activity_ctx["target_countries"] or []) if activity_ctx else [],
+        "target_languages": sorted(activity_ctx["target_languages"] or []) if activity_ctx else [],
         "competitor_evidence_applied": (
             activity_ctx["competitor_evidence_applied"] if activity_ctx else False
         ),
@@ -556,7 +716,11 @@ async def replay_candidate(
     product_fields = family["target"].get("fields") or {}
     fields = record.get("fields") or {}
     if object_type == "KOL":
-        matched, filter_reasons = _base_filter_kol(fields, product_fields, ctx["mapping"])
+        matched, filter_reasons = _base_filter_kol(
+            fields, product_fields, ctx["mapping"],
+            target_countries=(activity_ctx or {}).get("target_countries"),
+            target_languages=(activity_ctx or {}).get("target_languages"),
+        )
     else:
         matched, filter_reasons = True, []
     check = precheck_contact(
@@ -586,6 +750,10 @@ async def replay_candidate(
               "identity_paths": [], "stable_identity_keys": [],
               "matched_post_ids": [], "evidence_posts": []}
     )
+    review_snapshot = (
+        build_review_snapshot(fields, evidence_rank, now_ms=int(time.time() * 1000), precheck=check)
+        if object_type == "KOL" else {}
+    )
     locked_snapshot = None
     if activity_ctx:
         locked_version_field = (
@@ -611,6 +779,6 @@ async def replay_candidate(
         "candidate": {
             "contact_id": contact_id, "name": _candidate_name(fields, object_type),
             "base_filter_passed": matched, "base_filter_reasons": filter_reasons,
-            **check, **evidence_rank,
+            **check, **evidence_rank, **review_snapshot,
         },
     }

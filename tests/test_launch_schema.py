@@ -39,6 +39,20 @@ class LaunchSchemaTests(unittest.TestCase):
         self.assertEqual("参与记录ID", schema.PARTICIPANT_FIELDS[0]["field_name"])
         self.assertEqual(1, schema.PARTICIPANT_FIELDS[0]["type"])
 
+    def test_activity_schema_has_campaign_specific_market_scope(self):
+        by_name = {field["field_name"]: field for field in schema.ACTIVITY_FIELDS}
+        self.assertEqual(4, by_name["活动目标国家"]["type"])
+        self.assertEqual(4, by_name["活动目标语言"]["type"])
+
+    def test_participant_schema_has_actionable_review_fields(self):
+        names = {field["field_name"] for field in schema.PARTICIPANT_FIELDS}
+        self.assertTrue({
+            "达人主页", "主平台快照", "国家快照", "语言快照", "粉丝数快照",
+            "内容与活跃摘要", "内容数据更新时间", "历史关系与触达摘要",
+            "竞品证据摘要", "主证据帖子", "系统审核分流", "系统审核说明",
+            "审核结论", "审核原因", "审核人", "审核时间",
+        }.issubset(names))
+
     def test_participant_relation_cardinality_uses_base_v3_default(self):
         by_name = {field["field_name"]: field for field in schema.PARTICIPANT_FIELDS}
         for name in ("关联活动", "关联KOL", "关联媒体人"):

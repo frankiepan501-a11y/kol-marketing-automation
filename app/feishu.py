@@ -253,8 +253,12 @@ async def get_record(table_id: str, record_id: str):
 
 
 async def update_record(table_id: str, record_id: str, fields: dict):
-    await api("PUT", f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records/{record_id}",
-              {"fields": fields})
+    r = await api("PUT", f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records/{record_id}",
+                  {"fields": fields})
+    record = (r.get("data") or {}).get("record")
+    # 大文本/多字段更新偶发 code=0 但不回传 record；保留“已接受”
+    # 事实给上层做整批延迟回读，不把成功响应误当成无响应。
+    return record or {"record_id": record_id, "_accepted_without_record": True}
 
 
 async def create_record(table_id: str, fields: dict):

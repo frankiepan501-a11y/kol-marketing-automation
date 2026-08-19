@@ -127,6 +127,27 @@ class LaunchCompetitorEvidenceTests(unittest.TestCase):
         self.assertEqual("C", result["evidence_level"])
         self.assertEqual("rule_inferred_non_official", result["evidence_posts"][0]["evidence_basis"])
 
+    def test_rank_output_uses_url_link_instead_of_display_text(self):
+        contact = {
+            "record_id": "kol1",
+            "fields": {"主平台": "YouTube", "YouTube频道ID": "UC-creator"},
+        }
+        post = {
+            "record_id": "post1",
+            "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "曝光量": 1000, "KOL平台ID": "UC-creator",
+                "帖子URL": {"text": "查看帖子", "link": "https://youtube.com/watch?v=post1"},
+            },
+        }
+
+        result = evidence.rank_contact_evidence(contact, [post], base_score=80)
+
+        self.assertEqual(
+            "https://youtube.com/watch?v=post1",
+            result["evidence_posts"][0]["post_url"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

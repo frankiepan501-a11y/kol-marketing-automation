@@ -45,6 +45,11 @@ def select(name, options):
             "property": {"options": [{"name": value} for value in options]}}
 
 
+def multiselect(name, options):
+    return {"field_name": name, "type": 4,
+            "property": {"options": [{"name": value} for value in options]}}
+
+
 def datetime_field(name):
     return {"field_name": name, "type": 5}
 
@@ -57,6 +62,10 @@ def url(name):
     return {"field_name": name, "type": 15}
 
 
+def person(name):
+    return {"field_name": name, "type": 11, "property": {"multiple": False}}
+
+
 def relation(name, table_id):
     # Base v3 创建关联字段时不接受 legacy `multiple` 参数。
     return {"field_name": name, "type": 18,
@@ -65,6 +74,8 @@ def relation(name, table_id):
 
 ACTIVITY_FIELDS = [
     text("产品主记录ID"),
+    multiselect("活动目标国家", ["US", "UK", "DE", "FR", "ES", "IT", "NL", "SE", "PT", "CA", "AU", "BR"]),
+    multiselect("活动目标语言", ["en", "de", "es", "fr", "it", "nl", "sv", "pt"]),
     select("竞品证据模式", ["发起新分析", "引用历史证据", "不使用竞品证据"]),
     select("竞品分析状态", ["不适用", "待分析", "分析中", "待人工确认", "已就绪", "失败", "配置无效"]),
     text("竞品品牌"),
@@ -107,6 +118,13 @@ PARTICIPANT_FIELDS = [
     relation("关联邮件草稿", T_DRAFT),
     datetime_field("计划上稿时间"), datetime_field("承诺上稿时间"),
     datetime_field("实际上稿时间"), url("上稿链接"),
+    url("达人主页"), text("主平台快照"), text("国家快照"), text("语言快照"),
+    number("粉丝数快照"), text("内容与活跃摘要"), datetime_field("内容数据更新时间"),
+    text("历史关系与触达摘要"), text("竞品证据摘要"), url("主证据帖子"),
+    select("系统审核分流", ["系统建议通过", "KOL运营审核", "Frankie例外审核", "自动排除"]),
+    text("系统审核说明"),
+    select("审核结论", ["待审核", "通过", "待补资料", "排除"]),
+    text("审核原因"), person("审核人"), datetime_field("审核时间"),
 ]
 
 

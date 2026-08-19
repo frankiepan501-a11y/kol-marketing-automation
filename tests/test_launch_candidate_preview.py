@@ -6,6 +6,113 @@ from app import launch_candidate_preview as preview
 
 
 class LaunchCandidatePreviewTests(unittest.TestCase):
+    def test_activity_market_and_language_override_broader_product_scope(self):
+        product_fields = {
+            "品类": "手柄", "报价(USD)": 49.99,
+            "销售国家": ["US", "UK", "DE", "ES", "BR"],
+        }
+        mapping = {"expected_styles": ["手柄评测"]}
+        brazil = {
+            "国家": "BR", "语言": "pt", "主平台": "YouTube",
+            "粉丝数": 100000, "内容风格": ["手柄评测"],
+        }
+        usa = dict(brazil, **{"国家": "US", "语言": "en"})
+
+        matched_br, reasons_br = preview._base_filter_kol(
+            brazil, product_fields, mapping,
+            target_countries={"US", "UK", "DE", "ES"},
+            target_languages={"en", "de", "es"},
+        )
+        matched_us, reasons_us = preview._base_filter_kol(
+            usa, product_fields, mapping,
+            target_countries={"US", "UK", "DE", "ES"},
+            target_languages={"en", "de", "es"},
+        )
+
+        self.assertFalse(matched_br)
+        self.assertIn("国家不在活动目标市场", reasons_br)
+        self.assertIn("语言不在活动目标范围", reasons_br)
+        self.assertTrue(matched_us)
+        self.assertEqual([], reasons_us)
+
+    def test_empty_campaign_market_scope_fails_closed_instead_of_using_product_scope(self):
+        matched, reasons = preview._base_filter_kol(
+            {
+                "国家": "BR", "语言": "pt", "主平台": "YouTube",
+                "粉丝数": 100000, "内容风格": ["手柄评测"],
+            },
+            {
+                "品类": "手柄", "报价(USD)": 49.99,
+                "销售国家": ["US", "BR"],
+            },
+            {"expected_styles": ["手柄评测"]},
+            target_countries=set(), target_languages=set(),
+        )
+
+        self.assertFalse(matched)
+        self.assertIn("活动目标国家未配置", reasons)
+        self.assertIn("活动目标语言未配置", reasons)
+
+    def test_review_snapshot_routes_head_kol_to_frankie_with_actionable_evidence(self):
+        fields = {
+            "主链接": {"link": "https://youtube.com/@creator"},
+            "主平台": "YouTube", "国家": "US", "语言": "en",
+            "粉丝数": 900000, "内容风格": ["手柄评测"],
+            "近期视频标题": "Dave the Diver controller review\nBest Switch controllers",
+            "近期视频抓取时间": 1_800_000_000_000,
+            "合作状态": "未建联", "邮箱验真状态": "有效",
+            "KOL级别": "头部KOL", "合作报价": 1200,
+        }
+        evidence = {
+            "evidence_level": "A",
+            "evidence_posts": [{
+                "post_id": "post1", "post_url": "https://youtube.com/watch?v=nyxi",
+                "post_title": "NYXI controller review", "platform": "YouTube",
+                "metric_name": "曝光量", "metric_value": 200000,
+                "is_high_performance": True, "evidence_basis": "rule_inferred_non_official",
+            }],
+        }
+
+        snapshot = preview.build_review_snapshot(fields, evidence, now_ms=1_800_000_100_000)
+
+        self.assertEqual("Frankie例外审核", snapshot["review_route"])
+        self.assertEqual("待审核", snapshot["review_decision"])
+        self.assertEqual("https://youtube.com/@creator", snapshot["profile_url"])
+        self.assertEqual("https://youtube.com/watch?v=nyxi", snapshot["primary_evidence_url"])
+        self.assertIn("头部KOL", snapshot["review_instruction"])
+        self.assertIn("合作报价", snapshot["relationship_summary"])
+
+    def test_review_snapshot_system_passes_complete_ordinary_candidate(self):
+        fields = {
+            "主链接": "https://youtube.com/@ordinary", "主平台": "YouTube",
+            "国家": "US", "语言": "en", "粉丝数": 120000,
+            "内容风格": ["手柄评测"], "近期视频标题": "Controller review",
+            "近期视频抓取时间": 1_800_000_000_000,
+            "合作状态": "未建联", "邮箱验真状态": "有效",
+        }
+        snapshot = preview.build_review_snapshot(
+            fields, {"evidence_level": "无加分", "evidence_posts": []},
+            now_ms=1_800_000_100_000,
+        )
+        self.assertEqual("系统建议通过", snapshot["review_route"])
+        self.assertEqual("通过", snapshot["review_decision"])
+
+    def test_reactivation_is_operator_boundary_even_when_main_status_is_not_positive(self):
+        fields = {
+            "主链接": "https://youtube.com/@reactivate", "主平台": "YouTube",
+            "国家": "UK", "语言": "en", "粉丝数": 120000,
+            "近期视频标题": "Controller review",
+            "近期视频抓取时间": 1_800_000_000_000,
+            "合作状态": "建联中", "邮箱验真状态": "有效",
+        }
+        snapshot = preview.build_review_snapshot(
+            fields, {"evidence_level": "无加分", "evidence_posts": []},
+            now_ms=1_800_000_100_000,
+            precheck={"decision": "reactivation_same_thread"},
+        )
+        self.assertEqual("KOL运营审核", snapshot["review_route"])
+        self.assertIn("原邮件线程", snapshot["review_instruction"])
+
     def test_locked_replay_uses_snapshot_from_current_participant_version(self):
         rows = [{"record_id": "part1", "fields": {
             "活动ID": "c1", "产品家族ID": "p1", "对象类型": "KOL",
