@@ -97,8 +97,13 @@ def _product_identity_present(raw_text: str, rules: dict) -> bool:
     if exact and exact in text:
         return True
     ip_ok = any(marker.lower() in text for marker in rules.get("ip_markers") or [])
-    keyword_hits = sum(1 for token in rules.get("keyword_tokens") or [] if token in text)
-    return ip_ok and keyword_hits >= 2
+    keyword_tokens = rules.get("keyword_tokens") or []
+    keyword_hits = sum(1 for token in keyword_tokens if token in text)
+    # Some valid product keywords collapse to one distinctive token after generic
+    # words (Switch/controller/dock/etc.) are removed. Requiring two hits made
+    # those products impossible to validate even when the licensed IP matched.
+    required_hits = min(2, len(keyword_tokens))
+    return bool(ip_ok and required_hits and keyword_hits >= required_hits)
 
 
 def build_test_email(product: dict, draft: dict, brand: str, run_key: str) -> dict:

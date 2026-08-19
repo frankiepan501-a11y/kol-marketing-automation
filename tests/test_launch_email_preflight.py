@@ -73,6 +73,19 @@ class LaunchEmailPreflightTests(unittest.TestCase):
         )
         self.assertFalse(generic["checks"]["product_identity_present"])
 
+    def test_product_identity_allows_one_remaining_distinctive_keyword(self):
+        rules = {
+            "exact_name": "FUNLAB Luminex Dave THE DIVER Edition - Switch 2 Pro Controller",
+            "ip_markers": ["Dave the Diver"],
+            "keyword_tokens": ["pro"],
+        }
+        self.assertTrue(preflight._product_identity_present(
+            "Official Dave the Diver Pro Controller with charging dock.", rules
+        ))
+        self.assertFalse(preflight._product_identity_present(
+            "Official Dave the Diver collectible with charging dock.", rules
+        ))
+
     def test_send_and_validate_is_test_only_and_writes_no_bitable_rows(self):
         product = {
             "record_id": "product1",
