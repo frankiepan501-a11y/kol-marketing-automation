@@ -268,8 +268,10 @@ def run(*, commit: bool) -> dict:
     if len(nyxi) != 3423 or len(official) != 435 or len(partner) != 2988:
         raise RuntimeError("NYXI 证据数量与已审定口径不一致，停止写入")
 
+    partner_ids = [row["record_id"] for row in partner]
+    expected_event_ids = link_ids(fields.get("关联竞品营销事件"))
     body = {"fields": activity_write_fields(
-        fields, [row["record_id"] for row in partner],
+        fields, partner_ids,
         snapshot_ms=int(time.time() * 1000),
     )}
     rollback = {"fields": restore_fields(fields)}
@@ -277,16 +279,21 @@ def run(*, commit: bool) -> dict:
     lark(["api", "PUT", path, "--data", "-"], stdin=json.dumps(body, ensure_ascii=False))
     try:
         readback = get_activity().get("fields") or {}
+        written_post_ids = link_ids(readback.get("关联竞品帖子"))
+        written_event_ids = link_ids(readback.get("关联竞品营销事件"))
         result.update({
             "dry_run": False,
             "written_ranking_version": first(readback.get("证据排序版本")),
             "written_config_version": int(readback.get("证据配置版本") or 0),
-            "written_linked_posts": len(link_ids(readback.get("关联竞品帖子"))),
+            "written_linked_posts": len(written_post_ids),
+            "written_linked_events": len(written_event_ids),
         })
         if (
             result["written_ranking_version"] != "evidence-v4"
             or result["written_config_version"] != 2
-            or result["written_linked_posts"] != 2988
+            or len(written_post_ids) != 2988
+            or set(written_post_ids) != set(partner_ids)
+            or set(written_event_ids) != set(expected_event_ids)
         ):
             raise RuntimeError("写入后回读校验失败")
     except Exception as write_error:
@@ -295,7 +302,8 @@ def run(*, commit: bool) -> dict:
         rollback_ok = (
             int(restored.get("证据配置版本") or 0) == rollback["fields"]["证据配置版本"]
             and first(restored.get("证据排序版本")) == rollback["fields"]["证据排序版本"]
-            and len(link_ids(restored.get("关联竞品帖子"))) == len(rollback["fields"]["关联竞品帖子"])
+            and set(link_ids(restored.get("关联竞品帖子"))) == set(rollback["fields"]["关联竞品帖子"])
+            and set(link_ids(restored.get("关联竞品营销事件"))) == set(rollback["fields"]["关联竞品营销事件"])
         )
         if not rollback_ok:
             raise RuntimeError("全证据写入失败，且自动恢复后的二次回读也未通过") from write_error
