@@ -119,6 +119,29 @@ def diff_fields(existing: list[dict], desired: list[dict]) -> dict:
                 "expected_type": definition.get("type"),
                 "actual_type": current.get("type"),
             })
+        elif definition.get("type") == 18 and (
+            (current.get("property") or {}).get("table_id")
+            != (definition.get("property") or {}).get("table_id")
+            or bool((current.get("property") or {}).get("multiple"))
+            != bool((definition.get("property") or {}).get("multiple"))
+        ):
+            conflicts.append({
+                "field_name": definition["field_name"],
+                "expected_type": definition.get("type"),
+                "actual_type": current.get("type"),
+                "reason": "关联目标表或是否多选不一致",
+            })
+        elif definition.get("type") == 3 and not {
+            option.get("name") for option in (definition.get("property") or {}).get("options") or []
+        }.issubset({
+            option.get("name") for option in (current.get("property") or {}).get("options") or []
+        }):
+            conflicts.append({
+                "field_name": definition["field_name"],
+                "expected_type": definition.get("type"),
+                "actual_type": current.get("type"),
+                "reason": "单选选项不完整",
+            })
         else:
             reused.append(definition["field_name"])
     return {"missing": missing, "reused": reused, "conflicts": conflicts}
@@ -131,6 +154,14 @@ def validate_no_conflicts(diffs: dict[str, dict]) -> None:
     ]
     if conflicts:
         raise SchemaConflict("同名字段类型冲突: " + json.dumps(conflicts, ensure_ascii=False))
+
+
+def validate_participant_primary(fields: list[dict]) -> None:
+    if not fields:
+        return
+    primary = next((field for field in fields if field.get("is_primary")), None)
+    if not primary or primary.get("field_name") != "参与记录ID" or primary.get("type") != 1:
+        raise SchemaConflict("参与表主字段必须是文本字段「参与记录ID」")
 
 
 class Client:
@@ -203,6 +234,7 @@ async def run(*, commit=False, verify_only=False):
     activity_existing = await list_fields(client, config.T_LAUNCH_CAMPAIGN)
     node_existing = await list_fields(client, config.T_LAUNCH_NODE)
     participant_existing = await list_fields(client, participant_id) if participant_id else []
+    validate_participant_primary(participant_existing)
     diffs = {
         "activity": diff_fields(activity_existing, ACTIVITY_FIELDS),
         "node": diff_fields(node_existing, NODE_FIELDS),
@@ -256,15 +288,28 @@ async def run(*, commit=False, verify_only=False):
                 "POST", f"/bitable/v1/apps/{APP_TOKEN}/tables/{participant_id}/fields", definition,
             )
 
+    verified_fields = {
+        "activity": await list_fields(client, config.T_LAUNCH_CAMPAIGN),
+        "node": await list_fields(client, config.T_LAUNCH_NODE),
+        "participant": await list_fields(client, participant_id),
+    }
+    validate_participant_primary(verified_fields["participant"])
     verified_diffs = {
-        "activity": diff_fields(await list_fields(client, config.T_LAUNCH_CAMPAIGN), ACTIVITY_FIELDS),
-        "node": diff_fields(await list_fields(client, config.T_LAUNCH_NODE), NODE_FIELDS),
-        "participant": diff_fields(await list_fields(client, participant_id), PARTICIPANT_FIELDS),
+        "activity": diff_fields(verified_fields["activity"], ACTIVITY_FIELDS),
+        "node": diff_fields(verified_fields["node"], NODE_FIELDS),
+        "participant": diff_fields(verified_fields["participant"], PARTICIPANT_FIELDS),
     }
     validate_no_conflicts(verified_diffs)
     if any(diff["missing"] for diff in verified_diffs.values()):
         raise RuntimeError("写后回读仍缺字段")
-    result.update({"participant_table_id": participant_id, "verified": True})
+    result.update({
+        "participant_table_id": participant_id,
+        "verified": True,
+        "verified_field_ids": {
+            table: {field.get("field_name"): field.get("field_id") for field in fields}
+            for table, fields in verified_fields.items()
+        },
+    })
     return result
 
 

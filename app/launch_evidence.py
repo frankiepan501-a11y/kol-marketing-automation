@@ -87,7 +87,10 @@ async def _validate_linked_records(
         fields = record.get("fields") or {}
         if _record_brand(fields).upper() != competitor_brand.upper():
             raise EvidenceValidationError(f"竞品营销事件品牌不匹配: {record_id}")
-        if ext(fields.get("人工复核状态")) != "已确认":
+        event_review_status = (
+            ext(fields.get("人工确认状态")) or ext(fields.get("人工复核状态"))
+        )
+        if event_review_status != "已确认":
             raise EvidenceValidationError(f"竞品营销事件尚未确认: {record_id}")
         events.append(record)
     return posts, events

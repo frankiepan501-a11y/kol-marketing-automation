@@ -31,6 +31,20 @@ class LaunchSchemaTests(unittest.TestCase):
         self.assertEqual("参与记录ID", schema.PARTICIPANT_FIELDS[0]["field_name"])
         self.assertEqual(1, schema.PARTICIPANT_FIELDS[0]["type"])
 
+    def test_existing_participant_table_rejects_wrong_primary(self):
+        with self.assertRaises(schema.SchemaConflict):
+            schema.validate_participant_primary([
+                {"field_name": "记录名称", "type": 1, "is_primary": True},
+                {"field_name": "参与记录ID", "type": 1, "is_primary": False},
+            ])
+
+    def test_relation_target_drift_is_a_conflict(self):
+        desired = [schema.relation("关联活动", "expected", multiple=False)]
+        current = [{"field_name": "关联活动", "type": 18,
+                    "property": {"table_id": "wrong", "multiple": False}}]
+        diff = schema.diff_fields(current, desired)
+        self.assertEqual("关联目标表或是否多选不一致", diff["conflicts"][0]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
