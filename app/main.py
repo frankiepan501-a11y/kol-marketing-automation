@@ -39,6 +39,8 @@ _B2B_AUTO_POOL_JOB_TTL = 24 * 3600
 _b2b_discovery_jobs = {}
 _B2B_DISCOVERY_JOB_TTL = 24 * 3600
 _draft_regen_jobs = {}
+_dashboard_retention_jobs = {}
+_DASHBOARD_RETENTION_JOB_TTL = 4 * 3600
 _DRAFT_REGEN_JOB_TTL = 6 * 3600
 
 
@@ -1288,16 +1290,59 @@ async def run_dashboard(authorization: str = Header(default=""), async_mode: boo
 
 @app.post("/dashboard/retention")
 async def run_dashboard_retention(
-    authorization: str = Header(default=""), mode: str = "dry_run"
+    authorization: str = Header(default=""), mode: str = "dry_run",
+    async_mode: bool = True,
 ):
-    """KOL 看板容量维护；默认只预览，显式 mode=commit 才删除已规划的历史冗余。"""
+    """KOL 看板容量维护；默认只预览并后台跑，显式 mode=commit 才删除历史冗余。"""
     _check_auth(authorization)
     if mode not in {"dry_run", "commit"}:
         raise HTTPException(status_code=400, detail="mode must be dry_run or commit")
+    if async_mode:
+        now = time.time()
+        for job_id in list(_dashboard_retention_jobs):
+            job = _dashboard_retention_jobs[job_id]
+            if now - job.get("started_ts", 0) > _DASHBOARD_RETENTION_JOB_TTL:
+                _dashboard_retention_jobs.pop(job_id, None)
+        for job_id, job in _dashboard_retention_jobs.items():
+            if job.get("status") == "running" and job.get("mode") == mode:
+                return {"ok": True, "accepted": True, "already_running": True,
+                        "job_id": job_id, "mode": mode}
+        job_id = "dashret-" + uuid.uuid4().hex[:12]
+        _dashboard_retention_jobs[job_id] = {
+            "status": "running", "mode": mode, "started_ts": now,
+            "started_at": datetime_now_string(),
+        }
+
+        async def _job():
+            try:
+                result = await dashboard.cleanup_retention(commit=mode == "commit")
+                _dashboard_retention_jobs[job_id].update(
+                    status="success", finished_at=datetime_now_string(), result=result,
+                )
+            except Exception as e:
+                tr = _tb.format_exc()[-1000:]
+                _dashboard_retention_jobs[job_id].update(
+                    status="error", finished_at=datetime_now_string(),
+                    error=str(e), trace=tr,
+                )
+                await _alert_endpoint_failure("/dashboard/retention", str(e), tr)
+
+        asyncio.create_task(_job())
+        return {"ok": True, "accepted": True, "already_running": False,
+                "job_id": job_id, "mode": mode}
     try:
         return {"ok": True, **(await dashboard.cleanup_retention(commit=mode == "commit"))}
     except Exception as e:
         return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-1000:]}
+
+
+@app.get("/dashboard/retention/jobs/{job_id}")
+async def get_dashboard_retention_job(job_id: str, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    job = _dashboard_retention_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "job not found or expired")
+    return {"ok": True, "job_id": job_id, **job}
 
 
 @app.post("/followup/generate")

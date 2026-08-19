@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
-from app import dashboard
+from app import dashboard, main
 
 
 def _record(record_id, day, dimension="关键词"):
@@ -83,3 +83,31 @@ def test_cleanup_retention_requires_explicit_commit_to_delete(monkeypatch):
 
     assert result["deleted"] == 1
     delete.assert_awaited_once_with(["old-detail"])
+
+
+def test_retention_endpoint_returns_job_and_exposes_result(monkeypatch):
+    async def exercise():
+        old_token = main.config.INTERNAL_TOKEN
+        main.config.INTERNAL_TOKEN = "unit-token"
+        main._dashboard_retention_jobs.clear()
+        cleanup = AsyncMock(return_value={"commit": False, "planned_historical_delete": 7})
+        monkeypatch.setattr(main.dashboard, "cleanup_retention", cleanup)
+        try:
+            accepted = await main.run_dashboard_retention(
+                authorization="Bearer unit-token", mode="dry_run", async_mode=True,
+            )
+            await asyncio.sleep(0)
+            status = await main.get_dashboard_retention_job(
+                accepted["job_id"], authorization="Bearer unit-token",
+            )
+            return accepted, status
+        finally:
+            main._dashboard_retention_jobs.clear()
+            main.config.INTERNAL_TOKEN = old_token
+
+    accepted, status = asyncio.run(exercise())
+
+    assert accepted["accepted"] is True
+    assert accepted["mode"] == "dry_run"
+    assert status["status"] == "success"
+    assert status["result"]["planned_historical_delete"] == 7
