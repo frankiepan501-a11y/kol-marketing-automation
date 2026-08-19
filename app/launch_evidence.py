@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
 import time
 
@@ -39,6 +41,13 @@ _POST_VALIDATION_FIELDS = [
     "发布时间", "帖子URL", "内容链接", "视频链接", "帖子标题", "内容标题", "视频标题",
     "人工复核状态", "人工确认状态", "相关性", "合作信号",
 ]
+FULL_SNAPSHOT_PREFIX = "FULL_EVIDENCE_SNAPSHOT:"
+DAVE_CAMPAIGN_ID = "launch-20260915-funlab-dave-ys11-5"
+DAVE_NYXI_SNAPSHOT_COUNTS = {
+    "total_posts": 2988,
+    "official_excluded": 435,
+    "chunks": 50,
+}
 
 
 def _ids(value) -> list[str]:
@@ -57,6 +66,94 @@ def _ids(value) -> list[str]:
 
 def _record_brand(fields: dict) -> str:
     return (ext(fields.get("竞品品牌")) or ext(fields.get("品牌")) or ext(fields.get("竞品"))).strip()
+
+
+def parse_full_snapshot_metadata(fields: dict) -> dict:
+    raw = ext(fields.get("证据等待/变更说明")).strip()
+    if not raw.startswith(FULL_SNAPSHOT_PREFIX):
+        return {}
+    try:
+        metadata = json.loads(raw[len(FULL_SNAPSHOT_PREFIX):])
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise EvidenceValidationError("全证据快照摘要不是有效 JSON") from exc
+    required = {"ranking_version", "config_version", "total_posts", "chunks", "official_excluded"}
+    if not isinstance(metadata, dict) or not required.issubset(metadata):
+        raise EvidenceValidationError("全证据快照摘要字段不完整")
+    return metadata
+
+
+def _post_ids_sha256(post_ids: list[str]) -> str:
+    return hashlib.sha256("\n".join(post_ids).encode("utf-8")).hexdigest()
+
+
+async def load_full_snapshot_post_ids(*, campaign_id: str, activity_fields: dict) -> list[str]:
+    metadata = parse_full_snapshot_metadata(activity_fields)
+    if not metadata:
+        return []
+    ranking_version = ext(activity_fields.get("证据排序版本"))
+    config_version = int(activity_fields.get("证据配置版本") or 0)
+    if (
+        metadata["ranking_version"] != ranking_version
+        or int(metadata["config_version"]) != config_version
+    ):
+        raise EvidenceValidationError("全证据快照摘要版本与活动版本不一致")
+    if campaign_id == DAVE_CAMPAIGN_ID and ranking_version == "evidence-v4":
+        dave_expected = {**DAVE_NYXI_SNAPSHOT_COUNTS, "chunk_size": 60}
+        mismatched = [
+            name for name, expected in dave_expected.items()
+            if int(metadata.get(name) or 0) != expected
+        ]
+        if not re.fullmatch(r"[0-9a-f]{64}", str(metadata.get("post_ids_sha256") or "")):
+            mismatched.append("post_ids_sha256")
+        if mismatched:
+            raise EvidenceValidationError(
+                "Dave 活动 NYXI 全证据数量不符合已审定口径: " + ", ".join(mismatched)
+            )
+    prefix = f"{ranking_version}-chunk-"
+    rows = await feishu.search_records(
+        config.T_LAUNCH_NODE,
+        [{"field_name": "活动ID", "operator": "is", "value": [campaign_id]}],
+        field_names=[
+            "活动ID", "节点代码", "节点状态", "竞品品牌", "目标证据配置版本",
+            "待确认竞品帖子", "允许外部动作",
+        ],
+    )
+    chunks = []
+    for row in rows:
+        fields = row.get("fields") or {}
+        code = ext(fields.get("节点代码"))
+        if not code.startswith(prefix):
+            continue
+        if (
+            ext(fields.get("节点状态")) != "已确认"
+            or _record_brand(fields).upper() != _record_brand(activity_fields).upper()
+            or int(fields.get("目标证据配置版本") or 0) != config_version
+            or fields.get("允许外部动作") not in (None, "", False, 0)
+        ):
+            raise EvidenceValidationError(f"全证据快照节点状态无效: {code}")
+        chunks.append((code, _ids(fields.get("待确认竞品帖子"))))
+    chunks.sort(key=lambda item: item[0])
+    if len(chunks) != int(metadata["chunks"]):
+        raise EvidenceValidationError("全证据快照分块数量不一致")
+    expected_codes = [f"{prefix}{index:03d}" for index in range(1, int(metadata["chunks"]) + 1)]
+    if [code for code, _ in chunks] != expected_codes:
+        raise EvidenceValidationError("全证据快照节点代码不连续或重复")
+    chunk_size = int(metadata.get("chunk_size") or 0)
+    if chunk_size:
+        for index, (_, ids) in enumerate(chunks):
+            expected_size = (
+                chunk_size if index < len(chunks) - 1
+                else int(metadata["total_posts"]) - chunk_size * (len(chunks) - 1)
+            )
+            if expected_size <= 0 or len(ids) != expected_size:
+                raise EvidenceValidationError("全证据快照分块容量不一致")
+    post_ids = [record_id for _, ids in chunks for record_id in ids]
+    if len(post_ids) != int(metadata["total_posts"]) or len(set(post_ids)) != len(post_ids):
+        raise EvidenceValidationError("全证据快照帖子数量不一致或存在重复")
+    expected_hash = str(metadata.get("post_ids_sha256") or "")
+    if expected_hash and _post_ids_sha256(post_ids) != expected_hash:
+        raise EvidenceValidationError("全证据快照帖子指纹不一致")
+    return post_ids
 
 
 async def get_activity(campaign_id: str) -> dict:

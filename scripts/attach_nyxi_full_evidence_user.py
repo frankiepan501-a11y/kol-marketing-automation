@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -20,8 +21,13 @@ BASE_TOKEN = "KINabIENjak8fRsB6AHcIDALntc"
 POST_TABLE = "tblCDbvLtnLzdxEp"
 KOL_TABLE = "tblMMhnj2hEbhF6y"
 ACTIVITY_TABLE = "tbl8w0O7pI5PsRnq"
+NODE_TABLE = "tblUljeSSAvFdFT6"
 ACTIVITY_RECORD = "recvsFoRmeGj4Y"
 CAMPAIGN_ID = "launch-20260915-funlab-dave-ys11-5"
+TARGET_RANKING_VERSION = "evidence-v4"
+TARGET_CONFIG_VERSION = 2
+SNAPSHOT_PREFIX = "FULL_EVIDENCE_SNAPSHOT:"
+SNAPSHOT_CHUNK_SIZE = 60
 OFFICIAL_CREATOR_IDS = {"UCIY4yC2qUCPcM7ws-xTARYg", "UCbvp-CTcH3Mhtj2UWsSy8sA"}
 OFFICIAL_HANDLES = {"nyxigaming", "nyxi_official"}
 POST_FIELDS = [
@@ -185,21 +191,158 @@ def link_ids(value) -> list[str]:
     return []
 
 
-def activity_write_fields(fields: dict, partner_ids: list[str], *, snapshot_ms: int) -> dict:
+def split_chunks(record_ids: list[str], chunk_size: int = SNAPSHOT_CHUNK_SIZE) -> list[list[str]]:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size 必须大于 0")
+    return [record_ids[index:index + chunk_size] for index in range(0, len(record_ids), chunk_size)]
+
+
+def snapshot_metadata(result: dict, partner_ids: list[str]) -> dict:
+    chunks = split_chunks(partner_ids)
+    return {
+        "ranking_version": TARGET_RANKING_VERSION,
+        "config_version": TARGET_CONFIG_VERSION,
+        "total_posts": len(partner_ids),
+        "official_excluded": result["official_posts_excluded"],
+        "chunks": len(chunks),
+        "chunk_size": SNAPSHOT_CHUNK_SIZE,
+        "distinct_authors": result["distinct_partner_authors"],
+        "matched_authors": result["matched_authors"],
+        "matched_master_kols": result["matched_master_kols"],
+        "unmatched_authors": result["unmatched_authors"],
+        "post_ids_sha256": hashlib.sha256("\n".join(partner_ids).encode("utf-8")).hexdigest(),
+        "source": "NYXI non-official default collaboration",
+    }
+
+
+def snapshot_note(metadata: dict) -> str:
+    return SNAPSHOT_PREFIX + json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+
+
+def activity_write_fields(fields: dict, metadata: dict, *, snapshot_ms: int) -> dict:
     return {
         "竞品证据模式": "引用历史证据",
         "竞品分析状态": "已就绪",
         "竞品品牌": "NYXI",
-        "关联竞品帖子": partner_ids,
+        # 活动主记录只保留原有代表样本；完整证据从活动节点分块快照重建。
+        "关联竞品帖子": link_ids(fields.get("关联竞品帖子")),
         "关联竞品营销事件": link_ids(fields.get("关联竞品营销事件")),
-        "证据配置版本": 2,
-        "证据排序版本": "evidence-v4",
+        "证据配置版本": TARGET_CONFIG_VERSION,
+        "证据排序版本": TARGET_RANKING_VERSION,
         "证据快照时间": snapshot_ms,
-        "证据等待/变更说明": (
-            "NYXI 3423 条帖子中排除 435 条官方渠道，接入 2988 条非官方合作证据；"
-            "仅用于本次 Dave 活动排序。"
-        ),
+        "证据等待/变更说明": snapshot_note(metadata),
     }
+
+
+def snapshot_node_fields(*, index: int, total: int, post_ids: list[str], metadata: dict) -> dict:
+    return {
+        "活动ID": CAMPAIGN_ID,
+        "节点代码": f"{TARGET_RANKING_VERSION}-chunk-{index:03d}",
+        "节点名称": f"NYXI 全证据快照 {index:02d}/{total:02d}",
+        "待确认竞品帖子": post_ids,
+        "节点状态": "已确认",
+        "目标证据配置版本": TARGET_CONFIG_VERSION,
+        "竞品品牌": "NYXI",
+        "调查提交说明": snapshot_note(metadata),
+        "允许外部动作": False,
+    }
+
+
+def snapshot_rows(rows: list[dict]) -> list[dict]:
+    selected = []
+    prefix = f"{TARGET_RANKING_VERSION}-chunk-"
+    for row in rows:
+        fields = row.get("fields") or {}
+        if first(fields.get("活动ID")) == CAMPAIGN_ID and first(fields.get("节点代码")).startswith(prefix):
+            selected.append(row)
+    return selected
+
+
+def verify_snapshot_rows(rows: list[dict], partner_ids: list[str], metadata: dict) -> list[str]:
+    selected = snapshot_rows(rows)
+    expected_chunks = split_chunks(partner_ids)
+    expected_codes = [f"{TARGET_RANKING_VERSION}-chunk-{index:03d}" for index in range(1, len(expected_chunks) + 1)]
+    by_code = {}
+    for row in selected:
+        code = first((row.get("fields") or {}).get("节点代码"))
+        if code in by_code:
+            raise RuntimeError(f"全证据快照节点代码重复: {code}")
+        by_code[code] = row
+    if sorted(by_code) != expected_codes:
+        raise RuntimeError("全证据快照节点不完整或含未知分块")
+    flattened = []
+    for code, expected_ids in zip(expected_codes, expected_chunks):
+        fields = by_code[code].get("fields") or {}
+        actual_ids = link_ids(fields.get("待确认竞品帖子"))
+        if (
+            actual_ids != expected_ids
+            or first(fields.get("节点状态")) != "已确认"
+            or first(fields.get("竞品品牌")).upper() != "NYXI"
+            or int(fields.get("目标证据配置版本") or 0) != TARGET_CONFIG_VERSION
+            or fields.get("允许外部动作") not in (None, "", False, 0)
+            or first(fields.get("调查提交说明")) != snapshot_note(metadata)
+        ):
+            raise RuntimeError(f"全证据快照节点回读不一致: {code}")
+        flattened.extend(actual_ids)
+    if flattened != partner_ids or len(set(flattened)) != len(flattened):
+        raise RuntimeError("全证据快照汇总后数量、顺序或唯一性不一致")
+    return [by_code[code].get("record_id", "") for code in expected_codes]
+
+
+def verify_snapshot_subset(rows: list[dict], partner_ids: list[str], metadata: dict) -> set[str]:
+    selected = snapshot_rows(rows)
+    expected_chunks = split_chunks(partner_ids)
+    expected_by_code = {
+        f"{TARGET_RANKING_VERSION}-chunk-{index:03d}": chunk
+        for index, chunk in enumerate(expected_chunks, start=1)
+    }
+    seen = set()
+    for row in selected:
+        fields = row.get("fields") or {}
+        code = first(fields.get("节点代码"))
+        if code in seen or code not in expected_by_code:
+            raise RuntimeError(f"已有全证据快照节点未知或重复: {code}")
+        expected_fields = snapshot_node_fields(
+            index=int(code.rsplit("-", 1)[1]), total=len(expected_chunks),
+            post_ids=expected_by_code[code], metadata=metadata,
+        )
+        if (
+            link_ids(fields.get("待确认竞品帖子")) != expected_fields["待确认竞品帖子"]
+            or first(fields.get("节点状态")) != expected_fields["节点状态"]
+            or first(fields.get("竞品品牌")).upper() != "NYXI"
+            or int(fields.get("目标证据配置版本") or 0) != TARGET_CONFIG_VERSION
+            or fields.get("允许外部动作") not in (None, "", False, 0)
+            or first(fields.get("调查提交说明")) != expected_fields["调查提交说明"]
+        ):
+            raise RuntimeError(f"已有全证据快照节点与本次证据不一致: {code}")
+        seen.add(code)
+    return seen
+
+
+def create_snapshot_node(fields: dict) -> str:
+    path = f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{NODE_TABLE}/records"
+    payload = lark(["api", "POST", path, "--data", "-"], stdin=json.dumps({"fields": fields}, ensure_ascii=False))
+    data = payload.get("data") or {}
+    record = data.get("record") or data
+    record_id = record.get("record_id") or data.get("record_id")
+    if not record_id:
+        raise RuntimeError("飞书创建证据快照节点后未返回 record_id")
+    return record_id
+
+
+def delete_snapshot_node(record_id: str) -> None:
+    path = f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{NODE_TABLE}/records/{record_id}"
+    lark(["api", "DELETE", path])
+
+
+def cleanup_created_nodes(record_ids: list[str]) -> list[str]:
+    failures = []
+    for record_id in reversed(record_ids):
+        try:
+            delete_snapshot_node(record_id)
+        except Exception:
+            failures.append(record_id)
+    return failures
 
 
 def restore_fields(fields: dict) -> dict:
@@ -279,26 +422,76 @@ def run(*, commit: bool) -> dict:
         "current_ranking_version": first(fields.get("证据排序版本")),
         "all_outbound_gates_closed": gates_closed,
     }
+    partner_ids = sorted(row["record_id"] for row in partner)
+    metadata = snapshot_metadata(result, partner_ids)
+    result.update({
+        "snapshot_chunks": metadata["chunks"],
+        "snapshot_chunk_size": metadata["chunk_size"],
+        "activity_relation_posts_preserved": len(link_ids(fields.get("关联竞品帖子"))),
+        "target_config_version": TARGET_CONFIG_VERSION,
+        "target_ranking_version": TARGET_RANKING_VERSION,
+    })
     if not commit:
         return result
     if activity.get("record_id") != ACTIVITY_RECORD or first(fields.get("活动ID")) != CAMPAIGN_ID:
         raise RuntimeError("活动记录护栏不匹配")
     if not gates_closed:
         raise RuntimeError("有真实外联授权已开启，停止补接")
-    if result["current_config_version"] != 1 or result["current_ranking_version"] != "evidence-v3":
+    already_active = (
+        result["current_config_version"] == TARGET_CONFIG_VERSION
+        and result["current_ranking_version"] == TARGET_RANKING_VERSION
+    )
+    if not already_active and (
+        result["current_config_version"] != 1 or result["current_ranking_version"] != "evidence-v3"
+    ):
         raise RuntimeError("活动证据版本已变化，请重新 dry-run")
     if len(nyxi) != 3423 or len(official) != 435 or len(partner) != 2988:
         raise RuntimeError("NYXI 证据数量与已审定口径不一致，停止写入")
 
-    partner_ids = [row["record_id"] for row in partner]
-    body = {"fields": activity_write_fields(
-        fields, partner_ids,
-        snapshot_ms=int(time.time() * 1000),
-    )}
+    node_fields = [
+        "活动ID", "节点代码", "节点名称", "待确认竞品帖子", "节点状态",
+        "目标证据配置版本", "竞品品牌", "调查提交说明", "允许外部动作",
+    ]
+    nodes_before = list_records(NODE_TABLE, node_fields)
+    created_ids = []
+    try:
+        existing_codes = verify_snapshot_subset(nodes_before, partner_ids, metadata)
+        chunks = split_chunks(partner_ids)
+        for index, chunk in enumerate(chunks, start=1):
+            code = f"{TARGET_RANKING_VERSION}-chunk-{index:03d}"
+            if code not in existing_codes:
+                created_ids.append(create_snapshot_node(snapshot_node_fields(
+                    index=index, total=len(chunks), post_ids=chunk, metadata=metadata,
+                )))
+        verify_snapshot_rows(list_records(NODE_TABLE, node_fields), partner_ids, metadata)
+    except Exception as snapshot_error:
+        cleanup_failures = cleanup_created_nodes(created_ids)
+        if cleanup_failures:
+            raise RuntimeError(f"证据块创建失败，且这些本轮节点未能清理: {cleanup_failures}") from snapshot_error
+        raise
+
+    if already_active:
+        expected = activity_write_fields(fields, metadata, snapshot_ms=int(fields.get("证据快照时间") or 0))
+        if not activity_fields_match(fields, expected):
+            raise RuntimeError("活动已标记 evidence-v4，但元数据或代表证据回读不一致")
+        result.update({
+            "dry_run": False,
+            "snapshot_nodes_created": len(created_ids),
+            "snapshot_nodes_verified": metadata["chunks"],
+            "written_ranking_version": TARGET_RANKING_VERSION,
+            "written_config_version": TARGET_CONFIG_VERSION,
+            "written_linked_posts": len(link_ids(fields.get("关联竞品帖子"))),
+            "written_linked_events": len(link_ids(fields.get("关联竞品营销事件"))),
+        })
+        return result
+
+    body = {"fields": activity_write_fields(fields, metadata, snapshot_ms=int(time.time() * 1000))}
     rollback = {"fields": restore_fields(fields)}
     path = f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{ACTIVITY_TABLE}/records/{ACTIVITY_RECORD}"
-    lark(["api", "PUT", path, "--data", "-"], stdin=json.dumps(body, ensure_ascii=False))
     try:
+        # PUT 也放进结果不确定处理：即使服务端已写入、客户端只收到超时，
+        # except 分支仍会按旧快照恢复并清理本轮新建节点。
+        lark(["api", "PUT", path, "--data", "-"], stdin=json.dumps(body, ensure_ascii=False))
         readback = get_activity().get("fields") or {}
         written_post_ids = link_ids(readback.get("关联竞品帖子"))
         written_event_ids = link_ids(readback.get("关联竞品营销事件"))
@@ -308,6 +501,8 @@ def run(*, commit: bool) -> dict:
             "written_config_version": int(readback.get("证据配置版本") or 0),
             "written_linked_posts": len(written_post_ids),
             "written_linked_events": len(written_event_ids),
+            "snapshot_nodes_created": len(created_ids),
+            "snapshot_nodes_verified": metadata["chunks"],
         })
         if not activity_fields_match(readback, body["fields"]):
             raise RuntimeError("写入后回读校验失败")
@@ -315,8 +510,11 @@ def run(*, commit: bool) -> dict:
         lark(["api", "PUT", path, "--data", "-"], stdin=json.dumps(rollback, ensure_ascii=False))
         restored = get_activity().get("fields") or {}
         rollback_ok = activity_fields_match(restored, rollback["fields"])
-        if not rollback_ok:
-            raise RuntimeError("全证据写入失败，且自动恢复后的二次回读也未通过") from write_error
+        cleanup_failures = cleanup_created_nodes(created_ids)
+        if not rollback_ok or cleanup_failures:
+            raise RuntimeError(
+                f"全证据启用失败；活动恢复={rollback_ok}，未清理节点={cleanup_failures}"
+            ) from write_error
         raise
     return result
 

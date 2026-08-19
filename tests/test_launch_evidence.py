@@ -6,6 +6,91 @@ from app import launch_evidence
 
 
 class LaunchEvidenceContractTests(unittest.TestCase):
+    def test_full_snapshot_nodes_reconstruct_exact_post_set(self):
+        activity_fields = {
+            "竞品品牌": "NYXI", "证据配置版本": 2, "证据排序版本": "evidence-v4",
+            "证据等待/变更说明": (
+                'FULL_EVIDENCE_SNAPSHOT:{"ranking_version":"evidence-v4",'
+                '"config_version":2,"total_posts":3,"chunks":2,"official_excluded":435}'
+            ),
+        }
+        rows = [
+            {"record_id": "n2", "fields": {
+                "节点代码": "evidence-v4-chunk-002", "节点状态": "已确认",
+                "竞品品牌": "NYXI", "目标证据配置版本": 2,
+                "待确认竞品帖子": ["post3"], "允许外部动作": False,
+            }},
+            {"record_id": "n1", "fields": {
+                "节点代码": "evidence-v4-chunk-001", "节点状态": "已确认",
+                "竞品品牌": "NYXI", "目标证据配置版本": 2,
+                "待确认竞品帖子": ["post1", "post2"], "允许外部动作": False,
+            }},
+        ]
+        with patch.object(launch_evidence.config, "T_LAUNCH_NODE", "nodes"), \
+             patch.object(launch_evidence.feishu, "search_records", new=AsyncMock(return_value=rows)):
+            result = asyncio.run(launch_evidence.load_full_snapshot_post_ids(
+                campaign_id="campaign-1", activity_fields=activity_fields,
+            ))
+
+        self.assertEqual(["post1", "post2", "post3"], result)
+
+    def test_full_snapshot_duplicate_posts_fail_closed(self):
+        fields = {
+            "竞品品牌": "NYXI", "证据配置版本": 2, "证据排序版本": "evidence-v4",
+            "证据等待/变更说明": (
+                'FULL_EVIDENCE_SNAPSHOT:{"ranking_version":"evidence-v4",'
+                '"config_version":2,"total_posts":2,"chunks":1,"official_excluded":435}'
+            ),
+        }
+        rows = [{"record_id": "n1", "fields": {
+            "节点代码": "evidence-v4-chunk-001", "节点状态": "已确认",
+            "竞品品牌": "NYXI", "目标证据配置版本": 2,
+            "待确认竞品帖子": ["post1", "post1"], "允许外部动作": False,
+        }}]
+        with patch.object(launch_evidence.config, "T_LAUNCH_NODE", "nodes"), \
+             patch.object(launch_evidence.feishu, "search_records", new=AsyncMock(return_value=rows)):
+            with self.assertRaises(launch_evidence.EvidenceValidationError):
+                asyncio.run(launch_evidence.load_full_snapshot_post_ids(
+                    campaign_id="campaign-1", activity_fields=fields,
+                ))
+
+    def test_dave_v4_snapshot_rejects_self_consistent_partial_set(self):
+        fields = {
+            "竞品品牌": "NYXI", "证据配置版本": 2, "证据排序版本": "evidence-v4",
+            "证据等待/变更说明": (
+                'FULL_EVIDENCE_SNAPSHOT:{"ranking_version":"evidence-v4",'
+                '"config_version":2,"total_posts":60,"chunks":1,"official_excluded":435}'
+            ),
+        }
+
+        with self.assertRaisesRegex(launch_evidence.EvidenceValidationError, "已审定口径"):
+            asyncio.run(launch_evidence.load_full_snapshot_post_ids(
+                campaign_id=launch_evidence.DAVE_CAMPAIGN_ID,
+                activity_fields=fields,
+            ))
+
+    def test_snapshot_rejects_same_count_with_different_post_ids(self):
+        fields = {
+            "竞品品牌": "NYXI", "证据配置版本": 2, "证据排序版本": "evidence-v4",
+            "证据等待/变更说明": (
+                'FULL_EVIDENCE_SNAPSHOT:{"ranking_version":"evidence-v4",'
+                '"config_version":2,"total_posts":2,"chunks":1,"chunk_size":2,'
+                '"official_excluded":435,"post_ids_sha256":"'
+                + launch_evidence._post_ids_sha256(["post1", "post2"]) + '"}'
+            ),
+        }
+        rows = [{"record_id": "n1", "fields": {
+            "节点代码": "evidence-v4-chunk-001", "节点状态": "已确认",
+            "竞品品牌": "NYXI", "目标证据配置版本": 2,
+            "待确认竞品帖子": ["post1", "post3"], "允许外部动作": False,
+        }}]
+        with patch.object(launch_evidence.config, "T_LAUNCH_NODE", "nodes"), \
+             patch.object(launch_evidence.feishu, "search_records", new=AsyncMock(return_value=rows)):
+            with self.assertRaisesRegex(launch_evidence.EvidenceValidationError, "指纹"):
+                asyncio.run(launch_evidence.load_full_snapshot_post_ids(
+                    campaign_id="campaign-1", activity_fields=fields,
+                ))
+
     def test_switching_active_evidence_to_none_requires_reason(self):
         activity = {"record_id": "act1", "fields": {
             "活动ID": "campaign-1", "证据配置版本": 4,

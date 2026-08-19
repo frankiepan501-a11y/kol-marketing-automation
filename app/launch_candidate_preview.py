@@ -534,6 +534,18 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
     post_ids = sorted(_link_ids(fields.get("关联竞品帖子")))
     event_ids = sorted(_link_ids(fields.get("关联竞品营销事件")))
     ranking_version = ext(fields.get("证据排序版本"))
+    evidence_source = "activity_relation"
+    try:
+        snapshot_ids = await launch_evidence.load_full_snapshot_post_ids(
+            campaign_id=campaign_id, activity_fields=fields,
+        )
+        if snapshot_ids:
+            post_ids = snapshot_ids
+            evidence_source = "activity_node_snapshot"
+    except Exception as exc:
+        snapshot_error = str(exc)
+    else:
+        snapshot_error = ""
     # A legacy activity may predate these fields entirely.  Preserve the old
     # product-level scope in that case, but fail closed when a current activity
     # explicitly contains an empty target field.
@@ -562,7 +574,7 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
         and brand.upper() == "NYXI"
     )
     posts = []
-    evidence_error = ""
+    evidence_error = snapshot_error
     if mode == launch_evidence.MODE_NONE:
         if status != "不适用" or brand or post_ids or event_ids:
             evidence_error = "不使用竞品证据的字段组合无效"
@@ -595,6 +607,7 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
         "ranking_version": ranking_version,
         "competitor_posts": posts if applicable else [],
         "competitor_evidence_applied": applicable,
+        "evidence_source": evidence_source,
         "evidence_error": evidence_error,
         "target_countries": target_countries,
         "target_languages": target_languages,
@@ -766,6 +779,7 @@ async def preview_candidates(
         "evidence_status": activity_ctx["evidence_status"] if activity_ctx else "",
         "evidence_pending": activity_ctx["evidence_pending"] if activity_ctx else False,
         "ranking_version": activity_ctx["ranking_version"] if activity_ctx else "",
+        "evidence_source": activity_ctx["evidence_source"] if activity_ctx else "",
         "target_countries": sorted(activity_ctx["target_countries"] or []) if activity_ctx else [],
         "target_languages": sorted(activity_ctx["target_languages"] or []) if activity_ctx else [],
         "competitor_evidence_applied": (
