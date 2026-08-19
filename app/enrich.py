@@ -13,6 +13,7 @@ import re, time, asyncio, random
 from . import config, feishu, deepseek, draft_router, product_naming
 from .feishu import ext, xrid
 from .scoring import score_kol, _parse_multiselect
+from .product_dispatch_mode import is_regular_dispatch_allowed, product_dispatch_mode
 
 _run_lock = asyncio.Lock()
 
@@ -718,6 +719,14 @@ async def enrich_task(task_record: dict, seen_kb: set = None) -> dict:
             "任务状态": "8-已取消", "备注": f"读产品失败: {str(e)[:80]}",
         })
         return {"task": task_name, "error": f"读产品失败: {e}", "task_rid": task_rid}
+
+    if not is_regular_dispatch_allowed(product.get("fields") or {}):
+        mode = product_dispatch_mode(product.get("fields") or {})
+        await feishu.update_record(config.T_TASK_KOL, task_rid, {
+            "任务状态": "8-已取消",
+            "备注": f"活动专用锁已拦截常规 KOL 派单（派单模式={mode}）；活动任务由独立流程处理。",
+        })
+        return {"task": task_name, "error": f"产品派单模式={mode}", "task_rid": task_rid}
 
     # 2026-05-26 Bug B (戴夫派单事故): 产品无对外链接 → cold 会带死链 href="" (邮件铁律禁死链)
     # → 跳过整任务 + 告警, 零外发.

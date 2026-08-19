@@ -12,6 +12,7 @@ import re, time, asyncio, random
 from . import config, feishu, deepseek, draft_router, snov
 from .feishu import ext, xrid
 from .scoring import score_editor, _parse_multiselect
+from .product_dispatch_mode import is_regular_dispatch_allowed, product_dispatch_mode
 
 
 COUNTRY_TO_LANG = {
@@ -649,6 +650,14 @@ async def enrich_task(task_record: dict, seen_kb: set = None) -> dict:
             "任务状态": "8-已取消", "备注": f"读产品失败: {str(e)[:80]}",
         })
         return {"task": task_name, "error": f"读产品失败: {e}", "task_rid": task_rid}
+
+    if not is_regular_dispatch_allowed(product.get("fields") or {}):
+        mode = product_dispatch_mode(product.get("fields") or {})
+        await feishu.update_record(config.T_TASK_EDITOR, task_rid, {
+            "任务状态": "8-已取消",
+            "备注": f"活动专用锁已拦截常规媒体人派单（派单模式={mode}）；活动任务由独立流程处理。",
+        })
+        return {"task": task_name, "error": f"产品派单模式={mode}", "task_rid": task_rid}
 
     # 任务里设的报道品类 + 媒体类型 → set (传给 score_editor)
     def _to_set(v):

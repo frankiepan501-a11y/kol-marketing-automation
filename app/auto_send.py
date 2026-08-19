@@ -12,6 +12,11 @@ n8n cron 每 10 分钟触发 → 扫「KOL·媒体人邮件草稿」状态=自�
 import re, time, asyncio, random
 from . import config, feishu, zoho, coop_status
 from .feishu import ext, xrid
+from .product_dispatch_mode import (
+    is_proactive_product_outreach_source,
+    is_regular_dispatch_allowed,
+    product_dispatch_mode,
+)
 
 
 # 2026-06-04: 邮箱域名退信率守卫 — 算各域名历史「无效」率, 高退信域名(猜测格式系统性错)集合.
@@ -189,6 +194,48 @@ async def _deny_duplicate_ready(rec: dict, reason: str) -> None:
         await feishu.update_record(config.T_DRAFT, rid, {"邮件草稿状态": "已否决"})
     except Exception as e:
         print(f"[auto_send] deny duplicate fail rid={rid}: {e}")
+
+
+async def _deny_product_locked_ready(rec: dict, mode: str) -> None:
+    """把活动锁命中的首次开发信移出发送队列；不影响 reply/follow-up。"""
+    rid = rec["record_id"]
+    f = rec.get("fields") or {}
+    old_note = ext(f.get("审批意见"))
+    note = f"[活动专用锁] 产品派单模式={mode}，常规首次开发信已停止；活动任务由独立流程处理。"
+    if old_note and note not in old_note:
+        note = (old_note + " | " + note)[:500]
+    try:
+        await feishu.update_record(config.T_DRAFT, rid, {"审批意见": note[:500]})
+        await feishu.update_record(config.T_DRAFT, rid, {"邮件草稿状态": "已否决"})
+    except Exception as e:
+        print(f"[auto_send] deny product-locked draft fail rid={rid}: {e}")
+
+
+async def _hold_missing_product_ready(rec: dict) -> None:
+    """主动开发信没有关联产品时不能判断活动锁，转待修改而不是放行。"""
+    rid = rec["record_id"]
+    f = rec.get("fields") or {}
+    old_note = ext(f.get("审批意见"))
+    note = "[活动锁校验] 主动开发信缺少关联产品，已停止发送；补齐产品后重新审核。"
+    if old_note and note not in old_note:
+        note = (old_note + " | " + note)[:500]
+    try:
+        await feishu.update_record(config.T_DRAFT, rid, {"审批意见": note[:500]})
+        await feishu.update_record(config.T_DRAFT, rid, {"邮件草稿状态": "待修改"})
+    except Exception as e:
+        print(f"[auto_send] hold missing-product draft fail rid={rid}: {e}")
+
+
+async def _locked_product_mode(product_rid: str, cache: dict | None = None) -> str:
+    """返回锁定模式；空串表示允许常规派单。读取失败向上抛，由调用方停止本轮发送。"""
+    cache = cache if cache is not None else {}
+    if product_rid not in cache:
+        cache[product_rid] = await feishu.get_record(config.T_PRODUCT, product_rid)
+    product = cache[product_rid]
+    if not product or not isinstance(product.get("fields"), dict):
+        raise RuntimeError(f"产品回读为空或字段结构异常: {product_rid}")
+    fields = product["fields"]
+    return "" if is_regular_dispatch_allowed(fields) else product_dispatch_mode(fields)
 
 
 def _is_priority(rec: dict) -> bool:
@@ -408,8 +455,11 @@ async def scan_ready() -> tuple:
     already_sent = 0
     skip_followup = 0
     skip_duplicate = 0
+    skip_product_locked = 0
+    skip_product_lock_read = 0
     run_draft_ids = set()
     run_cold_keys = set()
+    product_cache = {}
 
     for rec in sorted(items, key=_ready_order):
         f = rec["fields"]
@@ -417,6 +467,24 @@ async def scan_ready() -> tuple:
         if send_status and send_status not in ("未发", ""):
             already_sent += 1
             continue
+
+        # 活动专用锁：拦首次 cold/二次新品主动推荐。回复、既有 follow-up、寄样信继续。
+        if is_proactive_product_outreach_source(f.get("邮件草稿来源")):
+            product_rid = _product_rid_of(f)
+            if not product_rid:
+                await _hold_missing_product_ready(rec)
+                skip_product_lock_read += 1
+                continue
+            try:
+                locked_mode = await _locked_product_mode(product_rid, product_cache)
+            except Exception as e:
+                print(f"[auto_send] product lock read fail, block this run rid={rec['record_id']} product={product_rid}: {e}")
+                skip_product_lock_read += 1
+                continue
+            if locked_mode:
+                await _deny_product_locked_ready(rec, locked_mode)
+                skip_product_locked += 1
+                continue
 
         # follow-up 守门: KOL 已回复则把这封 follow-up 标"已否决"
         round_num = ext(f.get("Follow-up轮次"))
@@ -464,13 +532,30 @@ async def scan_ready() -> tuple:
 
         ready.append(rec)
 
-    return ready, scheduled_later, already_sent + skip_followup + skip_duplicate, sent_24h, cold_sent_24h
+    return (ready, scheduled_later,
+            already_sent + skip_followup + skip_duplicate + skip_product_locked,
+            sent_24h, cold_sent_24h, skip_product_lock_read)
 
 
 # ===== 2. 发一封 =====
 async def send_one(rec: dict) -> dict:
     f = rec["fields"]
     rid = rec["record_id"]
+    if is_proactive_product_outreach_source(f.get("邮件草稿来源")):
+        product_rid = _product_rid_of(f)
+        if not product_rid:
+            await _hold_missing_product_ready(rec)
+            return {"ok": False, "rid": rid,
+                    "error": "主动开发信缺少关联产品，活动锁无法校验", "skipped": True}
+        try:
+            locked_mode = await _locked_product_mode(product_rid)
+        except Exception as e:
+            return {"ok": False, "rid": rid,
+                    "error": f"活动锁读取失败，本轮已停止发送: {str(e)[:160]}"}
+        if locked_mode:
+            await _deny_product_locked_ready(rec, locked_mode)
+            return {"ok": False, "rid": rid,
+                    "error": f"活动专用锁（派单模式={locked_mode}）", "skipped": True}
     raw_to = ext(f.get("收件邮箱"))
     subject = ext(f.get("邮件主题"))
     body_html = ext(f.get("邮件正文"))
@@ -996,9 +1081,17 @@ async def _run_unlocked() -> dict:
                        "测邮件用隔离方式(单条合成/纯函数), 测完删此 env 恢复生产发送。"}
     _dryrun_alerted = False     # DRY-RUN 已清 → 重置提醒, 下次再设会重新提醒
 
-    ready, scheduled_later, skipped, sent_24h, cold_sent_24h = await scan_ready()
+    (ready, scheduled_later, skipped, sent_24h, cold_sent_24h,
+     lock_validation_failures) = await scan_ready()
     if not ready:
-        return {"sent": 0, "fail": 0, "scheduled_later": scheduled_later, "skipped": skipped, "msg": "no ready drafts"}
+        return {
+            "sent": 0,
+            "fail": lock_validation_failures,
+            "lock_validation_failures": lock_validation_failures,
+            "scheduled_later": scheduled_later,
+            "skipped": skipped,
+            "msg": "no ready drafts" if not lock_validation_failures else "product lock validation blocked drafts",
+        }
 
     # 按品牌分组 (2026-06-08 配置驱动: 含白牌, 否则白牌草稿 KeyError 崩)
     by_brand = {b: [] for b in config.BRAND_CONFIG}
@@ -1033,7 +1126,8 @@ async def _run_unlocked() -> dict:
 
     results = []
     sent = 0
-    fail = 0
+    fail = lock_validation_failures
+    runtime_locked_skipped = 0
     consec = {}     # brand -> 连续 Zoho 通道错误数; 达阈值只暂停该品牌
 
     for i, rec in enumerate(queue, 1):
@@ -1042,7 +1136,10 @@ async def _run_unlocked() -> dict:
             continue     # 本轮内该品牌已被暂停 → 跳过其剩余草稿
         r = await send_one(rec)
         results.append(r)
-        if r["ok"]:
+        if r.get("skipped"):
+            runtime_locked_skipped += 1
+            consec[b] = 0
+        elif r["ok"]:
             sent += 1
             consec[b] = 0
         else:
@@ -1061,6 +1158,8 @@ async def _run_unlocked() -> dict:
     return {
         "sent": sent, "fail": fail,
         "scheduled_later": scheduled_later, "skipped": skipped,
+        "lock_validation_failures": lock_validation_failures,
+        "runtime_locked_skipped": runtime_locked_skipped,
         "queue_size": len(queue),
         "caps": caps_info,
         "paused_brands": dict(_paused_brands),

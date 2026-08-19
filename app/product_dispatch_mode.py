@@ -1,14 +1,20 @@
 """产品派单模式与活动归并规则。
 
 产品库未填写「派单模式」时继续按旧逻辑进入常规派单，避免上线后影响
-其他历史产品；只有明确标记为「活动专用」或「暂停」才会被常规 cold、
-媒体人派单和二次维护排除。
+其他历史产品；填写后只允许已知的「常规派单」，活动专用、暂停及拼错的
+未知值都按锁定处理，防止配置错误导致首次开发信误发。
 """
+
+FIELD_DISPATCH_MODE = "派单模式"
+FIELD_MERGE_KEY = "活动归并键"
+FIELD_IS_CANONICAL = "活动主记录"
+FIELD_CANONICAL_ID = "活动主记录ID"
 
 REGULAR_MODE = "常规派单"
 ACTIVITY_MODE = "活动专用"
 PAUSED_MODE = "暂停"
 LOCKED_MODES = {ACTIVITY_MODE, PAUSED_MODE}
+KNOWN_MODES = {REGULAR_MODE, *LOCKED_MODES}
 
 
 def _text(value) -> str:
@@ -29,7 +35,17 @@ def _text(value) -> str:
 
 def product_dispatch_mode(fields: dict) -> str:
     """空值按常规派单处理，保证旧产品无需一次性回填。"""
-    return _text((fields or {}).get("派单模式")) or REGULAR_MODE
+    return _text((fields or {}).get(FIELD_DISPATCH_MODE)) or REGULAR_MODE
+
+
+def is_regular_dispatch_allowed(fields: dict) -> bool:
+    """只有空值（兼容旧记录）或明确的常规派单允许进入常规流水线。"""
+    return product_dispatch_mode(fields) == REGULAR_MODE
+
+
+def is_proactive_product_outreach_source(source) -> bool:
+    """主动推新品的邮件；回复、既有 cold 的 follow-up、寄样信不在此列。"""
+    return _text(source).lower() in ("", "cold", "secondary_outreach")
 
 
 def partition_regular_products(products: list) -> tuple[list, list]:
@@ -39,13 +55,13 @@ def partition_regular_products(products: list) -> tuple[list, list]:
     for product in products or []:
         fields = product.get("fields") or {}
         mode = product_dispatch_mode(fields)
-        if mode in LOCKED_MODES:
+        if not is_regular_dispatch_allowed(fields):
             locked.append({
                 "record_id": product.get("record_id") or "",
                 "mode": mode,
                 "product_name": _text(fields.get("产品名")),
-                "merge_key": _text(fields.get("活动归并键")),
-                "canonical_record_id": _text(fields.get("活动主记录ID")),
+                "merge_key": _text(fields.get(FIELD_MERGE_KEY)),
+                "canonical_record_id": _text(fields.get(FIELD_CANONICAL_ID)),
             })
         else:
             regular.append(product)
@@ -58,7 +74,7 @@ def build_activity_group(products: list) -> dict:
         raise ValueError("活动归并组不能为空")
 
     merge_keys = {
-        _text((product.get("fields") or {}).get("活动归并键"))
+        _text((product.get("fields") or {}).get(FIELD_MERGE_KEY))
         for product in products
     }
     merge_keys.discard("")
@@ -66,7 +82,7 @@ def build_activity_group(products: list) -> dict:
         raise ValueError("活动归并键必须唯一且非空")
 
     canonical_ids = {
-        _text((product.get("fields") or {}).get("活动主记录ID"))
+        _text((product.get("fields") or {}).get(FIELD_CANONICAL_ID))
         for product in products
     }
     canonical_ids.discard("")
@@ -81,7 +97,7 @@ def build_activity_group(products: list) -> dict:
     marked_main_ids = [
         product.get("record_id") or ""
         for product in products
-        if bool((product.get("fields") or {}).get("活动主记录"))
+        if bool((product.get("fields") or {}).get(FIELD_IS_CANONICAL))
     ]
     if marked_main_ids != [canonical_id]:
         raise ValueError("活动归并组必须且只能标记一个主记录")
