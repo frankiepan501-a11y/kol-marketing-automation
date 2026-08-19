@@ -8,7 +8,7 @@ import uuid
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_participation
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_participation, launch_outreach
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
@@ -2424,6 +2424,38 @@ async def launch_email_test_raw(
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/launch/email/test-raw", str(e), tr)
         raise HTTPException(status_code=500, detail="邮件预检内部错误；已阻止放行")
+
+
+@app.post("/launch/outreach/send-one")
+async def launch_outreach_send_one(
+    request: Request, authorization: str = Header(default=""),
+):
+    """只发送一个已审活动 KOL；同 nonce 永不自动重发。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    try:
+        return await launch_outreach.send_one_real(
+            campaign_id=_launch_required(payload, "campaign_id"),
+            participant_record_id=_launch_required(payload, "participant_record_id"),
+            product_id=_launch_required(payload, "product_id"),
+            contact_id=_launch_required(payload, "contact_id"),
+            brand=_launch_required(payload, "brand"),
+            expected_profile_url=_launch_required(payload, "expected_profile_url"),
+            expected_ranking_version=_launch_required(payload, "expected_ranking_version"),
+            nonce=_launch_required(payload, "nonce"),
+            approved_by=_launch_required(payload, "approved_by"),
+            confirm=_launch_required(payload, "confirm"),
+        )
+    except launch_outreach.OutreachRawValidationError as exc:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/launch/outreach/send-one", str(exc), tr)
+        raise HTTPException(status_code=502, detail=str(exc))
+    except launch_outreach.OutreachValidationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/launch/outreach/send-one", type(exc).__name__, tr)
+        raise HTTPException(status_code=500, detail="单人真实灰度内部错误；系统不会自动补发")
 
 
 @app.post("/sla/check")

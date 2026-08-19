@@ -84,6 +84,8 @@ _pause_alerted = set()     # 已告警品牌 (去重)
 # 误把真草稿标已发送(→真 KOL 永久漏发)。测邮件用隔离方式(单条合成/纯函数), 不碰全表。
 _dryrun_alerted = False    # 一次性提醒去重 (DRY-RUN 清掉后重置 → 下次再设会重新提醒)
 _run_lock = asyncio.Lock()
+# 只有活动单人放行模块能显式传入这个进程内对象；常规调用无法因布尔值误开活动锁。
+_LAUNCH_ACTIVITY_RELEASE = object()
 
 
 async def _dryrun_alert_once(dry_to: str):
@@ -538,7 +540,7 @@ async def scan_ready() -> tuple:
 
 
 # ===== 2. 发一封 =====
-async def send_one(rec: dict) -> dict:
+async def send_one(rec: dict, *, activity_release=None) -> dict:
     f = rec["fields"]
     rid = rec["record_id"]
     if is_proactive_product_outreach_source(f.get("邮件草稿来源")):
@@ -552,7 +554,7 @@ async def send_one(rec: dict) -> dict:
         except Exception as e:
             return {"ok": False, "rid": rid,
                     "error": f"活动锁读取失败，本轮已停止发送: {str(e)[:160]}"}
-        if locked_mode:
+        if locked_mode and activity_release is not _LAUNCH_ACTIVITY_RELEASE:
             await _deny_product_locked_ready(rec, locked_mode)
             return {"ok": False, "rid": rid,
                     "error": f"活动专用锁（派单模式={locked_mode}）", "skipped": True}
