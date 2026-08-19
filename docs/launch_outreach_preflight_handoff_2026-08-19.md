@@ -10,7 +10,7 @@
 |---|---|---:|
 | `POST /launch/candidates/preview` | 活动候选只读预览；按产品别名家族做全局重复触达预检 | 0 |
 | `GET /launch/candidates/replay` | 回放单个候选为什么可开发、应延续旧线程、暂缓或排除 | 0 |
-| `POST /launch/email/test-raw` | 只发测试邮箱，回查收件人、主题、HTML、正文长度、产品名、链接和残留占位符 | 0 条飞书业务记录 |
+| `POST /launch/email/test-raw` | 读取指定真实 cold 草稿，只发测试邮箱，回查发件账号、收件人、主题、HTML、正文长度、产品名、链接和残留占位符 | 0 条飞书业务记录 |
 
 ## 候选决策
 
@@ -26,13 +26,13 @@
 1. 用 Zeabur 单变量方式设置 `EMAIL_DRY_RUN_TO=frankiepan501@gmail.com` 并重新部署。
 2. 对食人花二代和戴夫手柄分别运行候选预览，确认 `read_only=true`、`writes=0`。
 3. 各选 1 条候选做单条回放，核对证据草稿 ID 与处理路线。
-4. POWKONG、FUNLAB 各执行 1 次 `test-raw`；必须全部校验通过。
-5. 删除 `EMAIL_DRY_RUN_TO`，重新部署；再次调用 `test-raw` 应被硬拒绝。
+4. 从两款产品各选 1 条真实 cold 草稿，传 `draft_id` 与唯一 `run_key`；POWKONG、FUNLAB 各执行 1 次 `test-raw`，必须全部校验通过。同一个 `run_key` 重试只回查原邮件，不重复发送。
+5. 只允许白名单中的单个规范测试邮箱；删除 `EMAIL_DRY_RUN_TO` 并重新部署后，再次调用 `test-raw` 应被硬拒绝。
 6. 首封真实开发信仍需单独授权，不由本次 P0 自动触发。
 
 ## 验证记录
 
-- 新品集中上稿相关专项测试：20/20 通过。
+- 新品集中上稿相关专项测试：23/23 通过。
 - 全仓测试：233 项中 232 通过；唯一失败为既有 `test_zeabur_watchdog`，与本次 KOL 改动无关。
 - `git diff --check`：通过。
 

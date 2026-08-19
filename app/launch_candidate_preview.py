@@ -118,6 +118,38 @@ def _email_owners(kols: list[dict], editors: list[dict]) -> dict[str, set[tuple[
     return owners
 
 
+def _draft_identity_index(drafts: list[dict]) -> dict[tuple[str, str], list[dict]]:
+    """一次建立历史触达索引，避免每位候选都全表扫描草稿。"""
+    index: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for draft in drafts:
+        fields = draft.get("fields") or {}
+        object_type = "媒体人" if _link_ids(fields.get("关联媒体人")) else "KOL"
+        contact_id = _contact_id(fields, object_type)
+        if contact_id:
+            index[(object_type, contact_id)].append(draft)
+        email, _ = feishu.clean_email(ext(fields.get("收件邮箱")))
+        if email:
+            index[("email", email)].append(draft)
+    return index
+
+
+def _drafts_for_contact(contact: dict, object_type: str,
+                        index: dict[tuple[str, str], list[dict]]) -> list[dict]:
+    rid = contact.get("record_id", "")
+    email, _ = feishu.clean_email(ext((contact.get("fields") or {}).get("邮箱")))
+    seen = set()
+    out = []
+    for key in ((object_type, rid), ("email", email)):
+        if not key[1]:
+            continue
+        for draft in index.get(key, []):
+            did = draft.get("record_id", "")
+            if did not in seen:
+                seen.add(did)
+                out.append(draft)
+    return out
+
+
 def precheck_contact(
     contact: dict,
     *,
@@ -166,7 +198,7 @@ def precheck_contact(
     for draft in drafts:
         df = draft.get("fields") or {}
         source = ext(df.get("邮件草稿来源")) or "cold"
-        if source not in PROACTIVE_SOURCES or not _is_nonterminal_or_sent(df):
+        if not _is_nonterminal_or_sent(df):
             continue
         draft_object_type = "媒体人" if _link_ids(df.get("关联媒体人")) else "KOL"
         draft_contact_id = _contact_id(df, draft_object_type)
@@ -185,7 +217,8 @@ def precheck_contact(
             event_ms = int(df.get("发送时间") or df.get("生成时间") or 0)
         except (TypeError, ValueError):
             event_ms = 0
-        if _brand_of_draft(df) == brand and (event_ms >= cutoff or ext(df.get("发送状态")) not in {"已发", "已发送"}):
+        if (source in PROACTIVE_SOURCES and _brand_of_draft(df) == brand
+                and (event_ms >= cutoff or ext(df.get("发送状态")) not in {"已发", "已发送"})):
             same_brand_active.append(draft)
 
     for draft in same_product + same_brand_active + same_email_other_record:
@@ -277,6 +310,7 @@ async def _load_context(product_id: str) -> dict:
     return {
         "family": family, "kols": kols, "editors": editors, "drafts": drafts,
         "mapping": mapping, "owners": _email_owners(kols, editors),
+        "draft_index": _draft_identity_index(drafts),
     }
 
 
@@ -314,7 +348,8 @@ async def preview_candidates(product_id: str, *, object_type: str = "KOL", limit
 
         check = precheck_contact(
             record, object_type=object_type, brand=brand,
-            product_ids=set(family["product_ids"]), drafts=ctx["drafts"],
+            product_ids=set(family["product_ids"]),
+            drafts=_drafts_for_contact(record, object_type, ctx["draft_index"]),
             email_owners=ctx["owners"], now_ms=now_ms,
         )
         candidates.append({
@@ -356,12 +391,9 @@ async def preview_candidates(product_id: str, *, object_type: str = "KOL", limit
 
 
 async def replay_candidate(product_id: str, contact_id: str, *, object_type: str = "KOL") -> dict:
-    result = await preview_candidates(product_id, object_type=object_type, limit=500)
-    candidate = next((x for x in result["candidates"] if x["contact_id"] == contact_id), None)
-    if candidate:
-        return {"read_only": True, "writes": 0, "product": result["product"], "candidate": candidate}
-
-    # 候选可能在基础筛选阶段被排除；直接回读一次并解释，仍不写入。
+    if object_type not in {"KOL", "媒体人"}:
+        raise ValueError("object_type must be KOL or 媒体人")
+    # 单条只加载一次上下文；不先跑 500 条预览再重复全表读取。
     ctx = await _load_context(product_id)
     records = ctx["editors"] if object_type == "媒体人" else ctx["kols"]
     record = next((x for x in records if x.get("record_id") == contact_id), None)
@@ -375,8 +407,10 @@ async def replay_candidate(product_id: str, contact_id: str, *, object_type: str
     else:
         matched, filter_reasons = True, []
     check = precheck_contact(
-        record, object_type=object_type, brand=ext(product_fields.get("品牌")),
-        product_ids=set(family["product_ids"]), drafts=ctx["drafts"],
+        record, object_type=object_type,
+        brand=config.brand_from_text(ext(product_fields.get("品牌"))) or ext(product_fields.get("品牌")).upper(),
+        product_ids=set(family["product_ids"]),
+        drafts=_drafts_for_contact(record, object_type, ctx["draft_index"]),
         email_owners=ctx["owners"], now_ms=int(time.time() * 1000),
     )
     return {

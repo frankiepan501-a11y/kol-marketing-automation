@@ -45,6 +45,34 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertEqual("reactivation_same_thread", result["decision"])
         self.assertFalse(result["allowed_as_new_cold"])
 
+    def test_non_cold_history_also_blocks_new_cold(self):
+        contact = {
+            "record_id": "kol1",
+            "fields": {"邮箱": "creator@example.com", "合作状态": "样品评估"},
+        }
+        drafts = [{
+            "record_id": "ship1",
+            "fields": {
+                "关联KOL": {"link_record_ids": ["kol1"]},
+                "关联产品": {"link_record_ids": ["main"]},
+                "邮件草稿来源": "ship_confirm",
+                "邮件草稿状态": "已发送",
+                "发送状态": "已发",
+                "发送邮箱": "partner@fireflyfunlab.com",
+            },
+        }]
+        result = preview.precheck_contact(
+            contact,
+            object_type="KOL",
+            brand="FUNLAB",
+            product_ids={"main"},
+            drafts=drafts,
+            email_owners={"creator@example.com": {("KOL", "kol1")}},
+            now_ms=1_800_000_000_000,
+        )
+        self.assertEqual("reactivation_same_thread", result["decision"])
+        self.assertFalse(result["allowed_as_new_cold"])
+
     def test_cross_table_same_email_is_manual_hold(self):
         contact = {
             "record_id": "kol1",

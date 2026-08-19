@@ -2060,7 +2060,7 @@ async def launch_candidates_preview(
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/launch/candidates/preview", str(e), tr)
-        return {"ok": False, "error": str(e), "trace": tr}
+        raise HTTPException(status_code=500, detail="候选预览内部错误；未产生任何业务写入")
 
 
 @app.get("/launch/candidates/replay")
@@ -2083,30 +2083,36 @@ async def launch_candidate_replay(
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/launch/candidates/replay", str(e), tr)
-        return {"ok": False, "error": str(e), "trace": tr}
+        raise HTTPException(status_code=500, detail="单条回放内部错误；未产生任何业务写入")
 
 
 @app.post("/launch/email/test-raw")
 async def launch_email_test_raw(
     authorization: str = Header(default=""),
     product_id: str = "",
+    draft_id: str = "",
     brand: str = "FUNLAB",
     confirm: str = "",
+    run_key: str = "",
 ):
     """只发测试邮箱并回查 sent raw；全局 dry-run 未开启时硬拒绝。"""
     _check_auth(authorization)
-    if not product_id:
-        raise HTTPException(status_code=400, detail="product_id required")
+    if not product_id or not draft_id or not run_key:
+        raise HTTPException(status_code=400, detail="product_id, draft_id and run_key required")
     try:
         return await launch_email_preflight.send_and_validate(
-            product_id, brand, confirm=confirm,
+            product_id, draft_id, brand, confirm=confirm, run_key=run_key,
         )
+    except launch_email_preflight.RawValidationError as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/launch/email/test-raw", str(e), tr)
+        raise HTTPException(status_code=502, detail="Zoho raw 内容校验失败；已阻止放行")
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/launch/email/test-raw", str(e), tr)
-        return {"ok": False, "error": str(e), "trace": tr}
+        raise HTTPException(status_code=500, detail="邮件预检内部错误；已阻止放行")
 
 
 @app.post("/sla/check")
