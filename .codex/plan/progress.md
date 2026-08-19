@@ -153,3 +153,10 @@
 - 已正式发送采购部执行版卡给 2 名采购专员 union_id（继续不用采购群，因亚马逊助手 bot 不在采购群）：`sent=true`、`recipient_count=2`、4 张产品图上传、4 个可执行产品。message_id：`om_x100b69ad51ecc8a4c2cf958ab1a85ef`、`om_x100b69ad51e208b0dfd3edae0a4e004`。
 - 2026-07-29 Frankie 要求撤回发给蔡宗佑的采购部执行版卡，只保留郭嘉美收卡。已新增受保护 endpoint `POST /cs/amz-message/revoke`，由亚马逊助手 App 执行 Feishu message recall；提交并推送 `7679688 feat: add AMZ message revoke endpoint`，线上 `openapi.json` 已暴露新接口。已通过 n8n 已授权 AMZ Bearer 通道调用撤回 `om_x100b69ad51ecc8a4c2cf958ab1a85ef`，飞书返回 `feishu_code=0 / success`。郭嘉美卡片 `om_x100b69ad51e208b0dfd3edae0a4e004` 保留，不重复发送。撤回证据文件：`D:\Documents\AI知识库\.codex_tmp\amz_revoke_cai_procurement_card_20260729.json`。
 - 2026-07-29 session 分工已沉淀：本 session 继续跟进 `采购阶段`，当前节点是采购复核/采购执行清单确认；新 session 并行开展 `Listing 上架阶段预备工作`，只做 SOP、字段、资料缺口、合规文案框架和站点级上架准备，不直接创建真实 Listing、不写 Seller Central 生产后台。交接文件：`docs/handoff_amz_eu_procurement_and_listing_parallel_2026-07-29.md`。
+
+## 2026-08-19 KOL 集中宣发 P0 三池修复
+
+- Dave 活动生产名单已从混合的“新开发+旧关系复联”修复为三池隔离；当前 `evidence-v3` 有效名单 20/20 均为新开发池。
+- 生产批次 `p0-three-pool-v3-20260819a` 已回读通过：8 人通过、12 人待运营审核；历史对象分流为二次发布 4、现有流程 8、排除 7。
+- 代码 commit `bd7af3fff38cd92e333e70572398bb9e9eed6406` 已部署并健康；所有外联和费用授权保持关闭。
+- 详细证据见 `docs/launch_evidence_participation_handoff_2026-08-19.md`。
