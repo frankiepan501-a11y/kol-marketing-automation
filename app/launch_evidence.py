@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from . import config, feishu
+from . import config, feishu, launch_competitor_evidence
 from .feishu import ext
 
 
@@ -74,8 +74,8 @@ async def _validate_linked_records(
         fields = record.get("fields") or {}
         if _record_brand(fields).upper() != competitor_brand.upper():
             raise EvidenceValidationError(f"竞品帖子品牌不匹配: {record_id}")
-        if ext(fields.get("人工复核状态")) != "已确认" or ext(fields.get("相关性")) != "相关":
-            raise EvidenceValidationError(f"竞品帖子尚未确认或不相关: {record_id}")
+        if not launch_competitor_evidence.evidence_basis(fields):
+            raise EvidenceValidationError(f"竞品帖子不符合人工确认或非官方推定规则: {record_id}")
         posts.append(record)
 
     events = []

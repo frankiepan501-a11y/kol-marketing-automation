@@ -39,6 +39,7 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
             "fields": {
                 "竞品品牌": "NYXI", "人工复核状态": "待确认",
                 "相关性": "相关", "合作信号": "明确合作",
+                "KOL账号Handle": "@NyxiGaming",
             },
         }
         with patch.object(preview.launch_evidence, "get_activity", new=AsyncMock(return_value=activity)), \

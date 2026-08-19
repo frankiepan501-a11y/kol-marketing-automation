@@ -141,6 +141,58 @@ class LaunchEvidenceContractTests(unittest.TestCase):
         self.assertEqual(5, written["证据配置版本"])
         self.assertEqual(["post1"], written["关联竞品帖子"])
 
+    def test_reuse_accepts_nyxi_non_official_rule_inference(self):
+        activity = {
+            "record_id": "act1",
+            "fields": {"活动ID": "campaign-1", "证据配置版本": 0},
+        }
+        post = {
+            "record_id": "post1",
+            "fields": {
+                "竞品品牌": "NYXI", "KOL平台ID": "UC-creator",
+                "人工复核状态": "待复核", "相关性": "疑似", "合作信号": "待分析",
+            },
+        }
+        with patch.object(launch_evidence.config, "LAUNCH_EVIDENCE_ENABLED", True), \
+             patch.object(launch_evidence.config, "T_LAUNCH_CAMPAIGN", "activities"), \
+             patch.object(launch_evidence.config, "T_COMPETITOR_POST", "posts"), \
+             patch.object(launch_evidence.feishu, "search_records", new=AsyncMock(return_value=[activity])), \
+             patch.object(launch_evidence.feishu, "get_record", new=AsyncMock(return_value=post)), \
+             patch.object(launch_evidence.feishu, "update_record", new=AsyncMock()) as update:
+            result = asyncio.run(launch_evidence.configure_evidence(
+                campaign_id="campaign-1", mode="引用历史证据", competitor_brand="NYXI",
+                post_record_ids=["post1"], expected_config_version=0,
+            ))
+
+        self.assertEqual("已就绪", result["status"])
+        update.assert_awaited_once()
+
+    def test_reuse_rejects_nyxi_official_post(self):
+        activity = {
+            "record_id": "act1",
+            "fields": {"活动ID": "campaign-1", "证据配置版本": 0},
+        }
+        post = {
+            "record_id": "post1",
+            "fields": {
+                "竞品品牌": "NYXI", "KOL账号Handle": "@NyxiGaming",
+                "人工复核状态": "待复核", "相关性": "相关", "合作信号": "待分析",
+            },
+        }
+        with patch.object(launch_evidence.config, "LAUNCH_EVIDENCE_ENABLED", True), \
+             patch.object(launch_evidence.config, "T_LAUNCH_CAMPAIGN", "activities"), \
+             patch.object(launch_evidence.config, "T_COMPETITOR_POST", "posts"), \
+             patch.object(launch_evidence.feishu, "search_records", new=AsyncMock(return_value=[activity])), \
+             patch.object(launch_evidence.feishu, "get_record", new=AsyncMock(return_value=post)), \
+             patch.object(launch_evidence.feishu, "update_record", new=AsyncMock()) as update:
+            with self.assertRaises(launch_evidence.EvidenceValidationError):
+                asyncio.run(launch_evidence.configure_evidence(
+                    campaign_id="campaign-1", mode="引用历史证据", competitor_brand="NYXI",
+                    post_record_ids=["post1"], expected_config_version=0,
+                ))
+
+        update.assert_not_awaited()
+
     def test_start_moves_waiting_analysis_to_running(self):
         activity = {
             "record_id": "act1",

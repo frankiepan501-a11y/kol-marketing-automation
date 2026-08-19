@@ -4,6 +4,36 @@ from app import launch_competitor_evidence as evidence
 
 
 class LaunchCompetitorEvidenceTests(unittest.TestCase):
+    def test_nyxi_non_official_post_is_rule_inferred_partner_evidence(self):
+        fields = {
+            "竞品品牌": "NYXI", "平台": "YouTube",
+            "KOL平台ID": "UC-creator", "KOL账号Handle": "creator-one",
+            "人工复核状态": "待复核", "相关性": "疑似", "合作信号": "待分析",
+        }
+
+        self.assertEqual("rule_inferred_non_official", evidence.evidence_basis(fields))
+        self.assertFalse(evidence.is_nyxi_official_post(fields))
+
+    def test_nyxi_official_channels_are_not_partner_evidence(self):
+        for fields in (
+            {
+                "竞品品牌": "NYXI", "KOL平台ID": "UCIY4yC2qUCPcM7ws-xTARYg",
+                "人工复核状态": "已确认", "相关性": "相关", "合作信号": "明确合作",
+            },
+            {"竞品品牌": "NYXI", "KOL账号Handle": "@NyxiGaming"},
+            {"竞品品牌": "NYXI", "采集来源": ["YouTube官方频道"]},
+        ):
+            self.assertTrue(evidence.is_nyxi_official_post(fields))
+            self.assertEqual("", evidence.evidence_basis(fields))
+
+    def test_other_brand_still_requires_manual_confirmation(self):
+        fields = {
+            "竞品品牌": "Other", "人工复核状态": "待复核",
+            "相关性": "相关", "合作信号": "待分析",
+        }
+
+        self.assertEqual("", evidence.evidence_basis(fields))
+
     def test_long_term_and_p75_match_is_level_a(self):
         contact = {
             "record_id": "kol1",
@@ -77,6 +107,25 @@ class LaunchCompetitorEvidenceTests(unittest.TestCase):
         self.assertEqual("C", result["evidence_level"])
         self.assertEqual(["platform_creator_id"], result["identity_paths"])
         self.assertEqual(["youtube|creator:UC-current-schema"], result["stable_identity_keys"])
+
+    def test_rule_inferred_post_keeps_provenance_in_rank_output(self):
+        contact = {
+            "record_id": "kol1",
+            "fields": {"主平台": "YouTube", "YouTube频道ID": "UC-creator"},
+        }
+        post = {
+            "record_id": "post1",
+            "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "曝光量": 1000, "KOL平台ID": "UC-creator",
+                "人工复核状态": "待复核", "相关性": "疑似", "合作信号": "待分析",
+            },
+        }
+
+        result = evidence.rank_contact_evidence(contact, [post], base_score=80)
+
+        self.assertEqual("C", result["evidence_level"])
+        self.assertEqual("rule_inferred_non_official", result["evidence_posts"][0]["evidence_basis"])
 
 
 if __name__ == "__main__":

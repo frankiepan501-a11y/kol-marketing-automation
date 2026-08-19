@@ -13,6 +13,11 @@ from .feishu import ext
 MIN_P75_SAMPLE = 8
 LONG_TERM_DAYS = 90
 DAY_MS = 86_400_000
+NYXI_OFFICIAL_CREATOR_IDS = {
+    "UCIY4yC2qUCPcM7ws-xTARYg",
+    "UCbvp-CTcH3Mhtj2UWsSy8sA",
+}
+NYXI_OFFICIAL_HANDLES = {"nyxigaming", "nyxi_official"}
 
 
 def _ids(value) -> set[str]:
@@ -72,12 +77,41 @@ def _timestamp(value) -> int:
         return 0
 
 
-def _valid_post(fields: dict) -> bool:
-    return (
+def is_nyxi_official_post(fields: dict) -> bool:
+    if ext(fields.get("竞品品牌")).strip().upper() != "NYXI":
+        return False
+    sources = fields.get("采集来源") or []
+    if not isinstance(sources, list):
+        sources = [sources]
+    if "YouTube官方频道" in {ext(value).strip() for value in sources}:
+        return True
+    creator_id = _first(fields, ("KOL平台ID", "平台creator_id", "creator_id", "频道ID"))
+    handle = normalize_handle(_first(fields, (
+        "KOL账号Handle", "KOL账号名", "作者Handle", "Handle", "作者账号",
+    )))
+    return creator_id in NYXI_OFFICIAL_CREATOR_IDS or handle in NYXI_OFFICIAL_HANDLES
+
+
+def evidence_basis(fields: dict) -> str:
+    is_nyxi = ext(fields.get("竞品品牌")).strip().upper() == "NYXI"
+    if is_nyxi and is_nyxi_official_post(fields):
+        return ""
+    manually_confirmed = (
         ext(fields.get("人工复核状态")) == "已确认"
         and ext(fields.get("相关性")) == "相关"
         and ext(fields.get("合作信号")) == "明确合作"
     )
+    if manually_confirmed:
+        return "manual_confirmed"
+    if (
+        is_nyxi
+    ):
+        return "rule_inferred_non_official"
+    return ""
+
+
+def _valid_post(fields: dict) -> bool:
+    return bool(evidence_basis(fields))
 
 
 def _metric(fields: dict) -> tuple[str, float | None]:
@@ -203,6 +237,7 @@ def rank_contact_evidence(contact: dict, posts: list[dict], *, base_score: float
             "is_high_performance": high,
             "identity_path": path,
             "identity_key": identity_key(contact, post, path),
+            "evidence_basis": evidence_basis(fields),
         })
         if path not in match_paths:
             match_paths.append(path)
