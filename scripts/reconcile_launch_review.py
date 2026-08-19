@@ -25,23 +25,57 @@ def _contact_id(fields: dict) -> str:
     return (sorted(ids)[0] if ids else ext(fields.get("联系人记录ID"))).strip()
 
 
-async def _set_activity_gate(activity: dict, enabled: bool, *, ranking_version: str = "") -> None:
+def load_preview_json(path: str, args, participants: list[dict], activity: dict) -> dict:
+    payload = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    if payload.get("status") and payload.get("status") != "success":
+        raise RuntimeError(f"后台预览尚未成功: {payload.get('status')}")
+    preview = payload.get("result") or payload
+    product = preview.get("product") or {}
+    activity_fields = activity.get("fields") or {}
+    candidates = preview.get("candidates") or []
+    candidate_ids = {item.get("contact_id", "") for item in candidates}
+    current_ids = {
+        _contact_id(row.get("fields") or {}) for row in participants
+        if ext((row.get("fields") or {}).get("参与状态")) in launch_participation._PRE_OUTREACH_STATES
+    }
+    eligible_count = sum(item.get("decision") == "eligible_new_cold" for item in candidates)
+    checks = {
+        "只读结果": preview.get("read_only") is True and int(preview.get("writes") or 0) == 0,
+        "活动一致": preview.get("campaign_id") == args.campaign_id,
+        "产品一致": product.get("requested_product_id") == args.product_id,
+        "版本一致": preview.get("ranking_version") == args.ranking_version,
+        "生产活动版本未变化": ext(activity_fields.get("证据排序版本")) == args.ranking_version,
+        "生产活动产品未变化": ext(activity_fields.get("产品主记录ID")) == args.product_id,
+        "全证据来源": preview.get("evidence_source") == "activity_node_snapshot",
+        "竞品证据已应用": preview.get("competitor_evidence_applied") is True,
+        "全证据数量": int((preview.get("evidence_coverage") or {}).get("valid_partner_posts") or 0) == 2988,
+        "候选可安全补位": (
+            isinstance(preview.get("candidates"), list) and bool(candidates)
+            and current_ids.issubset(candidate_ids)
+            and eligible_count >= int(args.target_count)
+        ),
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise RuntimeError("后台预览文件安全校验失败: " + ", ".join(failed))
+    return preview
+
+
+async def _set_activity_gate(activity: dict, enabled: bool) -> None:
     fields = {"名单锁定授权": bool(enabled)}
-    if ranking_version:
-        fields["证据排序版本"] = ranking_version
     await launch_participation._update_and_confirm(
         config.T_LAUNCH_CAMPAIGN, activity["record_id"],
         fields,
     )
 
 
-async def _close_activity_gate(activity: dict, *, ranking_version: str) -> None:
+async def _close_activity_gate(activity: dict) -> None:
     last_error = None
     for delay in (0, 2, 5):
         if delay:
             await asyncio.sleep(delay)
         try:
-            await _set_activity_gate(activity, False, ranking_version=ranking_version)
+            await _set_activity_gate(activity, False)
             return
         except Exception as exc:  # closing the production gate is worth bounded retries
             last_error = exc
@@ -53,8 +87,12 @@ async def run(args) -> dict:
     participants = await launch_participation._participants(
         args.campaign_id, args.product_id, "KOL",
     )
-    preview = await launch_candidate_preview.preview_candidates(
-        campaign_id=args.campaign_id, object_type="KOL", limit=500, internal_full=True,
+    preview = (
+        load_preview_json(args.preview_json, args, participants, activity)
+        if args.preview_json
+        else await launch_candidate_preview.preview_candidates(
+            campaign_id=args.campaign_id, object_type="KOL", limit=500, internal_full=True,
+        )
     )
     plan = launch_participation.plan_review_backfill(
         participants, preview["candidates"],
@@ -87,10 +125,9 @@ async def run(args) -> dict:
 
     config.LAUNCH_PARTICIPATION_WRITE_ENABLED = True
     gate_open = False
-    lock_succeeded = False
-    old_ranking_version = ext((activity.get("fields") or {}).get("证据排序版本"))
     try:
-        await _set_activity_gate(activity, True, ranking_version=args.ranking_version)
+        # 开闸只改授权位；证据版本由生产活动自身持有，绝不从本地参数覆盖。
+        await _set_activity_gate(activity, True)
         gate_open = True
         lock_result = await launch_participation.lock_participants(
             campaign_id=args.campaign_id,
@@ -101,7 +138,6 @@ async def run(args) -> dict:
             lock_batch_id=args.lock_batch_id,
             _preview_result=preview,
         )
-        lock_succeeded = True
 
         pool_by_contact = {}
         for cid in plan["human_excluded_contact_ids"]:
@@ -132,12 +168,7 @@ async def run(args) -> dict:
     finally:
         try:
             if gate_open:
-                await _close_activity_gate(
-                    activity,
-                    ranking_version=(
-                        args.ranking_version if lock_succeeded else old_ranking_version
-                    ),
-                )
+                await _close_activity_gate(activity)
         finally:
             config.LAUNCH_PARTICIPATION_WRITE_ENABLED = False
 
@@ -189,6 +220,7 @@ def main() -> None:
     parser.add_argument("--target-count", type=int, default=20)
     parser.add_argument("--ranking-version", default="evidence-v3")
     parser.add_argument("--lock-batch-id", default="p0-three-pool-v3-20260819a")
+    parser.add_argument("--preview-json", default="")
     parser.add_argument("--commit", action="store_true")
     args = parser.parse_args()
     print(json.dumps(asyncio.run(run(args)), ensure_ascii=False, indent=2))

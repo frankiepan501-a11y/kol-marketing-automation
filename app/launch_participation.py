@@ -76,6 +76,10 @@ def plan_review_backfill(participants: list[dict], candidates: list[dict], *,
         if not contact_id:
             continue
         seen_participants.add(contact_id)
+        # 已取消行是历史审计记录：保留在 seen 中防止同一活动重新选回，
+        # 但不能再次计入本轮移出/分池，否则会把旧版本人数误报成当前调整量。
+        if ext(fields.get("参与状态")) not in _PRE_OUTREACH_STATES:
+            continue
         decision = (candidate_by_id.get(contact_id) or {}).get("decision")
         review = ext(fields.get("审核结论"))
         entry = ext(fields.get("进入方式"))

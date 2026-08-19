@@ -217,6 +217,30 @@ class LaunchParticipationTests(unittest.TestCase):
         self.assertEqual(["old-posted"], plan["republish_contact_ids"])
         self.assertEqual(0, plan["shortfall_count"])
 
+    def test_review_backfill_ignores_cancelled_history_but_does_not_reselect_it(self):
+        participants = [
+            {"fields": {"联系人记录ID": "current-pass", "进入方式": "新开发",
+                        "参与状态": "已入围", "审核结论": "通过"}},
+            {"fields": {"联系人记录ID": "current-excluded", "进入方式": "新开发",
+                        "参与状态": "已入围", "审核结论": "排除"}},
+            {"fields": {"联系人记录ID": "cancelled-old", "进入方式": "同线程激活",
+                        "参与状态": "已取消", "审核结论": "通过"}},
+        ]
+        candidates = [
+            {"contact_id": "current-pass", "decision": "eligible_new_cold"},
+            {"contact_id": "current-excluded", "decision": "eligible_new_cold"},
+            {"contact_id": "cancelled-old", "decision": "eligible_new_cold"},
+            {"contact_id": "fresh", "decision": "eligible_new_cold"},
+        ]
+
+        plan = launch_participation.plan_review_backfill(
+            participants, candidates, field_map={"link": "关联KOL"}, target_count=2,
+        )
+
+        self.assertEqual(["current-pass", "fresh"], plan["selected_contact_ids"])
+        self.assertEqual(["current-excluded"], plan["human_excluded_contact_ids"])
+        self.assertEqual([], plan["existing_pipeline_contact_ids"])
+
     def test_existing_approved_new_candidate_keeps_human_audit_on_version_upgrade(self):
         fields = {
             "进入方式": "新开发", "审核结论": "通过", "审核原因": "内容适配",
