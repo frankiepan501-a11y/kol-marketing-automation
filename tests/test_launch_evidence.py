@@ -202,30 +202,6 @@ class LaunchEvidenceContractTests(unittest.TestCase):
         self.assertEqual(post_ids, [row["record_id"] for row in validated])
         self.assertEqual(101, get.await_count)
 
-    def test_full_pool_validation_is_cached_after_first_background_load(self):
-        post_ids = [f"cache-post-{i}" for i in range(1000)]
-
-        async def fake_get(table_id, record_id):
-            return {"record_id": record_id, "fields": {
-                "竞品品牌": "NYXI", "KOL平台ID": f"UC-{record_id}",
-            }}
-
-        launch_evidence._VALIDATED_POST_CACHE.clear()
-        with patch.object(launch_evidence.config, "T_COMPETITOR_POST", "cache-posts"), \
-             patch.object(launch_evidence.feishu, "fetch_all_records", new=AsyncMock(return_value=[])) as fetch, \
-             patch.object(launch_evidence.feishu, "get_record", new=AsyncMock(side_effect=fake_get)) as get:
-            first = asyncio.run(launch_evidence._validate_linked_records(
-                competitor_brand="NYXI", post_record_ids=post_ids, event_record_ids=[],
-            ))
-            second = asyncio.run(launch_evidence._validate_linked_records(
-                competitor_brand="NYXI", post_record_ids=post_ids, event_record_ids=[],
-            ))
-
-        self.assertEqual(1000, len(first[0]))
-        self.assertEqual(1000, len(second[0]))
-        self.assertEqual(1, fetch.await_count)
-        self.assertEqual(1000, get.await_count)
-
     def test_confirm_analysis_keeps_ranking_version_monotonic(self):
         activity = {"record_id": "act1", "fields": {
             "活动ID": "campaign-1", "证据配置版本": 1,

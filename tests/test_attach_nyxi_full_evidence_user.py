@@ -29,6 +29,29 @@ class AttachNyxiFullEvidenceUserTests(unittest.TestCase):
 
         self.assertEqual(1, len(components))
 
+    def test_activity_readback_requires_every_committed_field(self):
+        expected = attach.activity_write_fields(
+            {"关联竞品营销事件": [{"record_ids": ["evt1"]}]},
+            ["post1"], snapshot_ms=123456,
+        )
+        actual = dict(expected)
+        actual["关联竞品帖子"] = [{"record_ids": ["post1"]}]
+        actual["关联竞品营销事件"] = [{"record_ids": ["evt1"]}]
+
+        self.assertTrue(attach.activity_fields_match(actual, expected))
+        for field, bad_value in (
+            ("竞品证据模式", "不使用竞品证据"),
+            ("竞品分析状态", "配置无效"),
+            ("竞品品牌", "OTHER"),
+            ("证据配置版本", 1),
+            ("证据排序版本", "evidence-v3"),
+            ("证据快照时间", 999),
+            ("证据等待/变更说明", "wrong"),
+        ):
+            changed = dict(actual)
+            changed[field] = bad_value
+            self.assertFalse(attach.activity_fields_match(changed, expected), field)
+
 
 if __name__ == "__main__":
     unittest.main()

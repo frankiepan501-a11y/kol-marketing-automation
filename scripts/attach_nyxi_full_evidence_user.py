@@ -216,6 +216,28 @@ def restore_fields(fields: dict) -> dict:
     }
 
 
+def activity_fields_match(actual: dict, expected: dict) -> bool:
+    scalar_names = (
+        "竞品证据模式", "竞品分析状态", "竞品品牌", "证据配置版本",
+        "证据排序版本", "证据快照时间", "证据等待/变更说明",
+    )
+    for name in scalar_names:
+        actual_value = actual.get(name)
+        expected_value = expected.get(name)
+        if name == "证据配置版本":
+            if int(actual_value or 0) != int(expected_value or 0):
+                return False
+        elif name == "证据快照时间":
+            if int(actual_value or 0) != int(expected_value or 0):
+                return False
+        elif first(actual_value) != first(expected_value):
+            return False
+    return (
+        set(link_ids(actual.get("关联竞品帖子"))) == set(expected.get("关联竞品帖子") or [])
+        and set(link_ids(actual.get("关联竞品营销事件"))) == set(expected.get("关联竞品营销事件") or [])
+    )
+
+
 def run(*, commit: bool) -> dict:
     posts = list_records(POST_TABLE, POST_FIELDS)
     nyxi = [row for row in posts if first(row["fields"].get("竞品品牌")).strip().upper() == "NYXI"]
@@ -269,7 +291,6 @@ def run(*, commit: bool) -> dict:
         raise RuntimeError("NYXI 证据数量与已审定口径不一致，停止写入")
 
     partner_ids = [row["record_id"] for row in partner]
-    expected_event_ids = link_ids(fields.get("关联竞品营销事件"))
     body = {"fields": activity_write_fields(
         fields, partner_ids,
         snapshot_ms=int(time.time() * 1000),
@@ -288,23 +309,12 @@ def run(*, commit: bool) -> dict:
             "written_linked_posts": len(written_post_ids),
             "written_linked_events": len(written_event_ids),
         })
-        if (
-            result["written_ranking_version"] != "evidence-v4"
-            or result["written_config_version"] != 2
-            or len(written_post_ids) != 2988
-            or set(written_post_ids) != set(partner_ids)
-            or set(written_event_ids) != set(expected_event_ids)
-        ):
+        if not activity_fields_match(readback, body["fields"]):
             raise RuntimeError("写入后回读校验失败")
     except Exception as write_error:
         lark(["api", "PUT", path, "--data", "-"], stdin=json.dumps(rollback, ensure_ascii=False))
         restored = get_activity().get("fields") or {}
-        rollback_ok = (
-            int(restored.get("证据配置版本") or 0) == rollback["fields"]["证据配置版本"]
-            and first(restored.get("证据排序版本")) == rollback["fields"]["证据排序版本"]
-            and set(link_ids(restored.get("关联竞品帖子"))) == set(rollback["fields"]["关联竞品帖子"])
-            and set(link_ids(restored.get("关联竞品营销事件"))) == set(rollback["fields"]["关联竞品营销事件"])
-        )
+        rollback_ok = activity_fields_match(restored, rollback["fields"])
         if not rollback_ok:
             raise RuntimeError("全证据写入失败，且自动恢复后的二次回读也未通过") from write_error
         raise
