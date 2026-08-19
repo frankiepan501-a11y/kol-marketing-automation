@@ -120,7 +120,6 @@ class LaunchOutreachTests(unittest.TestCase):
                 "YouTube频道ID": "UC_O4asJTG4G3PpNsA5Tkw3Q",
             },
         }
-        replay = {"candidate": {"decision": "eligible_new_cold", "base_filter_passed": True}}
         draft_copy = {}
         update_calls = []
 
@@ -142,7 +141,9 @@ class LaunchOutreachTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True), \
              patch.object(launch_outreach, "_find_release_draft", new=AsyncMock(return_value=None)), \
              patch.object(launch_outreach.launch_evidence, "get_activity", new=AsyncMock(return_value=activity)), \
-             patch.object(launch_outreach.launch_candidate_preview, "replay_candidate", new=AsyncMock(return_value=replay)), \
+             patch.object(launch_outreach, "_fast_precheck", new=AsyncMock(return_value={
+                 "decision": "eligible_new_cold", "reasons": ["全局重复触达预检通过"],
+             })), \
              patch.object(launch_outreach.feishu, "get_record", new=fake_get), \
              patch.object(launch_outreach.feishu, "create_record", new=fake_create), \
              patch.object(launch_outreach.feishu, "update_record", new=fake_update), \
@@ -178,6 +179,92 @@ class LaunchOutreachTests(unittest.TestCase):
         self.assertIn("launch-release:run-0002", draft_copy["邮件正文"])
         gate_values = [fields["发送邮件授权"] for _, _, fields in update_calls if "发送邮件授权" in fields]
         self.assertEqual([True, False], gate_values)
+
+    def test_fast_precheck_reads_only_exact_contact_email_and_product_family(self):
+        kol = {
+            "record_id": "kol1",
+            "fields": {"邮箱": "contact@indiealpa.ca", "合作状态": "待回复"},
+        }
+        product = {
+            "record_id": "product1",
+            "fields": {"活动主记录ID": "product1", "活动归并键": "dave-family"},
+        }
+        calls = []
+
+        async def fake_search(table_id, filters, field_names=None):
+            calls.append((table_id, filters, field_names))
+            field = filters[0]["field_name"]
+            if table_id == "kols" and field == "邮箱":
+                return [kol]
+            if table_id == "products":
+                return [product, {
+                    "record_id": "product-alias",
+                    "fields": {"活动主记录ID": "product1", "活动归并键": "dave-family"},
+                }]
+            return []
+
+        with patch.object(launch_outreach.config, "T_DRAFT", "drafts"), \
+             patch.object(launch_outreach.config, "T_KOL", "kols"), \
+             patch.object(launch_outreach.config, "T_EDITOR", "editors"), \
+             patch.object(launch_outreach.config, "T_PRODUCT", "products"), \
+             patch.object(launch_outreach.feishu, "search_records", new=fake_search), \
+             patch.object(
+                 launch_outreach.launch_candidate_preview, "precheck_contact",
+                 return_value={"decision": "eligible_new_cold"},
+             ) as precheck_mock:
+            result = asyncio.run(launch_outreach._fast_precheck(
+                kol=kol, product=product, product_id="product1",
+                contact_id="kol1", brand="FUNLAB",
+            ))
+
+        self.assertEqual("eligible_new_cold", result["decision"])
+        self.assertEqual(5, len(calls))
+        self.assertEqual(
+            {"product1", "product-alias"},
+            precheck_mock.call_args.kwargs["product_ids"],
+        )
+        self.assertEqual(
+            {("KOL", "kol1")},
+            precheck_mock.call_args.kwargs["email_owners"]["contact@indiealpa.ca"],
+        )
+
+    def test_fast_precheck_includes_same_email_history_and_blocks(self):
+        kol = {"record_id": "kol1", "fields": {"邮箱": "contact@indiealpa.ca"}}
+        product = {"record_id": "product1", "fields": {"活动主记录ID": "product1"}}
+        old_draft = {
+            "record_id": "draft-other",
+            "fields": {
+                "关联KOL": {"link_record_ids": ["kol-other"]},
+                "关联产品": {"link_record_ids": ["other-product"]},
+                "收件邮箱": "contact@indiealpa.ca",
+                "邮件草稿来源": "cold", "邮件草稿状态": "已发送",
+                "发送状态": "已发送", "发送邮箱": "FUNLAB",
+                "发送时间": 1_800_000_000_000,
+            },
+        }
+
+        async def fake_search(table_id, filters, field_names=None):
+            field = filters[0]["field_name"]
+            if table_id == "drafts" and field == "收件邮箱":
+                return [old_draft]
+            if table_id == "kols" and field == "邮箱":
+                return [kol]
+            if table_id == "products":
+                return [product]
+            return []
+
+        with patch.object(launch_outreach.config, "T_DRAFT", "drafts"), \
+             patch.object(launch_outreach.config, "T_KOL", "kols"), \
+             patch.object(launch_outreach.config, "T_EDITOR", "editors"), \
+             patch.object(launch_outreach.config, "T_PRODUCT", "products"), \
+             patch.object(launch_outreach.feishu, "search_records", new=fake_search), \
+             patch.object(launch_outreach.time, "time", return_value=1_800_000_000):
+            result = asyncio.run(launch_outreach._fast_precheck(
+                kol=kol, product=product, product_id="product1",
+                contact_id="kol1", brand="FUNLAB",
+            ))
+
+        self.assertEqual("hold_duplicate_identity", result["decision"])
 
     def test_regular_sender_still_denies_activity_locked_cold_draft(self):
         draft = {

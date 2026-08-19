@@ -205,6 +205,77 @@ async def _set_activity_email_gate(activity_record_id: str, value: bool) -> None
         raise OutreachValidationError("活动发送邮件授权写后回读不一致")
 
 
+async def _fast_precheck(*, kol: dict, product: dict, product_id: str,
+                         contact_id: str, brand: str) -> dict:
+    """只读取本次联系人相关记录，执行与全池预览相同的重复触达检查。"""
+    email, reason = feishu.clean_email(ext((kol.get("fields") or {}).get("邮箱")))
+    if not email:
+        raise OutreachValidationError(f"KOL 邮箱不可发送: {reason}")
+
+    draft_fields = launch_candidate_preview.DRAFT_FIELDS
+    product_fields = product.get("fields") or {}
+    canonical_id = ext(product_fields.get("活动主记录ID")).strip() or product_id
+    merge_key = ext(product_fields.get("活动归并键")).strip()
+
+    async def exact_email_owners(table_id: str, object_type: str) -> set[tuple[str, str]]:
+        rows = await feishu.search_records(table_id, [
+            {"field_name": "邮箱", "operator": "contains", "value": [email]},
+        ], field_names=["邮箱"])
+        owners = set()
+        for row in rows:
+            row_email, _ = feishu.clean_email(ext((row.get("fields") or {}).get("邮箱")))
+            if row_email == email:
+                owners.add((object_type, row.get("record_id", "")))
+        return owners
+
+    product_filter = (
+        {"field_name": "活动归并键", "operator": "is", "value": [merge_key]}
+        if merge_key else
+        {"field_name": "活动主记录ID", "operator": "is", "value": [canonical_id]}
+    )
+    drafts_by_contact, drafts_by_email, kol_owners, editor_owners, family_rows = await asyncio.gather(
+        feishu.search_records(config.T_DRAFT, [
+            {"field_name": "关联KOL", "operator": "contains", "value": [contact_id]},
+        ], field_names=draft_fields),
+        feishu.search_records(config.T_DRAFT, [
+            {"field_name": "收件邮箱", "operator": "contains", "value": [email]},
+        ], field_names=draft_fields),
+        exact_email_owners(config.T_KOL, "KOL"),
+        exact_email_owners(config.T_EDITOR, "媒体人"),
+        feishu.search_records(
+            config.T_PRODUCT, [product_filter],
+            field_names=["活动主记录ID", "活动归并键"],
+        ),
+    )
+
+    drafts = []
+    seen_drafts = set()
+    for draft in drafts_by_contact + drafts_by_email:
+        draft_email, _ = feishu.clean_email(ext((draft.get("fields") or {}).get("收件邮箱")))
+        linked_to_contact = contact_id in _link_ids((draft.get("fields") or {}).get("关联KOL"))
+        if not linked_to_contact and draft_email != email:
+            continue
+        draft_id = draft.get("record_id", "")
+        if draft_id not in seen_drafts:
+            seen_drafts.add(draft_id)
+            drafts.append(draft)
+
+    family_ids = {product_id, canonical_id}
+    for row in family_rows:
+        fields = row.get("fields") or {}
+        same_canonical = (ext(fields.get("活动主记录ID")).strip() or row.get("record_id", "")) == canonical_id
+        same_merge_key = bool(merge_key and ext(fields.get("活动归并键")).strip() == merge_key)
+        if same_canonical or same_merge_key:
+            family_ids.add(row.get("record_id", ""))
+    family_ids.discard("")
+
+    return launch_candidate_preview.precheck_contact(
+        kol, object_type="KOL", brand=brand, product_ids=family_ids,
+        drafts=drafts, email_owners={email: kol_owners | editor_owners},
+        now_ms=int(time.time() * 1000),
+    )
+
+
 async def send_one_real(*, campaign_id: str, participant_record_id: str,
                         product_id: str, contact_id: str, brand: str,
                         expected_profile_url: str, expected_ranking_version: str,
@@ -254,12 +325,16 @@ async def send_one_real(*, campaign_id: str, participant_record_id: str,
         if not email:
             raise OutreachValidationError(f"KOL 邮箱不可发送: {reason}")
 
-        replay = await launch_candidate_preview.replay_candidate(
-            product_id, contact_id, object_type="KOL", campaign_id=campaign_id,
+        precheck = await _fast_precheck(
+            kol=kol, product=product, product_id=product_id,
+            contact_id=contact_id, brand=brand,
         )
-        candidate = replay.get("candidate") or {}
-        if candidate.get("decision") != "eligible_new_cold" or not candidate.get("base_filter_passed"):
-            raise OutreachValidationError("单条回放已不再满足新开发条件，禁止发送")
+        if precheck.get("decision") != "eligible_new_cold":
+            raise OutreachValidationError(
+                "全局重复触达预检未通过: "
+                + str(precheck.get("decision") or "unknown")
+                + " / " + "; ".join(precheck.get("reasons") or [])
+            )
 
         score = float((participant.get("fields") or {}).get("基础评分快照") or 0)
         breakdown = {
