@@ -218,6 +218,50 @@ class LaunchParticipationTests(unittest.TestCase):
         self.assertEqual("batch-duplicate", activity["fields"]["KOL失败锁定批次ID"])
         self.assertEqual("已取消", created["fields"]["参与状态"])
 
+    def test_uncertain_create_and_failed_unique_query_blocks_automatic_retry(self):
+        activity = {"record_id": "act1", "fields": {
+            "活动ID": "campaign-1", "产品主记录ID": "product1",
+            "竞品证据模式": "不使用竞品证据", "竞品分析状态": "不适用",
+            "证据排序版本": "v2", "名单锁定授权": True,
+            "KOL已锁定名单版本": "v1", "KOL名单阻塞代码": "",
+        }}
+        preview = {"candidates": [{
+            "contact_id": "kol1", "decision": "eligible_new_cold", "score": 90,
+            "final_priority": 90, "evidence_level": "无加分",
+        }]}
+        calls = 0
+
+        async def fake_search(table_id, filters):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return []
+            raise RuntimeError("unique query unavailable")
+
+        async def fake_update(table_id, record_id, fields):
+            if table_id == "activities":
+                activity["fields"].update(fields)
+
+        with patch.object(launch_participation.config, "LAUNCH_PARTICIPATION_WRITE_ENABLED", True), \
+             patch.object(launch_participation.config, "T_LAUNCH_CAMPAIGN", "activities"), \
+             patch.object(launch_participation.config, "T_LAUNCH_PARTICIPANT", "participants"), \
+             patch.object(launch_participation.launch_evidence, "get_activity", new=AsyncMock(return_value=activity)), \
+             patch.object(launch_participation.launch_candidate_preview, "preview_candidates", new=AsyncMock(return_value=preview)), \
+             patch.object(launch_participation.feishu, "search_records", new=AsyncMock(side_effect=fake_search)), \
+             patch.object(launch_participation.feishu, "create_record", new=AsyncMock(side_effect=TimeoutError("unknown commit"))), \
+             patch.object(launch_participation.feishu, "update_record", new=AsyncMock(side_effect=fake_update)), \
+             patch.object(launch_participation.feishu, "get_record", new=AsyncMock()):
+            with self.assertRaises(launch_participation.ParticipantManualReviewError):
+                asyncio.run(launch_participation.lock_participants(
+                    campaign_id="campaign-1", product_family_id="product1",
+                    object_type="KOL", contact_ids=["kol1"],
+                    expected_ranking_version="v2", lock_batch_id="batch-uncertain",
+                ))
+
+        self.assertEqual("LOCK_BATCH_MANUAL_REVIEW", activity["fields"]["KOL名单阻塞代码"])
+        self.assertEqual("batch-uncertain", activity["fields"]["KOL失败锁定批次ID"])
+        self.assertIn("key:campaign-1|product1|KOL|kol1", activity["fields"]["KOL阻塞待处理记录"])
+
     def test_validation_checks_entire_batch_before_changing_first_record(self):
         activity = {"record_id": "act1", "fields": {
             "活动ID": "campaign-1", "产品主记录ID": "product1",

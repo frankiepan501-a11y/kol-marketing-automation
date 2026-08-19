@@ -356,7 +356,13 @@ async def lock_participants(
                     except Exception as create_exc:
                         if _definitely_not_committed(create_exc):
                             raise
-                        matches = await _participants_by_unique_key(unique_key)
+                        try:
+                            matches = await _participants_by_unique_key(unique_key)
+                        except Exception as query_exc:
+                            raise ParticipantManualReviewError(
+                                "新建参与记录结果不确定且唯一键回查失败，已停止自动重试",
+                                pending_ids=[f"key:{unique_key}"],
+                            ) from query_exc
                         if len(matches) != 1:
                             pending = [
                                 row.get("record_id", "") for row in matches
@@ -373,7 +379,13 @@ async def lock_participants(
                         await feishu.get_record(config.T_LAUNCH_PARTICIPANT, record_id),
                         fields,
                     )
-                    matches = await _participants_by_unique_key(unique_key)
+                    try:
+                        matches = await _participants_by_unique_key(unique_key)
+                    except Exception as query_exc:
+                        raise ParticipantManualReviewError(
+                            "参与记录已返回成功但唯一键回查失败，已停止自动重试",
+                            pending_ids=[record_id, f"key:{unique_key}"],
+                        ) from query_exc
                     match_ids = [
                         row.get("record_id", "") for row in matches
                         if row.get("record_id")

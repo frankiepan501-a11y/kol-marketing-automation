@@ -24,8 +24,8 @@
 
 ## 本地验证
 
-- 活动专项：`test_launch_*.py` 57/57 全部通过。
-- 全仓：271 项中 270 项通过；唯一失败为本次未改动的 `test_zeabur_watchdog.ZeaburWatchdogTests.test_run_once_alerts_any_project_service_failed_deployment`。单独重跑仍失败，相关文件相对实施前固定点无 diff。
+- 活动专项：`test_launch_*.py` 58/58 全部通过。
+- 全仓：272 项中 271 项通过；唯一失败为本次未改动的 `test_zeabur_watchdog.ZeaburWatchdogTests.test_run_once_alerts_any_project_service_failed_deployment`。单独重跑仍失败，相关文件相对实施前固定点无 diff。
 - `py_compile` 通过。
 - `git diff --check` 通过（仅有仓库现有 LF/CRLF 提示）。
 
