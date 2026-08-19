@@ -44,6 +44,8 @@ _DASHBOARD_RETENTION_JOB_TTL = 4 * 3600
 _dashboard_refresh_jobs = {}
 _DASHBOARD_REFRESH_JOB_TTL = 4 * 3600
 _DRAFT_REGEN_JOB_TTL = 6 * 3600
+_launch_preview_jobs = {}
+_LAUNCH_PREVIEW_JOB_TTL = 6 * 3600
 
 
 def _check_auth(auth: str):
@@ -2141,11 +2143,67 @@ async def launch_candidates_preview(
     object_type: str = "KOL",
     limit: int = 100,
     campaign_id: str = "",
+    async_mode: bool = True,
 ):
-    """活动候选只读预览：不建任务、不生草稿、不发邮件、不写飞书。"""
+    """活动候选只读预览；默认后台计算，避免全池读取超过网关时间。"""
     _check_auth(authorization)
     if not product_id and not campaign_id:
         raise HTTPException(status_code=400, detail="product_id or campaign_id required")
+    if async_mode:
+        now = time.time()
+        for job_id in list(_launch_preview_jobs):
+            if now - _launch_preview_jobs[job_id].get("started_ts", 0) > _LAUNCH_PREVIEW_JOB_TTL:
+                _launch_preview_jobs.pop(job_id, None)
+        request_key = (product_id, object_type, int(limit), campaign_id)
+        for job_id, job in _launch_preview_jobs.items():
+            if job.get("status") == "running" and job.get("request_key") == request_key:
+                return {
+                    "ok": True, "accepted": True, "already_running": True,
+                    "job_id": job_id, "status": "running",
+                }
+        job_id = "launchpreview-" + uuid.uuid4().hex[:12]
+        _launch_preview_jobs[job_id] = {
+            "status": "running", "started_ts": now,
+            "started_at": datetime_now_string(),
+            "request_key": request_key,
+            "params": {
+                "product_id": product_id, "object_type": object_type,
+                "limit": int(limit), "campaign_id": campaign_id,
+            },
+        }
+
+        async def _job():
+            try:
+                result = await launch_candidate_preview.preview_candidates(
+                    product_id, object_type=object_type, limit=limit,
+                    campaign_id=campaign_id,
+                )
+                _launch_preview_jobs[job_id].update(
+                    status="success", finished_at=datetime_now_string(),
+                    result={"ok": True, **result},
+                )
+            except (launch_evidence.EvidenceNotFoundError,
+                    launch_evidence.EvidenceValidationError, ValueError) as exc:
+                status_code = 404 if isinstance(exc, launch_evidence.EvidenceNotFoundError) else 422
+                if isinstance(exc, ValueError):
+                    status_code = 400
+                _launch_preview_jobs[job_id].update(
+                    status="error", finished_at=datetime_now_string(),
+                    error=str(exc), http_status=status_code,
+                )
+            except Exception as exc:
+                tr = _tb.format_exc()[-1000:]
+                _launch_preview_jobs[job_id].update(
+                    status="error", finished_at=datetime_now_string(),
+                    error="候选预览内部错误；未产生任何业务写入", http_status=500,
+                )
+                await _alert_endpoint_failure("/launch/candidates/preview", str(exc), tr)
+
+        asyncio.create_task(_job())
+        return {
+            "ok": True, "accepted": True, "already_running": False,
+            "job_id": job_id, "status": "running",
+        }
     try:
         return {"ok": True, **(await launch_candidate_preview.preview_candidates(
             product_id, object_type=object_type, limit=limit, campaign_id=campaign_id,
@@ -2160,6 +2218,21 @@ async def launch_candidates_preview(
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/launch/candidates/preview", str(e), tr)
         raise HTTPException(status_code=500, detail="候选预览内部错误；未产生任何业务写入")
+
+
+@app.get("/launch/candidates/preview/jobs/{job_id}")
+async def get_launch_preview_job(job_id: str, authorization: str = Header(default="")):
+    """查询候选预览后台任务；结果只保存在当前服务进程 6 小时。"""
+    _check_auth(authorization)
+    now = time.time()
+    for old_id in list(_launch_preview_jobs):
+        if now - _launch_preview_jobs[old_id].get("started_ts", 0) > _LAUNCH_PREVIEW_JOB_TTL:
+            _launch_preview_jobs.pop(old_id, None)
+    job = _launch_preview_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "job not found or expired")
+    public_job = {key: value for key, value in job.items() if key not in {"request_key", "started_ts"}}
+    return {"ok": True, "job_id": job_id, **public_job}
 
 
 @app.get("/launch/candidates/replay")

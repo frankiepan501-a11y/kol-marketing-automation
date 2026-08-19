@@ -57,11 +57,73 @@ class LaunchRouteTests(unittest.TestCase):
              patch.object(main.launch_candidate_preview, "preview_candidates", new=AsyncMock(return_value=result)) as preview:
             response = asyncio.run(main.launch_candidates_preview(
                 authorization="Bearer secret", product_id="", campaign_id="c1",
-                object_type="KOL", limit=20,
+                object_type="KOL", limit=20, async_mode=False,
             ))
         self.assertTrue(response["read_only"])
         self.assertEqual(response["writes"], 0)
         preview.assert_awaited_once_with("", object_type="KOL", limit=20, campaign_id="c1")
+
+    def test_preview_defaults_to_background_job_and_exposes_result(self):
+        async def exercise():
+            main._launch_preview_jobs.clear()
+            result = {"read_only": True, "writes": 0, "campaign_id": "c1"}
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), \
+                 patch.object(main.launch_candidate_preview, "preview_candidates", new=AsyncMock(return_value=result)):
+                accepted = await main.launch_candidates_preview(
+                    authorization="Bearer secret", campaign_id="c1",
+                    object_type="KOL", limit=20,
+                )
+                await asyncio.sleep(0)
+                status = await main.get_launch_preview_job(
+                    accepted["job_id"], authorization="Bearer secret",
+                )
+            main._launch_preview_jobs.clear()
+            return accepted, status
+
+        accepted, status = asyncio.run(exercise())
+
+        self.assertTrue(accepted["accepted"])
+        self.assertFalse(accepted["already_running"])
+        self.assertEqual(status["status"], "success")
+        self.assertTrue(status["result"]["read_only"])
+        self.assertEqual(status["result"]["writes"], 0)
+
+    def test_preview_job_status_requires_known_job(self):
+        main._launch_preview_jobs.clear()
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.get_launch_preview_job(
+                    "launchpreview-missing", authorization="Bearer secret",
+                ))
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_duplicate_preview_click_reuses_running_job(self):
+        async def exercise():
+            main._launch_preview_jobs.clear()
+            gate = asyncio.Event()
+
+            async def slow_preview(*args, **kwargs):
+                await gate.wait()
+                return {"read_only": True, "writes": 0, "campaign_id": "c1"}
+
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), \
+                 patch.object(main.launch_candidate_preview, "preview_candidates", new=AsyncMock(side_effect=slow_preview)) as preview:
+                first = await main.launch_candidates_preview(
+                    authorization="Bearer secret", campaign_id="c1", limit=20,
+                )
+                second = await main.launch_candidates_preview(
+                    authorization="Bearer secret", campaign_id="c1", limit=20,
+                )
+                gate.set()
+                await asyncio.sleep(0)
+            main._launch_preview_jobs.clear()
+            return first, second, preview.await_count
+
+        first, second, await_count = asyncio.run(exercise())
+
+        self.assertEqual(first["job_id"], second["job_id"])
+        self.assertTrue(second["already_running"])
+        self.assertEqual(await_count, 1)
 
     def test_participant_switch_denies_before_any_write(self):
         with patch.object(main.config, "INTERNAL_TOKEN", "secret"), \

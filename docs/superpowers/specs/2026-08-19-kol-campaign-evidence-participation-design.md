@@ -355,6 +355,9 @@ campaign_id|product_family_id|object_type|contact_record_id
 扩展现有 `POST /launch/candidates/preview`：
 
 - 新增必填 `campaign_id`；
+- 默认立即返回 `accepted=true + job_id`，后台完成全池读取与排序；重复提交相同参数时复用正在运行的 job；
+- 通过 `GET /launch/candidates/preview/jobs/{job_id}` 查询 `running / success / error` 和最终结果；进程内结果保留 6 小时，服务重启后可重新发起只读预览；
+- 仅技术诊断可显式传 `async_mode=false` 同步等待，运营入口不得依赖同步返回；
 - 产品从活动记录读取并核对，不能仅凭外部传入的产品 ID 绕过活动范围；
 - 返回 `evidence_mode`、`evidence_status`、`evidence_pending`、`ranking_version`；
 - 每位候选返回基础分、证据等级、使用的帖子 ID、排序分组和人话理由；

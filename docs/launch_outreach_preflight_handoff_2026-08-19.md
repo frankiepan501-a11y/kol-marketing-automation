@@ -8,7 +8,8 @@
 
 | 端点 | 用途 | 业务写入 |
 |---|---|---:|
-| `POST /launch/candidates/preview` | 活动候选只读预览；按产品别名家族做全局重复触达预检 | 0 |
+| `POST /launch/candidates/preview` | 默认后台启动活动候选只读预览，立即返回 `job_id`；按产品别名家族做全局重复触达预检 | 0 |
+| `GET /launch/candidates/preview/jobs/{job_id}` | 查询预览任务最终状态和候选结果；重复点击会复用同参数运行任务 | 0 |
 | `GET /launch/candidates/replay` | 回放单个候选为什么可开发、应延续旧线程、暂缓或排除 | 0 |
 | `POST /launch/email/test-raw` | 读取指定真实 cold 草稿，只发测试邮箱，回查发件账号、收件人、主题、HTML、正文长度、产品名、链接和残留占位符 | 0 条飞书业务记录 |
 
@@ -24,7 +25,7 @@
 ## 上线与验证顺序
 
 1. 用 Zeabur 单变量方式设置 `EMAIL_DRY_RUN_TO=frankiepan501@gmail.com` 并重新部署。
-2. 对食人花二代和戴夫手柄分别运行候选预览，确认 `read_only=true`、`writes=0`。
+2. 对食人花二代和戴夫手柄分别启动候选预览，保存返回的 `job_id`，轮询状态接口直到 `success`，再确认结果 `read_only=true`、`writes=0`。不要把 HTTP 已接受误当成计算完成。
 3. 各选 1 条候选做单条回放，核对证据草稿 ID 与处理路线。
 4. 从两款产品各选 1 条真实 cold 草稿，传 `draft_id` 与唯一 `run_key`；POWKONG、FUNLAB 各执行 1 次 `test-raw`，必须全部校验通过。当前生产单实例内，同一个 `run_key` 会先占位；并发、超时重试只回查原邮件，不重复发送。服务重启后仍先按 `run_key` 查 Zoho 已发送箱。
 5. 只允许白名单中的单个规范测试邮箱；删除 `EMAIL_DRY_RUN_TO` 并重新部署后，再次调用 `test-raw` 应被硬拒绝。
