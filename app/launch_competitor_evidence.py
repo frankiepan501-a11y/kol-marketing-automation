@@ -140,6 +140,24 @@ def match_post_identity(contact: dict, post: dict) -> str:
     return ""
 
 
+def identity_key(contact: dict, post: dict, path: str) -> str:
+    contact_fields = contact.get("fields") or {}
+    post_fields = post.get("fields") or {}
+    platform = _first(contact_fields, ("主平台", "平台")).lower()
+    if path == "linked_kol":
+        return f"kol_record:{contact.get('record_id', '')}"
+    if path == "platform_creator_id":
+        value = _first(contact_fields, ("平台creator_id", "creator_id", "作者ID", "频道ID"))
+        return f"{platform}|creator:{value}"
+    if path == "profile_url":
+        value = normalize_url(_first(contact_fields, ("主页URL", "账号主页", "主页链接", "频道链接")))
+        return f"{platform}|url:{value}"
+    if path == "platform_handle":
+        value = normalize_handle(_first(contact_fields, ("账号Handle", "Handle", "账号名")))
+        return f"{platform}|handle:{value}"
+    return f"post:{post.get('record_id', '')}|unknown"
+
+
 def rank_contact_evidence(contact: dict, posts: list[dict], *, base_score: float) -> dict:
     """只使用调用方传入的活动直接关联帖子，不扫描品牌的其他证据。"""
     thresholds, samples = _p75_thresholds(posts)
@@ -170,6 +188,7 @@ def rank_contact_evidence(contact: dict, posts: list[dict], *, base_score: float
             "p75_threshold": thresholds.get(key),
             "is_high_performance": high,
             "identity_path": path,
+            "identity_key": identity_key(contact, post, path),
         })
         if path not in match_paths:
             match_paths.append(path)
@@ -193,6 +212,9 @@ def rank_contact_evidence(contact: dict, posts: list[dict], *, base_score: float
         "long_term_span_days": span_days,
         "high_performance": high_performance,
         "identity_paths": match_paths,
+        "stable_identity_keys": list(dict.fromkeys(
+            x["identity_key"] for x in matched if x.get("identity_key")
+        )),
         "matched_post_ids": [x["post_id"] for x in matched],
         "evidence_posts": matched,
         "p75_thresholds": thresholds,

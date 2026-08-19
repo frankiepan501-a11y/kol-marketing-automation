@@ -57,9 +57,6 @@ class LaunchEvidenceContractTests(unittest.TestCase):
     def test_no_evidence_mode_clears_all_competitor_fields(self):
         target = launch_evidence.build_config_target(
             mode="不使用竞品证据",
-            competitor_brand="NYXI",
-            post_record_ids=["post1"],
-            event_record_ids=["event1"],
             change_reason="活动不需要竞品证据",
         )
 
@@ -68,6 +65,42 @@ class LaunchEvidenceContractTests(unittest.TestCase):
         self.assertEqual("", target["竞品品牌"])
         self.assertEqual([], target["关联竞品帖子"])
         self.assertEqual([], target["关联竞品营销事件"])
+
+    def test_no_evidence_mode_rejects_stale_competitor_fields(self):
+        with self.assertRaises(launch_evidence.EvidenceValidationError):
+            launch_evidence.build_config_target(
+                mode="不使用竞品证据", competitor_brand="NYXI",
+                post_record_ids=["post1"],
+            )
+
+    def test_start_failure_marks_node_and_activity_failed_for_retry(self):
+        activity = {"record_id": "act1", "fields": {
+            "活动ID": "campaign-1", "证据配置版本": 5,
+            "竞品证据模式": "发起新分析", "竞品分析状态": "待分析",
+        }}
+        node = {"record_id": "node1", "fields": {"节点代码": "competitor_research"}}
+        calls = []
+
+        async def fake_update(table_id, record_id, fields):
+            calls.append((table_id, record_id, dict(fields)))
+            if len(calls) == 2:
+                raise RuntimeError("start failed")
+
+        with patch.object(launch_evidence.config, "LAUNCH_EVIDENCE_ENABLED", True), \
+             patch.object(launch_evidence.config, "T_LAUNCH_CAMPAIGN", "activities"), \
+             patch.object(launch_evidence.config, "T_LAUNCH_NODE", "nodes"), \
+             patch.object(launch_evidence.feishu, "search_records", new=AsyncMock(
+                 side_effect=[[activity], [node], [node]]
+             )), \
+             patch.object(launch_evidence.feishu, "update_record", new=AsyncMock(side_effect=fake_update)):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(launch_evidence.start_analysis(
+                    campaign_id="campaign-1", expected_config_version=5,
+                ))
+        self.assertEqual("执行中", calls[0][2]["节点状态"])
+        self.assertEqual("已阻塞", calls[2][2]["节点状态"])
+        self.assertEqual("失败", calls[3][2]["竞品分析状态"])
+        self.assertEqual(5, calls[3][2]["证据配置版本"])
 
     def test_reuse_confirmed_post_increments_config_version_once(self):
         activity = {
@@ -120,7 +153,10 @@ class LaunchEvidenceContractTests(unittest.TestCase):
         }
         with patch.object(launch_evidence.config, "LAUNCH_EVIDENCE_ENABLED", True), \
              patch.object(launch_evidence.config, "T_LAUNCH_CAMPAIGN", "activities"), \
-             patch.object(launch_evidence.feishu, "search_records", new=AsyncMock(return_value=[activity])), \
+             patch.object(launch_evidence.config, "T_LAUNCH_NODE", "nodes"), \
+             patch.object(launch_evidence.feishu, "search_records", new=AsyncMock(
+                 side_effect=[[activity], [{"record_id": "node1", "fields": {}}]]
+             )), \
              patch.object(launch_evidence.feishu, "update_record", new=AsyncMock()) as update:
             result = asyncio.run(launch_evidence.start_analysis(
                 campaign_id="campaign-1", expected_config_version=2,
@@ -128,10 +164,33 @@ class LaunchEvidenceContractTests(unittest.TestCase):
 
         self.assertEqual("分析中", result["status"])
         self.assertEqual(3, result["config_version"])
+        self.assertEqual("执行中", update.await_args_list[0].args[2]["节点状态"])
         self.assertEqual(
             {"竞品分析状态": "分析中", "证据配置版本": 3},
-            update.await_args.args[2],
+            update.await_args_list[1].args[2],
         )
+
+    def test_retry_reopens_node_then_commits_new_activity_version(self):
+        activity = {"record_id": "act1", "fields": {
+            "活动ID": "campaign-1", "证据配置版本": 5,
+            "竞品证据模式": "发起新分析", "竞品分析状态": "失败",
+        }}
+        node = {"record_id": "node1", "fields": {"节点状态": "已阻塞"}}
+        with patch.object(launch_evidence.config, "LAUNCH_EVIDENCE_ENABLED", True), \
+             patch.object(launch_evidence.config, "T_LAUNCH_CAMPAIGN", "activities"), \
+             patch.object(launch_evidence.config, "T_LAUNCH_NODE", "nodes"), \
+             patch.object(launch_evidence.feishu, "search_records", new=AsyncMock(
+                 side_effect=[[activity], [node]]
+             )), \
+             patch.object(launch_evidence.feishu, "update_record", new=AsyncMock()) as update:
+            result = asyncio.run(launch_evidence.retry_analysis(
+                campaign_id="campaign-1", expected_config_version=5,
+            ))
+
+        self.assertEqual("待分析", result["status"])
+        self.assertEqual(6, result["config_version"])
+        self.assertEqual("待执行", update.await_args_list[0].args[2]["节点状态"])
+        self.assertEqual("待分析", update.await_args_list[1].args[2]["竞品分析状态"])
 
     def test_submit_then_confirm_only_accepts_current_candidate_subset(self):
         activity = {

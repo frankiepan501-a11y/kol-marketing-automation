@@ -113,6 +113,10 @@ def build_config_target(
     brand = (competitor_brand or "").strip()
 
     if mode == MODE_NONE:
+        if brand or posts or events:
+            raise EvidenceValidationError(
+                "不使用竞品证据时，竞品品牌、帖子和事件必须全部为空"
+            )
         return {
             "竞品证据模式": MODE_NONE,
             "竞品分析状态": "不适用",
@@ -252,12 +256,52 @@ async def _transition_simple(
 
 
 async def start_analysis(*, campaign_id: str, expected_config_version: int) -> dict:
-    return await _transition_simple(
-        campaign_id=campaign_id,
-        expected_config_version=expected_config_version,
-        expected_status="待分析",
-        target_status="分析中",
-    )
+    """启动调查；启动写入失败时尽力落到可见的失败态，供 retry 恢复。"""
+    if not config.LAUNCH_EVIDENCE_ENABLED:
+        raise EvidenceValidationError("LAUNCH_EVIDENCE_ENABLED 未开启")
+    lock = _ACTIVITY_LOCKS.setdefault(campaign_id, asyncio.Lock())
+    async with lock:
+        activity = await get_activity(campaign_id)
+        fields = activity.get("fields") or {}
+        current = _require_new_analysis_state(
+            fields, expected_config_version=expected_config_version,
+            expected_status="待分析",
+        )
+        new_version = current + 1
+        try:
+            node = await _get_research_node(campaign_id)
+            await feishu.update_record(config.T_LAUNCH_NODE, node["record_id"], {
+                "节点状态": "执行中",
+                "节点阻塞说明": "",
+                "目标证据配置版本": new_version,
+            })
+            await feishu.update_record(config.T_LAUNCH_CAMPAIGN, activity["record_id"], {
+                "竞品分析状态": "分析中", "证据配置版本": new_version,
+            })
+        except Exception:
+            try:
+                node = await _get_research_node(campaign_id)
+                await feishu.update_record(config.T_LAUNCH_NODE, node["record_id"], {
+                    "节点状态": "已阻塞",
+                    "节点阻塞说明": "调查启动失败；可刷新活动版本后重试",
+                })
+            except Exception:
+                pass
+            try:
+                await feishu.update_record(config.T_LAUNCH_CAMPAIGN, activity["record_id"], {
+                    "竞品分析状态": "失败",
+                    "证据配置版本": current,
+                    "证据等待/变更说明": "调查启动失败；请使用 retry 重试",
+                })
+            except Exception:
+                pass
+            raise
+        return {
+            "campaign_id": campaign_id,
+            "activity_record_id": activity["record_id"],
+            "status": "分析中",
+            "config_version": new_version,
+        }
 
 
 async def _find_research_nodes(campaign_id: str) -> list[dict]:
@@ -440,9 +484,38 @@ async def confirm_analysis(
 
 
 async def retry_analysis(*, campaign_id: str, expected_config_version: int) -> dict:
-    return await _transition_simple(
-        campaign_id=campaign_id,
-        expected_config_version=expected_config_version,
-        expected_status="失败",
-        target_status="待分析",
-    )
+    if not config.LAUNCH_EVIDENCE_ENABLED:
+        raise EvidenceValidationError("LAUNCH_EVIDENCE_ENABLED 未开启")
+    lock = _ACTIVITY_LOCKS.setdefault(campaign_id, asyncio.Lock())
+    async with lock:
+        activity = await get_activity(campaign_id)
+        fields = activity.get("fields") or {}
+        current = _require_new_analysis_state(
+            fields, expected_config_version=expected_config_version,
+            expected_status="失败",
+        )
+        new_version = current + 1
+        node = await _get_research_node(campaign_id)
+        await feishu.update_record(config.T_LAUNCH_NODE, node["record_id"], {
+            "节点状态": "待执行",
+            "节点阻塞说明": "",
+            "目标证据配置版本": new_version,
+        })
+        try:
+            await feishu.update_record(config.T_LAUNCH_CAMPAIGN, activity["record_id"], {
+                "竞品分析状态": "待分析",
+                "证据配置版本": new_version,
+                "证据等待/变更说明": "",
+            })
+        except Exception:
+            await feishu.update_record(config.T_LAUNCH_NODE, node["record_id"], {
+                "节点状态": "已阻塞",
+                "节点阻塞说明": "重试版本提交失败；旧失败版本继续有效",
+            })
+            raise
+        return {
+            "campaign_id": campaign_id,
+            "activity_record_id": activity["record_id"],
+            "status": "待分析",
+            "config_version": new_version,
+        }

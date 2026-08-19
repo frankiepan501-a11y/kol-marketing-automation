@@ -25,6 +25,11 @@ from app import config
 
 APP_TOKEN = os.environ.get("FEISHU_APP_TOKEN", "KINabIENjak8fRsB6AHcIDALntc")
 PARTICIPANT_TABLE_NAME = "新品集中上稿活动参与记录"
+T_KOL = os.environ.get("T_KOL", "tblMMhnj2hEbhF6y")
+T_EDITOR = os.environ.get("T_EDITOR", "tblinUWFZHtmXZbC")
+T_DRAFT = os.environ.get("T_DRAFT", "tblpWteXNX34vds4")
+T_TASK_KOL = os.environ.get("T_TASK_KOL", "tblBtDYex6eiW2ui")
+T_TASK_EDITOR = os.environ.get("T_TASK_EDITOR", "tblQ9Be4tisn8gcs")
 
 
 def text(name):
@@ -83,8 +88,8 @@ NODE_FIELDS = [
 PARTICIPANT_FIELDS = [
     text("参与记录ID"), text("活动ID"), relation("关联活动", config.T_LAUNCH_CAMPAIGN, multiple=False),
     select("对象类型", ["KOL", "媒体人"]),
-    relation("关联KOL", config.T_KOL, multiple=False),
-    relation("关联媒体人", config.T_EDITOR, multiple=False),
+    relation("关联KOL", T_KOL, multiple=False),
+    relation("关联媒体人", T_EDITOR, multiple=False),
     text("产品家族ID"), select("进入方式", ["新开发", "同线程激活", "继续洽谈"]),
     number("基础评分快照"), select("竞品证据等级", ["A", "B", "C", "无加分", "待人工匹配"]),
     relation("关联竞品帖子", config.T_COMPETITOR_POST), number("最终优先级"),
@@ -92,9 +97,9 @@ PARTICIPANT_FIELDS = [
     select("参与状态", ["锁定准备中", "已入围", "已取消"]),
     text("锁定批次ID"), text("名单版本"),
     select("取消原因代码", ["锁定失败", "运营取消", "不再符合"]),
-    relation("关联KOL任务", config.T_TASK_KOL),
-    relation("关联媒体人任务", config.T_TASK_EDITOR),
-    relation("关联邮件草稿", config.T_DRAFT),
+    relation("关联KOL任务", T_TASK_KOL),
+    relation("关联媒体人任务", T_TASK_EDITOR),
+    relation("关联邮件草稿", T_DRAFT),
     datetime_field("计划上稿时间"), datetime_field("承诺上稿时间"),
     datetime_field("实际上稿时间"), url("上稿链接"),
 ]
@@ -260,7 +265,7 @@ async def run(*, commit=False, verify_only=False):
 
     relation_targets = [
         config.T_LAUNCH_CAMPAIGN, config.T_COMPETITOR_POST, config.T_COMPETITOR_EVENT,
-        config.T_KOL, config.T_EDITOR, config.T_TASK_KOL, config.T_TASK_EDITOR, config.T_DRAFT,
+        T_KOL, T_EDITOR, T_TASK_KOL, T_TASK_EDITOR, T_DRAFT,
     ]
     if not all(relation_targets):
         raise RuntimeError("commit 前必须配置全部关联表 ID")

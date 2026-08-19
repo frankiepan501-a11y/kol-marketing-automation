@@ -27,6 +27,10 @@ class ParticipantRetryableError(RuntimeError):
 class ParticipantManualReviewError(RuntimeError):
     """数据存在重复或回滚不完整，必须人工修复。"""
 
+    def __init__(self, message: str, *, pending_ids: list[str] | None = None):
+        super().__init__(message)
+        self.pending_ids = pending_ids or []
+
 
 _LOCKS: dict[str, asyncio.Lock] = {}
 _FIELDS = {
@@ -92,6 +96,11 @@ def _history(value) -> list[dict]:
 
 
 def _snapshot(candidate: dict, ranking_version: str) -> dict:
+    evidence_posts = candidate.get("evidence_posts") or []
+    dated_posts = sorted(
+        (x for x in evidence_posts if int(x.get("published_at") or 0) > 0),
+        key=lambda x: int(x.get("published_at") or 0),
+    )
     return {
         "ranking_version": ranking_version,
         "base_score": candidate.get("score"),
@@ -99,8 +108,15 @@ def _snapshot(candidate: dict, ranking_version: str) -> dict:
         "evidence_level": candidate.get("evidence_level", "无加分"),
         "ranking_group": candidate.get("evidence_level", "无加分"),
         "identity_paths": candidate.get("identity_paths") or [],
+        "stable_identity_keys": candidate.get("stable_identity_keys") or [],
         "post_ids": candidate.get("matched_post_ids") or [],
-        "evidence_posts": candidate.get("evidence_posts") or [],
+        "evidence_posts": evidence_posts,
+        "long_term_first_post": dated_posts[0] if dated_posts else None,
+        "long_term_last_post": dated_posts[-1] if dated_posts else None,
+        "p75_thresholds": candidate.get("p75_thresholds") or {},
+        "p75_samples": candidate.get("p75_samples") or {},
+        "base_filter_passed": bool(candidate.get("base_filter_passed", True)),
+        "base_filter_reasons": candidate.get("base_filter_reasons") or [],
         "duplicate_touch_decision": candidate.get("decision"),
         "selection_reason": _selection_reason(candidate),
         "saved_at": int(time.time() * 1000),
@@ -180,6 +196,23 @@ async def _participants(campaign_id: str, product_family_id: str,
         {"field_name": "产品家族ID", "operator": "is", "value": [product_family_id]},
         {"field_name": "对象类型", "operator": "is", "value": [object_type]},
     ])
+
+
+async def _participants_by_unique_key(unique_key: str) -> list[dict]:
+    rows = await feishu.search_records(config.T_LAUNCH_PARTICIPANT, [
+        {"field_name": "参与记录ID", "operator": "is", "value": [unique_key]},
+    ])
+    # 即使底层 search 返回宽于过滤条件的结果，也只认完全相等的唯一键。
+    return [
+        row for row in rows
+        if _participant_unique_key(row.get("fields") or {}) == unique_key
+    ]
+
+
+def _definitely_not_committed(exc: Exception) -> bool:
+    """只把明确的 HTTP 4xx 拒绝视为“肯定没有写入”。"""
+    message = str(exc)
+    return bool(re.search(r"(?:HTTP\s*)?4\d\d|→\s*4\d\d", message, re.IGNORECASE))
 
 
 async def lock_participants(
@@ -315,13 +348,41 @@ async def lock_participants(
                     )
                     selected_record_ids.append(record["record_id"])
                 else:
-                    record_id = await feishu.create_record(config.T_LAUNCH_PARTICIPANT, fields)
+                    unique_key = fields["参与记录ID"]
+                    try:
+                        record_id = await feishu.create_record(
+                            config.T_LAUNCH_PARTICIPANT, fields,
+                        )
+                    except Exception as create_exc:
+                        if _definitely_not_committed(create_exc):
+                            raise
+                        matches = await _participants_by_unique_key(unique_key)
+                        if len(matches) != 1:
+                            pending = [
+                                row.get("record_id", "") for row in matches
+                                if row.get("record_id")
+                            ] or [f"key:{unique_key}"]
+                            raise ParticipantManualReviewError(
+                                "新建参与记录结果不确定，已停止自动重试",
+                                pending_ids=pending,
+                            ) from create_exc
+                        record_id = matches[0]["record_id"]
                     created_ids.append(record_id)
                     selected_record_ids.append(record_id)
                     _assert_readback(
                         await feishu.get_record(config.T_LAUNCH_PARTICIPANT, record_id),
                         fields,
                     )
+                    matches = await _participants_by_unique_key(unique_key)
+                    match_ids = [
+                        row.get("record_id", "") for row in matches
+                        if row.get("record_id")
+                    ]
+                    if len(matches) != 1 or match_ids != [record_id]:
+                        raise ParticipantManualReviewError(
+                            "参与记录ID创建后唯一性回查失败",
+                            pending_ids=match_ids or [f"key:{unique_key}"],
+                        )
 
             activity_commit_started = True
             await feishu.update_record(config.T_LAUNCH_CAMPAIGN, activity["record_id"], {
@@ -359,6 +420,13 @@ async def lock_participants(
                         })
                     except Exception:
                         rollback_failed.append(record_id)
+                if isinstance(exc, ParticipantManualReviewError):
+                    await _set_block(
+                        activity, field_map, code="LOCK_BATCH_MANUAL_REVIEW",
+                        failed_batch=lock_batch_id,
+                        pending_ids=exc.pending_ids + rollback_failed,
+                    )
+                    raise exc
                 if rollback_failed:
                     await _set_block(
                         activity, field_map, code="LOCK_BATCH_MANUAL_REVIEW",

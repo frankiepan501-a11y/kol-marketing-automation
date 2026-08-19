@@ -30,6 +30,7 @@ class LaunchCompetitorEvidenceTests(unittest.TestCase):
         self.assertTrue(result["long_term"])
         self.assertTrue(result["high_performance"])
         self.assertEqual(600, result["p75_thresholds"]["YouTube|长视频"])
+        self.assertEqual(["kol_record:kol1"], result["stable_identity_keys"])
 
     def test_display_name_similarity_does_not_match_identity(self):
         contact = {

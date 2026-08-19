@@ -476,6 +476,7 @@ async def preview_candidates(
                 "evidence_level": "无加分", "final_priority": score,
                 "long_term": False, "long_term_span_days": 0,
                 "high_performance": False, "identity_paths": [],
+                "stable_identity_keys": [],
                 "matched_post_ids": [], "evidence_posts": [],
                 "p75_thresholds": {}, "p75_samples": {},
             }
@@ -485,6 +486,7 @@ async def preview_candidates(
             "name": _candidate_name(fields, object_type),
             "platform": ext(fields.get("主平台")) if object_type == "KOL" else ext(fields.get("主要媒体")),
             "country": ext(fields.get("国家")), "language": ext(fields.get("语言")),
+            "base_filter_passed": True, "base_filter_reasons": filter_reasons,
             "score": score, "breakdown": breakdown,
             "competitor_signal": (ext(fields.get("合作竞品"))[:300] if object_type == "KOL" else ""),
             "competitor_evidence": (ext(fields.get("竞品帖子证据"))[:500] if object_type == "KOL" else ""),
@@ -580,7 +582,8 @@ async def replay_candidate(
         )
         if activity_ctx and activity_ctx["competitor_evidence_applied"] and object_type == "KOL"
         else {"evidence_level": "无加分", "final_priority": score,
-              "identity_paths": [], "matched_post_ids": [], "evidence_posts": []}
+              "identity_paths": [], "stable_identity_keys": [],
+              "matched_post_ids": [], "evidence_posts": []}
     )
     locked_snapshot = None
     if activity_ctx:
