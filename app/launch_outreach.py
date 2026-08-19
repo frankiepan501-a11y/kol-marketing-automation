@@ -66,10 +66,33 @@ def _canonical_profile(url: str) -> str:
     return f"{host}{path}"
 
 
+def _profile_identity_matches(participant_url: str, expected_url: str,
+                              kol: dict | None = None) -> bool:
+    if _canonical_profile(participant_url) == _canonical_profile(expected_url):
+        return True
+    # 飞书历史快照可能保存 /channel/UC...，用户审核时打开的是 /@handle。
+    # 只有“参与记录 channel ID = KOL 主表 channel ID”且“@handle = KOL 账号名”才视为同一人。
+    pf = urlsplit(participant_url if "://" in participant_url else "https://" + participant_url)
+    ef = urlsplit(expected_url if "://" in expected_url else "https://" + expected_url)
+    participant_match = re.fullmatch(r"/channel/(UC[A-Za-z0-9_-]{20,})/?", pf.path, re.I)
+    expected_match = re.fullmatch(r"/@([^/]+)/?", ef.path)
+    kf = (kol or {}).get("fields") or {}
+    channel_id = ext(kf.get("YouTube频道ID")).strip()
+    account_name = ext(kf.get("账号名")).strip().lstrip("@").lower()
+    return bool(
+        pf.netloc.lower().removeprefix("www.") == "youtube.com"
+        and ef.netloc.lower().removeprefix("www.") == "youtube.com"
+        and participant_match and expected_match
+        and participant_match.group(1).lower() == channel_id.lower()
+        and expected_match.group(1).lower() == account_name
+    )
+
+
 def validate_participant_gate(activity: dict, participant: dict, *, campaign_id: str,
                               product_id: str, contact_id: str,
                               expected_profile_url: str,
-                              expected_ranking_version: str) -> None:
+                              expected_ranking_version: str,
+                              kol: dict | None = None) -> None:
     af = activity.get("fields") or {}
     pf = participant.get("fields") or {}
     checks = {
@@ -87,8 +110,9 @@ def validate_participant_gate(activity: dict, participant: dict, *, campaign_id:
             and ext(pf.get("排序版本")) == expected_ranking_version
         ),
         "名单阻塞": not ext(af.get("KOL名单阻塞代码")),
-        "达人主页": _canonical_profile(feishu.ext_url(pf.get("达人主页")))
-        == _canonical_profile(expected_profile_url),
+        "达人主页": _profile_identity_matches(
+            feishu.ext_url(pf.get("达人主页")), expected_profile_url, kol,
+        ),
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
@@ -208,10 +232,11 @@ async def send_one_real(*, campaign_id: str, participant_record_id: str,
 
         activity = await launch_evidence.get_activity(campaign_id)
         participant = await feishu.get_record(config.T_LAUNCH_PARTICIPANT, participant_record_id)
+        kol = await feishu.get_record(config.T_KOL, contact_id)
         validate_participant_gate(
             activity, participant, campaign_id=campaign_id, product_id=product_id,
             contact_id=contact_id, expected_profile_url=expected_profile_url,
-            expected_ranking_version=expected_ranking_version,
+            expected_ranking_version=expected_ranking_version, kol=kol,
         )
         if bool((activity.get("fields") or {}).get("发送邮件授权")):
             raise OutreachValidationError("活动全局发送授权已处于开启状态；需先查明原因，禁止叠加放行")
@@ -225,7 +250,6 @@ async def send_one_real(*, campaign_id: str, participant_record_id: str,
             raise OutreachValidationError("产品品牌与发件品牌不一致")
         if ext(product_fields.get("派单模式")) != "活动专用":
             raise OutreachValidationError("产品不是活动专用锁状态，禁止走活动单人放行")
-        kol = await feishu.get_record(config.T_KOL, contact_id)
         email, reason = feishu.clean_email(ext((kol.get("fields") or {}).get("邮箱")))
         if not email:
             raise OutreachValidationError(f"KOL 邮箱不可发送: {reason}")

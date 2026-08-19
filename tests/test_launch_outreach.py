@@ -51,6 +51,19 @@ class LaunchOutreachTests(unittest.TestCase):
                 expected_ranking_version="evidence-v4",
             )
 
+    def test_profile_gate_accepts_same_youtube_channel_id_and_reviewed_handle(self):
+        kol = {"fields": {"账号名": "IndieAlpaca", "YouTube频道ID": "UC_O4asJTG4G3PpNsA5Tkw3Q"}}
+        self.assertTrue(launch_outreach._profile_identity_matches(
+            "https://www.youtube.com/channel/UC_O4asJTG4G3PpNsA5Tkw3Q",
+            "https://www.youtube.com/@IndieAlpaca",
+            kol,
+        ))
+        self.assertFalse(launch_outreach._profile_identity_matches(
+            "https://www.youtube.com/channel/UC_O4asJTG4G3PpNsA5Tkw3Q",
+            "https://www.youtube.com/@AnotherCreator",
+            kol,
+        ))
+
     def test_existing_release_draft_never_automatically_resends(self):
         existing = {
             "record_id": "draft1",
@@ -102,7 +115,10 @@ class LaunchOutreachTests(unittest.TestCase):
         }
         kol = {
             "record_id": "kol1",
-            "fields": {"账号名": "IndieAlpaca", "邮箱": "contact@indiealpa.ca"},
+            "fields": {
+                "账号名": "IndieAlpaca", "邮箱": "contact@indiealpa.ca",
+                "YouTube频道ID": "UC_O4asJTG4G3PpNsA5Tkw3Q",
+            },
         }
         replay = {"candidate": {"decision": "eligible_new_cold", "base_filter_passed": True}}
         draft_copy = {}
