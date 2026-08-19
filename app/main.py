@@ -2150,6 +2150,10 @@ async def launch_candidates_preview(
         return {"ok": True, **(await launch_candidate_preview.preview_candidates(
             product_id, object_type=object_type, limit=limit, campaign_id=campaign_id,
         ))}
+    except launch_evidence.EvidenceNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except launch_evidence.EvidenceValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -2174,6 +2178,10 @@ async def launch_candidate_replay(
         return {"ok": True, **(await launch_candidate_preview.replay_candidate(
             product_id, contact_id, object_type=object_type, campaign_id=campaign_id,
         ))}
+    except launch_evidence.EvidenceNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except launch_evidence.EvidenceValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

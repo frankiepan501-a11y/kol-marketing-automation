@@ -216,6 +216,8 @@ async def lock_participants(
             product_family_id, object_type=object_type, campaign_id=campaign_id,
             internal_full=True,
         )
+        if preview.get("evidence_pending") or preview.get("evidence_status") == "配置无效":
+            raise ParticipantValidationError("活动竞品证据配置无效或尚未就绪")
         candidate_map = {x.get("contact_id", ""): x for x in preview.get("candidates") or []}
         invalid = [cid for cid in contacts if (
             cid not in candidate_map

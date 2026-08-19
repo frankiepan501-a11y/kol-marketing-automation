@@ -329,6 +329,8 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
     status = ext(fields.get("竞品分析状态"))
     brand = ext(fields.get("竞品品牌"))
     post_ids = sorted(_link_ids(fields.get("关联竞品帖子")))
+    event_ids = sorted(_link_ids(fields.get("关联竞品营销事件")))
+    ranking_version = ext(fields.get("证据排序版本"))
     evidence_pending = bool(
         not mode or status == "配置无效"
         or (mode == launch_evidence.MODE_NEW and status != "已就绪")
@@ -345,25 +347,28 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
     )
     posts = []
     evidence_error = ""
-    if exact_scope and post_ids:
+    if mode == launch_evidence.MODE_NONE:
+        if status != "不适用" or brand or post_ids or event_ids:
+            evidence_error = "不使用竞品证据的字段组合无效"
+    elif mode in {launch_evidence.MODE_NEW, launch_evidence.MODE_REUSE} and status == "已就绪":
+        if not brand or not post_ids or not ranking_version:
+            evidence_error = "已就绪证据缺少品牌、帖子或排序版本"
+    elif mode not in launch_evidence.VALID_MODES:
+        evidence_error = "竞品证据模式为空或未知"
+
+    if not evidence_error and mode in {launch_evidence.MODE_NEW, launch_evidence.MODE_REUSE} and status == "已就绪":
         try:
-            for record_id in post_ids:
-                post = await feishu.get_record(config.T_COMPETITOR_POST, record_id)
-                post_fields = post.get("fields") or {}
-                if (
-                    launch_evidence._record_brand(post_fields).upper() != brand.upper()
-                    or ext(post_fields.get("人工复核状态")) != "已确认"
-                    or ext(post_fields.get("相关性")) != "相关"
-                ):
-                    raise launch_evidence.EvidenceValidationError(
-                        f"竞品帖子已失效: {record_id}"
-                    )
-                posts.append(post)
+            posts, _ = await launch_evidence._validate_linked_records(
+                competitor_brand=brand,
+                post_record_ids=post_ids,
+                event_record_ids=event_ids,
+            )
         except Exception as exc:
             evidence_error = str(exc)
-            evidence_pending = True
-            status = "配置无效"
             posts = []
+    if evidence_error:
+        evidence_pending = True
+        status = "配置无效"
     applicable = bool(exact_scope and posts and not evidence_error)
     return {
         "activity": activity,
@@ -371,7 +376,7 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
         "evidence_mode": mode,
         "evidence_status": status or "配置无效",
         "evidence_pending": evidence_pending,
-        "ranking_version": ext(fields.get("证据排序版本")),
+        "ranking_version": ranking_version,
         "competitor_posts": posts if applicable else [],
         "competitor_evidence_applied": applicable,
         "evidence_error": evidence_error,
