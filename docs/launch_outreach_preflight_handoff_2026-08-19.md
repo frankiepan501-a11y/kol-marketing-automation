@@ -49,3 +49,32 @@
 ## 可观测与回放
 
 候选预览返回联系人记录 ID、掩码邮箱、评分、决策、原因和命中的历史草稿 ID；单条回放可复现同一条的判断。响应不返回完整邮箱，也不会把活动状态写回联系人主状态。
+
+## 2026-08-20 首封真实灰度：IndieAlpaca
+
+### 结果
+
+- 活动：`launch-20260915-funlab-dave-ys11-5`
+- 参与记录：`recvsLh7iLBxUg`
+- KOL：`recvhwpbzedYZ8 / IndieAlpaca`
+- 草稿：`recvsLHSKGv4tc / launch-dave-indiealpaca-20260820a`
+- 收件邮箱：`contact@indiealpa.ca`
+- 主题：`IndieAlpaca, this fits your retro corner`
+- Zoho message ID：`1787164088114155100`
+- 发送时间：2026-08-20 02:28:08（Asia/Taipei）
+- raw：9/9 通过；raw 正文 597 字符，预期 597 字符
+- 跟进记录：`recvsLIppE2dOA`
+- 活动全局发送授权：发送后回读为 `false`
+
+### 本轮修复
+
+1. 单人真实发送不再加载整个候选池，改为只查目标联系人、同邮箱身份、相关草稿和产品家族；保留全部重复触达规则。commit `5a8280d`。
+2. 飞书数字字段可能以字符串返回，`enrich._subscriber_count` 先规范为整数，避免邮件生成阶段格式化失败。commit `9b66315`。
+3. 产品身份检查增加“授权 IP + 产品类型”组合，避免正文写明 `Dave the Diver controller` 却因没出现 `Pro` 被误报。commit `1455c60`。
+
+### 验证与安全边界
+
+- 活动相关测试 118 项通过，`py_compile` 和 `git diff --check` 通过。
+- 同 nonce 已有草稿后接口只回查、不重发；这封邮件在修复 raw 规则时只读取既有 Zoho 消息，没有补发。
+- KOL 主状态保持单调前进为 `待回复`；参与记录仍为 `已入围 / 审核通过`，并关联唯一草稿。
+- 本次授权不包含其他 KOL、自动 follow-up、寄样、付费或批量发送；这些仍需后续独立闸门。

@@ -63,3 +63,23 @@
 - 2026-07-29 修订：正式采购部执行卡不能沿用“给 Frankie 确认”的预览文案；采购部版本必须显示“采购阶段执行清单 / 采购部执行”，且需要 `procurement_approved=true` 才能越过 Frankie-only 安全闸。
 - 2026-08-19：高基数竞品证据不再塞进单个关联单元格；活动主表保留代表样本，完整证据放有序快照节点并用数量、连续分片和 SHA-256 校验。
 - 2026-08-19：历史已取消参与记录继续用于防止重复选人，但不计入本次当前名单的流出人数；名单闸门不得覆盖证据排序版本。
+
+## 2026-08-20 IndieAlpaca 首封真实灰度
+
+| Phase | Status | Success Check |
+|---|---|---|
+| 6.1 发送前生产回读 | complete | 参与记录已人工通过；主页、联系人、邮箱、产品、历史触达和活动版本全部一致 |
+| 6.2 只生成并发送一封 | complete | 仅 IndieAlpaca 生成草稿 `recvsLHSKGv4tc` 并发送 1 封；同 nonce 禁止补发 |
+| 6.3 发后 raw 与业务回读 | complete | Zoho raw 9/9 通过；草稿、跟进、KOL 状态、参与记录与活动锁回读一致 |
+| 6.4 收口 | complete | 活动发送闸=false；代码、测试、部署和审计备注完成 |
+
+授权边界：Frankie 已明确授权 `https://www.youtube.com/@IndieAlpaca` 作为 Dave 活动首名真实 KOL 灰度对象；只覆盖这一名、这一封 cold 开发信，不覆盖其他参与者、follow-up、寄样、付费或批量发送。
+
+### 2026-08-20 Errors Encountered
+
+| Error | Attempt | Resolution |
+|---|---|---|
+| 本机 lark-cli 1.0.64 的 `base +record-get` 不支持文档中的 `--fields` | 首次裁剪字段读取 | 改为先看当前命令 help，再使用该版本支持的只读参数；不改 CLI 版本、不切 raw API 盲试 |
+| 单人端点仍调用全池 `replay_candidate`，读取全表导致长等待且未建草稿 | 首次两次放行尝试 | 改为只查该联系人、该邮箱和产品家族的 `_fast_precheck`；116 项活动测试通过后部署 |
+| 飞书把 `粉丝数` 返回为字符串，`{kol_sub:,}` 触发 `ValueError` | 修复后首次真实请求 | 在 `enrich._subscriber_count` 统一转为非负整数；只生成不发送验证通过后再用同 nonce 执行 |
+| 已发 raw 初检 8/9，产品身份项误报 | 唯一真实发送后的 raw 检查 | 邮件实际含 `Dave the Diver controller`；校验器补充“IP + 产品类型”规则，直接读取同一 Zoho 消息重新验证为 9/9，未补发 |

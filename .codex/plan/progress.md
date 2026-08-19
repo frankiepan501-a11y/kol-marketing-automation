@@ -177,3 +177,16 @@
 - 3 人补位已提交并回读：IndieAlpaca、La Poción Roja、Mundatos；均为 `已入围 / 待审核 / 新开发 / 新开发池 / evidence-v4`。当前有效名单 20、坏记录 0、关联任务或草稿 0。
 - G4 已通过：临时启用 `EMAIL_DRY_RUN_TO=frankiepan501@gmail.com`，只发送 1 封 Dave 测试邮件，Zoho raw 9 项检查全部通过；随后用单变量方式清空该环境变量并重新部署，端点已恢复 HTTP 400 硬拒绝测试发送。
 - 最终代码 commit `73826ec30d357d7cdeab964ca63b3ceb86f4ae8f` 已部署；活动专项 113 项和 3 个子测试通过，全仓 333 项中仅 1 项既有 Zeabur watchdog 用例失败，与本次无关。真实 KOL 发信、寄样、付费和储备金授权继续关闭。
+
+## 2026-08-20 IndieAlpaca 首封真实灰度
+
+- Frankie 明确授权选择 `https://www.youtube.com/@IndieAlpaca` 作为本次 Dave 活动的首名真实 KOL 灰度发送对象。
+- 执行范围固定为：先回读人工审核、参与状态、邮箱、现有草稿、历史触达和全局重复触达；全部通过后只发送 1 封；发后立即回查 Zoho raw 和飞书写回。其他 KOL、后续跟进、寄样、付费与批量发送不在本次授权范围内。
+- 首次用 `lark-cli base +record-get --fields` 读取时，本机 1.0.64 不支持该参数，未产生写入；已改为按本机 help 选择受支持的只读调用。
+- 已新增活动单人真实发送端点 `POST /launch/outreach/send-one`：要求 `REAL_ONE_ONLY`、人工审核通过、活动/产品/联系人/名单版本/主页一致、活动锁关闭、Zoho 未暂停、产品为活动专用、全局重复触达通过；同一 nonce 有任何草稿后永不自动重发。
+- 单人预检已从全池回放改为定向查询：只读该联系人、同邮箱身份、相关历史草稿与产品别名家族；避免约 4.6 分钟全池计算卡住单封发送。commit `5a8280d`。
+- 首次真实请求在建草稿前失败，根因为飞书数字字段 `粉丝数` 在线返回字符串，旧邮件生成器使用数字格式化报错；Zoho 与参与记录回读均确认 0 发件、0 草稿。已在 `enrich._subscriber_count` 统一数值类型，117 项活动测试通过，且只生成不发送实测正文成功。commit `9b66315`。
+- 唯一真实邮件已于 2026-08-20 02:28:08（Asia/Taipei）发至 `contact@indiealpa.ca`：草稿 `recvsLHSKGv4tc`，Zoho message ID `1787164088114155100`，主题 `IndieAlpaca, this fits your retro corner`。
+- 首轮 raw 返回 8/9：正文已经明确包含 `officially licensed Dave the Diver controller`，但旧规则额外要求出现主关键词剩余 token `Pro`，属于校验误报，不是邮件错误。修复为“IP 名称 + 产品类型”也可确认身份；直接读取同一 Zoho raw 复核为 9/9，正文 raw 597 字符与预期 597 一致，没有补发。commit `1455c60` 已 `RUNNING`。
+- 生产回读：草稿 `邮件草稿状态=已发送 / 发送状态=已发`；参与记录关联该唯一草稿；KOL 合作状态保持 `待回复`；新增跟进记录 `recvsLIppE2dOA`；活动 `发送邮件授权=false`；审批意见已回填 `raw=9/9通过` 和 Zoho message ID。
+- 本次只创建 1 条活动 cold 草稿、发送 1 封真实邮件；未触发其他 KOL、follow-up、寄样、费用或批量发送。
