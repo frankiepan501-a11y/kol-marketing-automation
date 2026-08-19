@@ -1,0 +1,283 @@
+"""集中上稿活动证据与参与记录表结构迁移。
+
+默认只读取并输出差异；只有 ``--commit`` 才新增表或字段。本脚本不删除、
+重命名或覆盖现有字段。若同名字段类型不同，会在第一笔写入前整批停止。
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+
+import httpx
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app import config
+
+
+APP_TOKEN = os.environ.get("FEISHU_APP_TOKEN", "KINabIENjak8fRsB6AHcIDALntc")
+PARTICIPANT_TABLE_NAME = "新品集中上稿活动参与记录"
+
+
+def text(name):
+    return {"field_name": name, "type": 1}
+
+
+def number(name):
+    return {"field_name": name, "type": 2}
+
+
+def select(name, options):
+    return {"field_name": name, "type": 3,
+            "property": {"options": [{"name": value} for value in options]}}
+
+
+def datetime_field(name):
+    return {"field_name": name, "type": 5}
+
+
+def checkbox(name):
+    return {"field_name": name, "type": 7}
+
+
+def url(name):
+    return {"field_name": name, "type": 15}
+
+
+def relation(name, table_id, *, multiple=True):
+    return {"field_name": name, "type": 18,
+            "property": {"table_id": table_id, "multiple": multiple}}
+
+
+ACTIVITY_FIELDS = [
+    text("产品主记录ID"),
+    select("竞品证据模式", ["发起新分析", "引用历史证据", "不使用竞品证据"]),
+    select("竞品分析状态", ["不适用", "待分析", "分析中", "待人工确认", "已就绪", "失败", "配置无效"]),
+    text("竞品品牌"),
+    relation("关联竞品营销事件", config.T_COMPETITOR_EVENT),
+    relation("关联竞品帖子", config.T_COMPETITOR_POST),
+    datetime_field("证据快照时间"), text("证据排序版本"), number("证据配置版本"),
+    checkbox("名单锁定授权"), text("KOL已锁定名单版本"),
+    select("KOL名单阻塞代码", ["LOCK_BATCH_RETRYABLE", "LOCK_BATCH_MANUAL_REVIEW", "DUPLICATE_PARTICIPANT_MANUAL"]),
+    text("KOL失败锁定批次ID"), text("KOL阻塞待处理记录"),
+    text("媒体人已锁定名单版本"),
+    select("媒体人名单阻塞代码", ["LOCK_BATCH_RETRYABLE", "LOCK_BATCH_MANUAL_REVIEW", "DUPLICATE_PARTICIPANT_MANUAL"]),
+    text("媒体人失败锁定批次ID"), text("媒体人阻塞待处理记录"),
+    text("证据等待/变更说明"),
+]
+
+NODE_FIELDS = [
+    relation("待确认竞品帖子", config.T_COMPETITOR_POST),
+    relation("待确认竞品事件", config.T_COMPETITOR_EVENT),
+    number("调查提交版本"), datetime_field("调查提交时间"), text("调查提交说明"),
+]
+
+PARTICIPANT_FIELDS = [
+    text("参与记录ID"), text("活动ID"), relation("关联活动", config.T_LAUNCH_CAMPAIGN, multiple=False),
+    select("对象类型", ["KOL", "媒体人"]),
+    relation("关联KOL", config.T_KOL, multiple=False),
+    relation("关联媒体人", config.T_EDITOR, multiple=False),
+    text("产品家族ID"), select("进入方式", ["新开发", "同线程激活", "继续洽谈"]),
+    number("基础评分快照"), select("竞品证据等级", ["A", "B", "C", "无加分", "待人工匹配"]),
+    relation("关联竞品帖子", config.T_COMPETITOR_POST), number("最终优先级"),
+    text("选择原因"), text("排序版本"), text("排序快照历史"),
+    select("参与状态", ["锁定准备中", "已入围", "已取消"]),
+    text("锁定批次ID"), text("名单版本"),
+    select("取消原因代码", ["锁定失败", "运营取消", "不再符合"]),
+    relation("关联KOL任务", config.T_TASK_KOL),
+    relation("关联媒体人任务", config.T_TASK_EDITOR),
+    relation("关联邮件草稿", config.T_DRAFT),
+    datetime_field("计划上稿时间"), datetime_field("承诺上稿时间"),
+    datetime_field("实际上稿时间"), url("上稿链接"),
+]
+
+
+class SchemaConflict(RuntimeError):
+    pass
+
+
+def diff_fields(existing: list[dict], desired: list[dict]) -> dict:
+    by_name = {field.get("field_name"): field for field in existing}
+    missing = []
+    reused = []
+    conflicts = []
+    for definition in desired:
+        current = by_name.get(definition["field_name"])
+        if not current:
+            missing.append(definition)
+        elif current.get("type") != definition.get("type"):
+            conflicts.append({
+                "field_name": definition["field_name"],
+                "expected_type": definition.get("type"),
+                "actual_type": current.get("type"),
+            })
+        else:
+            reused.append(definition["field_name"])
+    return {"missing": missing, "reused": reused, "conflicts": conflicts}
+
+
+def validate_no_conflicts(diffs: dict[str, dict]) -> None:
+    conflicts = [
+        {"table": table, **item}
+        for table, diff in diffs.items() for item in diff.get("conflicts") or []
+    ]
+    if conflicts:
+        raise SchemaConflict("同名字段类型冲突: " + json.dumps(conflicts, ensure_ascii=False))
+
+
+class Client:
+    def __init__(self):
+        self.app_id = os.environ.get("FEISHU_BITABLE_APP_ID", "")
+        self.app_secret = os.environ.get("FEISHU_BITABLE_APP_SECRET", "")
+        if not self.app_id or not self.app_secret:
+            raise RuntimeError("缺少 FEISHU_BITABLE_APP_ID / FEISHU_BITABLE_APP_SECRET")
+        self.access_token = ""
+
+    async def authenticate(self):
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                json={"app_id": self.app_id, "app_secret": self.app_secret},
+            )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("code") not in (None, 0):
+            raise RuntimeError(f"飞书认证失败: {data.get('code')} {data.get('msg')}")
+        self.access_token = data["tenant_access_token"]
+
+    async def request(self, method, path, body=None):
+        headers = {"Authorization": f"Bearer {self.access_token}",
+                   "Content-Type": "application/json; charset=utf-8"}
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.request(
+                method, f"https://open.feishu.cn/open-apis{path}", headers=headers, json=body,
+            )
+        data = response.json()
+        if response.status_code >= 400 or data.get("code") not in (None, 0):
+            raise RuntimeError(
+                f"{method} {path} 失败: HTTP={response.status_code} "
+                f"code={data.get('code')} msg={data.get('msg')}"
+            )
+        return data
+
+
+async def list_all(client, path):
+    items = []
+    page_token = ""
+    while True:
+        joiner = "&" if "?" in path else "?"
+        suffix = f"{joiner}page_size=100"
+        if page_token:
+            suffix += f"&page_token={page_token}"
+        response = await client.request("GET", path + suffix)
+        data = response.get("data") or {}
+        items.extend(data.get("items") or [])
+        if not data.get("has_more"):
+            return items
+        page_token = data.get("page_token") or ""
+        if not page_token:
+            raise RuntimeError("分页返回 has_more=true 但没有 page_token")
+
+
+async def list_fields(client, table_id):
+    return await list_all(client, f"/bitable/v1/apps/{APP_TOKEN}/tables/{table_id}/fields")
+
+
+async def run(*, commit=False, verify_only=False):
+    client = Client()
+    await client.authenticate()
+    tables = await list_all(client, f"/bitable/v1/apps/{APP_TOKEN}/tables")
+    participant = next((x for x in tables if x.get("name") == PARTICIPANT_TABLE_NAME), None)
+    participant_id = config.T_LAUNCH_PARTICIPANT or (participant or {}).get("table_id", "")
+    if config.T_LAUNCH_PARTICIPANT and participant and participant["table_id"] != config.T_LAUNCH_PARTICIPANT:
+        raise SchemaConflict("T_LAUNCH_PARTICIPANT 与同名表不一致")
+
+    activity_existing = await list_fields(client, config.T_LAUNCH_CAMPAIGN)
+    node_existing = await list_fields(client, config.T_LAUNCH_NODE)
+    participant_existing = await list_fields(client, participant_id) if participant_id else []
+    diffs = {
+        "activity": diff_fields(activity_existing, ACTIVITY_FIELDS),
+        "node": diff_fields(node_existing, NODE_FIELDS),
+        "participant": diff_fields(participant_existing, PARTICIPANT_FIELDS),
+    }
+    validate_no_conflicts(diffs)
+    result = {
+        "mode": "commit" if commit else ("verify-only" if verify_only else "dry-run"),
+        "participant_table_id": participant_id,
+        "participant_table_will_create": not bool(participant_id),
+        "tables": {
+            name: {"missing": [x["field_name"] for x in diff["missing"]],
+                   "reused": diff["reused"], "conflicts": diff["conflicts"]}
+            for name, diff in diffs.items()
+        },
+        "deletes": [],
+    }
+    if verify_only:
+        result["verified"] = bool(participant_id) and not any(diff["missing"] for diff in diffs.values())
+        return result
+    if not commit:
+        return result
+
+    relation_targets = [
+        config.T_LAUNCH_CAMPAIGN, config.T_COMPETITOR_POST, config.T_COMPETITOR_EVENT,
+        config.T_KOL, config.T_EDITOR, config.T_TASK_KOL, config.T_TASK_EDITOR, config.T_DRAFT,
+    ]
+    if not all(relation_targets):
+        raise RuntimeError("commit 前必须配置全部关联表 ID")
+
+    for table_id, diff in (
+        (config.T_LAUNCH_CAMPAIGN, diffs["activity"]),
+        (config.T_LAUNCH_NODE, diffs["node"]),
+    ):
+        for definition in diff["missing"]:
+            await client.request(
+                "POST", f"/bitable/v1/apps/{APP_TOKEN}/tables/{table_id}/fields", definition,
+            )
+
+    if not participant_id:
+        response = await client.request(
+            "POST", f"/bitable/v1/apps/{APP_TOKEN}/tables",
+            {"table": {"name": PARTICIPANT_TABLE_NAME, "fields": PARTICIPANT_FIELDS}},
+        )
+        participant_id = ((response.get("data") or {}).get("table") or {}).get("table_id", "")
+        if not participant_id:
+            raise RuntimeError("参与表创建后未返回 table_id")
+    else:
+        for definition in diffs["participant"]["missing"]:
+            await client.request(
+                "POST", f"/bitable/v1/apps/{APP_TOKEN}/tables/{participant_id}/fields", definition,
+            )
+
+    verified_diffs = {
+        "activity": diff_fields(await list_fields(client, config.T_LAUNCH_CAMPAIGN), ACTIVITY_FIELDS),
+        "node": diff_fields(await list_fields(client, config.T_LAUNCH_NODE), NODE_FIELDS),
+        "participant": diff_fields(await list_fields(client, participant_id), PARTICIPANT_FIELDS),
+    }
+    validate_no_conflicts(verified_diffs)
+    if any(diff["missing"] for diff in verified_diffs.values()):
+        raise RuntimeError("写后回读仍缺字段")
+    result.update({"participant_table_id": participant_id, "verified": True})
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--commit", action="store_true")
+    group.add_argument("--verify-only", action="store_true")
+    group.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    output = asyncio.run(run(commit=args.commit, verify_only=args.verify_only))
+    print(json.dumps(output, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

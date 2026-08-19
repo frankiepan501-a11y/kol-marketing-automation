@@ -8,7 +8,7 @@ import uuid
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_participation
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
@@ -2140,14 +2140,15 @@ async def launch_candidates_preview(
     product_id: str = "",
     object_type: str = "KOL",
     limit: int = 100,
+    campaign_id: str = "",
 ):
     """活动候选只读预览：不建任务、不生草稿、不发邮件、不写飞书。"""
     _check_auth(authorization)
-    if not product_id:
-        raise HTTPException(status_code=400, detail="product_id required")
+    if not product_id and not campaign_id:
+        raise HTTPException(status_code=400, detail="product_id or campaign_id required")
     try:
         return {"ok": True, **(await launch_candidate_preview.preview_candidates(
-            product_id, object_type=object_type, limit=limit,
+            product_id, object_type=object_type, limit=limit, campaign_id=campaign_id,
         ))}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2163,14 +2164,15 @@ async def launch_candidate_replay(
     product_id: str = "",
     contact_id: str = "",
     object_type: str = "KOL",
+    campaign_id: str = "",
 ):
     """单条候选回放：解释为什么入选、转二次激活、暂缓或排除。"""
     _check_auth(authorization)
-    if not product_id or not contact_id:
-        raise HTTPException(status_code=400, detail="product_id and contact_id required")
+    if (not product_id and not campaign_id) or not contact_id:
+        raise HTTPException(status_code=400, detail="(product_id or campaign_id) and contact_id required")
     try:
         return {"ok": True, **(await launch_candidate_preview.replay_candidate(
-            product_id, contact_id, object_type=object_type,
+            product_id, contact_id, object_type=object_type, campaign_id=campaign_id,
         ))}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -2178,6 +2180,140 @@ async def launch_candidate_replay(
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/launch/candidates/replay", str(e), tr)
         raise HTTPException(status_code=500, detail="单条回放内部错误；未产生任何业务写入")
+
+
+async def _launch_json(request: Request) -> dict:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="请求正文必须是 JSON 对象") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="请求正文必须是 JSON 对象")
+    return payload
+
+
+def _launch_required(payload: dict, name: str):
+    value = payload.get(name)
+    if value is None or value == "":
+        raise HTTPException(status_code=422, detail=f"{name} required")
+    return value
+
+
+def _raise_launch_business_error(exc: Exception) -> None:
+    if isinstance(exc, launch_evidence.EvidenceNotFoundError):
+        raise HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, (launch_evidence.EvidenceVersionConflict,
+                        launch_participation.ParticipantVersionConflict)):
+        raise HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, launch_participation.ParticipantRetryableError):
+        raise HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, launch_participation.ParticipantManualReviewError):
+        raise HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, (launch_evidence.EvidenceValidationError,
+                        launch_participation.ParticipantValidationError,
+                        ValueError, TypeError)):
+        raise HTTPException(status_code=422, detail=str(exc))
+    raise exc
+
+
+async def _run_launch_write(endpoint: str, operation):
+    try:
+        return {"ok": True, **(await operation())}
+    except Exception as exc:
+        try:
+            _raise_launch_business_error(exc)
+        except HTTPException:
+            raise
+        # 告警只带异常类型，不带帖子正文、邮箱、token 或请求正文。
+        await _alert_endpoint_failure(endpoint, type(exc).__name__, "launch write failed")
+        raise HTTPException(status_code=500, detail="活动接口内部错误；未开放外部动作")
+
+
+@app.post("/launch/campaigns/evidence/configure")
+async def launch_evidence_configure(request: Request, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    if not config.LAUNCH_EVIDENCE_ENABLED:
+        raise HTTPException(status_code=403, detail="活动竞品证据写入开关未开启")
+    payload = await _launch_json(request)
+    return await _run_launch_write("/launch/campaigns/evidence/configure", lambda: launch_evidence.configure_evidence(
+        campaign_id=_launch_required(payload, "campaign_id"),
+        mode=_launch_required(payload, "mode"),
+        competitor_brand=payload.get("competitor_brand", ""),
+        post_record_ids=payload.get("post_record_ids") or [],
+        event_record_ids=payload.get("event_record_ids") or [],
+        change_reason=payload.get("change_reason", ""),
+        expected_config_version=int(_launch_required(payload, "expected_config_version")),
+    ))
+
+
+@app.post("/launch/campaigns/evidence/start")
+async def launch_evidence_start(request: Request, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    if not config.LAUNCH_EVIDENCE_ENABLED:
+        raise HTTPException(status_code=403, detail="活动竞品证据写入开关未开启")
+    payload = await _launch_json(request)
+    return await _run_launch_write("/launch/campaigns/evidence/start", lambda: launch_evidence.start_analysis(
+        campaign_id=_launch_required(payload, "campaign_id"),
+        expected_config_version=int(_launch_required(payload, "expected_config_version")),
+    ))
+
+
+@app.post("/launch/campaigns/evidence/submit")
+async def launch_evidence_submit(request: Request, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    if not config.LAUNCH_EVIDENCE_ENABLED:
+        raise HTTPException(status_code=403, detail="活动竞品证据写入开关未开启")
+    payload = await _launch_json(request)
+    return await _run_launch_write("/launch/campaigns/evidence/submit", lambda: launch_evidence.submit_analysis(
+        campaign_id=_launch_required(payload, "campaign_id"),
+        candidate_post_ids=payload.get("candidate_post_ids") or [],
+        candidate_event_ids=payload.get("candidate_event_ids") or [],
+        submission_note=payload.get("submission_note", ""),
+        expected_config_version=int(_launch_required(payload, "expected_config_version")),
+    ))
+
+
+@app.post("/launch/campaigns/evidence/confirm")
+async def launch_evidence_confirm(request: Request, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    if not config.LAUNCH_EVIDENCE_ENABLED:
+        raise HTTPException(status_code=403, detail="活动竞品证据写入开关未开启")
+    payload = await _launch_json(request)
+    return await _run_launch_write("/launch/campaigns/evidence/confirm", lambda: launch_evidence.confirm_analysis(
+        campaign_id=_launch_required(payload, "campaign_id"),
+        confirmed_post_ids=payload.get("confirmed_post_ids") or [],
+        confirmed_event_ids=payload.get("confirmed_event_ids") or [],
+        expected_config_version=int(_launch_required(payload, "expected_config_version")),
+    ))
+
+
+@app.post("/launch/campaigns/evidence/retry")
+async def launch_evidence_retry(request: Request, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    if not config.LAUNCH_EVIDENCE_ENABLED:
+        raise HTTPException(status_code=403, detail="活动竞品证据写入开关未开启")
+    payload = await _launch_json(request)
+    return await _run_launch_write("/launch/campaigns/evidence/retry", lambda: launch_evidence.retry_analysis(
+        campaign_id=_launch_required(payload, "campaign_id"),
+        expected_config_version=int(_launch_required(payload, "expected_config_version")),
+    ))
+
+
+@app.post("/launch/participants/lock")
+async def launch_participants_lock(request: Request, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    if not config.LAUNCH_PARTICIPATION_WRITE_ENABLED:
+        raise HTTPException(status_code=403, detail="活动参与记录写入开关未开启")
+    payload = await _launch_json(request)
+    return await _run_launch_write("/launch/participants/lock", lambda: launch_participation.lock_participants(
+        campaign_id=_launch_required(payload, "campaign_id"),
+        product_family_id=_launch_required(payload, "product_family_id"),
+        object_type=_launch_required(payload, "object_type"),
+        contact_ids=payload.get("contact_ids") or [],
+        expected_ranking_version=_launch_required(payload, "expected_ranking_version"),
+        lock_batch_id=_launch_required(payload, "lock_batch_id"),
+        recovery_of_batch_id=payload.get("recovery_of_batch_id", ""),
+    ))
 
 
 @app.post("/launch/email/test-raw")

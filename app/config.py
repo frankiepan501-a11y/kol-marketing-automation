@@ -47,6 +47,18 @@ T_PRODUCT = env("T_PRODUCT", required=True)
 T_TASK_KOL = env("T_TASK_KOL", required=True)
 T_TASK_EDITOR = env("T_TASK_EDITOR", required=True)
 
+# 新品集中上稿活动控制层。表 ID 不是凭据；现有影子表给安全默认值，
+# 新参与表在 schema dry-run/commit 后必须通过环境变量显式注入。
+T_LAUNCH_CAMPAIGN = env("T_LAUNCH_CAMPAIGN", "tbl8w0O7pI5PsRnq")
+T_LAUNCH_NODE = env("T_LAUNCH_NODE", "tblUljeSSAvFdFT6")
+T_COMPETITOR_POST = env("T_COMPETITOR_POST", "tblCDbvLtnLzdxEp")
+T_COMPETITOR_EVENT = env("T_COMPETITOR_EVENT", "tblpZaWYEWy54Sll")
+T_LAUNCH_PARTICIPANT = env("T_LAUNCH_PARTICIPANT", "")
+LAUNCH_EVIDENCE_ENABLED = (env("LAUNCH_EVIDENCE_ENABLED", "0") or "0") == "1"
+LAUNCH_PARTICIPATION_WRITE_ENABLED = (
+    env("LAUNCH_PARTICIPATION_WRITE_ENABLED", "0") or "0"
+) == "1"
+
 # SKU 产品库 (采购治理源, 独立 wiki) — 产品英文名引用拼接用 (2026-06-02).
 # 非 secret, 给默认值避免漏配; 聪哥2号(bitable app)已是该库协作者.
 SKU_LIB_APP_TOKEN = env("SKU_LIB_APP_TOKEN", "MvtZb6OE9aJFaisO913cWSErnFe")

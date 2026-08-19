@@ -7,10 +7,11 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections import Counter, defaultdict
 
-from . import config, dispatch, feishu
+from . import config, dispatch, feishu, launch_competitor_evidence, launch_evidence
 from .feishu import ext
 from .scoring import _parse_multiselect, score_editor, score_kol
 
@@ -314,10 +315,119 @@ async def _load_context(product_id: str) -> dict:
     }
 
 
-async def preview_candidates(product_id: str, *, object_type: str = "KOL", limit: int = 100) -> dict:
+def _activity_product_id(fields: dict) -> str:
+    return ext(fields.get("产品主记录ID")).strip() or (
+        sorted(_link_ids(fields.get("关联产品主记录")))[0]
+        if _link_ids(fields.get("关联产品主记录")) else ""
+    )
+
+
+async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
+    activity = await launch_evidence.get_activity(campaign_id)
+    fields = activity.get("fields") or {}
+    mode = ext(fields.get("竞品证据模式"))
+    status = ext(fields.get("竞品分析状态"))
+    brand = ext(fields.get("竞品品牌"))
+    post_ids = sorted(_link_ids(fields.get("关联竞品帖子")))
+    evidence_pending = bool(
+        not mode or status == "配置无效"
+        or (mode == launch_evidence.MODE_NEW and status != "已就绪")
+        or (mode == launch_evidence.MODE_REUSE and status != "已就绪")
+    )
+    exact_scope = bool(
+        object_type == "KOL"
+        and campaign_id == "launch-20260915-funlab-dave-ys11-5"
+        and activity.get("record_id") == "recvsFoRmeGj4Y"
+        and _activity_product_id(fields) == "recvkJOoCsNb1s"
+        and mode == launch_evidence.MODE_REUSE
+        and status == "已就绪"
+        and brand.upper() == "NYXI"
+    )
+    posts = []
+    evidence_error = ""
+    if exact_scope and post_ids:
+        try:
+            for record_id in post_ids:
+                post = await feishu.get_record(config.T_COMPETITOR_POST, record_id)
+                post_fields = post.get("fields") or {}
+                if (
+                    launch_evidence._record_brand(post_fields).upper() != brand.upper()
+                    or ext(post_fields.get("人工复核状态")) != "已确认"
+                    or ext(post_fields.get("相关性")) != "相关"
+                ):
+                    raise launch_evidence.EvidenceValidationError(
+                        f"竞品帖子已失效: {record_id}"
+                    )
+                posts.append(post)
+        except Exception as exc:
+            evidence_error = str(exc)
+            evidence_pending = True
+            status = "配置无效"
+            posts = []
+    applicable = bool(exact_scope and posts and not evidence_error)
+    return {
+        "activity": activity,
+        "product_id": _activity_product_id(fields),
+        "evidence_mode": mode,
+        "evidence_status": status or "配置无效",
+        "evidence_pending": evidence_pending,
+        "ranking_version": ext(fields.get("证据排序版本")),
+        "competitor_posts": posts if applicable else [],
+        "competitor_evidence_applied": applicable,
+        "evidence_error": evidence_error,
+    }
+
+
+async def _load_locked_snapshot(
+    *, campaign_id: str, product_family_id: str, object_type: str,
+    contact_id: str, ranking_version: str,
+) -> dict | None:
+    if not config.T_LAUNCH_PARTICIPANT or not ranking_version:
+        return None
+    rows = await feishu.search_records(config.T_LAUNCH_PARTICIPANT, [
+        {"field_name": "活动ID", "operator": "is", "value": [campaign_id]},
+        {"field_name": "产品家族ID", "operator": "is", "value": [product_family_id]},
+        {"field_name": "对象类型", "operator": "is", "value": [object_type]},
+    ])
+    link_field = "关联媒体人" if object_type == "媒体人" else "关联KOL"
+    matched = [row for row in rows if (
+        contact_id in _link_ids((row.get("fields") or {}).get(link_field))
+        and ext((row.get("fields") or {}).get("名单版本")) == ranking_version
+        and ext((row.get("fields") or {}).get("参与状态")) in {"已入围", "锁定准备中"}
+    )]
+    if len(matched) > 1:
+        raise ValueError("当前名单存在重复参与记录，无法可靠回放")
+    if not matched:
+        return None
+    raw = (matched[0].get("fields") or {}).get("排序快照历史")
+    try:
+        history = raw if isinstance(raw, list) else json.loads(ext(raw) or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("参与记录排序快照历史损坏") from exc
+    snapshots = [x for x in history if (
+        isinstance(x, dict) and x.get("ranking_version") == ranking_version
+    )]
+    return snapshots[-1] if snapshots else None
+
+
+async def preview_candidates(
+    product_id: str = "", *, object_type: str = "KOL", limit: int = 100,
+    campaign_id: str = "", internal_full: bool = False,
+) -> dict:
     if object_type not in {"KOL", "媒体人"}:
         raise ValueError("object_type must be KOL or 媒体人")
     limit = max(1, min(int(limit), 500))
+    activity_ctx = None
+    if campaign_id:
+        activity_ctx = await _load_activity_context(campaign_id, object_type)
+        activity_product_id = activity_ctx["product_id"]
+        if not activity_product_id:
+            raise ValueError(f"活动缺少产品主记录ID: {campaign_id}")
+        if product_id and product_id != activity_product_id:
+            raise ValueError("product_id 与活动产品主记录不一致")
+        product_id = activity_product_id
+    if not product_id:
+        raise ValueError("product_id or campaign_id required")
     ctx = await _load_context(product_id)
     family = ctx["family"]
     product_fields = family["target"].get("fields") or {}
@@ -352,6 +462,19 @@ async def preview_candidates(product_id: str, *, object_type: str = "KOL", limit
             drafts=_drafts_for_contact(record, object_type, ctx["draft_index"]),
             email_owners=ctx["owners"], now_ms=now_ms,
         )
+        evidence_rank = (
+            launch_competitor_evidence.rank_contact_evidence(
+                record, activity_ctx["competitor_posts"], base_score=score,
+            )
+            if activity_ctx and activity_ctx["competitor_evidence_applied"] and object_type == "KOL"
+            else {
+                "evidence_level": "无加分", "final_priority": score,
+                "long_term": False, "long_term_span_days": 0,
+                "high_performance": False, "identity_paths": [],
+                "matched_post_ids": [], "evidence_posts": [],
+                "p75_thresholds": {}, "p75_samples": {},
+            }
+        )
         candidates.append({
             "contact_id": record.get("record_id", ""),
             "name": _candidate_name(fields, object_type),
@@ -360,7 +483,7 @@ async def preview_candidates(product_id: str, *, object_type: str = "KOL", limit
             "score": score, "breakdown": breakdown,
             "competitor_signal": (ext(fields.get("合作竞品"))[:300] if object_type == "KOL" else ""),
             "competitor_evidence": (ext(fields.get("竞品帖子证据"))[:500] if object_type == "KOL" else ""),
-            **check,
+            **check, **evidence_rank,
         })
 
     decision_order = {
@@ -368,7 +491,10 @@ async def preview_candidates(product_id: str, *, object_type: str = "KOL", limit
         "hold_active_or_recent": 2, "hold_duplicate_identity": 3,
         "blocked_prior_same_product": 4, "blocked": 5,
     }
-    candidates.sort(key=lambda x: (decision_order.get(x["decision"], 9), -float(x["score"] or 0), x["contact_id"]))
+    candidates.sort(key=lambda x: (
+        decision_order.get(x["decision"], 9),
+        -float(x.get("final_priority") or x["score"] or 0), x["contact_id"],
+    ))
     counts = Counter(x["decision"] for x in candidates)
     return {
         "read_only": True, "writes": 0,
@@ -379,6 +505,14 @@ async def preview_candidates(product_id: str, *, object_type: str = "KOL", limit
             "name": ext(product_fields.get("产品名")), "brand": brand,
         },
         "object_type": object_type,
+        "campaign_id": campaign_id,
+        "evidence_mode": activity_ctx["evidence_mode"] if activity_ctx else "",
+        "evidence_status": activity_ctx["evidence_status"] if activity_ctx else "",
+        "evidence_pending": activity_ctx["evidence_pending"] if activity_ctx else False,
+        "ranking_version": activity_ctx["ranking_version"] if activity_ctx else "",
+        "competitor_evidence_applied": (
+            activity_ctx["competitor_evidence_applied"] if activity_ctx else False
+        ),
         "summary": {
             "pool_records": len(records), "base_filter_excluded": filtered_out,
             "evaluated": len(candidates), "eligible_new_cold": counts["eligible_new_cold"],
@@ -386,13 +520,24 @@ async def preview_candidates(product_id: str, *, object_type: str = "KOL", limit
             "held_or_blocked": len(candidates) - counts["eligible_new_cold"] - counts["reactivation_same_thread"],
             "by_decision": dict(counts),
         },
-        "candidates": candidates[:limit],
+        "candidates": candidates if internal_full else candidates[:limit],
     }
 
 
-async def replay_candidate(product_id: str, contact_id: str, *, object_type: str = "KOL") -> dict:
+async def replay_candidate(
+    product_id: str, contact_id: str, *, object_type: str = "KOL", campaign_id: str = "",
+) -> dict:
     if object_type not in {"KOL", "媒体人"}:
         raise ValueError("object_type must be KOL or 媒体人")
+    activity_ctx = None
+    if campaign_id:
+        activity_ctx = await _load_activity_context(campaign_id, object_type)
+        activity_product_id = activity_ctx["product_id"]
+        if product_id and product_id != activity_product_id:
+            raise ValueError("product_id 与活动产品主记录不一致")
+        product_id = activity_product_id
+    if not product_id:
+        raise ValueError("product_id or campaign_id required")
     # 单条只加载一次上下文；不先跑 500 条预览再重复全表读取。
     ctx = await _load_context(product_id)
     records = ctx["editors"] if object_type == "媒体人" else ctx["kols"]
@@ -413,11 +558,50 @@ async def replay_candidate(product_id: str, contact_id: str, *, object_type: str
         drafts=_drafts_for_contact(record, object_type, ctx["draft_index"]),
         email_owners=ctx["owners"], now_ms=int(time.time() * 1000),
     )
+    if object_type == "KOL":
+        score, _ = score_kol(
+            fields, product_fields, set(ctx["mapping"].get("expected_styles") or []),
+            set(dispatch.CATEGORY_PLATFORMS.get(ext(product_fields.get("品类")), [])),
+        )
+    else:
+        score, _ = score_editor(
+            fields, product_fields,
+            set(ctx["mapping"].get("expected_report_cats") or []),
+            set(ctx["mapping"].get("expected_media_types") or []),
+        )
+    evidence_rank = (
+        launch_competitor_evidence.rank_contact_evidence(
+            record, activity_ctx["competitor_posts"], base_score=score,
+        )
+        if activity_ctx and activity_ctx["competitor_evidence_applied"] and object_type == "KOL"
+        else {"evidence_level": "无加分", "final_priority": score,
+              "identity_paths": [], "matched_post_ids": [], "evidence_posts": []}
+    )
+    locked_snapshot = None
+    if activity_ctx:
+        locked_version_field = (
+            "媒体人已锁定名单版本" if object_type == "媒体人" else "KOL已锁定名单版本"
+        )
+        locked_version = ext(
+            (activity_ctx["activity"].get("fields") or {}).get(locked_version_field)
+        )
+        locked_snapshot = await _load_locked_snapshot(
+            campaign_id=campaign_id,
+            product_family_id=family["canonical_product_id"],
+            object_type=object_type,
+            contact_id=contact_id,
+            ranking_version=locked_version,
+        )
     return {
         "read_only": True, "writes": 0,
         "product": {"requested_product_id": product_id, "canonical_product_id": family["canonical_product_id"]},
+        "campaign_id": campaign_id,
+        "ranking_version": activity_ctx["ranking_version"] if activity_ctx else "",
+        "ranking_source": "locked_snapshot" if locked_snapshot else "current_preview",
+        "locked_ranking_snapshot": locked_snapshot,
         "candidate": {
             "contact_id": contact_id, "name": _candidate_name(fields, object_type),
-            "base_filter_passed": matched, "base_filter_reasons": filter_reasons, **check,
+            "base_filter_passed": matched, "base_filter_reasons": filter_reasons,
+            **check, **evidence_rank,
         },
     }
