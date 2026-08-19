@@ -41,6 +41,8 @@ _B2B_DISCOVERY_JOB_TTL = 24 * 3600
 _draft_regen_jobs = {}
 _dashboard_retention_jobs = {}
 _DASHBOARD_RETENTION_JOB_TTL = 4 * 3600
+_dashboard_refresh_jobs = {}
+_DASHBOARD_REFRESH_JOB_TTL = 4 * 3600
 _DRAFT_REGEN_JOB_TTL = 6 * 3600
 
 
@@ -1272,20 +1274,53 @@ async def run_dashboard(authorization: str = Header(default=""), async_mode: boo
     默认后台跑, 避免 n8n 等待长同步任务超时。"""
     _check_auth(authorization)
     if async_mode:
+        now = time.time()
+        for job_id in list(_dashboard_refresh_jobs):
+            job = _dashboard_refresh_jobs[job_id]
+            if now - job.get("started_ts", 0) > _DASHBOARD_REFRESH_JOB_TTL:
+                _dashboard_refresh_jobs.pop(job_id, None)
+        for job_id, job in _dashboard_refresh_jobs.items():
+            if job.get("status") == "running":
+                return {"ok": True, "accepted": True, "already_running": True,
+                        "job_id": job_id, "status": "running"}
+        job_id = "dashrefresh-" + uuid.uuid4().hex[:12]
+        _dashboard_refresh_jobs[job_id] = {
+            "status": "running", "started_ts": now,
+            "started_at": datetime_now_string(),
+        }
+
         async def _job():
             try:
                 result = await dashboard.run()
+                _dashboard_refresh_jobs[job_id].update(
+                    status="success", finished_at=datetime_now_string(), result=result,
+                )
                 print(f"[dashboard_refresh] background done ok={result.get('ok', True)}")
             except Exception as e:
-                await _alert_endpoint_failure("/dashboard/refresh", str(e), _tb.format_exc()[-1200:])
+                tr = _tb.format_exc()[-1200:]
+                _dashboard_refresh_jobs[job_id].update(
+                    status="error", finished_at=datetime_now_string(),
+                    error=str(e), trace=tr,
+                )
+                await _alert_endpoint_failure("/dashboard/refresh", str(e), tr)
         asyncio.create_task(_job())
-        return {"ok": True, "started": "background",
+        return {"ok": True, "accepted": True, "already_running": False,
+                "job_id": job_id, "started": "background",
                 "msg": "dashboard refresh started, will update dashboard tables when done"}
     try:
         result = await dashboard.run()
         return {"ok": True, **result}
     except Exception as e:
         return {"ok": False, "error": str(e), "trace": _tb.format_exc()[-1000:]}
+
+
+@app.get("/dashboard/refresh/jobs/{job_id}")
+async def get_dashboard_refresh_job(job_id: str, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    job = _dashboard_refresh_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "job not found or expired")
+    return {"ok": True, "job_id": job_id, **job}
 
 
 @app.post("/dashboard/retention")

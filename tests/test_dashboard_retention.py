@@ -111,3 +111,31 @@ def test_retention_endpoint_returns_job_and_exposes_result(monkeypatch):
     assert accepted["mode"] == "dry_run"
     assert status["status"] == "success"
     assert status["result"]["planned_historical_delete"] == 7
+
+
+def test_dashboard_refresh_endpoint_returns_trackable_job(monkeypatch):
+    async def exercise():
+        old_token = main.config.INTERNAL_TOKEN
+        main.config.INTERNAL_TOKEN = "unit-token"
+        main._dashboard_refresh_jobs.clear()
+        run = AsyncMock(return_value={"snapshots": 12, "retention": {"historical_deleted": 0}})
+        monkeypatch.setattr(main.dashboard, "run", run)
+        try:
+            accepted = await main.run_dashboard(
+                authorization="Bearer unit-token", async_mode=True,
+            )
+            await asyncio.sleep(0)
+            status = await main.get_dashboard_refresh_job(
+                accepted["job_id"], authorization="Bearer unit-token",
+            )
+            return accepted, status
+        finally:
+            main._dashboard_refresh_jobs.clear()
+            main.config.INTERNAL_TOKEN = old_token
+
+    accepted, status = asyncio.run(exercise())
+
+    assert accepted["accepted"] is True
+    assert accepted["already_running"] is False
+    assert status["status"] == "success"
+    assert status["result"]["snapshots"] == 12
