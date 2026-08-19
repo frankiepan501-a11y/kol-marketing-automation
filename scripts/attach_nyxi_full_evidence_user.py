@@ -283,10 +283,22 @@ def run(*, commit: bool) -> dict:
             "written_config_version": int(readback.get("证据配置版本") or 0),
             "written_linked_posts": len(link_ids(readback.get("关联竞品帖子"))),
         })
-        if result["written_ranking_version"] != "evidence-v4" or result["written_linked_posts"] != 2988:
+        if (
+            result["written_ranking_version"] != "evidence-v4"
+            or result["written_config_version"] != 2
+            or result["written_linked_posts"] != 2988
+        ):
             raise RuntimeError("写入后回读校验失败")
-    except Exception:
+    except Exception as write_error:
         lark(["api", "PUT", path, "--data", "-"], stdin=json.dumps(rollback, ensure_ascii=False))
+        restored = get_activity().get("fields") or {}
+        rollback_ok = (
+            int(restored.get("证据配置版本") or 0) == rollback["fields"]["证据配置版本"]
+            and first(restored.get("证据排序版本")) == rollback["fields"]["证据排序版本"]
+            and len(link_ids(restored.get("关联竞品帖子"))) == len(rollback["fields"]["关联竞品帖子"])
+        )
+        if not rollback_ok:
+            raise RuntimeError("全证据写入失败，且自动恢复后的二次回读也未通过") from write_error
         raise
     return result
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import time
 
@@ -33,6 +34,10 @@ class EvidenceVersionConflict(RuntimeError):
 
 _ACTIVITY_LOCKS: dict[str, asyncio.Lock] = {}
 _BULK_VALIDATE_THRESHOLD = 100
+_VALIDATION_CACHE_MIN_RECORDS = 1000
+_VALIDATION_CACHE_TTL_SECONDS = 6 * 60 * 60
+_VALIDATED_POST_CACHE: dict[str, tuple[float, list[dict], list[dict]]] = {}
+_VALIDATION_CACHE_LOCKS: dict[str, asyncio.Lock] = {}
 _POST_VALIDATION_FIELDS = [
     "竞品品牌", "品牌", "竞品", "采集来源", "KOL平台ID", "KOL账号Handle",
     "KOL账号名", "KOL主页URL", "关联KOL", "平台", "内容类型", "曝光量", "覆盖量",
@@ -71,6 +76,38 @@ async def get_activity(campaign_id: str) -> dict:
 
 
 async def _validate_linked_records(
+    *, competitor_brand: str, post_record_ids: list[str], event_record_ids: list[str]
+) -> tuple[list[dict], list[dict]]:
+    cache_key = ""
+    if len(post_record_ids) >= _VALIDATION_CACHE_MIN_RECORDS:
+        digest_input = [*post_record_ids, "--events--", *event_record_ids]
+        digest = hashlib.sha256("\n".join(digest_input).encode("utf-8")).hexdigest()
+        cache_key = f"{config.T_COMPETITOR_POST}:{competitor_brand.upper()}:{digest}"
+        cached = _VALIDATED_POST_CACHE.get(cache_key)
+        if cached and cached[0] > time.monotonic():
+            return cached[1], cached[2]
+        cache_lock = _VALIDATION_CACHE_LOCKS.setdefault(cache_key, asyncio.Lock())
+        async with cache_lock:
+            cached = _VALIDATED_POST_CACHE.get(cache_key)
+            if cached and cached[0] > time.monotonic():
+                return cached[1], cached[2]
+            posts, events = await _validate_linked_records_uncached(
+                competitor_brand=competitor_brand,
+                post_record_ids=post_record_ids,
+                event_record_ids=event_record_ids,
+            )
+            _VALIDATED_POST_CACHE[cache_key] = (
+                time.monotonic() + _VALIDATION_CACHE_TTL_SECONDS, posts, events,
+            )
+            return posts, events
+    return await _validate_linked_records_uncached(
+        competitor_brand=competitor_brand,
+        post_record_ids=post_record_ids,
+        event_record_ids=event_record_ids,
+    )
+
+
+async def _validate_linked_records_uncached(
     *, competitor_brand: str, post_record_ids: list[str], event_record_ids: list[str]
 ) -> tuple[list[dict], list[dict]]:
     post_map = {}
