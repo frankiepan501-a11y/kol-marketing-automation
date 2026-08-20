@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import re
 import time
 
@@ -20,6 +21,7 @@ from . import (
     launch_evidence,
     launch_outreach,
     launch_participation,
+    utm,
 )
 from .feishu import ext, xrid
 
@@ -39,6 +41,68 @@ def _ids(value) -> list[str]:
 def _queue_key(campaign_id: str, participant_id: str) -> str:
     digest = hashlib.sha1(f"{campaign_id}|{participant_id}".encode("utf-8")).hexdigest()[:20]
     return f"launchq-{digest}"
+
+
+def _deterministic_fallback_draft(kol: dict, product: dict, brand: str) -> dict:
+    """DeepSeek 余额/计费故障时的保守模板；不编造内容、不写价格或佣金。"""
+    kf = kol.get("fields") or {}
+    pf = product.get("fields") or {}
+    kol_name = ext(kf.get("账号名")).strip() or "there"
+    product_name = ext(pf.get("产品英文名")).strip()
+    if not product_name:
+        raise LaunchRuntimeError("备用模板要求产品英文名")
+    country = ext(kf.get("国家")).strip()
+    language = ext(kf.get("语言")).strip().lower() or enrich.COUNTRY_TO_LANG.get(country, "en")
+    if language not in {"en", "de", "es"}:
+        language = "en"
+    links = []
+    for label, url in feishu.product_links(pf):
+        tracked = utm.make_utm_link(url, brand, product_name, kol_name)
+        links.append((label, tracked))
+    if not links:
+        raise LaunchRuntimeError("备用模板要求至少一个产品链接")
+    link_html = "".join(
+        f'<p><a href="{html.escape(url, quote=True)}">{html.escape(label)}</a></p>'
+        for label, url in links
+    )
+    safe_name = html.escape(kol_name)
+    safe_product = html.escape(product_name)
+    signature = "Tom from FUNLAB Team" if brand == "FUNLAB" else "Lisa @ POWKONG Team"
+    if language == "de":
+        subject = f"{kol_name}, ein Launch-Sample für dich"[:80]
+        body = (
+            f"<p>Hey {safe_name},</p><p>dein Gaming-Content passt gut zu unserem kommenden "
+            f"Launch. Wir möchten dir gern den {safe_product} zum Testen anbieten.</p>{link_html}"
+            "<p>Wir koordinieren die Berichterstattung rund um den 15. September. "
+            "Hättest du Interesse, ein Sample unverbindlich auszuprobieren? Wir senden es dir gern zu.</p>"
+            f"<p>-- {html.escape(signature)}</p>"
+        )
+    elif language == "es":
+        subject = f"{kol_name}, una muestra para el lanzamiento"[:80]
+        body = (
+            f"<p>Hey {safe_name},</p><p>tu contenido de gaming encaja bien con nuestro próximo "
+            f"lanzamiento. Nos gustaría ofrecerte el {safe_product} para que lo pruebes.</p>{link_html}"
+            "<p>Estamos coordinando publicaciones alrededor del 15 de septiembre. "
+            "¿Te interesaría probar una muestra sin compromiso? Estaremos encantados de enviártela.</p>"
+            f"<p>-- {html.escape(signature)}</p>"
+        )
+    else:
+        subject = f"{kol_name}, a launch sample for you"[:80]
+        body = (
+            f"<p>Hey {safe_name},</p><p>Your gaming content looks like a good fit for our upcoming "
+            f"launch. We would love to offer you the {safe_product} to try.</p>{link_html}"
+            "<p>We are coordinating coverage around September 15. Would you be curious to try a sample, "
+            "with no strings attached? We would be happy to send one over.</p>"
+            f"<p>-- {html.escape(signature)}</p>"
+        )
+    return {
+        "subject": subject, "body": body,
+        "highlights": "Activity filters and global duplicate-contact precheck passed.",
+        "angle": "Upcoming September 15 launch sample.",
+        "ban_phrase_failed": False, "utm_url": links[0][1],
+        "utm_id": utm.kol_utm_id(kol_name), "language": language,
+        "deterministic_fallback": True,
+    }
 
 
 def recommend_feedback_action(*, target_posts: int, target_commitments: int,
@@ -199,6 +263,8 @@ async def _queue_one(*, activity: dict, participant: dict, product: dict,
         {"活动名单": {"score": score, "reason": "活动名单和全局重复触达预检已通过"}},
         score,
     )
+    if generated.get("error") and "402 Payment Required" in str(generated.get("error")):
+        generated = _deterministic_fallback_draft(kol, product, brand)
     if generated.get("error") or generated.get("skip"):
         return {
             "participant_id": participant_id,
@@ -217,7 +283,8 @@ async def _queue_one(*, activity: dict, participant: dict, product: dict,
         "邮件草稿ID": queue_key, "关联KOL": [contact_id], "关联产品": [product_id],
         "匹配度总分": score, "匹配亮点": str(generated.get("highlights") or "")[:500],
         "建议切入点": str(generated.get("angle") or "")[:200], "收件邮箱": email,
-        "邮件主题": subject[:200], "邮件正文": body, "邮件语言": "en",
+        "邮件主题": subject[:200], "邮件正文": body,
+        "邮件语言": generated.get("language") or "en",
         "邮件草稿状态": "待审", "邮件草稿来源": "cold", "对象类型": "KOL",
         "发送邮箱": config.BRAND_CONFIG[brand]["sender_label"], "发送人署名": signature,
         "生成时间": now_ms, "建议发送时间": now_ms,
@@ -247,6 +314,13 @@ async def _queue_one(*, activity: dict, participant: dict, product: dict,
         })
         return {"participant_id": participant_id, "draft_id": draft_id,
                 "reused": False, "path": "需人改"}
+    if generated.get("deterministic_fallback"):
+        await feishu.update_record(config.T_DRAFT, draft_id, {
+            "邮件草稿状态": "自动通过", "审核路径": "自动通过",
+            "AI评分理由": "[fallback-template] DeepSeek 402；使用无价格、无虚构内容的受控活动模板",
+        })
+        return {"participant_id": participant_id, "draft_id": draft_id,
+                "reused": False, "path": "自动通过-受控备用模板"}
     route = await draft_router.route_draft(draft_id)
     return {"participant_id": participant_id, "draft_id": draft_id,
             "reused": False, "path": route.get("path"), "score": route.get("score")}

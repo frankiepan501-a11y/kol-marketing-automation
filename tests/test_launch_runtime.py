@@ -14,6 +14,19 @@ def _certificate():
 
 
 class LaunchRuntimeTests(unittest.TestCase):
+    def test_deterministic_fallback_is_product_specific_and_placeholder_free(self):
+        kol = {"fields": {"账号名": "Indie Alpaca", "国家": "US"}}
+        product = {"fields": {
+            "产品英文名": "POWKONG Piranha Plant 2 Dock",
+            "品牌": "POWKONG",
+            "官网链接": {"link": "https://example.com/piranha"},
+        }}
+        draft = launch_runtime._deterministic_fallback_draft(kol, product, "POWKONG")
+        self.assertIn("Piranha Plant 2 Dock", draft["body"])
+        self.assertIn("https://example.com/piranha", draft["body"])
+        self.assertNotRegex(draft["body"], r"\[TBD|待填|\$\d")
+        self.assertTrue(draft["deterministic_fallback"])
+
     def test_activity_queue_gate_requires_formal_authorization_and_exact_links(self):
         draft = {
             "record_id": "draft1",
