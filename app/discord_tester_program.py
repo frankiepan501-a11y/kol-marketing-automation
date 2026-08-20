@@ -21,6 +21,8 @@ Work = Callable[[], Awaitable[None]]
 CompletionNotifier = Callable[[str], Awaitable[None]]
 _drafts: dict[str, tuple[float, dict]] = {}
 _DRAFT_TTL_SECONDS = 30 * 60
+_HOUR_CANONICAL = {"2-5": "2–5", "6-10": "6–10"}
+_PC_SCORING_HOURS = {*_HOUR_CANONICAL.values(), "10+"}
 
 
 def _require_feishu_ok(result: dict, action: str) -> dict:
@@ -211,8 +213,10 @@ def _device_mask(value: str) -> int:
     mask = 0
     if "switch 2" in text or "switch2" in text:
         mask |= 2
-    # Switch 2 also satisfies the base Switch ownership requirement.
-    if "switch" in text:
+    # Keep Switch 1 and Switch 2 distinct in the ledger while allowing either
+    # device to satisfy the Nintendo Switch eligibility requirement.
+    switch_1_text = text.replace("switch 2", "").replace("switch2", "")
+    if "switch" in switch_1_text:
         mask |= 1
     if "steam deck" in text or "steamdeck" in text:
         mask |= 4
@@ -410,7 +414,7 @@ def _step1_state(values: dict[str, str]) -> tuple[str, str]:
         return "", "Applicants must be at least 18 years old."
     if not country:
         return "", "The current test is not available in your country or region."
-    if not devices & 1:
+    if not devices & 3:
         return "", "You must actively use a Nintendo Switch or Switch 2."
     if not _yes(values.get("amazon_24m", "")):
         return "", "Recent Amazon Video Games purchase experience is required."
@@ -483,8 +487,8 @@ def _step2_values(values: dict[str, str]) -> tuple[dict, str]:
         "product_types": values.get("product_types", "")[:500],
         "funlab": fp["funlab"].casefold() == "yes",
         "prime": "不愿透露" if prime_raw.startswith("prefer") else ("是" if prime_raw == "yes" else "否"),
-        "switch_hours": "Under 2" if switch_hours == "UNDER 2" else switch_hours,
-        "pc_hours": "Under 2" if pc_hours == "UNDER 2" else pc_hours,
+        "switch_hours": "Under 2" if switch_hours == "UNDER 2" else _HOUR_CANONICAL.get(switch_hours, switch_hours),
+        "pc_hours": "Under 2" if pc_hours == "UNDER 2" else _HOUR_CANONICAL.get(pc_hours, pc_hours),
         "cross": _yes(play.get("cross", "")),
         "cross_experience": values.get("cross_platform", "")[:1000],
     }, ""
@@ -567,7 +571,7 @@ def _provisional_score(devices: list[str], step2: dict) -> int:
         device_points += 7
     if "Steam Deck" in devices:
         device_points += 5
-    if "PC / Steam" in devices and step2["pc_hours"] in {"2-5", "6-10", "10+"}:
+    if "PC / Steam" in devices and step2["pc_hours"] in _PC_SCORING_HOURS:
         device_points += 5
     if step2["cross"]:
         device_points += 3

@@ -157,6 +157,9 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("123", ledger.saved["Discord用户ID"])
         self.assertEqual("已提交", ledger.saved["报名状态"])
         self.assertIn("Switch 2", ledger.saved["设备"])
+        self.assertNotIn("Switch 1", ledger.saved["设备"])
+        self.assertEqual("6–10", ledger.saved["每周Switch游戏时长"])
+        self.assertEqual("2–5", ledger.saved["每周PC手柄时长"])
         self.assertNotIn("收件地址", ledger.saved)
         self.assertNotIn("联系电话", ledger.saved)
         self.assertGreaterEqual(ledger.saved["筛选分数"], 30)
@@ -183,6 +186,38 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
 
         await outcome.work()
         self.assertIn("could not save", notices[0])
+
+    async def test_pc_steam_hours_keep_the_cross_platform_score_after_normalization(self):
+        ledger = FakeLedger()
+        first = await program.build_interaction_outcome(_modal_submit("tester_apply_step1", {
+            "country": "United States", "age": "YES", "devices": "Switch 2, PC Steam",
+            "amazon_24m": "YES", "commit": "YES",
+        }), signing_secret="test-secret")
+        step2_button = first.response["data"]["components"][0]["components"][0]["custom_id"]
+        step2_modal = await program.build_interaction_outcome(
+            {"type": 3, "data": {"custom_id": step2_button}}, signing_secret="test-secret"
+        )
+        second = await program.build_interaction_outcome(_modal_submit(step2_modal.response["data"]["custom_id"], {
+            "purchase_count": "4-6",
+            "product_types": "Controllers, games, cases",
+            "funlab_prime": "FUNLAB=YES; PRIME=YES",
+            "play_hours": "SWITCH=6-10; PC=2-5; CROSS=YES",
+            "cross_platform": "Compared latency on Switch 2 and PC Steam.",
+        }), signing_secret="test-secret")
+        step3_button = second.response["data"]["components"][0]["components"][0]["custom_id"]
+        step3_modal = await program.build_interaction_outcome(
+            {"type": 3, "data": {"custom_id": step3_button}}, signing_secret="test-secret"
+        )
+        outcome = await program.build_interaction_outcome(_modal_submit(step3_modal.response["data"]["custom_id"], {
+            "games": "Mario Kart World on Switch 2 and Rocket League on PC",
+            "controllers": "Nintendo Pro Controller and Xbox Wireless Controller",
+            "disconnect": "Record platform, game, steps, frequency, expected and actual result.",
+            "feature_test": "Compare five matched runs on Switch 2 and PC.",
+            "route_agree": "ROUTE=SWITCH + PC STEAM; RULES=YES; ALUMNI=NO",
+        }), signing_secret="test-secret", ledger=ledger)
+
+        await outcome.work()
+        self.assertEqual(39, ledger.saved["筛选分数"])
 
     async def test_final_route_must_match_declared_devices(self):
         outcome = await program.build_interaction_outcome(
