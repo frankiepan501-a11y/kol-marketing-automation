@@ -24,7 +24,7 @@ class LaunchRouteTests(unittest.TestCase):
             with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
                 main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
             ), patch.object(
-                main.launch_runtime, "load_runtime_job", new=AsyncMock(side_effect=[None, persisted]),
+                main.launch_runtime, "load_runtime_job", new=AsyncMock(return_value=persisted),
             ), patch.object(
                 main.launch_runtime, "persist_runtime_job", new=AsyncMock(),
             ) as persist, patch.object(
@@ -63,6 +63,37 @@ class LaunchRouteTests(unittest.TestCase):
         self.assertEqual("launchruntime-real", status["job_id"])
         self.assertEqual("success", status["status"])
         load.assert_awaited_once_with("c1")
+
+    def test_autonomous_job_restarts_when_durable_running_job_is_not_in_this_process(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            durable = {
+                "job_id": "launchruntime-interrupted", "status": "running",
+                "campaign_id": "c1", "mode": "autonomous",
+                "updated_ts": 9_999_999_999,
+            }
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+            ), patch.object(
+                main.launch_runtime, "load_runtime_job", new=AsyncMock(return_value=durable),
+            ), patch.object(
+                main.launch_runtime, "persist_runtime_job", new=AsyncMock(),
+            ), patch.object(
+                main.launch_runtime, "autonomous_refill",
+                new=AsyncMock(return_value={"business_outcome": "supply_in_progress"}),
+            ) as refill:
+                accepted = await main.launch_runtime_autonomous_refill(
+                    FakeRequest({"campaign_id": "c1"}), authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+            main._launch_runtime_jobs.clear()
+            return accepted, refill
+
+        accepted, refill = asyncio.run(exercise())
+
+        self.assertFalse(accepted["already_running"])
+        self.assertNotEqual("launchruntime-interrupted", accepted["job_id"])
+        refill.assert_awaited_once_with(campaign_id="c1")
 
     def test_autonomous_job_persists_degraded_when_supply_is_blocked(self):
         async def exercise():

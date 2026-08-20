@@ -2549,17 +2549,8 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
     if not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise HTTPException(status_code=403, detail="活动队列写入开关未开启")
     _prune_launch_runtime_jobs()
-    if mode == "autonomous":
-        durable = await launch_runtime.load_runtime_job(campaign_id)
-        if (
-            durable and durable.get("status") == "running"
-            and time.time() - float(durable.get("updated_ts") or 0) < 45 * 60
-        ):
-            return {
-                "ok": True, "accepted": True, "already_running": True,
-                "job_id": durable["job_id"], "status": "running",
-                "campaign_id": campaign_id,
-            }
+    # Zeabur 重启后旧进程里的后台协程已经不存在，不能把活动表里残留的
+    # running 记录继续当成活任务。当前生产为单实例，真实并发只以内存任务表判定。
     request_key = f"{mode}|{campaign_id}"
     for job_id, job in _launch_runtime_jobs.items():
         if job.get("status") == "running" and job.get("request_key") == request_key:
