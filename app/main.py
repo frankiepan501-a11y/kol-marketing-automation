@@ -2507,10 +2507,10 @@ async def launch_email_test_raw(
 ):
     """只发测试邮箱并回查 sent raw；全局 dry-run 未开启时硬拒绝。"""
     _check_auth(authorization)
-    if not product_id or not draft_id or not run_key or not campaign_id:
+    if not product_id or not run_key or not campaign_id:
         raise HTTPException(
             status_code=400,
-            detail="campaign_id, product_id, draft_id and run_key required",
+            detail="campaign_id, product_id and run_key required; draft_id is optional for template-only preflight",
         )
     try:
         return await launch_email_preflight.send_and_validate(

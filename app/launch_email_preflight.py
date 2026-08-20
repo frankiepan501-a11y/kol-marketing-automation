@@ -237,10 +237,24 @@ async def send_and_validate(product_id: str, draft_id: str, brand: str, *, confi
     product_brand = config.brand_from_text(ext((product.get("fields") or {}).get("品牌")))
     if product_brand != brand:
         raise RuntimeError(f"产品品牌={product_brand or '未识别'}，不能使用 {brand} 邮箱测试")
-    draft = await feishu.get_record(config.T_DRAFT, draft_id)
-    draft_brand = config.brand_from_text(ext((draft.get("fields") or {}).get("发送邮箱")))
-    if draft_brand != brand:
-        raise RuntimeError(f"草稿发件品牌={draft_brand or '未识别'}，不能作为 {brand} 测试样本")
+    if draft_id:
+        draft = await feishu.get_record(config.T_DRAFT, draft_id)
+        draft_brand = config.brand_from_text(ext((draft.get("fields") or {}).get("发送邮箱")))
+        if draft_brand != brand:
+            raise RuntimeError(f"草稿发件品牌={draft_brand or '未识别'}，不能作为 {brand} 测试样本")
+    else:
+        # 尚无人审可发对象时，只验证活动受控备用模板；不创建生产草稿记录。
+        from . import launch_runtime
+        generated = launch_runtime._deterministic_fallback_draft(
+            {"fields": {"账号名": "Launch Test", "国家": "US", "语言": "en"}},
+            product, brand,
+        )
+        draft_id = f"template:{LAUNCH_QUEUE_TEMPLATE_VERSION}"
+        draft = {"record_id": draft_id, "fields": {
+            "邮件草稿来源": "cold", "关联产品": [product_id],
+            "发送邮箱": config.BRAND_CONFIG[brand]["sender_label"],
+            "邮件主题": generated["subject"], "邮件正文": generated["body"],
+        }}
     expected = build_test_email(product, draft, brand, run_key)
     fingerprint = hashlib.sha256(
         f"{product_id}|{draft_id}|{expected['subject']}|{expected['body']}".encode("utf-8")
