@@ -311,6 +311,9 @@ async def append_review_candidates(*, campaign_id: str, review_target: int = 20,
             ranking_fields["审核原因"] = ""
             ranking_fields["审核人"] = None
             ranking_fields["审核时间"] = None
+            reason_codes = _pending_review_reason_codes(candidate)
+            if reason_codes:
+                ranking_fields["审核原因代码"] = reason_codes
             if ranking_fields.get("系统审核分流") == "系统建议通过":
                 ranking_fields["系统审核说明"] = (
                     "系统规则已建议通过；本批为新品活动候选质量灰度，请运营抽检主页、"
@@ -354,6 +357,32 @@ async def append_review_candidates(*, campaign_id: str, review_target: int = 20,
         "batch_id": batch_id, "participant_ids": created,
         "drafts_created": 0, "emails_sent": 0,
     }
+
+
+def _pending_review_reason_codes(candidate: dict) -> list[str]:
+    """把机器筛选原因收敛为运营可复用的活动原因码。"""
+    mapping = {
+        "目标主机不匹配": "目标主机不匹配",
+        "Nintendo/Mario受众或近期硬件内容不匹配": "核心游戏/IP不匹配",
+        "近期目标游戏/主机内容占比不足": "核心游戏/IP不匹配",
+        "近期内容缺少Nintendo/Switch或硬件评测证据": "核心游戏/IP不匹配",
+        "内容风格不匹配": "硬件/配件内容不足",
+        "内容垂类不是主机游戏或游戏硬件评测": "非游戏或泛娱乐",
+        "最近发布记录缺失或过期": "活跃度不足",
+        "国家不在活动目标市场": "地区/语言不匹配",
+        "国家不在销售市场": "地区/语言不匹配",
+        "语言不在活动目标范围": "地区/语言不匹配",
+        "语言不匹配": "地区/语言不匹配",
+        "资料缺失或过期": "资料缺失或过期",
+        "人工核实已过期": "资料缺失或过期",
+        "标签版本不是v2": "资料缺失或过期",
+    }
+    values = []
+    for reason in candidate.get("base_filter_reasons") or []:
+        code = mapping.get(str(reason).strip())
+        if code and code not in values:
+            values.append(code)
+    return values
 
 
 async def _find_queue_draft(queue_key: str) -> dict | None:
@@ -828,7 +857,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                 created=int(review_pool.get("created") or 0),
             )
 
-        return {
+        result = {
             **metrics, "already_running": False, "brand": brand,
             "quota": quota, "target_ready_inventory": target_ready,
             "inventory_before": inventory_before["ready"],
@@ -842,6 +871,57 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             "review_notification": review_notification,
             "quality_filters_lowered": False,
         }
+        return _with_business_outcome(result)
+
+
+def _section_count(result: dict, section: str, key: str) -> int:
+    try:
+        return max(0, int((result.get(section) or {}).get(key) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _with_business_outcome(result: dict) -> dict:
+    """给后台任务补业务结果；HTTP没报错不再等同于补池成功。"""
+    progress = sum((
+        _section_count(result, "append", "created"),
+        _section_count(result, "queue", "queued"),
+        _section_count(result, "profile_refresh", "writes"),
+        _section_count(result, "append_after_refresh", "created"),
+        _section_count(result, "queue_after_refresh", "queued"),
+        _section_count(result, "discovery", "created"),
+        _section_count(result, "review_pool", "created"),
+    ))
+    try:
+        remaining = max(0, int((result.get("quota") or {}).get("remaining") or 0))
+    except (TypeError, ValueError):
+        remaining = 0
+    try:
+        inventory_after = max(0, int(result.get("inventory_after") or 0))
+    except (TypeError, ValueError):
+        inventory_after = 0
+
+    if result.get("stopped") or result.get("action") == "stop":
+        outcome = "stopped"
+    elif result.get("held") or result.get("action") == "hold":
+        outcome = "held"
+    elif result.get("runtime") == "inventory_sufficient":
+        outcome = "inventory_sufficient"
+    elif remaining <= 0:
+        outcome = "quota_exhausted"
+    elif inventory_after > 0:
+        outcome = "ready_inventory_created"
+    elif progress > 0:
+        outcome = "supply_in_progress"
+    elif result.get("action") == "expand":
+        outcome = "supply_blocked"
+    else:
+        outcome = "no_action_needed"
+    return {**result, "business_outcome": outcome, "supply_progress": progress}
+
+
+def runtime_job_status(result: dict | None) -> str:
+    return "degraded" if (result or {}).get("business_outcome") == "supply_blocked" else "success"
 
 
 def _runtime_result_summary(result: dict | None) -> dict:
@@ -851,7 +931,8 @@ def _runtime_result_summary(result: dict | None) -> dict:
         key: result.get(key) for key in (
             "action", "brand", "participants", "sent", "replies", "commitments",
             "ontime_posts", "target_ready_inventory", "inventory_before", "inventory_after",
-            "stopped", "held", "quality_filters_lowered",
+            "inventory_after_master", "stopped", "held", "quality_filters_lowered",
+            "runtime", "business_outcome", "supply_progress",
         ) if key in result
     } | ({"quota": quota} if quota else {})
 
@@ -895,7 +976,7 @@ async def persist_runtime_job(*, campaign_id: str, job_id: str, mode: str,
         "started_ts": int(started_ts or (previous or {}).get("started_ts") or now_ts),
         "updated_ts": now_ts,
     }
-    if status == "success":
+    if status in {"success", "degraded"}:
         payload["result"] = _runtime_result_summary(result)
     if error:
         payload["error"] = str(error)[:300]

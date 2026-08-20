@@ -7,6 +7,41 @@ from app import keyword_supply
 
 
 class KeywordSupplyBrazilTests(unittest.TestCase):
+    def test_campaign_supply_generates_more_targeted_keywords_after_seed_list_is_exhausted(self):
+        used = [
+            {"fields": {
+                "任务名": "[活动补池:campaign1] YT KOL - " + word,
+                "关键词列表": word, "爬虫类型": "KOL-YouTube",
+                "任务状态": "3-已完成", "筛选-语言": ["en"],
+            }}
+            for word in keyword_supply._CAMPAIGN_KEYWORDS["piranha"]["en"]
+        ]
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=used),
+        ), patch.object(
+            keyword_supply.deepseek, "chat_json", new=AsyncMock(return_value={
+                "keywords": [
+                    "mario switch collection showcase", "nintendo desk setup review",
+                    "super mario collector room tour", "switch accessories setup channel",
+                ],
+            }),
+        ) as generate, patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(return_value="task1"),
+        ) as create_record:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, dry_run=False,
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(4, result["created"])
+        self.assertEqual("dynamic", result["keyword_source"])
+        generate.assert_awaited_once()
+        self.assertEqual(4, create_record.await_count)
+
     def test_campaign_supply_is_deterministic_idempotent_and_target_language_only(self):
         rows = [{"fields": {
             "任务名": "[活动补池:campaign1] YT KOL - dave the diver gameplay",

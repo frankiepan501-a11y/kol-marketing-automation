@@ -2600,12 +2600,15 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                     queue_limit=queue_limit,
                 )
             if mode == "autonomous":
+                job_status = launch_runtime.runtime_job_status(result)
                 await launch_runtime.persist_runtime_job(
                     campaign_id=campaign_id, job_id=job_id, mode=mode,
-                    status="success", result=result, started_ts=started_ts,
+                    status=job_status, result=result, started_ts=started_ts,
                 )
+            else:
+                job_status = "success"
             _launch_runtime_jobs[job_id].update(
-                status="success", finished_at=datetime_now_string(), result=result,
+                status=job_status, finished_at=datetime_now_string(), result=result,
             )
         except Exception as exc:
             tr = _tb.format_exc()[-1000:]

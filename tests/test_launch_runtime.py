@@ -213,7 +213,68 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(1, result["created"])
         fields = create_record.await_args.args[1]
         self.assertEqual("待补资料", fields["审核结论"])
+        self.assertEqual(["资料缺失或过期"], fields["审核原因代码"])
         self.assertNotIn("关联邮件草稿", fields)
+
+    def test_autonomous_refill_reports_blocked_when_quota_remains_but_supply_makes_no_progress(self):
+        metrics = {
+            "campaign_id": "campaign1", "participants": 42, "sent": 4,
+            "replies": 0, "commitments": 0, "ontime_posts": 0,
+            "action": "expand", "reason": "commitment gap",
+        }
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "活动目标语言": ["en", "de", "es"],
+            "运行模式": "正式运行", "状态": "正式执行中",
+        }}
+        product = {"record_id": "product1", "fields": {
+            "品牌": "POWKONG", "产品英文名": "Piranha Plant 2 Dock",
+        }}
+        preview = {
+            "summary": {"eligible_new_cold": 0},
+            "profile_refresh_candidate_ids": [], "profile_refresh_candidates": [],
+            "candidates": [],
+        }
+        inventories = [
+            {"ready": 0, "pending_review": 20},
+            {"ready": 0, "pending_review": 20},
+            {"ready": 0, "pending_review": 20},
+        ]
+
+        with patch.object(
+            launch_runtime, "campaign_metrics", new=AsyncMock(return_value=metrics),
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(return_value=product),
+        ), patch.object(
+            launch_runtime, "_brand_quota_snapshot",
+            new=AsyncMock(return_value={"brand": "POWKONG", "cap": 120,
+                                        "sent_24h": 13, "remaining": 107}),
+        ), patch.object(
+            launch_runtime, "_campaign_ready_inventory", new=AsyncMock(side_effect=inventories),
+        ), patch.object(
+            launch_runtime.launch_candidate_preview, "preview_candidates",
+            new=AsyncMock(return_value=preview),
+        ), patch.object(
+            launch_runtime, "append_auto_approved", new=AsyncMock(return_value={"created": 0}),
+        ), patch.object(
+            launch_runtime, "queue_approved", new=AsyncMock(return_value={"queued": 0}),
+        ), patch.object(
+            launch_runtime.keyword_supply, "ensure_campaign_supply",
+            new=AsyncMock(return_value={"ok": False, "created": 0,
+                                        "error": "no unused discovery keywords"}),
+        ), patch.object(
+            launch_runtime, "append_review_candidates", new=AsyncMock(return_value={"created": 0}),
+        ), patch.object(
+            launch_runtime, "_notify_operator_review", new=AsyncMock(return_value={"sent": 0}),
+        ):
+            result = asyncio.run(launch_runtime.autonomous_refill(campaign_id="campaign1"))
+
+        self.assertEqual("supply_blocked", result["business_outcome"])
+        self.assertEqual(0, result["supply_progress"])
+        self.assertEqual(107, result["quota"]["remaining"])
+        self.assertEqual(0, result["inventory_after"])
 
     def test_autonomous_refill_refreshes_then_requests_discovery_without_lowering_filters(self):
         metrics = {
@@ -288,6 +349,8 @@ class LaunchRuntimeTests(unittest.TestCase):
         review.assert_awaited_once()
         self.assertTrue(review.await_args.kwargs["operator_only"])
         self.assertEqual(12, result["inventory_after"])
+        self.assertEqual("ready_inventory_created", result["business_outcome"])
+        self.assertGreater(result["supply_progress"], 0)
 
     def test_autonomous_refill_holds_when_campaign_is_not_formally_active(self):
         metrics = {

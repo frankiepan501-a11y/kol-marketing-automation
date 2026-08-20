@@ -10,10 +10,11 @@ $sourceWorkflowId = 'VWTMNkXf0zcs4Kvz'
 $serviceBase = 'https://kol-auto.zeabur.app'
 $legacyStartName = 'KOL Launch - Hourly Autonomous Refill + Completion Poll'
 $startName = 'KOL Launch - Hourly Autonomous Refill Start'
-$auditName = 'KOL Launch - Hourly Completion Audit'
+$legacyAuditName = 'KOL Launch - Hourly Completion Audit'
+$auditName = 'KOL Launch - 15min Business Result Audit'
 $daveCron = if ($env:LAUNCH_AUTONOMY_DAVE_CRON) { $env:LAUNCH_AUTONOMY_DAVE_CRON } else { '0 * * * *' }
-$piranhaCron = if ($env:LAUNCH_AUTONOMY_PIRANHA_CRON) { $env:LAUNCH_AUTONOMY_PIRANHA_CRON } else { '5 * * * *' }
-$auditCron = if ($env:LAUNCH_AUTONOMY_AUDIT_CRON) { $env:LAUNCH_AUTONOMY_AUDIT_CRON } else { '50 * * * *' }
+$piranhaCron = if ($env:LAUNCH_AUTONOMY_PIRANHA_CRON) { $env:LAUNCH_AUTONOMY_PIRANHA_CRON } else { '5,20,35,50 * * * *' }
+$auditCron = if ($env:LAUNCH_AUTONOMY_AUDIT_CRON) { $env:LAUNCH_AUTONOMY_AUDIT_CRON } else { '12,27,42,57 * * * *' }
 
 # Reuse the existing launch controller's Authorization header in memory. Do not
 # persist the service token in this repository or print it to stdout.
@@ -111,8 +112,8 @@ $startNodes = @(
         }
     },
     @{
-        id = Node-Id $sm 'Piranha Hourly BJ'
-        name = 'Piranha Hourly BJ'
+        id = Node-Id $sm 'Piranha Every 15m BJ'
+        name = 'Piranha Every 15m BJ'
         type = 'n8n-nodes-base.scheduleTrigger'
         typeVersion = 1.1
         position = @(0, 360)
@@ -139,11 +140,12 @@ $startNodes = @(
 )
 $startConnections = @{
     'Dave Hourly BJ' = Main-To 'Dave Start'
-    'Piranha Hourly BJ' = Main-To 'Piranha Start'
+    'Piranha Every 15m BJ' = Main-To 'Piranha Start'
 }
 $startWorkflow = Upsert-Workflow $startName $startNodes $startConnections $settings $startExisting
 
 $auditExisting = Get-ExistingWorkflow $auditName
+if (-not $auditExisting) { $auditExisting = Get-ExistingWorkflow $legacyAuditName }
 $auditState = Get-NodeIdMap $auditExisting
 $am = $auditState.map
 $validateDave = @'
@@ -157,15 +159,26 @@ return [{json: data}];
 $validatePiranha = @'
 const data = $input.first().json;
 const age = Math.floor(Date.now() / 1000) - Number(data.updated_ts || data.started_ts || 0);
-if (data.status !== 'success' || age > 70 * 60) {
-  throw new Error('Piranha latest autonomous job is not a fresh success: ' + JSON.stringify(data).slice(0, 1000));
+if (data.status === 'running' && age <= 45 * 60) {
+  return [{json: {...data, validation: 'running_within_expected_window'}}];
 }
-return [{json: data}];
+const result = data.result || {};
+const remaining = Number((result.quota || {}).remaining || 0);
+const inventory = Number(result.inventory_after || 0);
+const progress = Number(result.supply_progress || 0);
+if (data.status !== 'success' || age > 35 * 60) {
+  throw new Error('Piranha autonomous job is stale or not successful: ' + JSON.stringify(data).slice(0, 1000));
+}
+if (result.business_outcome === 'supply_blocked'
+    || (result.action === 'expand' && remaining > 0 && inventory === 0 && progress <= 0)) {
+  throw new Error('Piranha has unused quota but refill made no supply progress: ' + JSON.stringify(data).slice(0, 1000));
+}
+return [{json: {...data, validation: 'business_result_ok'}}];
 '@
 $auditNodes = @(
     @{
-        id = Node-Id $am 'Audit Hourly BJ'
-        name = 'Audit Hourly BJ'
+        id = Node-Id $am 'Audit Every 15m BJ'
+        name = 'Audit Every 15m BJ'
         type = 'n8n-nodes-base.scheduleTrigger'
         typeVersion = 1.1
         position = @(0, 220)
@@ -217,7 +230,7 @@ $auditNodes = @(
     }
 )
 $auditConnections = @{
-    'Audit Hourly BJ' = @{ main = ,@(
+    'Audit Every 15m BJ' = @{ main = ,@(
         @{ node = 'Dave Latest Status'; type = 'main'; index = 0 },
         @{ node = 'Piranha Latest Status'; type = 'main'; index = 0 }
     ) }

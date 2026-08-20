@@ -141,11 +141,46 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         if not progressed:
             break
 
+    keyword_source = "deterministic" if candidates else "none"
+    generation_error = ""
+    if need:
+        prompt = f"""你是海外游戏KOL发现助手。为{theme}主题新品活动补充YouTube创作者搜索词。
+目标语言只能从 {languages} 选择。搜索对象必须是Nintendo/Switch、Mario收藏、主机游戏房或游戏硬件评测创作者；
+不要生成产品购买词、店铺词、官方频道词，不要重复这些词：{sorted(existing_keywords)[-80:]}。
+返回JSON：{{"keywords":[{{"language":"en","keyword":"..."}}]}}，至少{max(need * 2, need)}条。"""
+        try:
+            generated = await deepseek.chat_json(prompt, max_tokens=1200, temperature=0.6)
+            raw_words = (generated or {}).get("keywords") or []
+            for index, item in enumerate(raw_words):
+                if need <= 0:
+                    break
+                if isinstance(item, dict):
+                    lang = str(item.get("language") or "").strip().lower()
+                    word = str(item.get("keyword") or "").strip().lower()
+                else:
+                    lang = languages[index % len(languages)]
+                    word = str(item or "").strip().lower()
+                if lang not in languages or not (2 <= len(word) <= 80):
+                    continue
+                if word in existing_keywords or any(existing == word for _, existing in candidates):
+                    continue
+                market = next((m for m in MARKETS if m["lang"] == lang), {"lang": lang})
+                if not _is_localized(word, market):
+                    continue
+                candidates.append((lang, word))
+                need -= 1
+            if candidates:
+                keyword_source = "mixed" if keyword_source == "deterministic" else "dynamic"
+        except Exception as exc:
+            generation_error = str(exc)[:160]
+
     if dry_run:
         return {
             "ok": True, "created": 0, "would_create": len(candidates),
             "keywords": [{"language": lang, "keyword": word} for lang, word in candidates],
             "pending_before": pending_for_campaign, "target_tasks": target_tasks,
+            "keyword_source": keyword_source, "shortfall_tasks": need,
+            "generation_error": generation_error,
         }
 
     now = int(time.time() * 1000)
@@ -163,10 +198,14 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             created += 1
         except Exception as exc:
             errors.append(f"{word}: {str(exc)[:100]}")
+    if need and not generation_error:
+        generation_error = f"仍缺{need}个未使用的活动发现关键词"
     return {
-        "ok": not errors, "created": created, "errors": errors[:5],
+        "ok": not errors and not generation_error, "created": created, "errors": errors[:5],
         "pending_before": pending_for_campaign, "target_tasks": target_tasks,
         "keywords": [{"language": lang, "keyword": word} for lang, word in candidates],
+        "keyword_source": keyword_source, "shortfall_tasks": need,
+        "generation_error": generation_error,
     }
 
 

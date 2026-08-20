@@ -64,6 +64,39 @@ class LaunchRouteTests(unittest.TestCase):
         self.assertEqual("success", status["status"])
         load.assert_awaited_once_with("c1")
 
+    def test_autonomous_job_persists_degraded_when_supply_is_blocked(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            blocked = {
+                "action": "expand", "business_outcome": "supply_blocked",
+                "supply_progress": 0, "inventory_after": 0,
+                "quota": {"remaining": 107},
+            }
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+            ), patch.object(
+                main.launch_runtime, "load_runtime_job", new=AsyncMock(return_value=None),
+            ), patch.object(
+                main.launch_runtime, "persist_runtime_job", new=AsyncMock(),
+            ) as persist, patch.object(
+                main.launch_runtime, "autonomous_refill", new=AsyncMock(return_value=blocked),
+            ):
+                accepted = await main.launch_runtime_autonomous_refill(
+                    FakeRequest({"campaign_id": "c1"}), authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+                status = await main.get_launch_runtime_job(
+                    accepted["job_id"], campaign_id="c1", authorization="Bearer secret",
+                )
+            main._launch_runtime_jobs.clear()
+            return status, persist
+
+        status, persist = asyncio.run(exercise())
+
+        self.assertEqual("degraded", status["status"])
+        states = [call.kwargs["status"] for call in persist.await_args_list]
+        self.assertEqual(["running", "degraded"], states)
+
     def test_profile_backfill_defaults_to_background_dry_run(self):
         async def exercise():
             main._relabel_profile_jobs.clear()
