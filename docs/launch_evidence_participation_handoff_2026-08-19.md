@@ -170,6 +170,19 @@
 - n8n工作流 `UIShaANEi8M0rx1v` 保持每10分钟运行并已切换后台模式；每日反馈工作流 `VWTMNkXf0zcs4Kvz` 每天北京时间17:00依次评估Dave与食人花。
 - 线上代码版本为 `c6dc0ec`。活动专项测试：`test_launch_routes` 10项、`test_launch_runtime` 7项、邮箱清洗3项全部通过。
 
+### P0 上线补完（2026-08-20）
+
+- 自治补池代码 commit `9a5a41f` 与调度补强 commit `912756c` 已推送到 `master`；Zeabur deployment `6a870e0a29f0931a12bf96b3` 为 `RUNNING`。线上 `/health=ok`，OpenAPI 已回读到 `/launch/runtime/autonomous-refill` 与 `/launch/runtime/jobs/{job_id}`。
+- 已启用启动工作流 `uvBfJBtGH93FPa6w`：北京时间每小时00分受理Dave、05分受理食人花；只负责快速取得后台任务ID，不同步等待整批完成。
+- 已启用独立完成审计 `ijIcjoYO9Jm1Vdkw`：北京时间每小时50分读取两活动最新持久任务，只接受70分钟内更新的`success`，把“收到HTTP 200”与“后台真的完成”分开验证。
+- 17:00 每日反馈工作流 `VWTMNkXf0zcs4Kvz` 保留，不承担小时级补池；10分钟发送中心 `UIShaANEi8M0rx1v` 仍是唯一真实发信出口。
+- 两条工作流均经 n8n validator 验证为0错误/0警告。真实定时器验证：启动 execution `968537` 成功受理Dave后台任务；完成审计首版暴露`updated_ts/started_ts`字段差异，修正后 execution `968515` 成功；正式频率随后恢复。
+- 生产验证任务：Dave `launchruntime-4f08fd685492`、食人花 `launchruntime-f2cc8266945d` 均已完成且状态为`success`。
+- 食人花任务已回读 `success`：POWKONG滚动24小时13/120、活动已发4、承诺0、可发草稿0；刷新30名旧候选并写入30条画像，建立5个活动专属YouTube发现任务，新增19名只交运营审核的对象并成功发1张运营卡；运营审核对象草稿0、邮件0，`quality_filters_lowered=false`。
+- Dave任务已回读`success`：FUNLAB滚动24小时120/120、活动已发104、回复3、承诺0；可发库存33→35，自动补入并排队2名，建立3个发现任务和20名运营审核对象；达到额度后不超发，额度释放时由现有发送中心继续。
+- 食人花5个外部发现任务最终4个完成、1个失败，成功任务共新增24名KOL，确认现有本地daemon会独立于Codex session继续消费任务。失败项为旧爬虫对异常YouTube响应缺少`data`字段的处理缺口，小时补池可用其他未使用关键词继续补给，不阻塞主链。
+- 活动不是“正式运行+正式执行中”时自治补池保持暂停；超过`窗口结束`后系统会关闭`发送邮件授权`并停止补池。任何审核池对象仍不得自动建草稿或发信。
+
 ### Dave生产结果
 
 - 活动：`launch-20260915-funlab-dave-ys11-5`；参与记录142条，已关联活动草稿120条。

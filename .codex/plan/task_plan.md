@@ -152,14 +152,14 @@
 |---|---|---|
 | 9.1 固定接口与安全边界 | complete | 自治入口只补池/建草稿，不直接发信；停止/保持继续以活动承诺和预计按时上稿为准 |
 | 9.2 测试先行与代码实现 | complete | 覆盖库存缺口、主表补池、资料刷新、外部拓新、运营审核分流和任务状态持久化 |
-| 9.3 生产表与 n8n 调度 | pending | 每小时触发两活动并轮询实际完成状态，服务重启后仍可查询 |
-| 9.4 部署与生产小样本 | pending | 两活动各完成一次后台任务回读；无重复触达、无越权发送、无质量阈值下调 |
+| 9.3 生产表与 n8n 调度 | complete | 活动表持久化后台状态；启动流 `uvBfJBtGH93FPa6w` 每小时00/05分错峰受理，审计流 `ijIcjoYO9Jm1Vdkw` 每小时50分独立核验最新持久状态，避免长连接和网关超时 |
+| 9.4 部署与生产小样本 | complete | commit `9a5a41f` + `912756c` 已部署；Dave与食人花真实后台任务均成功，定时启动 execution `968537`、独立完成审计 execution `968515` 均成功 |
 
 ### P0 implementation seams
 
 1. `launch_runtime.autonomous_refill(...)`：确定性控制器，返回 `action / quota / inventory / append / refresh / discovery / review_pool / queue`。
 2. `/launch/runtime/autonomous-refill` + `/launch/runtime/jobs/{job_id}`：启动后台任务并从活动表持久回读状态；HTTP 受理不等于完成。
-3. n8n：北京时间每小时启动两活动，轮询到 `success/error` 后才结束；`running` 必须继续等待，不能把 200/accepted 当成功。
+3. n8n：短启动流只确认后台已受理；独立审计流在每小时50分读取活动表最新持久状态，只接受新鲜的 `success`，不能把 200/accepted 当完成。
 
 ### 2026-08-20 Errors Encountered
 
@@ -169,3 +169,5 @@
 | 单人端点仍调用全池 `replay_candidate`，读取全表导致长等待且未建草稿 | 首次两次放行尝试 | 改为只查该联系人、该邮箱和产品家族的 `_fast_precheck`；116 项活动测试通过后部署 |
 | 飞书把 `粉丝数` 返回为字符串，`{kol_sub:,}` 触发 `ValueError` | 修复后首次真实请求 | 在 `enrich._subscriber_count` 统一转为非负整数；只生成不发送验证通过后再用同 nonce 执行 |
 | 已发 raw 初检 8/9，产品身份项误报 | 唯一真实发送后的 raw 检查 | 邮件实际含 `Dave the Diver controller`；校验器补充“IP + 产品类型”规则，直接读取同一 Zoho 消息重新验证为 9/9，未补发 |
+| 长等待版 n8n 工作流启用后没有稳定产生 schedule execution | 首次小时调度验证 | 用最小定时流证明 n8n scheduler 正常；将架构拆成“短启动 + 独立完成审计”，更新时显式停用/重启注册，两个真实定时 execution 均成功 |
+| 持久任务状态使用 `updated_ts`，审计首版只读 `started_ts` | 首次审计 execution `968505` | 审计改为优先读取 `updated_ts`、兼容内存态 `started_ts`；重跑 execution `968515` 成功 |

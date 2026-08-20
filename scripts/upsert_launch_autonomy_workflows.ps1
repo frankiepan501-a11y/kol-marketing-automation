@@ -148,7 +148,7 @@ $auditState = Get-NodeIdMap $auditExisting
 $am = $auditState.map
 $validateDave = @'
 const data = $input.first().json;
-const age = Math.floor(Date.now() / 1000) - Number(data.started_ts || 0);
+const age = Math.floor(Date.now() / 1000) - Number(data.updated_ts || data.started_ts || 0);
 if (data.status !== 'success' || age > 70 * 60) {
   throw new Error('Dave latest autonomous job is not a fresh success: ' + JSON.stringify(data).slice(0, 1000));
 }
@@ -156,7 +156,7 @@ return [{json: data}];
 '@
 $validatePiranha = @'
 const data = $input.first().json;
-const age = Math.floor(Date.now() / 1000) - Number(data.started_ts || 0);
+const age = Math.floor(Date.now() / 1000) - Number(data.updated_ts || data.started_ts || 0);
 if (data.status !== 'success' || age > 70 * 60) {
   throw new Error('Piranha latest autonomous job is not a fresh success: ' + JSON.stringify(data).slice(0, 1000));
 }
