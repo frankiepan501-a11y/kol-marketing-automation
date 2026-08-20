@@ -136,6 +136,56 @@ class LaunchRouteTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 403)
         lock.assert_not_awaited()
 
+    def test_auto_send_async_mode_returns_job_and_exposes_result(self):
+        async def exercise():
+            main._auto_send_jobs.clear()
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), \
+                 patch.object(main.auto_send, "run", new=AsyncMock(return_value={"sent": 2, "fail": 0})):
+                accepted = await main.run_auto_send(
+                    authorization="Bearer secret", async_mode=True,
+                )
+                await asyncio.sleep(0)
+                status = await main.get_auto_send_job(
+                    accepted["job_id"], authorization="Bearer secret",
+                )
+            main._auto_send_jobs.clear()
+            return accepted, status
+
+        accepted, status = asyncio.run(exercise())
+
+        self.assertTrue(accepted["accepted"])
+        self.assertFalse(accepted["already_running"])
+        self.assertEqual(status["status"], "success")
+        self.assertEqual(status["result"]["sent"], 2)
+
+    def test_auto_send_async_mode_reuses_running_job(self):
+        async def exercise():
+            main._auto_send_jobs.clear()
+            gate = asyncio.Event()
+
+            async def slow_send():
+                await gate.wait()
+                return {"sent": 0, "fail": 0}
+
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), \
+                 patch.object(main.auto_send, "run", new=AsyncMock(side_effect=slow_send)) as run:
+                first = await main.run_auto_send(
+                    authorization="Bearer secret", async_mode=True,
+                )
+                second = await main.run_auto_send(
+                    authorization="Bearer secret", async_mode=True,
+                )
+                gate.set()
+                await asyncio.sleep(0)
+            main._auto_send_jobs.clear()
+            return first, second, run.await_count
+
+        first, second, await_count = asyncio.run(exercise())
+
+        self.assertEqual(first["job_id"], second["job_id"])
+        self.assertTrue(second["already_running"])
+        self.assertEqual(await_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

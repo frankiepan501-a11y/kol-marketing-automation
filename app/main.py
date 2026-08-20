@@ -48,6 +48,8 @@ _launch_preview_jobs = {}
 _LAUNCH_PREVIEW_JOB_TTL = 6 * 3600
 _launch_runtime_jobs = {}
 _LAUNCH_RUNTIME_JOB_TTL = 24 * 3600
+_auto_send_jobs = {}
+_AUTO_SEND_JOB_TTL = 24 * 3600
 
 
 def _check_auth(auth: str):
@@ -1457,10 +1459,57 @@ async def run_kol_keyword_cron(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1500:]}
 
 
+def _prune_auto_send_jobs() -> None:
+    now = time.time()
+    for job_id in list(_auto_send_jobs):
+        if now - _auto_send_jobs[job_id].get("started_ts", 0) > _AUTO_SEND_JOB_TTL:
+            _auto_send_jobs.pop(job_id, None)
+
+
+async def _start_auto_send_job() -> dict:
+    """Accept a slow send cycle without holding the edge gateway open."""
+    _prune_auto_send_jobs()
+    for job_id, job in _auto_send_jobs.items():
+        if job.get("status") == "running":
+            return {
+                "ok": True, "accepted": True, "already_running": True,
+                "job_id": job_id, "status": "running",
+            }
+    job_id = "autosend-" + uuid.uuid4().hex[:12]
+    _auto_send_jobs[job_id] = {
+        "status": "running", "started_ts": time.time(),
+        "started_at": datetime_now_string(),
+    }
+
+    async def _job():
+        try:
+            result = await auto_send.run()
+            _auto_send_jobs[job_id].update(
+                status="success", finished_at=datetime_now_string(), result=result,
+            )
+        except Exception as exc:
+            tr = _tb.format_exc()[-1000:]
+            _auto_send_jobs[job_id].update(
+                status="error", finished_at=datetime_now_string(),
+                error=str(exc)[:500],
+            )
+            await _alert_endpoint_failure("/auto-send/run", str(exc), tr)
+
+    asyncio.create_task(_job())
+    return {
+        "ok": True, "accepted": True, "already_running": False,
+        "job_id": job_id, "status": "running",
+    }
+
+
 @app.post("/auto-send/run")
-async def run_auto_send(authorization: str = Header(default="")):
+async def run_auto_send(
+    authorization: str = Header(default=""), async_mode: bool = False,
+):
     """每 10 分钟扫 自动通过/通过 状态草稿 → Zoho 双品牌发送 + 限速"""
     _check_auth(authorization)
+    if async_mode:
+        return await _start_auto_send_job()
     try:
         result = await auto_send.run()
         return {"ok": True, **result}
@@ -1468,6 +1517,18 @@ async def run_auto_send(authorization: str = Header(default="")):
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/auto-send/run", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.get("/auto-send/jobs/{job_id}")
+async def get_auto_send_job(job_id: str, authorization: str = Header(default="")):
+    """查询后台发信批次；状态保留 24 小时。"""
+    _check_auth(authorization)
+    _prune_auto_send_jobs()
+    job = _auto_send_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found or expired")
+    public = {key: value for key, value in job.items() if key != "started_ts"}
+    return {"ok": True, "job_id": job_id, **public}
 
 
 @app.post("/zoho/send-debug")
