@@ -300,3 +300,12 @@
 - 代码提交：`59e6f6e`（活动粉丝范围）、`2220f44`（持续内容证据）、`dea23ae`（精准清理旧机器误判标签）。相关测试47项全部通过；全仓400项通过，唯一失败为既有 Zeabur watchdog 用例，与本次无关。
 - 安全边界保持：P1只补人工审核池，没有新建草稿、没有调用Zoho、没有改变3名对象的人工结论。
 - 最终版本`3429d75`在线状态`RUNNING`、健康检查`ok`；EL GUERRERO单条修正任务`kolprofile-d5a8a59e8521`写入成功，主表读回旧机器内容风格/IP标签均已清空。
+
+## 2026-08-20 食人花新增3名候选审核通过并正式发送
+
+- 用户确认 SwitchRank、Metricar、Aliens in the garage 3名新增候选全部审核通过；生产回读均为`审核结论=通过 / 参与状态=已入围`，当时`关联邮件草稿`为空。
+- 仅针对本活动触发后台队列 job `launchruntime-0dbbc7a1bdba`：eligible=3、queued=3、failed=0；3条参与记录均唯一关联新活动草稿，未复用其他草稿。
+- 触发现有唯一发送中心后台 job `autosend-51a67ea78d3c`：sent=3、fail=0、scheduled_later=0、skipped=0、活动锁失败=0；没有触发其他活动草稿。
+- 真实发件结果：Metricar→Zoho `1787229751642155100`；Aliens in the garage→Zoho `1787229770928138400`；SwitchRank→Zoho `1787229788380138300`。
+- 发后直接读取POWKONG已发送文件夹raw复核：3封均命中正确收件人、主题非空、正文953-995字符、产品英文名/产品链接/HTML完整、无未替换占位符；2封西班牙语正文含`15 de septiembre`，1封英语正文含`September 15`。
+- 发送批次完成时POWKONG滚动24小时计数=10/120，可用110；FUNLAB=120/120，本批未向FUNLAB继续发送。现有回复/寄样/预算闸保持原规则不变。
