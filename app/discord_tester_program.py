@@ -88,6 +88,30 @@ class DiscordTesterLedger:
             "application update",
         )
 
+    async def get_application(self, record_id: str) -> dict:
+        from . import feishu
+        path = f"/bitable/v1/apps/{self.base_token}/tables/{self.table_id}/records/{record_id}"
+        result = _require_feishu_ok(await feishu.api("GET", path, which="bitable"), "application read")
+        record = (result.get("data") or {}).get("record") or {}
+        return record.get("fields") or {}
+
+    async def list_applications(self) -> list[dict]:
+        from . import feishu
+        path = f"/bitable/v1/apps/{self.base_token}/tables/{self.table_id}/records"
+        items: list[dict] = []
+        page_token = ""
+        while True:
+            query = "?page_size=500" + (f"&page_token={page_token}" if page_token else "")
+            result = _require_feishu_ok(
+                await feishu.api("GET", path + query, which="bitable"),
+                "application list",
+            )
+            data = result.get("data") or {}
+            items.extend(data.get("items") or [])
+            if not data.get("has_more") or not data.get("page_token"):
+                return items
+            page_token = str(data["page_token"])
+
 
 class DiscordTesterFeedbackLedger:
     def __init__(self, *, base_token: str = "KINabIENjak8fRsB6AHcIDALntc",
@@ -262,7 +286,12 @@ def build_form_writes(kind: str, form: dict[str, str], claims: dict) -> tuple[di
     app: dict = {"最近更新时间": now_ms}
     feedback: dict = {}
     if kind == "verification":
-        app.update({"核验邮箱": form.get("email", "")[:300], "核验状态": "待核验", "报名状态": "待核验"})
+        app.update({
+            "核验邮箱": form.get("email", "")[:300],
+            "核验状态": "待核验",
+            "报名状态": "待核验",
+            "资料计划删除日": now_ms + 30 * 24 * 60 * 60 * 1000,
+        })
     elif kind == "shipping":
         address = "\n".join(part for part in [
             form.get("address_line_1", ""), form.get("address_line_2", ""),
@@ -297,7 +326,16 @@ def build_form_writes(kind: str, form: dict[str, str], claims: dict) -> tuple[di
         if platforms:
             feedback["测试平台"] = platforms
         if kind == "receipt":
-            app.update({"签收确认": True, "配送状态": "已签收", "测试进度": "已签收"})
+            condition = (form.get("condition", "") + " " + form.get("notes", "")).casefold()
+            blocked = any(term in condition for term in (
+                "damage", "damaged", "crush", "cracked", "broken", "missing", "wrong",
+                "unsafe", "leak", "swollen", "smoke", "破损", "损坏", "缺少", "错货", "不安全",
+            ))
+            if blocked:
+                app.update({"签收确认": False, "配送状态": "破损或异常", "测试进度": "暂停"})
+                feedback["严重度"] = "P1-阻断测试"
+            else:
+                app.update({"签收确认": True, "配送状态": "已签收", "测试进度": "已签收"})
         elif kind == "checkpoint1":
             app["测试进度"] = "第一阶段完成"
             feedback["严重度"] = "P2-重要问题"
@@ -314,6 +352,31 @@ def build_form_writes(kind: str, form: dict[str, str], claims: dict) -> tuple[di
             app.update({"配送状态": "破损或丢件", "问题与异常": form.get("notes", "")[:5000]})
             feedback["严重度"] = "P1-阻断测试"
     return app, feedback
+
+
+def status_allows_form(kind: str, status: str) -> bool:
+    normalized = status.strip().casefold()
+    verification = {"shortlisted", "need verification", "已入围", "待核验"}
+    selected = {
+        "selected", "verified", "已入选", "已核验", "待发货", "已发货", "已签收", "测试中",
+    }
+    if kind == "verification":
+        return normalized in verification
+    return normalized in selected
+
+
+def retention_clear_fields(scope: str) -> dict:
+    if scope == "verification":
+        return {"购买凭证": [], "核验状态": "凭证已删除", "资料计划删除日": None}
+    common = {
+        "Discord用户ID": "", "Discord用户名": "", "核验邮箱": "", "购买凭证": [],
+        "收件姓名": "", "收件地址": "", "联系电话": "", "资料计划删除日": None,
+    }
+    if scope == "unselected":
+        return {**common, "报名状态": "未入选资料已去标识"}
+    if scope == "selected":
+        return {**common, "报名状态": "活动资料已去标识"}
+    raise ValueError("scope must be verification, unselected, or selected")
 
 
 def _step1_state(values: dict[str, str]) -> tuple[str, str]:
@@ -498,6 +561,14 @@ def _application_fields(payload: dict, draft: dict, values: dict[str, str]) -> t
     country, devices = _step1_fields(draft.get("step1", ""))
     if not country or not devices:
         return {}, "The application draft is invalid. Please start again."
+    route_requirements = {
+        "Switch 2": "Switch 2",
+        "Switch + Steam Deck": "Steam Deck",
+        "Switch + PC Steam": "PC / Steam",
+    }
+    required_device = route_requirements.get(route)
+    if required_device and required_device not in devices:
+        return {}, "The selected test route does not match the devices declared in Step 1."
     step2 = draft["step2"]
     user = ((payload.get("member") or {}).get("user") or payload.get("user") or {})
     discord_id = str(user.get("id") or "")
@@ -534,7 +605,7 @@ def _application_fields(payload: dict, draft: dict, values: dict[str, str]) -> t
         "最近更新时间": now_ms,
         "筛选分数": score,
         "客群类型": "品牌老客户" if step2["funlab"] else "新品类用户",
-        "筛选结论": f"客观预评分{score}/70；FUNLAB/Prime待核验；两道反馈题和Discord历史待人工评分。",
+        "筛选结论": f"客观预评分{score}/47；其余53分由FUNLAB/Prime核验、两道反馈题和Discord历史人工评分。",
         "核验状态": "未开始",
         "配送状态": "未收集",
         "测试进度": "未开始",

@@ -26,6 +26,7 @@
 - 限时表单：`GET|POST /discord/tester/forms/{kind}`
 - 生成专属链接：`POST /discord/tester/admin/invitations`
 - 隐藏区预览/创建：`POST /discord/tester/admin/setup?commit=false|true`
+- 到期资料清理预览/执行：`POST /discord/tester/admin/retention?scope=verification|unselected|selected&commit=false|true`
 
 ## 环境变量
 
@@ -33,6 +34,8 @@
 
 - `DISCORD_BOT_TOKEN`：现有 FUN Bot Token
 - `DISCORD_FUNLAB_GUILD_ID`
+- `DISCORD_FUN_BOT_USER_ID`
+- `DISCORD_TESTER_PUBLIC_ANNOUNCEMENT_CHANNEL_ID`
 - `DISCORD_APPLICATION_PUBLIC_KEY`
 - `DISCORD_TESTER_SIGNING_SECRET`：至少 32 位随机值
 - `DISCORD_TESTER_APPLICATION_BASE_TOKEN`
@@ -48,6 +51,7 @@
 5. 飞书报名台账出现测试记录，敏感地址/电话字段为空。
 6. 用专属测试链接分别验证核验、配送和安全表单进入正确字段/表。
 7. 公告发布前确认 `public_announcement_sent=false`。
+8. 用 `admin/retention` 分别预演核验原件、未入选资料和活动结束资料的到期清理；默认 `commit=false` 只列受影响记录。
 
 ## 回退
 

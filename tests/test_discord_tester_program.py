@@ -127,6 +127,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("收件地址", ledger.saved)
         self.assertNotIn("联系电话", ledger.saved)
         self.assertGreaterEqual(ledger.saved["筛选分数"], 30)
+        self.assertIn("/47", ledger.saved["筛选结论"])
 
     async def test_final_submission_reports_background_save_failure(self):
         notices = []
@@ -149,6 +150,22 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
 
         await outcome.work()
         self.assertIn("could not save", notices[0])
+
+    async def test_final_route_must_match_declared_devices(self):
+        outcome = await program.build_interaction_outcome(
+            _modal_submit(await _open_final_custom_id(), {
+                "games": "Mario Kart World",
+                "controllers": "Nintendo Pro Controller",
+                "disconnect": "Record platform, game, steps, expected and actual result.",
+                "feature_test": "Compare five matched runs.",
+                "route_agree": "ROUTE=SWITCH + PC STEAM; RULES=YES; ALUMNI=NO",
+            }),
+            signing_secret="test-secret",
+        )
+
+        # The helper applicant declares Switch 2 + Steam Deck, but no PC Steam.
+        self.assertEqual(4, outcome.response["type"])
+        self.assertIn("does not match", outcome.response["data"]["content"])
 
     def test_discord_signature_verification_rejects_tampering(self):
         private_key = Ed25519PrivateKey.generate()
@@ -178,6 +195,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         verification = routes.form_html("verification", "signed-token")
         shipping = routes.form_html("shipping", "signed-token")
         emergency = routes.form_html("emergency", "signed-token")
+        day7 = routes.form_html("checkpoint2", "signed-token")
 
         self.assertIn("Redact", verification)
         self.assertIn('type="file"', verification)
@@ -185,6 +203,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('name="address_line_1"', shipping)
         self.assertNotIn('type="file"', shipping)
         self.assertIn("Stop using", emergency)
+        self.assertIn("Day 7 Stability Test", day7)
 
     def test_form_writes_keep_shipping_and_feedback_in_their_own_fields(self):
         claims = {"record_id": "rec123", "discord_user_id": "discord123"}
@@ -205,10 +224,34 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("P0-立即停用", feedback["严重度"])
         self.assertEqual("紧急安全上报", feedback["反馈类型"])
 
+        app_fields, feedback = program.build_form_writes("receipt", {
+            "condition": "Outer box crushed and controller damaged",
+            "notes": "Button shell is cracked",
+        }, claims)
+        self.assertEqual("暂停", app_fields["测试进度"])
+        self.assertFalse(app_fields["签收确认"])
+        self.assertEqual("P1-阻断测试", feedback["严重度"])
+
+    def test_form_status_gates_and_retention_scopes(self):
+        self.assertTrue(program.status_allows_form("verification", "Shortlisted"))
+        self.assertFalse(program.status_allows_form("verification", "Selected"))
+        self.assertTrue(program.status_allows_form("shipping", "Selected"))
+        self.assertFalse(program.status_allows_form("shipping", "已提交"))
+
+        proof_clear = program.retention_clear_fields("verification")
+        self.assertEqual([], proof_clear["购买凭证"])
+        self.assertNotIn("收件地址", proof_clear)
+        selected_clear = program.retention_clear_fields("selected")
+        self.assertEqual("", selected_clear["收件地址"])
+        self.assertEqual("", selected_clear["Discord用户ID"])
+
     def test_prelaunch_setup_is_private_and_rehearsal_message_has_apply_button(self):
         plan = routes.discord_setup_plan()
         self.assertTrue(plan["prelaunch_private"])
         self.assertIn("tester-feedback", plan["channels"])
+        self.assertIn("tester-office-hours", plan["channels"])
+        self.assertIn("tester-staff-rehearsal", plan["channels"])
+        self.assertNotIn("tester-announcements", plan["channels"])
         self.assertNotIn("public_announcement", plan["actions"])
 
         message = routes.rehearsal_message_payload()

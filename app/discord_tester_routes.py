@@ -46,9 +46,9 @@ def form_html(kind: str, token: str) -> str:
         "verification": "Shortlisted Applicant Verification",
         "shipping": "Selected Tester Shipping Details",
         "receipt": "Sample Receipt Confirmation",
-        "checkpoint1": "Testing Checkpoint 1",
-        "checkpoint2": "Testing Checkpoint 2",
-        "final": "Final Product Test Feedback",
+        "checkpoint1": "Days 2–3 Core Test",
+        "checkpoint2": "Day 7 Stability Test",
+        "final": "Days 10–14 Final Product Test",
         "emergency": "Urgent Safety Report",
         "logistics": "Shipment Problem Report",
     }[kind]
@@ -103,8 +103,8 @@ def discord_setup_plan() -> dict:
     return {
         "prelaunch_private": True,
         "roles": ["Tester Interest", "Tester Selected", "Tester Active", "Official Product Tester", "Tester Alumni"],
-        "channels": ["tester-announcements", "tester-faq", "tester-questions", "start-here", "tester-lounge",
-                     "tester-feedback", "known-issues", "weekly-check-in"],
+        "channels": ["tester-staff-rehearsal", "start-here", "tester-lounge", "tester-feedback",
+                     "known-issues", "weekly-check-in", "tester-office-hours"],
         "actions": ["create_missing_roles", "create_hidden_prelaunch_category", "create_missing_channels",
                     "configure_interactions_endpoint", "send_staff_rehearsal"],
     }
@@ -158,29 +158,49 @@ async def setup_discord_prelaunch(request: Request, authorization: str = Header(
 
     channels = await _discord_request("GET", f"/guilds/{guild_id}/channels")
     category_name = "🧪 PRODUCT TEST (PRELAUNCH)"
+    bot_user_id = os.environ.get("DISCORD_FUN_BOT_USER_ID", "1485906070248493116")
     category = next((item for item in channels if item.get("type") == 4 and item.get("name") == category_name), None)
     if not category:
         category = await _discord_request("POST", f"/guilds/{guild_id}/channels", body={
             "name": category_name,
             "type": 4,
-            "permission_overwrites": [{"id": guild_id, "type": 0, "deny": "1024", "allow": "0"}],
+            "permission_overwrites": [
+                {"id": guild_id, "type": 0, "deny": "1024", "allow": "0"},
+                {"id": bot_user_id, "type": 1, "deny": "0", "allow": "117760"},
+            ],
         })
         channels.append(category)
 
     existing = {item.get("name"): item for item in channels if item.get("parent_id") == category.get("id")}
     created_channels = []
+    active_role_id = role_by_name["Tester Active"]["id"]
+    hidden_base = [
+        {"id": guild_id, "type": 0, "deny": "1024", "allow": "0"},
+        {"id": bot_user_id, "type": 1, "deny": "0", "allow": "117760"},
+    ]
+    read_only = hidden_base + [{"id": active_role_id, "type": 0, "deny": "2048", "allow": "66560"}]
+    text_access = hidden_base + [{"id": active_role_id, "type": 0, "deny": "0", "allow": "101376"}]
+    forum_access = hidden_base + [{"id": active_role_id, "type": 0, "deny": "0", "allow": "274878008320"}]
+    voice_access = hidden_base + [{"id": active_role_id, "type": 0, "deny": "0", "allow": "3146752"}]
     channel_specs = {
-        "tester-announcements": {"type": 0, "topic": "Prelaunch staff rehearsal; public recruitment has not been published."},
-        "tester-faq": {"type": 0, "topic": "Tester FAQ and policy links."},
-        "tester-questions": {"type": 0, "topic": "Public questions after launch. Never upload order or address information."},
-        "start-here": {"type": 0, "topic": "Private tester rules, schedule, and safety instructions."},
-        "tester-lounge": {"type": 0, "topic": "Private tester discussion; formal issues go to the Forum."},
+        "tester-staff-rehearsal": {"type": 0, "topic": "Hidden staff rehearsal. Never publish recruitment from this channel."},
+        "start-here": {"type": 0, "topic": "Private tester rules, schedule, and safety instructions.",
+                       "permission_overwrites": read_only},
+        "tester-lounge": {"type": 0, "topic": "Private tester discussion; formal issues go to the Forum.",
+                          "permission_overwrites": text_access},
         "tester-feedback": {"type": 15, "topic": "One issue per post; P0 safety reports use the urgent form.",
+                            "permission_overwrites": forum_access,
                             "available_tags": [{"name": name, "moderated": False} for name in
                                                ["Switch", "Switch 2", "Steam Deck", "PC Steam", "Connection", "Controls", "Compatibility", "Stability", "Instructions", "Suggestion", "Need Info", "Confirmed", "Planned", "Resolved"]]},
-        "known-issues": {"type": 0, "topic": "Team-published known issues and status."},
-        "weekly-check-in": {"type": 0, "topic": "Testing checkpoint reminders and secure form links."},
+        "known-issues": {"type": 0, "topic": "Team-published known issues and status.",
+                         "permission_overwrites": read_only},
+        "weekly-check-in": {"type": 0, "topic": "Four testing checkpoint reminders and secure form links.",
+                            "permission_overwrites": read_only},
+        "tester-office-hours": {"type": 2, "permission_overwrites": voice_access},
     }
+    channel_specs["tester-feedback"]["available_tags"].extend(
+        {"name": name, "moderated": False} for name in ["Not Planned", "P1", "P2", "P3"]
+    )
     for name, spec in channel_specs.items():
         if name in existing:
             continue
@@ -199,7 +219,7 @@ async def setup_discord_prelaunch(request: Request, authorization: str = Header(
     except HTTPException as exc:
         endpoint_status = f"failed:{exc.status_code}"
 
-    rehearsal = await _discord_request("POST", f"/channels/{existing['tester-announcements']['id']}/messages",
+    rehearsal = await _discord_request("POST", f"/channels/{existing['tester-staff-rehearsal']['id']}/messages",
                                        body=rehearsal_message_payload())
     return {"ok": True, "mode": "commit", "prelaunch_private": True,
             "created_role_ids": created_roles, "created_channel_ids": created_channels,
@@ -255,6 +275,14 @@ async def create_secure_invitation(request: Request, authorization: str = Header
     ttl_hours = min(24 * 30, max(1, int(body.get("ttl_hours") or 48)))
     if kind not in FORM_KINDS or not record_id or not discord_user_id:
         raise HTTPException(400, "kind, record_id, and discord_user_id are required")
+    ledger = discord_tester_program.DiscordTesterLedger()
+    fields = await ledger.get_application(record_id)
+    stored_user_id = str(fields.get("Discord用户ID") or "")
+    status = str(fields.get("报名状态") or "")
+    if stored_user_id != discord_user_id:
+        raise HTTPException(409, "Discord user does not match the application record")
+    if not discord_tester_program.status_allows_form(kind, status):
+        raise HTTPException(409, f"Application status does not allow a {kind} form")
     secret = os.environ.get("DISCORD_TESTER_SIGNING_SECRET", "")
     if not secret:
         raise HTTPException(503, "Secure form signing is not configured")
@@ -262,6 +290,42 @@ async def create_secure_invitation(request: Request, authorization: str = Header
     base = str(request.base_url).rstrip("/")
     return {"ok": True, "kind": kind, "expires_in_hours": ttl_hours,
             "url": f"{base}/discord/tester/forms/{kind}?{urlencode({'token': token})}"}
+
+
+@router.post("/admin/retention")
+async def apply_retention_cleanup(authorization: str = Header(default=""), scope: str = "verification",
+                                  commit: bool = False):
+    _check_internal_auth(authorization)
+    try:
+        clear_fields = discord_tester_program.retention_clear_fields(scope)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    ledger = discord_tester_program.DiscordTesterLedger()
+    now_ms = int(__import__("time").time() * 1000)
+    status_allow = {
+        "verification": None,
+        "unselected": {"not selected", "ineligible", "未入选", "不合格"},
+        "selected": {"completed", "official product tester", "已完成", "测试完成"},
+    }[scope]
+    planned = []
+    for record in await ledger.list_applications():
+        fields = record.get("fields") or {}
+        due = fields.get("资料计划删除日")
+        try:
+            is_due = int(due or 0) <= now_ms and int(due or 0) > 0
+        except (TypeError, ValueError):
+            is_due = False
+        status = str(fields.get("报名状态") or "").strip().casefold()
+        if not is_due or (status_allow is not None and status not in status_allow):
+            continue
+        if scope == "verification" and not fields.get("购买凭证"):
+            continue
+        planned.append(record.get("record_id"))
+    if commit:
+        for record_id in planned:
+            await ledger.update_application(record_id, clear_fields)
+    return {"ok": True, "scope": scope, "mode": "commit" if commit else "preview",
+            "affected_count": len(planned), "record_ids": planned}
 
 
 async def _upload_bitable_file(upload, *, parent_node: str) -> dict:
@@ -287,8 +351,29 @@ async def _upload_bitable_file(upload, *, parent_node: str) -> dict:
     return {"file_token": file_token}
 
 
+async def _notify_emergency(record_id: str, discord_user_id: str, summary: str) -> None:
+    from . import config, feishu
+
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "red", "title": {"tag": "plain_text", "content": "新品体验官安全事件"}},
+        "elements": [{
+            "tag": "markdown",
+            "content": (f"**申请记录：** `{record_id}`\n**Discord ID：** `{discord_user_id}`\n"
+                        f"**用户报告：** {summary[:1500]}\n\n用户已收到立即停用且不要复现的指令。请马上联系并判断后续处理。"),
+        }],
+    }
+    targets = [("chat_id", config.NOTIFY_CHAT_ID)]
+    targets.extend(("open_id", oid) for name, oid in config.NOTIFY_USERS if name.startswith("潘"))
+    for receive_type, receive_id in targets:
+        try:
+            await feishu.send_card_message(receive_type, receive_id, card.copy(), biz="KOL", level="P0")
+        except Exception as exc:
+            print(f"[discord_tester] P0 notification failed for {receive_type}: {exc}")
+
+
 @router.post("/forms/{kind}", response_class=HTMLResponse)
-async def submit_secure_form(kind: str, request: Request):
+async def submit_secure_form(kind: str, request: Request, background_tasks: BackgroundTasks):
     if kind not in FORM_KINDS:
         raise HTTPException(404, "Unknown form")
     form_data = await request.form()
@@ -323,6 +408,13 @@ async def submit_secure_form(kind: str, request: Request):
         feedback_id = await feedback_ledger.create_feedback(feedback_fields)
         if attachment_values and kind == "emergency":
             await feedback_ledger.update_feedback(feedback_id, {"附件": attachment_values})
+    if kind == "emergency":
+        background_tasks.add_task(
+            _notify_emergency,
+            claims["record_id"],
+            claims["discord_user_id"],
+            text_fields.get("summary", "Urgent safety report submitted"),
+        )
     special = ("<div class='warn'><strong>Stop using the product.</strong> FUNLAB has received your urgent report. Do not reproduce the issue.</div>"
                if kind == "emergency" else "")
     return HTMLResponse(f"<!doctype html><html><head><meta charset='utf-8'><style>{_STYLE}</style></head><body><main>"
