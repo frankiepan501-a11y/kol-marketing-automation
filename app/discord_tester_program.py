@@ -13,6 +13,7 @@ import json
 import os
 import secrets
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
@@ -161,14 +162,14 @@ def _step1_modal() -> dict:
     return {
         "type": 9,
         "data": {
-            "custom_id": "tester_apply_step1",
-            "title": "Step 1 Of 3 — Eligibility",
+            "custom_id": "tester_apply_v2_step1",
+            "title": "Step 1 Of 2 — Eligibility",
             "components": [
                 _text_input("country", "Country Or Region", placeholder="United States, Canada, Mexico, UK, DE, FR, IT, ES"),
                 _text_input("age", "Are You 18 Or Older?", placeholder="Type YES"),
                 _text_input("devices", "Devices You Actively Use", placeholder="Switch / Switch 2 / Steam Deck / PC Steam"),
                 _text_input("amazon_24m", "Amazon Video Games Purchase In 24 Months?", placeholder="Type YES or NO"),
-                _text_input("commit", "Can You Test For 14 Days And Keep It Private?", placeholder="Type YES"),
+                _text_input("commit", "14-Day Test, Privacy And Rules?", placeholder="Type YES"),
             ],
         },
     }
@@ -220,7 +221,8 @@ def _device_mask(value: str) -> int:
         mask |= 1
     if "steam deck" in text or "steamdeck" in text:
         mask |= 4
-    if "pc" in text or "steam" in text and "deck" not in text:
+    non_deck_text = text.replace("steam deck", "").replace("steamdeck", "")
+    if "pc" in non_deck_text or "steam" in non_deck_text:
         mask |= 8
     return mask
 
@@ -420,7 +422,7 @@ def _step1_state(values: dict[str, str]) -> tuple[str, str]:
         return "", "Recent Amazon Video Games purchase experience is required."
     if not _yes(values.get("commit", "")):
         return "", "The 14-day test and confidentiality commitment are required."
-    return f"1-{country}-{devices:x}", ""
+    return f"2-{country}-{devices:x}", ""
 
 
 def _continue_button(custom_id: str, label: str) -> dict:
@@ -441,22 +443,36 @@ def _step2_modal(token: str) -> dict:
     return {
         "type": 9,
         "data": {
-            "custom_id": f"tester_apply_step2.{token}",
-            "title": "Step 2 Of 3 — Experience",
+            "custom_id": f"tester_apply_v2_step2.{token}",
+            "title": "Step 2 Of 2 — Match And Preferences",
             "components": [
-                _text_input("purchase_count", "Amazon Video Games Purchases", placeholder="1 / 2-3 / 4-6 / 7+"),
-                _text_input("product_types", "Types Purchased", placeholder="Controllers, games, cases, consoles..."),
-                _text_input("funlab_prime", "FUNLAB Purchase And Prime", placeholder="FUNLAB=YES/NO; PRIME=YES/NO/PREFER NOT"),
-                _text_input("play_hours", "Weekly Play Time", placeholder="SWITCH=6-10; PC=2-5; CROSS=YES"),
-                _text_input("cross_platform", "Cross-Platform Controller Experience", placeholder="Brief example, or NONE", max_length=500),
+                _text_input("purchase_profile", "Amazon, FUNLAB And Prime Profile", placeholder="COUNT=4-6; FUNLAB=YES; PRIME=YES", max_length=200),
+                _text_input("play_profile", "Weekly Play Profile", placeholder="SWITCH=6-10; PC=2-5; CROSS=YES", max_length=200),
+                _text_input("favorite_ips", "Favorite Game IPs Or Franchises", placeholder="Pokémon; Zelda; Mario (max 3)", max_length=240),
+                _text_input("usage", "Games, Platforms And Controllers", placeholder="Games + platform + controller examples", max_length=1500),
+                _text_input("priorities", "What Matters Most In Gaming Accessories?", placeholder="Comfort; low latency; durability (max 3)", max_length=180),
             ],
         },
     }
 
 
+def _error_response(content: str, *, restart: bool = True) -> InteractionOutcome:
+    data: dict = {"content": content, "flags": 64}
+    if restart:
+        data["components"] = [{
+            "type": 1,
+            "components": [{
+                "type": 2, "style": 1, "label": "Restart Application",
+                "custom_id": "tester_apply_start",
+            }],
+        }]
+    return InteractionOutcome({"type": 4, "data": data})
+
+
 def _parse_pair_text(value: str) -> dict[str, str]:
     out: dict[str, str] = {}
-    for part in value.replace(",", ";").split(";"):
+    normalized = unicodedata.normalize("NFKC", value).translate(str.maketrans({"，": ";", "；": ";", ",": ";"}))
+    for part in normalized.split(";"):
         if "=" not in part:
             continue
         key, item = part.split("=", 1)
@@ -464,33 +480,76 @@ def _parse_pair_text(value: str) -> dict[str, str]:
     return out
 
 
+def _limited_list(value: str, label: str, *, item_max: int, total_max: int) -> tuple[str, str]:
+    normalized = unicodedata.normalize("NFKC", value).translate(str.maketrans({"，": ";", "；": ";", ",": ";"}))
+    items: list[str] = []
+    seen: set[str] = set()
+    for raw in normalized.split(";"):
+        item = raw.strip()
+        if not item:
+            continue
+        if len(item) > item_max:
+            return "", f"Each {label} entry must be {item_max} characters or fewer."
+        key = item.casefold()
+        if key not in seen:
+            seen.add(key)
+            items.append(item)
+    if not items:
+        return "", f"Enter at least one {label} entry."
+    if len(items) > 3:
+        return "", f"Enter up to 3 {label} entries."
+    result = "; ".join(items)
+    if len(result) > total_max:
+        return "", f"The {label} answer is too long."
+    return result, ""
+
+
 def _step2_values(values: dict[str, str]) -> tuple[dict, str]:
-    purchase_count = values.get("purchase_count", "").replace("–", "-").replace(" ", "")
+    purchase = _parse_pair_text(values.get("purchase_profile", ""))
+    purchase_count = purchase.get("count", "").replace("–", "-").replace(" ", "")
     aliases = {"1": "1", "2-3": "2–3", "4-6": "4–6", "7+": "7+"}
     if purchase_count not in aliases:
-        return {}, "Use 1, 2-3, 4-6, or 7+ for Amazon purchases."
-    fp = _parse_pair_text(values.get("funlab_prime", ""))
-    play = _parse_pair_text(values.get("play_hours", ""))
-    if fp.get("funlab", "").casefold() not in {"yes", "no"}:
+        return {}, "Use COUNT=1, COUNT=2-3, COUNT=4-6, or COUNT=7+."
+    if purchase.get("funlab", "").casefold() not in {"yes", "no"}:
         return {}, "Use FUNLAB=YES or FUNLAB=NO."
-    prime_raw = fp.get("prime", "").casefold()
+    prime_raw = purchase.get("prime", "").casefold()
     if prime_raw not in {"yes", "no", "prefer not", "prefer not to say"}:
         return {}, "Use PRIME=YES, PRIME=NO, or PRIME=PREFER NOT."
+    play = _parse_pair_text(values.get("play_profile", ""))
     switch_hours = play.get("switch", "").upper()
     pc_hours = play.get("pc", "").upper()
     valid_switch = {"UNDER 2", "2-5", "6-10", "11-20", "20+"}
     valid_pc = {"0", "UNDER 2", "2-5", "6-10", "10+"}
     if switch_hours not in valid_switch or pc_hours not in valid_pc:
         return {}, "Use the play-time examples shown in the field."
+    cross_raw = play.get("cross", "").casefold()
+    if cross_raw not in {"yes", "no"}:
+        return {}, "Use CROSS=YES or CROSS=NO."
+    favorite_ips, error = _limited_list(
+        values.get("favorite_ips", ""), "game IP", item_max=80, total_max=240
+    )
+    if error:
+        return {}, error
+    priorities, error = _limited_list(
+        values.get("priorities", ""), "accessory priority", item_max=60, total_max=180
+    )
+    if error:
+        return {}, error
+    usage = unicodedata.normalize("NFKC", values.get("usage", "")).strip()
+    if not usage:
+        return {}, "Describe the games, platforms, and controllers you use."
+    if len(usage) > 1500:
+        return {}, "The games, platforms, and controllers answer is too long."
     return {
         "purchase_count": aliases[purchase_count],
-        "product_types": values.get("product_types", "")[:500],
-        "funlab": fp["funlab"].casefold() == "yes",
+        "funlab": purchase["funlab"].casefold() == "yes",
         "prime": "不愿透露" if prime_raw.startswith("prefer") else ("是" if prime_raw == "yes" else "否"),
         "switch_hours": "Under 2" if switch_hours == "UNDER 2" else _HOUR_CANONICAL.get(switch_hours, switch_hours),
         "pc_hours": "Under 2" if pc_hours == "UNDER 2" else _HOUR_CANONICAL.get(pc_hours, pc_hours),
-        "cross": _yes(play.get("cross", "")),
-        "cross_experience": values.get("cross_platform", "")[:1000],
+        "cross": cross_raw == "yes",
+        "favorite_ips": favorite_ips,
+        "usage": usage,
+        "priorities": priorities,
     }, ""
 
 
@@ -512,27 +571,10 @@ def _load_draft(draft_id: str) -> dict | None:
     return item[1]
 
 
-def _step3_modal(token: str) -> dict:
-    return {
-        "type": 9,
-        "data": {
-            "custom_id": f"tester_apply_step3.{token}",
-            "title": "Step 3 Of 3 — Feedback",
-            "components": [
-                _text_input("games", "Games And Platforms You Would Test", placeholder="List 3-5 games and their platforms", max_length=1000),
-                _text_input("controllers", "Controllers Used In The Past 24 Months", placeholder="Brands/models and platforms", max_length=1000),
-                _text_input("disconnect", "What Would You Record After A Disconnect?", max_length=1000),
-                _text_input("feature_test", "One Feature And How You Would Test It", max_length=1000),
-                _text_input("route_agree", "Route And Agreements", placeholder="ROUTE=SWITCH 2; RULES=YES; ALUMNI=NO", max_length=200),
-            ],
-        },
-    }
-
-
 def _step1_fields(state: str) -> tuple[str, list[str]]:
     try:
         version, country, mask_hex = state.split("-", 2)
-        if version != "1":
+        if version != "2":
             raise ValueError
         mask = int(mask_hex, 16)
     except (TypeError, ValueError):
@@ -547,21 +589,6 @@ def _step1_fields(state: str) -> tuple[str, list[str]]:
     if mask & 8:
         devices.append("PC / Steam")
     return country, devices
-
-
-def _normal_route(value: str) -> str:
-    text = value.strip().casefold().replace("_", " ")
-    aliases = {
-        "switch": "Switch",
-        "switch 1": "Switch",
-        "switch 2": "Switch 2",
-        "switch + steam deck": "Switch + Steam Deck",
-        "switch+steam deck": "Switch + Steam Deck",
-        "switch + pc steam": "Switch + PC Steam",
-        "switch+pc steam": "Switch + PC Steam",
-        "switch + pc": "Switch + PC Steam",
-    }
-    return aliases.get(text, "")
 
 
 def _provisional_score(devices: list[str], step2: dict) -> int:
@@ -579,25 +606,21 @@ def _provisional_score(devices: list[str], step2: dict) -> int:
     return purchase_points + min(25, device_points) + 7
 
 
-def _application_fields(payload: dict, draft: dict, values: dict[str, str]) -> tuple[dict, str]:
-    route_info = _parse_pair_text(values.get("route_agree", ""))
-    route = _normal_route(route_info.get("route", ""))
-    if not route:
-        return {}, "Choose SWITCH, SWITCH 2, SWITCH + STEAM DECK, or SWITCH + PC STEAM."
-    if not _yes(route_info.get("rules", "")):
-        return {}, "You must accept the privacy notice, tester rules, and no-review requirement."
-    country, devices = _step1_fields(draft.get("step1", ""))
+def _infer_route(devices: list[str], pc_hours: str) -> str:
+    if "Steam Deck" in devices:
+        return "Switch + Steam Deck"
+    if "PC / Steam" in devices and pc_hours in _PC_SCORING_HOURS:
+        return "Switch + PC Steam"
+    if "Switch 2" in devices:
+        return "Switch 2"
+    return "Switch"
+
+
+def _application_fields(payload: dict, step1_state: str, step2: dict) -> tuple[dict, str]:
+    country, devices = _step1_fields(step1_state)
     if not country or not devices:
         return {}, "The application draft is invalid. Please start again."
-    route_requirements = {
-        "Switch 2": "Switch 2",
-        "Switch + Steam Deck": "Steam Deck",
-        "Switch + PC Steam": "PC / Steam",
-    }
-    required_device = route_requirements.get(route)
-    if required_device and required_device not in devices:
-        return {}, "The selected test route does not match the devices declared in Step 1."
-    step2 = draft["step2"]
+    route = _infer_route(devices, step2["pc_hours"])
     user = ((payload.get("member") or {}).get("user") or payload.get("user") or {})
     discord_id = str(user.get("id") or "")
     if not discord_id:
@@ -616,24 +639,26 @@ def _application_fields(payload: dict, draft: dict, values: dict[str, str]) -> t
         "购买过FUNLAB": "是" if step2["funlab"] else "否",
         "Amazon Prime": step2["prime"],
         "Amazon购买次数": step2["purchase_count"],
-        "Amazon购买品类": step2["product_types"],
+        "Amazon购买品类": "",
         "每周Switch游戏时长": step2["switch_hours"],
         "每周PC手柄时长": step2["pc_hours"],
-        "游戏与手柄使用经验": (values.get("controllers", "") + "\n" + step2["cross_experience"]).strip()[:5000],
-        "拟测试场景": values.get("games", "")[:5000],
-        "断连问题回答": values.get("disconnect", "")[:5000],
-        "功能测试回答": values.get("feature_test", "")[:5000],
-        "申请理由": values.get("feature_test", "")[:5000],
+        "游戏与手柄使用经验": step2["usage"],
+        "拟测试场景": step2["usage"],
+        "喜爱游戏IP": step2["favorite_ips"],
+        "配件关注点": step2["priorities"],
+        "断连问题回答": "",
+        "功能测试回答": "",
+        "申请理由": "",
         "主测试路线": route,
         "承诺完成测试": True,
         "同意保密": True,
         "理解非抽奖且不要求评价": True,
-        "可选加入Tester Alumni": _yes(route_info.get("alumni", "")),
+        "可选加入Tester Alumni": False,
         "报名时间": now_ms,
         "最近更新时间": now_ms,
         "筛选分数": score,
         "客群类型": "品牌老客户" if step2["funlab"] else "新品类用户",
-        "筛选结论": f"客观预评分{score}/47；其余53分由FUNLAB/Prime核验、两道反馈题和Discord历史人工评分。",
+        "筛选结论": f"客观预评分{score}/47；其余53分由FUNLAB与Prime核验、IP匹配、配件关注点匹配及Discord历史人工评分。",
         "核验状态": "未开始",
         "配送状态": "未收集",
         "测试进度": "未开始",
@@ -654,63 +679,54 @@ async def build_interaction_outcome(payload: dict, *, signing_secret: str = "",
     if interaction_type == 3 and custom_id == "tester_apply_start":
         return InteractionOutcome(_step1_modal())
 
-    if interaction_type == 5 and custom_id == "tester_apply_step1":
+    legacy_ids = (
+        "tester_apply_step1", "tester_apply_step2.", "tester_apply_step3.",
+        "tester_apply_continue2.", "tester_apply_continue3.",
+    )
+    if custom_id == legacy_ids[0] or custom_id.startswith(legacy_ids[1:]):
+        return _error_response(
+            "The application form has been updated. Please return to the recruitment message and start again."
+        )
+
+    if interaction_type == 5 and custom_id == "tester_apply_v2_step1":
         state, error = _step1_state(_values(data))
         if error:
-            return InteractionOutcome({
-                "type": 4,
-                "data": {"content": f"This application is not eligible: {error}", "flags": 64},
-            })
-        token = _sign_state(state, signing_secret or "development-only")
-        return InteractionOutcome(_continue_button(f"tester_apply_continue2.{token}", "Continue To Step 2"))
+            return _error_response(f"This application is not eligible: {error}")
+        draft_id = _store_draft({"step1": state})
+        token = _sign_state(f"d-{draft_id}", signing_secret or "development-only")
+        return InteractionOutcome(_continue_button(
+            f"tester_apply_v2_continue2.{token}", "Continue To Final Step"
+        ))
 
-    if interaction_type == 3 and custom_id.startswith("tester_apply_continue2."):
-        token = custom_id.removeprefix("tester_apply_continue2.")
-        state = _verify_state(token, signing_secret or "development-only")
-        if not state:
-            return InteractionOutcome({
-                "type": 4,
-                "data": {"content": "This application step is expired or invalid. Please start again.", "flags": 64},
-            })
-        return InteractionOutcome(_step2_modal(token))
-
-    if interaction_type == 5 and custom_id.startswith("tester_apply_step2."):
-        token = custom_id.removeprefix("tester_apply_step2.")
-        state = _verify_state(token, signing_secret or "development-only")
-        if not state:
-            return InteractionOutcome({"type": 4, "data": {"content": "This application step is expired or invalid. Please start again.", "flags": 64}})
-        step2, error = _step2_values(_values(data))
-        if error:
-            return InteractionOutcome({"type": 4, "data": {"content": error, "flags": 64}})
-        draft_id = _store_draft({"step1": state, "step2": step2})
-        draft_token = _sign_state(f"d-{draft_id}", signing_secret or "development-only")
-        return InteractionOutcome(_continue_button(f"tester_apply_continue3.{draft_token}", "Continue To Final Step"))
-
-    if interaction_type == 3 and custom_id.startswith("tester_apply_continue3."):
-        token = custom_id.removeprefix("tester_apply_continue3.")
-        state = _verify_state(token, signing_secret or "development-only")
-        draft = _load_draft(state.removeprefix("d-")) if state.startswith("d-") else None
-        if not draft:
-            return InteractionOutcome({"type": 4, "data": {"content": "This application step is expired or invalid. Please start again.", "flags": 64}})
-        return InteractionOutcome(_step3_modal(token))
-
-    if interaction_type == 5 and custom_id.startswith("tester_apply_step3."):
-        token = custom_id.removeprefix("tester_apply_step3.")
+    if interaction_type == 3 and custom_id.startswith("tester_apply_v2_continue2."):
+        token = custom_id.removeprefix("tester_apply_v2_continue2.")
         state = _verify_state(token, signing_secret or "development-only")
         draft_id = state.removeprefix("d-") if state.startswith("d-") else ""
-        draft = _load_draft(draft_id)
+        if not draft_id or not _load_draft(draft_id):
+            return _error_response("Form expired or invalid. Please start again.")
+        return InteractionOutcome(_step2_modal(token))
+
+    if interaction_type == 5 and custom_id.startswith("tester_apply_v2_step2."):
+        token = custom_id.removeprefix("tester_apply_v2_step2.")
+        state = _verify_state(token, signing_secret or "development-only")
+        draft_id = state.removeprefix("d-") if state.startswith("d-") else ""
+        draft = _load_draft(draft_id) if draft_id else None
         if not draft:
-            return InteractionOutcome({"type": 4, "data": {"content": "This application step is expired or invalid. Please start again.", "flags": 64}})
-        fields, error = _application_fields(payload, draft, _values(data))
+            return _error_response("Form expired or invalid. Please start again.")
+        step2, error = _step2_values(_values(data))
         if error:
-            return InteractionOutcome({"type": 4, "data": {"content": error, "flags": 64}})
+            return _error_response(error)
+        fields, error = _application_fields(payload, draft.get("step1", ""), step2)
+        if error:
+            return _error_response(error)
         active_ledger = ledger or DiscordTesterLedger()
 
         async def save_and_notify() -> None:
             try:
                 record_id = await active_ledger.save_application(fields)
             except Exception:
-                message = "We could not save your application. No application was recorded. Please try again shortly."
+                message = ("We could not save your application. No application was recorded. "
+                           "Please try again shortly or contact marketing@fireflyfunlab.com.")
             else:
                 _drafts.pop(draft_id, None)
                 message = (f"Application received. Your application ID is `{record_id}`. "

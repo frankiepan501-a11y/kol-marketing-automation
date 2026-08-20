@@ -1,7 +1,7 @@
 # FUNLAB Discord 体验官简版报名设计
 
 日期：2026-08-21  
-状态：已获 Frankie 口头确认，待规格复审与最终文件确认
+状态：已获 Frankie 确认，实施中
 
 ## 1. 目标
 
@@ -29,7 +29,7 @@
 | 游戏时长 | Weekly Play Profile | `SWITCH=6-10; PC=2-5; CROSS=YES` | 延用现有时长档位并规范为飞书标准选项 |
 | 游戏IP偏好 | Favorite Game IPs Or Franchises | `Pokémon; Zelda; Mario` | 自由文本，最多3个；分号或逗号分隔；每项去首尾空格、去重，超出3个时明确报错 |
 | 使用场景 | Games, Platforms And Controllers | `Mario Kart World—Switch 2; Hades—Steam Deck; Nintendo Pro Controller` | 合并原“拟测试游戏”和“近24个月使用手柄”两题 |
-| 配件关注点 | What Matters Most To You In Gaming Accessories? | `Comfort; low latency; durability` | 简短填写最注重的1–3个方面，用于了解产品偏好，不作为反馈能力考试 |
+| 配件关注点 | What Matters Most In Gaming Accessories? | `Comfort; low latency; durability` | 简短填写最注重的1–3个方面，用于了解产品偏好，不作为反馈能力考试；原直译超过 Discord 标签 45 字符限制，因此使用这句等义短版 |
 
 ### 输入清洗规则
 

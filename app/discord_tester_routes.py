@@ -120,7 +120,7 @@ def rehearsal_message_payload() -> dict:
     return {
         "content": ("🧪 **STAFF TEST — FUNLAB Private Product Testing Application**\n"
                     "This message is in the hidden prelaunch area. It is not the public recruitment post.\n"
-                    "Click below to test the 3-step application. Do not use real shipping details or proof files."),
+                    "Click below to test the 2-step application. Do not use real shipping details or proof files."),
         "components": [{"type": 1, "components": [{
             "type": 2, "style": 1, "label": "Test Application Flow", "custom_id": "tester_apply_start",
         }]}],
