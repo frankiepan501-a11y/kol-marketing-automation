@@ -145,7 +145,8 @@ $startConnections = @{
 $startWorkflow = Upsert-Workflow $startName $startNodes $startConnections $settings $startExisting
 
 $auditExisting = Get-ExistingWorkflow $auditName
-if (-not $auditExisting) { $auditExisting = Get-ExistingWorkflow $legacyAuditName }
+$legacyAuditExisting = Get-ExistingWorkflow $legacyAuditName
+if (-not $auditExisting) { $auditExisting = $legacyAuditExisting }
 $auditState = Get-NodeIdMap $auditExisting
 $am = $auditState.map
 $validateDave = @'
@@ -255,7 +256,13 @@ $auditConnections = @{
     'Dave Latest Status' = Main-To 'Dave Validate Fresh Success'
     'Piranha Latest Status' = Main-To 'Piranha Validate Fresh Success'
 }
-$auditWorkflow = Upsert-Workflow $auditName $auditNodes $auditConnections $settings
+$auditWorkflow = Upsert-Workflow $auditName $auditNodes $auditConnections $settings $auditExisting
+if ($legacyAuditExisting -and $legacyAuditExisting.id -ne $auditWorkflow.id) {
+    $legacyCurrent = Invoke-RestMethod -Headers $apiHeaders -Uri "$n8nBase/workflows/$($legacyAuditExisting.id)"
+    if ($legacyCurrent.active) {
+        Invoke-RestMethod -Method Post -Headers $apiHeaders -ContentType 'application/json' -Uri "$n8nBase/workflows/$($legacyAuditExisting.id)/deactivate" | Out-Null
+    }
+}
 
 @(
     [pscustomobject]@{
