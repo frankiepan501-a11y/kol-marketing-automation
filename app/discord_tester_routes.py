@@ -136,8 +136,9 @@ def _discord_headers() -> dict:
 
 
 async def _discord_request(method: str, path: str, *, body: dict | None = None):
+    kwargs = {"json": body} if body is not None else {}
     async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.request(method, f"{DISCORD_API}{path}", headers=_discord_headers(), json=body)
+        response = await client.request(method, f"{DISCORD_API}{path}", headers=_discord_headers(), **kwargs)
     if response.status_code >= 400:
         try:
             error = response.json()

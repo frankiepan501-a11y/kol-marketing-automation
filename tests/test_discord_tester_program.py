@@ -8,6 +8,20 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discord_get_request_does_not_send_a_json_body(self):
+        response = unittest.mock.Mock(status_code=200, content=b"[]")
+        response.json.return_value = []
+        client = AsyncMock()
+        client.request.return_value = response
+        context = AsyncMock()
+        context.__aenter__.return_value = client
+        with (patch("app.discord_tester_routes.httpx.AsyncClient", return_value=context),
+              patch.dict("os.environ", {"DISCORD_BOT_TOKEN": "test-token"})):
+            await routes._discord_request("GET", "/guilds/123/roles")
+
+        _, kwargs = client.request.call_args
+        self.assertNotIn("json", kwargs)
+
     async def test_emergency_notification_counts_only_confirmed_message_ids(self):
         sender = AsyncMock(side_effect=["", "om_confirmed"])
         with (patch("app.config.NOTIFY_CHAT_ID", "oc_ops"),
