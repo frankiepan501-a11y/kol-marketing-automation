@@ -38,6 +38,7 @@ VALID_ECOSYSTEMS = {
     "Switch", "Switch 2", "PlayStation", "Xbox",
     "PC-Steam", "Mobile", "跨平台", "未知",
 }
+VALID_STYLES = {"游戏", "生活娱乐", "SETUP", "科技测评", "UNBOX", "硬件改装", "测评", "教程", "综合"}
 ECOSYSTEM_ORDER = [
     "Switch", "Switch 2", "PlayStation", "Xbox",
     "PC-Steam", "Mobile", "跨平台", "未知",
@@ -235,9 +236,10 @@ Handle: @{handle or 'unknown'}
 
     try:
         data = await deepseek.chat_json(prompt, max_tokens=400, temperature=0.1)
-    except Exception as e:
-        return {"type": "不确定", "confidence": 0.0, "reason": f"deepseek_err: {str(e)[:80]}",
-                "styles": [], "ip_tags": [], "country_guess": None}
+    except Exception:
+        return deterministic_profile_classification(
+            name=name, description=description, recent_titles=recent_titles,
+        )
 
     data.setdefault("styles", [])
     data.setdefault("ip_tags", [])
@@ -249,7 +251,72 @@ Handle: @{handle or 'unknown'}
     return data
 
 
-VALID_STYLES = {"游戏", "生活娱乐", "SETUP", "科技测评", "UNBOX", "硬件改装", "测评", "教程", "综合"}
+def deterministic_profile_classification(*, name: str, description: str,
+                                         recent_titles: list[str]) -> dict:
+    """模型不可用时，用可回放的内容关键词完成保守画像。"""
+    text = " ".join([name or "", description or "", *(recent_titles or [])]).lower()
+    styles: list[str] = []
+    style_cues = (
+        ("UNBOX", ("unbox", "unboxing", "开箱")),
+        ("测评", ("review", "comparison", "tested", "测评", "评测", "对比")),
+        ("科技测评", ("controller", "gamepad", "dock", "hardware", "accessory", "手柄", "底座", "硬件", "配件")),
+        ("SETUP", ("setup", "desk tour", "桌搭")),
+        ("硬件改装", ("modding", "teardown", "repair", "改装", "拆解", "维修")),
+        ("教程", ("how to", "guide", "tutorial", "教程", "攻略")),
+        ("游戏", ("gameplay", "walkthrough", "boss", "full game", "gaming", "游戏", "通关")),
+    )
+    for style, cues in style_cues:
+        if any(cue in text for cue in cues):
+            styles.append(style)
+        if len(styles) >= 3:
+            break
+    if not styles and any(cue in text for cue in (
+        "nintendo", "switch", "mario", "zelda", "playstation", "xbox", "steam",
+    )):
+        styles.append("游戏")
+
+    tags = []
+    tag_cues = (
+        ("Switch 2", ("switch 2",)), ("Nintendo", ("nintendo", "任天堂")),
+        ("Mario", ("mario", "马里奥")), ("Zelda", ("zelda", "塞尔达")),
+        ("Yoshi", ("yoshi", "耀西")), ("Splatoon", ("splatoon", "喷射战士")),
+        ("Donkey Kong", ("donkey kong", "dk bananza")),
+        ("Steam Deck", ("steam deck",)), ("PlayStation", ("playstation", "ps5", "ps4")),
+        ("Xbox", ("xbox",)),
+    )
+    for tag, cues in tag_cues:
+        if any(cue in text for cue in cues):
+            tags.append(tag)
+        if len(tags) >= 5:
+            break
+
+    normalized_name = re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+    official_publishers = {
+        "nintendo", "nintendo of america", "playstation", "xbox",
+        "the pokemon company international", "sega", "ubisoft",
+    }
+    known_media = {"ign", "gamespot", "polygon", "the verge", "eurogamer"}
+    if normalized_name in official_publishers or (
+        "official" in normalized_name
+        and any(cue in normalized_name for cue in ("nintendo", "playstation", "xbox", "games"))
+    ):
+        object_type = "游戏厂商"
+    elif normalized_name in known_media:
+        object_type = "媒体"
+    else:
+        # 对象已存在 KOL 主表；没有强官方/媒体信号时保守沿用 KOL 身份，
+        # 但候选仍必须通过活动硬筛和本次人工审核。
+        object_type = "KOL"
+
+    ecosystems = _derive_ecosystems(text, [])
+    vertical = _derive_vertical(text, styles, "")
+    return {
+        "type": object_type, "confidence": 0.65,
+        "reason": "确定性兜底：按近期标题关键词分类；外部模型不可用",
+        "styles": styles, "ip_tags": tags, "country_guess": None,
+        "content_vertical": vertical, "ecosystems": ecosystems,
+        "classification_source": "deterministic_fallback",
+    }
 
 
 def _timestamp_ms(value) -> int:

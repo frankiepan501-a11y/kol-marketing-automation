@@ -87,6 +87,33 @@ class RelabelProfileTests(unittest.TestCase):
         self.assertEqual("人工核实有效", update["资料可用状态"])
         self.assertEqual(manual_at, update["资料核实时间"])
 
+    def test_deterministic_fallback_builds_nintendo_profile_without_model(self):
+        result = relabel.deterministic_profile_classification(
+            name="MarioBricks", description="",
+            recent_titles=[
+                "Mario Kart World - Full Game",
+                "Splatoon Raiders - Final Boss",
+                "DK Bananza DLC Event",
+            ],
+        )
+
+        self.assertEqual("KOL", result["type"])
+        self.assertEqual("deterministic_fallback", result["classification_source"])
+        self.assertEqual("主机游戏", result["content_vertical"])
+        self.assertIn("Switch", result["ecosystems"])
+        self.assertIn("Mario", result["ip_tags"])
+
+    def test_deterministic_fallback_blocks_exact_official_or_media_identity(self):
+        publisher = relabel.deterministic_profile_classification(
+            name="Nintendo", description="", recent_titles=["Nintendo Direct"],
+        )
+        media = relabel.deterministic_profile_classification(
+            name="IGN", description="", recent_titles=["Switch 2 Review"],
+        )
+
+        self.assertEqual("游戏厂商", publisher["type"])
+        self.assertEqual("媒体", media["type"])
+
     def test_touch_route_is_relationship_based_and_deterministic(self):
         self.assertEqual("可新开发", relabel.touch_route_for_status("未建联"))
         self.assertEqual("沿用原线程", relabel.touch_route_for_status("洽谈中"))
