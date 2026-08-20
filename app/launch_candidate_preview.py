@@ -22,6 +22,7 @@ POSITIVE_RELATION_STATES = {
     "已合作", "已合作-免费", "已合作-免费(多次)", "已合作-付费",
     "洽谈中", "样品评估", "未产出",
 }
+THREAD_ONLY_STATES = POSITIVE_RELATION_STATES | {"待回复", "建联中"}
 REUSABLE_DRAFT_STATES = {"已否决", "发送失败"}
 PROACTIVE_SOURCES = {"cold", "followup", "secondary_outreach"}
 RECENT_SAME_BRAND_DAYS = 7
@@ -35,7 +36,12 @@ KOL_FIELDS = [
     "内容风格", "IP喜好", "合作竞品", "竞品帖子证据", "邮箱验真状态",
     "YouTube频道ID", "主链接", "近期视频标题", "近期视频抓取时间",
     "上次二次接触时间", "上稿日期", "上稿标题", "寄样次数", "KOL级别", "合作报价",
+    "内容垂类", "主机生态", "最近发布日", "近90天发布数", "资料可用状态", "触达路由状态",
 ]
+
+SWITCH_ECOSYSTEMS = {"Switch", "Switch 2"}
+SWITCH_PROFILE_VERTICALS = {"游戏硬件评测", "主机游戏"}
+PROFILE_READY_STATES = {"有效", "人工核实有效"}
 
 # 这里只拦“近期内容反复指向活动范围外地区”的强信号。单条标题可能只是
 # 评测某个海外版本，不能据此改写达人国家；重复出现才进入人工冻结。
@@ -213,6 +219,7 @@ def precheck_contact(
     rid = contact.get("record_id", "")
     email, email_note = feishu.clean_email(ext(fields.get("邮箱")))
     coop = ext(fields.get("合作状态"))
+    route_state = ext(fields.get("触达路由状态"))
     email_state = ext(fields.get("邮箱验真状态"))
     reasons: list[str] = []
     evidence_drafts: list[str] = []
@@ -223,6 +230,8 @@ def precheck_contact(
         reasons.append("邮箱验真状态=无效")
     if coop in HARD_BLOCK_STATES:
         reasons.append(f"合作状态={coop}")
+    if route_state == "禁止新开发":
+        reasons.append("触达路由状态=禁止新开发")
     if reasons:
         return {
             "decision": "blocked", "allowed_as_new_cold": False,
@@ -321,12 +330,60 @@ def precheck_contact(
             "evidence_draft_ids": evidence_drafts[:10], "email": _masked_email(email),
         }
 
+    if route_state == "待核对":
+        return {
+            "decision": "hold_active_or_recent", "allowed_as_new_cold": False,
+            "campaign_pool": "existing_pipeline",
+            "recommended_route": "verify_relationship_before_contact",
+            "reasons": ["触达路由状态=待核对，禁止直接进入新开发池"],
+            "evidence_draft_ids": evidence_drafts[:10], "email": _masked_email(email),
+        }
+
+    if route_state == "沿用原线程" or coop in THREAD_ONLY_STATES:
+        return {
+            "decision": "existing_pipeline_same_thread", "allowed_as_new_cold": False,
+            "campaign_pool": "existing_pipeline",
+            "recommended_route": "continue_existing_thread",
+            "reasons": [
+                f"历史关系={coop or '未标记'}；只能沿用原邮件线程，禁止新 cold"
+            ],
+            "evidence_draft_ids": evidence_drafts[:10], "email": _masked_email(email),
+        }
+
     return {
         "decision": "eligible_new_cold", "allowed_as_new_cold": True,
         "campaign_pool": "new_development",
         "recommended_route": "activity_cold_pool", "reasons": ["全局重复触达预检通过"],
         "evidence_draft_ids": [], "email": _masked_email(email),
     }
+
+
+def _requires_nintendo_switch_profile(product_fields: dict) -> bool:
+    """仅对明确的 Nintendo/Mario Switch 产品启用严格受众闸。"""
+    hosts = _parse_multiselect(product_fields.get("适配主机"))
+    ips = " ".join(_parse_multiselect(product_fields.get("适配IP"))).lower()
+    return bool(hosts & SWITCH_ECOSYSTEMS) and any(
+        cue in ips for cue in ("nintendo", "任天堂", "mario", "马里奥")
+    )
+
+
+def _nintendo_switch_profile_reasons(fields: dict) -> list[str]:
+    """把本次人工审核结论固化为可回放的结构化硬规则。"""
+    reasons: list[str] = []
+    readiness = ext(fields.get("资料可用状态"))
+    if readiness == "活跃度不足":
+        reasons.append("活跃度不足")
+    elif readiness not in PROFILE_READY_STATES:
+        reasons.append("资料缺失或过期")
+
+    ecosystems = _parse_multiselect(fields.get("主机生态"))
+    if not (ecosystems & SWITCH_ECOSYSTEMS):
+        reasons.append("目标主机不匹配")
+
+    vertical = ext(fields.get("内容垂类"))
+    if vertical not in SWITCH_PROFILE_VERTICALS:
+        reasons.append("核心游戏IP或硬件内容不匹配")
+    return reasons
 
 
 def _base_filter_kol(
@@ -366,6 +423,9 @@ def _base_filter_kol(
         reasons.append("粉丝量级不匹配")
     if expected_styles and not (_parse_multiselect(fields.get("内容风格")) & expected_styles):
         reasons.append("内容风格不匹配")
+    if _requires_nintendo_switch_profile(product_fields):
+        reasons.extend(_nintendo_switch_profile_reasons(fields))
+    reasons = list(dict.fromkeys(reasons))
     return not reasons, reasons
 
 

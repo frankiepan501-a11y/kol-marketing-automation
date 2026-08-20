@@ -53,6 +53,67 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertIn("活动目标国家未配置", reasons)
         self.assertIn("活动目标语言未配置", reasons)
 
+    def test_piranha_rejects_generic_game_profile_even_when_style_overlaps(self):
+        matched, reasons = preview._base_filter_kol(
+            {
+                "国家": "US", "语言": "en", "主平台": "YouTube",
+                "粉丝数": 789000, "内容风格": ["游戏", "测评", "综合"],
+                "内容垂类": "泛游戏娱乐",
+                "主机生态": ["PC-Steam", "Mobile", "跨平台"],
+                "资料可用状态": "人工核实有效",
+            },
+            {
+                "品类": "Switch底座", "报价(USD)": 109.99,
+                "销售国家": ["US"], "适配主机": ["Switch", "Switch 2"],
+                "适配IP": ["马里奥系列", "Nintendo系列"],
+            },
+            {"expected_styles": ["游戏", "SETUP", "UNBOX", "测评"]},
+            target_countries={"US"}, target_languages={"en"},
+        )
+
+        self.assertFalse(matched)
+        self.assertIn("目标主机不匹配", reasons)
+
+    def test_piranha_accepts_manually_verified_switch_profile(self):
+        matched, reasons = preview._base_filter_kol(
+            {
+                "国家": "ES", "语言": "es", "主平台": "YouTube",
+                "粉丝数": 1980000, "内容风格": ["游戏"],
+                "内容垂类": "主机游戏", "主机生态": ["Switch", "Switch 2"],
+                "资料可用状态": "人工核实有效",
+            },
+            {
+                "品类": "Switch底座", "报价(USD)": 109.99,
+                "销售国家": ["ES"], "适配主机": ["Switch", "Switch 2"],
+                "适配IP": ["马里奥系列", "Nintendo系列"],
+            },
+            {"expected_styles": ["游戏", "SETUP", "UNBOX", "测评"]},
+            target_countries={"ES"}, target_languages={"es"},
+        )
+
+        self.assertTrue(matched)
+        self.assertEqual([], reasons)
+
+    def test_piranha_holds_strong_switch_profile_when_activity_is_too_low(self):
+        matched, reasons = preview._base_filter_kol(
+            {
+                "国家": "US", "语言": "en", "主平台": "YouTube",
+                "粉丝数": 2130000, "内容风格": ["游戏"],
+                "内容垂类": "主机游戏", "主机生态": ["Switch", "Switch 2"],
+                "资料可用状态": "活跃度不足",
+            },
+            {
+                "品类": "Switch底座", "报价(USD)": 109.99,
+                "销售国家": ["US"], "适配主机": ["Switch", "Switch 2"],
+                "适配IP": ["马里奥系列", "Nintendo系列"],
+            },
+            {"expected_styles": ["游戏", "SETUP", "UNBOX", "测评"]},
+            target_countries={"US"}, target_languages={"en"},
+        )
+
+        self.assertFalse(matched)
+        self.assertIn("活跃度不足", reasons)
+
     def test_review_snapshot_routes_head_kol_to_frankie_with_actionable_evidence(self):
         fields = {
             "主链接": {"link": "https://youtube.com/@creator"},
@@ -196,6 +257,38 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         )
         self.assertEqual("existing_pipeline_same_thread", result["decision"])
         self.assertEqual("existing_pipeline", result["campaign_pool"])
+        self.assertFalse(result["allowed_as_new_cold"])
+
+    def test_positive_relationship_without_product_draft_never_enters_new_cold(self):
+        result = preview.precheck_contact(
+            {
+                "record_id": "kol1",
+                "fields": {
+                    "邮箱": "creator@example.com", "合作状态": "洽谈中",
+                    "触达路由状态": "沿用原线程",
+                },
+            },
+            object_type="KOL", brand="POWKONG", product_ids={"main"},
+            drafts=[], email_owners={"creator@example.com": {("KOL", "kol1")}},
+            now_ms=1_800_000_000_000,
+        )
+
+        self.assertEqual("existing_pipeline_same_thread", result["decision"])
+        self.assertEqual("existing_pipeline", result["campaign_pool"])
+        self.assertFalse(result["allowed_as_new_cold"])
+
+    def test_waiting_reply_without_product_draft_never_enters_new_cold(self):
+        result = preview.precheck_contact(
+            {
+                "record_id": "kol1",
+                "fields": {"邮箱": "creator@example.com", "合作状态": "待回复"},
+            },
+            object_type="KOL", brand="POWKONG", product_ids={"main"},
+            drafts=[], email_owners={"creator@example.com": {("KOL", "kol1")}},
+            now_ms=1_800_000_000_000,
+        )
+
+        self.assertEqual("existing_pipeline_same_thread", result["decision"])
         self.assertFalse(result["allowed_as_new_cold"])
 
     def test_prior_same_product_with_upload_routes_to_republish_pool(self):
