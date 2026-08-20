@@ -2427,6 +2427,10 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
         try:
             if mode == "feedback":
                 result = await launch_runtime.daily_feedback(campaign_id)
+            elif mode == "queue":
+                result = await launch_runtime.queue_approved(
+                    campaign_id=campaign_id, limit=queue_limit,
+                )
             else:
                 result = await launch_runtime.run_campaign(
                     campaign_id=campaign_id, pool_target=pool_target,
@@ -2466,6 +2470,17 @@ async def launch_runtime_feedback(request: Request, authorization: str = Header(
     payload = await _launch_json(request)
     return await _start_launch_runtime_job(
         campaign_id=_launch_required(payload, "campaign_id"), mode="feedback",
+    )
+
+
+@app.post("/launch/runtime/queue")
+async def launch_runtime_queue(request: Request, authorization: str = Header(default="")):
+    """只为现有已审活动参与人生成草稿；不重跑全池预览、不发送。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    return await _start_launch_runtime_job(
+        campaign_id=_launch_required(payload, "campaign_id"), mode="queue",
+        queue_limit=int(payload.get("queue_limit") or 120),
     )
 
 
