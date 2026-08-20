@@ -90,3 +90,11 @@
 - 若 IP 喜好同时包含 Mario 与 Minecraft/Roblox/Fortnite 等冲突信号，只有近期标题再次出现 Nintendo/Mario 或明确硬件内容时才允许通过；否则先排除或待核对。
 - 单条回放增加 `profile_evidence` 和 `participant_review`：直接显示用于判断的主机生态、垂类、资料时间、发布量、命中的受众/硬件关键词，以及人工结论、原因代码和参与记录 ID。
 - 最新候选预览专项 31 项通过；全仓 364 项中 363 项通过，唯一失败为既有 Zeabur watchdog 用例，与本次候选筛选改动无关。
+
+## 生产部署与20条回放验收
+
+- 代码 commit `1a33c1f3880797c57db7efe049098fde0f61b013` 已部署为 Zeabur deployment `6a86d0be29f0931a12bf889d`，状态 `RUNNING`；`/health=ok`，OpenAPI 已确认 `/launch/candidates/replay` 存在。
+- 先用线上单条回放核验 DSimphony：`base_filter_passed=true`，人工结论为“通过”，当前名单版本=`no-evidence-v1`；因同产品已有触达，决策为 `blocked_prior_same_product`，不会重新发 cold。
+- 随后复用同一份生产代码和 Zeabur 生产环境，一次读取当前 KOL 主表、草稿历史、活动配置与20条参与记录做全量只读回放：`total=20 / writes=0 / acceptance_failures=[] / all_safe_from_new_send=true`。
+- 18名“排除”对象全部 `base_filter_passed=false`；Summoning Salt `base_filter_passed=false` 且原因包含“活跃度不足”；DSimphony `base_filter_passed=true`。20/20 均不会作为新的 cold 发送。
+- 验收通过后，食人花活动 `recvsFoRmeMM9Y` 的 `发送邮件授权` 已恢复为 `true` 并回读确认；`运行模式=正式运行`、名单版本=`no-evidence-v1`，Dave活动未修改。

@@ -283,3 +283,10 @@
 - 候选计算已把全局关系路由放到产品画像前：已有关系对象即使画像失败，仍输出“沿用原线程/禁止新cold”，不再被基础筛选静默吞掉。
 - 单条回放已接入当前名单版本的活动参与记录审核结论/原因代码，并返回画像证据字段；旧版本或已取消记录只标记为历史，不作为当前结论展示。新增专项测试后该文件31项全通过；全仓364项中363项通过，唯一失败仍为既有Zeabur watchdog用例。
 - 活动`发送邮件授权`继续保持关闭，待部署和20条生产单条回放通过后才恢复。
+
+### P0 生产验收完成
+
+- commit `1a33c1f3880797c57db7efe049098fde0f61b013` 已部署为 Zeabur deployment `6a86d0be29f0931a12bf889d`，状态`RUNNING`，`/health=ok`，回放端点存在。
+- DSimphony线上单条回放保持产品匹配，但因同产品已有触达被判`blocked_prior_same_product`，不会重复发新cold。
+- 复用生产环境和同一份代码一次性回放20条：18排除全部基础筛选失败；Summoning Salt因活跃度不足失败；DSimphony基础筛选通过；`acceptance_failures=[] / all_safe_from_new_send=true / writes=0`。
+- 食人花活动`recvsFoRmeMM9Y`的`发送邮件授权`已恢复true并回读确认，运行模式仍为正式运行、名单版本仍为`no-evidence-v1`；Dave未动。
