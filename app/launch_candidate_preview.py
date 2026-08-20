@@ -55,6 +55,15 @@ HARDWARE_CONTENT_CUES = {
     "unbox", "unboxing", "setup", "dock", "controller", "gamepad",
     "accessory", "accessories", "hardware", "开箱", "桌搭", "底座", "手柄", "配件", "硬件",
 }
+NINTENDO_TITLE_CUES = NINTENDO_AUDIENCE_CUES | {
+    "switch", "joy-con", "joycon", "gameboy", "game boy", "snes", "3ds",
+}
+GAME_OR_CONSOLE_CONTENT_CUES = NINTENDO_TITLE_CUES | HARDWARE_CONTENT_CUES | {
+    "video game", "videogame", "videojuego", "videojuegos", "gaming", "gamer",
+    "jrpg", "rpg", "console", "consola", "consolas", "retro", "playstation",
+    "xbox", "pokemon", "pokémon", "gameroom", "game room",
+}
+PROFILE_MIN_TARGET_TITLES = 3
 NON_TARGET_AUDIENCE_CUES = {
     "roblox", "minecraft", "fortnite", "fall guys", "gta", "valorant",
     "league of legends", "英雄联盟", "call of duty", "warcraft", "魔兽世界",
@@ -408,6 +417,14 @@ def _matched_cues(text: str, cues: set[str]) -> list[str]:
     return sorted(cue for cue in cues if cue in lowered)
 
 
+def _recent_title_lines(value) -> list[str]:
+    return [line.strip() for line in ext(value).splitlines() if line.strip()]
+
+
+def _matching_title_count(titles: list[str], cues: set[str]) -> int:
+    return sum(bool(_matched_cues(title, cues)) for title in titles)
+
+
 def _nintendo_switch_profile_evidence(fields: dict, *, now_ms: int) -> dict:
     """返回硬闸使用的原始字段和命中信号，供单条回放解释。"""
     readiness = ext(fields.get("资料可用状态"))
@@ -421,6 +438,7 @@ def _nintendo_switch_profile_evidence(fields: dict, *, now_ms: int) -> dict:
         posts_90d = 0
     ip_text = ext(fields.get("IP喜好"))
     recent_titles = ext(fields.get("近期视频标题"))
+    title_lines = _recent_title_lines(fields.get("近期视频标题"))
     ip_matches = _matched_cues(ip_text, NINTENDO_AUDIENCE_CUES)
     recent_nintendo_matches = _matched_cues(recent_titles, NINTENDO_AUDIENCE_CUES)
     recent_hardware_matches = _matched_cues(recent_titles, HARDWARE_CONTENT_CUES)
@@ -448,6 +466,13 @@ def _nintendo_switch_profile_evidence(fields: dict, *, now_ms: int) -> dict:
         "ip_matches": ip_matches,
         "recent_nintendo_matches": recent_nintendo_matches,
         "recent_hardware_matches": recent_hardware_matches,
+        "recent_title_count": len(title_lines),
+        "recent_target_title_count": _matching_title_count(
+            title_lines, GAME_OR_CONSOLE_CONTENT_CUES,
+        ),
+        "recent_nintendo_title_count": _matching_title_count(
+            title_lines, NINTENDO_TITLE_CUES,
+        ),
         "negative_ip_matches": negative_ip_matches,
         "negative_recent_matches": negative_recent_matches,
         "recent_titles_excerpt": recent_titles[:600],
@@ -493,6 +518,11 @@ def _nintendo_switch_profile_reasons(fields: dict, *, now_ms: int | None = None)
     )
     if not (has_nintendo_audience or has_recent_hardware):
         reasons.append("Nintendo/Mario受众或近期硬件内容不匹配")
+    if not evidence["manual_verified"]:
+        if evidence["recent_target_title_count"] < PROFILE_MIN_TARGET_TITLES:
+            reasons.append("近期目标游戏/主机内容占比不足")
+        if not (evidence["recent_nintendo_title_count"] or has_recent_hardware):
+            reasons.append("近期内容缺少Nintendo/Switch或硬件评测证据")
     if ((evidence["negative_ip_matches"] or evidence["negative_recent_matches"])
             and not (evidence["recent_nintendo_matches"] or has_recent_hardware)):
         reasons.append("近期或主要内容存在明显非目标游戏/IP信号")
@@ -503,6 +533,8 @@ def _base_filter_kol(
     fields: dict, product_fields: dict, mapping: dict, *,
     target_countries: set[str] | None = None,
     target_languages: set[str] | None = None,
+    target_fans_min: int | None = None,
+    target_fans_max: int | None = None,
     now_ms: int | None = None,
 ) -> tuple[bool, list[str]]:
     reasons = []
@@ -518,7 +550,11 @@ def _base_filter_kol(
     languages = {language_iso.get(x, x) for x in languages}
     platforms = set(dispatch.CATEGORY_PLATFORMS.get(ext(product_fields.get("品类")), []))
     expected_styles = set(mapping.get("expected_styles") or [])
-    fans_min, fans_max = dispatch._fans_range_for_price(float(product_fields.get("报价(USD)") or 0))
+    default_fans_min, default_fans_max = dispatch._fans_range_for_price(
+        float(product_fields.get("报价(USD)") or 0)
+    )
+    fans_min = int(target_fans_min) if target_fans_min is not None else default_fans_min
+    fans_max = int(target_fans_max) if target_fans_max is not None else default_fans_max
     try:
         fans = int(fields.get("粉丝数") or 0)
     except (TypeError, ValueError):
@@ -533,7 +569,9 @@ def _base_filter_kol(
         reasons.append("语言不在活动目标范围" if target_languages else "语言不匹配")
     if platforms and ext(fields.get("主平台")) not in platforms:
         reasons.append("主平台不匹配")
-    if fans < fans_min or (fans_max and fans > fans_max):
+    if fans_min < 0 or fans_max < 0 or (fans_max and fans_min > fans_max):
+        reasons.append("活动粉丝范围配置无效")
+    elif fans < fans_min or (fans_max and fans > fans_max):
         reasons.append("粉丝量级不匹配")
     if expected_styles and not (_parse_multiselect(fields.get("内容风格")) & expected_styles):
         reasons.append("内容风格不匹配")
@@ -726,6 +764,14 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
         if "活动目标语言" in fields
         else None
     )
+    target_fans_min = (
+        int(_numeric(fields.get("KOL粉丝下限")))
+        if fields.get("KOL粉丝下限") not in (None, "") else None
+    )
+    target_fans_max = (
+        int(_numeric(fields.get("KOL粉丝上限")))
+        if fields.get("KOL粉丝上限") not in (None, "") else None
+    )
     evidence_pending = bool(
         not mode or status == "配置无效"
         or (mode == launch_evidence.MODE_NEW and status != "已就绪")
@@ -778,6 +824,8 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
         "evidence_error": evidence_error,
         "target_countries": target_countries,
         "target_languages": target_languages,
+        "target_fans_min": target_fans_min,
+        "target_fans_max": target_fans_max,
     }
 
 
@@ -911,6 +959,8 @@ async def preview_candidates(
                 fields, product_fields, ctx["mapping"],
                 target_countries=(activity_ctx or {}).get("target_countries"),
                 target_languages=(activity_ctx or {}).get("target_languages"),
+                target_fans_min=(activity_ctx or {}).get("target_fans_min"),
+                target_fans_max=(activity_ctx or {}).get("target_fans_max"),
                 now_ms=now_ms,
             )
             if not matched:
@@ -998,6 +1048,8 @@ async def preview_candidates(
         "evidence_source": activity_ctx["evidence_source"] if activity_ctx else "",
         "target_countries": sorted(activity_ctx["target_countries"] or []) if activity_ctx else [],
         "target_languages": sorted(activity_ctx["target_languages"] or []) if activity_ctx else [],
+        "target_fans_min": activity_ctx["target_fans_min"] if activity_ctx else None,
+        "target_fans_max": activity_ctx["target_fans_max"] if activity_ctx else None,
         "competitor_evidence_applied": (
             activity_ctx["competitor_evidence_applied"] if activity_ctx else False
         ),
@@ -1044,6 +1096,8 @@ async def replay_candidate(
             fields, product_fields, ctx["mapping"],
             target_countries=(activity_ctx or {}).get("target_countries"),
             target_languages=(activity_ctx or {}).get("target_languages"),
+            target_fans_min=(activity_ctx or {}).get("target_fans_min"),
+            target_fans_max=(activity_ctx or {}).get("target_fans_max"),
             now_ms=now_ms,
         )
     else:

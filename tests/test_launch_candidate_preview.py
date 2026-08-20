@@ -53,6 +53,58 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertIn("活动目标国家未配置", reasons)
         self.assertIn("活动目标语言未配置", reasons)
 
+    def test_campaign_follower_range_overrides_product_price_band(self):
+        fields = {
+            "国家": "US", "语言": "en", "主平台": "YouTube",
+            "粉丝数": 51600, "内容风格": ["游戏"],
+            "内容垂类": "主机游戏", "主机生态": ["Switch 2"],
+            "资料可用状态": "有效", "IP喜好": "Nintendo, Switch 2",
+            "标签版本": "v2", "近期视频抓取时间": 1_799_000_000_000,
+            "最近发布日": 1_799_000_000_000, "近90天发布数": 10,
+            "近期视频标题": "\n".join([
+                "Upcoming JRPG games on Nintendo Switch 2",
+                "Best Pokemon-like games for Nintendo Switch",
+                "New Switch 2 games everyone is playing",
+            ]),
+        }
+        product = {
+            "品类": "Switch底座", "报价(USD)": 109.99,
+            "销售国家": ["US"], "适配主机": ["Switch", "Switch 2"],
+            "适配IP": ["马里奥系列", "Nintendo系列"],
+        }
+
+        matched_activity, reasons_activity = preview._base_filter_kol(
+            fields, product, {"expected_styles": ["游戏"]},
+            target_countries={"US"}, target_languages={"en"},
+            target_fans_min=5000, target_fans_max=1_000_000,
+            now_ms=1_800_000_000_000,
+        )
+        matched_default, reasons_default = preview._base_filter_kol(
+            fields, product, {"expected_styles": ["游戏"]},
+            target_countries={"US"}, target_languages={"en"},
+            now_ms=1_800_000_000_000,
+        )
+
+        self.assertTrue(matched_activity)
+        self.assertEqual([], reasons_activity)
+        self.assertFalse(matched_default)
+        self.assertIn("粉丝量级不匹配", reasons_default)
+
+    def test_campaign_follower_max_is_enforced(self):
+        matched, reasons = preview._base_filter_kol(
+            {
+                "国家": "US", "语言": "en", "主平台": "YouTube",
+                "粉丝数": 1_000_001, "内容风格": ["手柄评测"],
+            },
+            {"品类": "手柄", "报价(USD)": 49.99, "销售国家": ["US"]},
+            {"expected_styles": ["手柄评测"]},
+            target_countries={"US"}, target_languages={"en"},
+            target_fans_min=5000, target_fans_max=1_000_000,
+        )
+
+        self.assertFalse(matched)
+        self.assertIn("粉丝量级不匹配", reasons)
+
     def test_piranha_rejects_generic_game_profile_even_when_style_overlaps(self):
         matched, reasons = preview._base_filter_kol(
             {
@@ -198,6 +250,11 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
                 "资料可用状态": "有效", "IP喜好": "Nintendo, Mario",
                 "标签版本": "v2", "近期视频抓取时间": 1_799_000_000_000,
                 "最近发布日": 1_799_000_000_000, "近90天发布数": 4,
+                "近期视频标题": "\n".join([
+                    "Best Nintendo Switch games this month",
+                    "Mario game review on Switch 2",
+                    "Nintendo Switch accessories setup",
+                ]),
             },
             {
                 "品类": "Switch底座", "报价(USD)": 109.99,
@@ -210,6 +267,46 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         )
 
         self.assertTrue(matched)
+        self.assertEqual([], reasons)
+
+    def test_piranha_machine_profile_rejects_single_keyword_hit_in_unrelated_channel(self):
+        reasons = preview._nintendo_switch_profile_reasons({
+            "内容垂类": "主机游戏", "主机生态": ["Switch"],
+            "资料可用状态": "有效", "IP喜好": "Nintendo",
+            "标签版本": "v2", "近期视频抓取时间": 1_799_000_000_000,
+            "最近发布日": 1_799_000_000_000, "近90天发布数": 7,
+            "近期视频标题": "\n".join([
+                "Unique Ghostbusters molds and official Miniland gem",
+                "Airgam Monsters figures that terrified a generation",
+                "Factory-sealed Nintendo box with six unused games",
+                "The rarest 70s comics",
+                "The rarest My Pet Monster in the world",
+                "Toy hunter travels the world",
+                "Toy treasure hunters in Spain",
+                "Banned figures from the 90s",
+                "Collecting stories",
+                "Rare collectible video games",
+            ]),
+        }, now_ms=1_800_000_000_000)
+
+        self.assertIn("近期目标游戏/主机内容占比不足", reasons)
+
+    def test_piranha_machine_profile_accepts_retro_console_channel_with_nintendo_signal(self):
+        reasons = preview._nintendo_switch_profile_reasons({
+            "内容垂类": "主机游戏", "主机生态": ["Switch"],
+            "资料可用状态": "有效", "IP喜好": "Nintendo",
+            "标签版本": "v2", "近期视频抓取时间": 1_799_000_000_000,
+            "最近发布日": 1_799_000_000_000, "近90天发布数": 4,
+            "近期视频标题": "\n".join([
+                "Massive retro video game collection",
+                "RetroBarcelona 2026",
+                "Best Super Nintendo in the world",
+                "Video game museum in Galicia",
+                "Complete GameBoy collection",
+                "The best retro game store",
+            ]),
+        }, now_ms=1_800_000_000_000)
+
         self.assertEqual([], reasons)
 
     def test_review_snapshot_routes_head_kol_to_frankie_with_actionable_evidence(self):
@@ -355,6 +452,27 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertTrue(context["evidence_pending"])
         self.assertFalse(context["competitor_evidence_applied"])
         self.assertEqual(context["evidence_status"], "配置无效")
+
+    def test_activity_context_reads_campaign_specific_follower_range(self):
+        activity = {
+            "record_id": "activity1",
+            "fields": {
+                "活动ID": "campaign1", "产品主记录ID": "product1",
+                "竞品证据模式": "不使用竞品证据", "竞品分析状态": "不适用",
+                "证据排序版本": "no-evidence-v1",
+                "KOL粉丝下限": 5000, "KOL粉丝上限": 1_000_000,
+            },
+        }
+        with patch.object(
+            preview.launch_evidence, "get_activity", new=AsyncMock(return_value=activity)
+        ), patch.object(
+            preview.launch_evidence, "load_full_snapshot_post_ids",
+            new=AsyncMock(return_value=[]),
+        ):
+            context = asyncio.run(preview._load_activity_context("campaign1", "KOL"))
+
+        self.assertEqual(5000, context["target_fans_min"])
+        self.assertEqual(1_000_000, context["target_fans_max"])
 
     def test_canonical_product_family_keeps_aliases_together(self):
         products = [
