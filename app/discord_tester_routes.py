@@ -421,8 +421,13 @@ async def _notify_emergency(record_id: str, discord_user_id: str, summary: str) 
     sent = 0
     for receive_type, receive_id in targets:
         try:
-            await feishu.send_card_message(receive_type, receive_id, card.copy(), biz="KOL", level="P0")
-            sent += 1
+            message_id = await feishu.send_card_message(
+                receive_type, receive_id, card.copy(), biz="KOL", level="P0"
+            )
+            if message_id:
+                sent += 1
+            else:
+                print(f"[discord_tester] P0 notification returned no message_id for {receive_type}")
         except Exception as exc:
             print(f"[discord_tester] P0 notification failed for {receive_type}: {exc}")
     return sent

@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app import discord_tester_program as program
 from app import discord_tester_routes as routes
@@ -8,6 +8,25 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_emergency_notification_counts_only_confirmed_message_ids(self):
+        sender = AsyncMock(side_effect=["", "om_confirmed"])
+        with (patch("app.config.NOTIFY_CHAT_ID", "oc_ops"),
+              patch("app.config.NOTIFY_USERS", [("潘志聪", "ou_frankie")]),
+              patch("app.feishu.send_card_message", sender)):
+            sent = await routes._notify_emergency("rec123", "discord123", "Unusual odor")
+
+        self.assertEqual(1, sent)
+        self.assertEqual(2, sender.await_count)
+
+    async def test_emergency_notification_returns_zero_when_all_message_ids_are_empty(self):
+        sender = AsyncMock(return_value="")
+        with (patch("app.config.NOTIFY_CHAT_ID", "oc_ops"),
+              patch("app.config.NOTIFY_USERS", [("潘志聪", "ou_frankie")]),
+              patch("app.feishu.send_card_message", sender)):
+            sent = await routes._notify_emergency("rec123", "discord123", "Unusual odor")
+
+        self.assertEqual(0, sent)
+
     async def test_apply_button_opens_first_application_modal(self):
         payload = {
             "type": 3,
