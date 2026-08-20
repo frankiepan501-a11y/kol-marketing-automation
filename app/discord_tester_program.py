@@ -290,7 +290,7 @@ def build_form_writes(kind: str, form: dict[str, str], claims: dict) -> tuple[di
             "核验邮箱": form.get("email", "")[:300],
             "核验状态": "待核验",
             "报名状态": "待核验",
-            "资料计划删除日": now_ms + 30 * 24 * 60 * 60 * 1000,
+            "核验资料删除日": now_ms + 30 * 24 * 60 * 60 * 1000,
         })
     elif kind == "shipping":
         address = "\n".join(part for part in [
@@ -326,7 +326,20 @@ def build_form_writes(kind: str, form: dict[str, str], claims: dict) -> tuple[di
         if platforms:
             feedback["测试平台"] = platforms
         if kind == "receipt":
-            condition = (form.get("condition", "") + " " + form.get("notes", "")).casefold()
+            feedback["反馈摘要"] = "\n".join(filter(None, [
+                f"Package: {form.get('condition', '')}",
+                f"Contents: {form.get('contents', '')}",
+                f"Instructions: {form.get('instructions', '')}",
+                f"Setup: {form.get('setup', '')}",
+                f"First impressions: {form.get('first_impressions', '')}",
+                form.get("notes", ""),
+            ]))[:5000]
+            receipt_platforms = _form_platforms(form.get("platforms", ""))
+            if receipt_platforms:
+                feedback["测试平台"] = receipt_platforms
+            condition = " ".join(form.get(key, "") for key in (
+                "condition", "contents", "instructions", "setup", "first_impressions", "notes",
+            )).casefold()
             blocked = any(term in condition for term in (
                 "damage", "damaged", "crush", "cracked", "broken", "missing", "wrong",
                 "unsafe", "leak", "swollen", "smoke", "破损", "损坏", "缺少", "错货", "不安全",
@@ -358,7 +371,7 @@ def status_allows_form(kind: str, status: str) -> bool:
     normalized = status.strip().casefold()
     verification = {"shortlisted", "need verification", "已入围", "待核验"}
     selected = {
-        "selected", "verified", "已入选", "已核验", "待发货", "已发货", "已签收", "测试中",
+        "selected", "已入选", "待发货", "已发货", "已签收", "测试中", "active", "completed", "已完成",
     }
     if kind == "verification":
         return normalized in verification
@@ -367,16 +380,27 @@ def status_allows_form(kind: str, status: str) -> bool:
 
 def retention_clear_fields(scope: str) -> dict:
     if scope == "verification":
-        return {"购买凭证": [], "核验状态": "凭证已删除", "资料计划删除日": None}
+        return {"购买凭证": [], "核验状态": "凭证已删除", "核验资料删除日": None}
     common = {
         "Discord用户ID": "", "Discord用户名": "", "核验邮箱": "", "购买凭证": [],
-        "收件姓名": "", "收件地址": "", "联系电话": "", "资料计划删除日": None,
+        "收件姓名": "", "收件地址": "", "联系电话": "",
     }
     if scope == "unselected":
-        return {**common, "报名状态": "未入选资料已去标识"}
+        return {**common, "报名状态": "未入选资料已去标识", "未入选资料删除日": None}
     if scope == "selected":
-        return {**common, "报名状态": "活动资料已去标识"}
+        return {**common, "报名状态": "活动资料已去标识", "配送资料删除日": None}
     raise ValueError("scope must be verification, unselected, or selected")
+
+
+def retention_date_field(scope: str) -> str:
+    fields = {
+        "verification": "核验资料删除日",
+        "unselected": "未入选资料删除日",
+        "selected": "配送资料删除日",
+    }
+    if scope not in fields:
+        raise ValueError("scope must be verification, unselected, or selected")
+    return fields[scope]
 
 
 def _step1_state(values: dict[str, str]) -> tuple[str, str]:

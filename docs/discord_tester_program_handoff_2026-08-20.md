@@ -27,6 +27,7 @@
 - 生成专属链接：`POST /discord/tester/admin/invitations`
 - 隐藏区预览/创建：`POST /discord/tester/admin/setup?commit=false|true`
 - 到期资料清理预览/执行：`POST /discord/tester/admin/retention?scope=verification|unselected|selected&commit=false|true`
+- 批量登记删除日：`POST /discord/tester/admin/retention/schedule?commit=false|true`，body 传 `scope` 和名单确认日/活动结束日 `anchor_ms`；未入选自动加 30 天，入选者自动加 90 天。
 
 ## 环境变量
 
@@ -51,7 +52,8 @@
 5. 飞书报名台账出现测试记录，敏感地址/电话字段为空。
 6. 用专属测试链接分别验证核验、配送和安全表单进入正确字段/表。
 7. 公告发布前确认 `public_announcement_sent=false`。
-8. 用 `admin/retention` 分别预演核验原件、未入选资料和活动结束资料的到期清理；默认 `commit=false` 只列受影响记录。
+8. 名单确认和活动结束时先用 `admin/retention/schedule` 批量登记删除日，再用 `admin/retention` 分别预演核验原件、未入选资料和活动结束资料的到期清理；两者默认 `commit=false`。
+9. 有未关闭的欺诈、安全、法律或换货案件时，先在台账勾选 `资料保留暂停`；清理程序会跳过该记录。
 
 ## 回退
 

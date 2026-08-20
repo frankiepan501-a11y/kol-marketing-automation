@@ -74,7 +74,13 @@ def form_html(kind: str, token: str) -> str:
                   + '<label><input class="check" name="accurate" type="checkbox" required> I confirm this delivery information is accurate.</label>')
     elif kind == "receipt":
         fields = (_input("condition", "Package condition", kind="text")
+                  + _input("contents", "Are all listed items present?")
+                  + _textarea("instructions", "Were the instructions easy to find and understand?")
+                  + _input("platforms", "Main platform and connection method")
+                  + _textarea("setup", "First successful connection: time required, result, and any failed step")
+                  + _textarea("first_impressions", "First impressions: grip, buttons, sticks, weight, and appearance")
                   + _textarea("notes", "Missing items, damage, or delivery notes", required=False)
+                  + '<label><input class="check" name="safety_clear" type="checkbox" required> I confirm there is no safety issue. If there is one, I will stop and use the urgent safety form instead.</label>'
                   + '<label><input class="check" name="received" type="checkbox" required> I confirm that I received the sample.</label>')
     elif kind in {"checkpoint1", "checkpoint2", "final"}:
         fields = (_input("platforms", "Platforms tested (comma separated)")
@@ -230,9 +236,12 @@ async def setup_discord_prelaunch(request: Request, authorization: str = Header(
 @router.get("/forms/{kind}", response_class=HTMLResponse)
 async def get_secure_form(kind: str, token: str):
     secret = os.environ.get("DISCORD_TESTER_SIGNING_SECRET", "")
+    if not secret:
+        raise HTTPException(503, "Secure form signing is not configured")
     claims = discord_tester_program.read_form_token(token, kind, secret)
     if kind not in FORM_KINDS or not claims:
         raise HTTPException(403, "This secure form link is invalid or expired")
+    await _validate_current_form_access(kind, claims)
     return HTMLResponse(form_html(kind, token))
 
 
@@ -265,6 +274,16 @@ def _check_internal_auth(authorization: str) -> None:
         raise HTTPException(401, "Invalid internal token")
 
 
+async def _validate_current_form_access(kind: str, claims: dict) -> dict:
+    ledger = discord_tester_program.DiscordTesterLedger()
+    fields = await ledger.get_application(str(claims.get("record_id") or ""))
+    if str(fields.get("Discord用户ID") or "") != str(claims.get("discord_user_id") or ""):
+        raise HTTPException(409, "Discord user no longer matches this application")
+    if not discord_tester_program.status_allows_form(kind, str(fields.get("报名状态") or "")):
+        raise HTTPException(409, "This form is no longer available for the current application status")
+    return fields
+
+
 @router.post("/admin/invitations")
 async def create_secure_invitation(request: Request, authorization: str = Header(default="")):
     _check_internal_auth(authorization)
@@ -275,14 +294,7 @@ async def create_secure_invitation(request: Request, authorization: str = Header
     ttl_hours = min(24 * 30, max(1, int(body.get("ttl_hours") or 48)))
     if kind not in FORM_KINDS or not record_id or not discord_user_id:
         raise HTTPException(400, "kind, record_id, and discord_user_id are required")
-    ledger = discord_tester_program.DiscordTesterLedger()
-    fields = await ledger.get_application(record_id)
-    stored_user_id = str(fields.get("Discord用户ID") or "")
-    status = str(fields.get("报名状态") or "")
-    if stored_user_id != discord_user_id:
-        raise HTTPException(409, "Discord user does not match the application record")
-    if not discord_tester_program.status_allows_form(kind, status):
-        raise HTTPException(409, f"Application status does not allow a {kind} form")
+    await _validate_current_form_access(kind, {"record_id": record_id, "discord_user_id": discord_user_id})
     secret = os.environ.get("DISCORD_TESTER_SIGNING_SECRET", "")
     if not secret:
         raise HTTPException(503, "Secure form signing is not configured")
@@ -305,18 +317,19 @@ async def apply_retention_cleanup(authorization: str = Header(default=""), scope
     status_allow = {
         "verification": None,
         "unselected": {"not selected", "ineligible", "未入选", "不合格"},
-        "selected": {"completed", "official product tester", "已完成", "测试完成"},
+        "selected": {"selected", "active", "completed", "official product tester", "已入选", "测试中", "已完成", "测试完成"},
     }[scope]
+    date_field = discord_tester_program.retention_date_field(scope)
     planned = []
     for record in await ledger.list_applications():
         fields = record.get("fields") or {}
-        due = fields.get("资料计划删除日")
+        due = fields.get(date_field)
         try:
             is_due = int(due or 0) <= now_ms and int(due or 0) > 0
         except (TypeError, ValueError):
             is_due = False
         status = str(fields.get("报名状态") or "").strip().casefold()
-        if not is_due or (status_allow is not None and status not in status_allow):
+        if fields.get("资料保留暂停") or not is_due or (status_allow is not None and status not in status_allow):
             continue
         if scope == "verification" and not fields.get("购买凭证"):
             continue
@@ -325,6 +338,46 @@ async def apply_retention_cleanup(authorization: str = Header(default=""), scope
         for record_id in planned:
             await ledger.update_application(record_id, clear_fields)
     return {"ok": True, "scope": scope, "mode": "commit" if commit else "preview",
+            "affected_count": len(planned), "record_ids": planned}
+
+
+@router.post("/admin/retention/schedule")
+async def schedule_retention_cleanup(request: Request, authorization: str = Header(default=""),
+                                     commit: bool = False):
+    _check_internal_auth(authorization)
+    body = await request.json()
+    scope = str(body.get("scope") or "")
+    if scope not in {"unselected", "selected"}:
+        raise HTTPException(400, "scope must be unselected or selected")
+    try:
+        anchor_ms = int(body.get("anchor_ms") or 0)
+    except (TypeError, ValueError):
+        anchor_ms = 0
+    if anchor_ms <= 0:
+        raise HTTPException(400, "anchor_ms is required")
+    requested_ids = {str(value) for value in (body.get("record_ids") or []) if value}
+    statuses = {
+        "unselected": {"not selected", "ineligible", "未入选", "不合格"},
+        "selected": {"selected", "active", "completed", "已入选", "测试中", "已完成", "测试完成"},
+    }[scope]
+    days = 30 if scope == "unselected" else 90
+    delete_at = anchor_ms + days * 24 * 60 * 60 * 1000
+    date_field = discord_tester_program.retention_date_field(scope)
+    ledger = discord_tester_program.DiscordTesterLedger()
+    planned = []
+    for record in await ledger.list_applications():
+        record_id = str(record.get("record_id") or "")
+        fields = record.get("fields") or {}
+        status = str(fields.get("报名状态") or "").strip().casefold()
+        if requested_ids and record_id not in requested_ids:
+            continue
+        if status in statuses:
+            planned.append(record_id)
+    if commit:
+        for record_id in planned:
+            await ledger.update_application(record_id, {date_field: delete_at})
+    return {"ok": True, "scope": scope, "mode": "commit" if commit else "preview",
+            "anchor_ms": anchor_ms, "delete_at": delete_at,
             "affected_count": len(planned), "record_ids": planned}
 
 
@@ -351,7 +404,7 @@ async def _upload_bitable_file(upload, *, parent_node: str) -> dict:
     return {"file_token": file_token}
 
 
-async def _notify_emergency(record_id: str, discord_user_id: str, summary: str) -> None:
+async def _notify_emergency(record_id: str, discord_user_id: str, summary: str) -> int:
     from . import config, feishu
 
     card = {
@@ -365,11 +418,14 @@ async def _notify_emergency(record_id: str, discord_user_id: str, summary: str) 
     }
     targets = [("chat_id", config.NOTIFY_CHAT_ID)]
     targets.extend(("open_id", oid) for name, oid in config.NOTIFY_USERS if name.startswith("潘"))
+    sent = 0
     for receive_type, receive_id in targets:
         try:
             await feishu.send_card_message(receive_type, receive_id, card.copy(), biz="KOL", level="P0")
+            sent += 1
         except Exception as exc:
             print(f"[discord_tester] P0 notification failed for {receive_type}: {exc}")
+    return sent
 
 
 @router.post("/forms/{kind}", response_class=HTMLResponse)
@@ -379,9 +435,12 @@ async def submit_secure_form(kind: str, request: Request, background_tasks: Back
     form_data = await request.form()
     token = str(form_data.get("token") or request.query_params.get("token") or "")
     secret = os.environ.get("DISCORD_TESTER_SIGNING_SECRET", "")
+    if not secret:
+        raise HTTPException(503, "Secure form signing is not configured")
     claims = discord_tester_program.read_form_token(token, kind, secret)
     if not claims:
         raise HTTPException(403, "This secure form link is invalid or expired")
+    await _validate_current_form_access(kind, claims)
     text_fields = {key: str(value) for key, value in form_data.multi_items() if isinstance(value, str)}
     if kind == "verification" and "redacted" not in text_fields:
         raise HTTPException(400, "You must confirm that proof files are redacted and genuine")
@@ -390,6 +449,8 @@ async def submit_secure_form(kind: str, request: Request, background_tasks: Back
         raise HTTPException(400, "Amazon purchase proof is required")
     if kind == "shipping" and "accurate" not in text_fields:
         raise HTTPException(400, "You must confirm that the shipping information is accurate")
+    if kind == "receipt" and "safety_clear" not in text_fields:
+        raise HTTPException(400, "Use the urgent safety form instead of the receipt checkpoint")
     app_fields, feedback_fields = discord_tester_program.build_form_writes(kind, text_fields, claims)
     app_ledger = discord_tester_program.DiscordTesterLedger()
     feedback_ledger = discord_tester_program.DiscordTesterFeedbackLedger()
@@ -408,15 +469,18 @@ async def submit_secure_form(kind: str, request: Request, background_tasks: Back
         feedback_id = await feedback_ledger.create_feedback(feedback_fields)
         if attachment_values and kind == "emergency":
             await feedback_ledger.update_feedback(feedback_id, {"附件": attachment_values})
+    special = ""
     if kind == "emergency":
-        background_tasks.add_task(
-            _notify_emergency,
-            claims["record_id"],
-            claims["discord_user_id"],
+        sent_count = await _notify_emergency(
+            claims["record_id"], claims["discord_user_id"],
             text_fields.get("summary", "Urgent safety report submitted"),
         )
-    special = ("<div class='warn'><strong>Stop using the product.</strong> FUNLAB has received your urgent report. Do not reproduce the issue.</div>"
-               if kind == "emergency" else "")
+        notification_status = "P0已通知" if sent_count else "P0通知失败-需巡检"
+        if feedback_id:
+            await feedback_ledger.update_feedback(feedback_id, {"处理状态": notification_status})
+        special = ("<div class='warn'><strong>Stop using the product.</strong> FUNLAB has received your urgent report. Do not reproduce the issue.</div>"
+                   if sent_count else
+                   "<div class='warn'><strong>Stop using the product.</strong> Your report is saved, but the automatic staff alert was delayed. Email marketing@fireflyfunlab.com and do not reproduce the issue.</div>")
     return HTMLResponse(f"<!doctype html><html><head><meta charset='utf-8'><style>{_STYLE}</style></head><body><main>"
                         f"<h1>Submission Received</h1>{special}<p>Your information was saved securely.</p>"
                         f"<p class='note'>Reference: {escape(feedback_id or claims['record_id'])}</p>"
@@ -458,6 +522,9 @@ async def discord_interactions(request: Request, background_tasks: BackgroundTas
         payload = json.loads(body)
     except (TypeError, ValueError):
         raise HTTPException(400, "Invalid JSON")
+    signing_secret = os.environ.get("DISCORD_TESTER_SIGNING_SECRET", "")
+    if int(payload.get("type") or 0) != 1 and not signing_secret:
+        raise HTTPException(503, "Discord tester signing is not configured")
     application_id = str(payload.get("application_id") or "")
     interaction_token = str(payload.get("token") or "")
 
@@ -466,7 +533,7 @@ async def discord_interactions(request: Request, background_tasks: BackgroundTas
 
     outcome = await discord_tester_program.build_interaction_outcome(
         payload,
-        signing_secret=os.environ.get("DISCORD_TESTER_SIGNING_SECRET", ""),
+        signing_secret=signing_secret,
         completion_notifier=notify_completion,
     )
     if outcome.work:

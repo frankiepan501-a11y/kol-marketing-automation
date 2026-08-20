@@ -196,6 +196,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         shipping = routes.form_html("shipping", "signed-token")
         emergency = routes.form_html("emergency", "signed-token")
         day7 = routes.form_html("checkpoint2", "signed-token")
+        receipt = routes.form_html("receipt", "signed-token")
 
         self.assertIn("Redact", verification)
         self.assertIn('type="file"', verification)
@@ -204,6 +205,9 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('type="file"', shipping)
         self.assertIn("Stop using", emergency)
         self.assertIn("Day 7 Stability Test", day7)
+        self.assertIn("First successful connection", receipt)
+        self.assertIn("First impressions", receipt)
+        self.assertIn("no safety issue", receipt)
 
     def test_form_writes_keep_shipping_and_feedback_in_their_own_fields(self):
         claims = {"record_id": "rec123", "discord_user_id": "discord123"}
@@ -240,10 +244,13 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
 
         proof_clear = program.retention_clear_fields("verification")
         self.assertEqual([], proof_clear["购买凭证"])
+        self.assertIsNone(proof_clear["核验资料删除日"])
         self.assertNotIn("收件地址", proof_clear)
         selected_clear = program.retention_clear_fields("selected")
         self.assertEqual("", selected_clear["收件地址"])
         self.assertEqual("", selected_clear["Discord用户ID"])
+        self.assertIsNone(selected_clear["配送资料删除日"])
+        self.assertEqual("未入选资料删除日", program.retention_date_field("unselected"))
 
     def test_prelaunch_setup_is_private_and_rehearsal_message_has_apply_button(self):
         plan = routes.discord_setup_plan()
