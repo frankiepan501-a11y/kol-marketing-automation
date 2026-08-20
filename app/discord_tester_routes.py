@@ -139,7 +139,18 @@ async def _discord_request(method: str, path: str, *, body: dict | None = None):
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.request(method, f"{DISCORD_API}{path}", headers=_discord_headers(), json=body)
     if response.status_code >= 400:
-        raise HTTPException(502, f"Discord API failed at {path}: HTTP {response.status_code}")
+        try:
+            error = response.json()
+        except ValueError:
+            error = {}
+        code = error.get("code")
+        message = str(error.get("message") or "")[:240]
+        detail = f"Discord API failed at {path}: HTTP {response.status_code}"
+        if code is not None:
+            detail += f", code {code}"
+        if message:
+            detail += f", {message}"
+        raise HTTPException(502, detail)
     return response.json() if response.content else {}
 
 
