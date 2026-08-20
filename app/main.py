@@ -24,10 +24,12 @@ from . import b2b_outreach_email  # B2B LinkedIn 转 Email 开发信队列 + dry
 from . import invest  # 投资助手: X 帖子抓取 → A股观察映射 → 投资助手 App 推送
 from . import x_history  # 竞品 X 历史补采: 独立只读探测/分窗采集，不触碰 KOL 主表
 from . import kol_roi_mapping  # KOL ROI 归因缺口卡 + 映射回填
+from . import discord_tester_routes  # FUN Bot 新品体验官：Discord Modal + 安全表单
 
 app = FastAPI(title="KOL Marketing Automation", version="0.2")
 app.include_router(invest.router)
 app.include_router(x_history.router)
+app.include_router(discord_tester_routes.router)
 
 # Endpoint 失败告警 dedup: {endpoint: last_alert_ts} (60 min 内同 endpoint 只告 1 次)
 _alert_last = {}
