@@ -172,6 +172,18 @@ async def append_auto_approved(*, campaign_id: str, pool_target: int,
         ext((row.get("fields") or {}).get("参与状态")) in {"锁定准备中", "已入围"}
         for row in existing
     )
+    outstanding_review = sum(
+        ext((row.get("fields") or {}).get("参与状态")) in {"锁定准备中", "已入围"}
+        and ext((row.get("fields") or {}).get("审核结论")) in {"待审核", "待补资料"}
+        for row in existing
+    )
+    if outstanding_review:
+        return {
+            "campaign_id": campaign_id, "pool_before": active_count,
+            "eligible_auto_approved": 0, "created": 0,
+            "pool_after": active_count, "participant_ids": [],
+            "blocked_by_pending_review": outstanding_review,
+        }
     room = max(0, int(pool_target) - active_count)
     batch_room = min(room, 120)
     candidates = [
@@ -207,6 +219,111 @@ async def append_auto_approved(*, campaign_id: str, pool_target: int,
         "campaign_id": campaign_id, "pool_before": active_count,
         "eligible_auto_approved": len(candidates), "created": len(created),
         "pool_after": active_count + len(created), "participant_ids": created,
+    }
+
+
+async def append_review_candidates(*, campaign_id: str, review_target: int = 20,
+                                   preview: dict | None = None) -> dict:
+    """补充一个待审核批次；不生成草稿，也不沿用系统自动通过结论。"""
+    if not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
+        raise LaunchRuntimeError("LAUNCH_ACTIVITY_QUEUE_ENABLED 未开启")
+    activity = await launch_evidence.get_activity(campaign_id)
+    af = activity.get("fields") or {}
+    product_id = ext(af.get("产品主记录ID")).strip()
+    ranking_version = ext(af.get("证据排序版本")).strip()
+    if not product_id or not ranking_version:
+        raise LaunchRuntimeError("活动缺少产品主记录ID或证据排序版本")
+    if ext(af.get("KOL名单阻塞代码")):
+        raise LaunchRuntimeError("KOL 名单仍处于阻塞状态")
+
+    preview = preview or await launch_candidate_preview.preview_candidates(
+        product_id, campaign_id=campaign_id, object_type="KOL", internal_full=True,
+    )
+    if preview.get("ranking_version") != ranking_version:
+        raise LaunchRuntimeError("预览排序版本与活动证据版本不一致")
+    if preview.get("evidence_pending"):
+        raise LaunchRuntimeError("竞品证据仍待处理，禁止补充审核池")
+    evidence_mode = ext(af.get("竞品证据模式"))
+    if evidence_mode in {launch_evidence.MODE_NEW, launch_evidence.MODE_REUSE}:
+        if (preview.get("evidence_status") != "已就绪"
+                or not preview.get("competitor_evidence_applied")):
+            raise LaunchRuntimeError("活动要求竞品证据，但证据未实际应用到排序")
+
+    existing = await _participants(campaign_id)
+    existing_contacts = {
+        cid for row in existing for cid in _ids((row.get("fields") or {}).get("关联KOL"))
+    }
+    pending_count = sum(
+        ext((row.get("fields") or {}).get("参与状态")) in {"锁定准备中", "已入围"}
+        and ext((row.get("fields") or {}).get("审核结论")) in {"待审核", "待补资料"}
+        for row in existing
+    )
+    target = max(1, min(int(review_target), 50))
+    room = min(max(0, target - pending_count), 20)
+    candidates = [
+        candidate for candidate in (preview.get("candidates") or [])
+        if candidate.get("contact_id") not in existing_contacts
+        and candidate.get("decision") == "eligible_new_cold"
+        and candidate.get("base_filter_passed") is True
+    ][:room]
+
+    batch_id = f"review-{time.strftime('%Y%m%d')}-{int(time.time())}"
+    created: list[str] = []
+    try:
+        for candidate in candidates:
+            contact_id = candidate["contact_id"]
+            unique_key = launch_participation.participant_key(
+                campaign_id, product_id, "KOL", contact_id,
+            )
+            if await launch_participation._participants_by_unique_key(unique_key):
+                continue
+            ranking_fields = launch_participation._ranking_fields(candidate, ranking_version)
+            ranking_fields["审核结论"] = "待审核"
+            ranking_fields["审核原因"] = ""
+            ranking_fields["审核人"] = None
+            ranking_fields["审核时间"] = None
+            if ranking_fields.get("系统审核分流") == "系统建议通过":
+                ranking_fields["系统审核说明"] = (
+                    "系统规则已建议通过；本批为新品活动候选质量灰度，请运营抽检主页、"
+                    "近90天内容和实际语言后选择通过/待补资料/排除。"
+                )
+            fields = {
+                "参与记录ID": unique_key, "活动ID": campaign_id,
+                "关联活动": [activity["record_id"]], "产品家族ID": product_id,
+                "对象类型": "KOL", "关联KOL": [contact_id],
+                **ranking_fields,
+                "参与状态": "已入围", "名单版本": ranking_version,
+                "锁定批次ID": batch_id, "取消原因代码": "",
+                "排序快照历史": launch_participation._with_snapshot(
+                    {}, candidate, ranking_version,
+                ),
+            }
+            record_id = await feishu.create_record(config.T_LAUNCH_PARTICIPANT, fields)
+            created.append(record_id)
+            matches = await launch_participation._participants_by_unique_key(unique_key)
+            if len(matches) != 1:
+                raise LaunchRuntimeError("待审核候选创建后唯一键回读不一致")
+            readback = matches[0].get("fields") or {}
+            if ext(readback.get("审核结论")) != "待审核":
+                raise LaunchRuntimeError("待审核候选被意外放行为通过")
+            if _ids(readback.get("关联邮件草稿")):
+                raise LaunchRuntimeError("待审核候选意外关联邮件草稿")
+    except Exception:
+        for record_id in created:
+            try:
+                await feishu.update_record(config.T_LAUNCH_PARTICIPANT, record_id, {
+                    "参与状态": "已取消", "取消原因代码": "P1待审核补池失败回滚",
+                })
+            except Exception:
+                pass
+        raise
+
+    return {
+        "campaign_id": campaign_id, "review_target": target,
+        "pending_before": pending_count, "eligible_candidates": len(candidates),
+        "created": len(created), "pending_after": pending_count + len(created),
+        "batch_id": batch_id, "participant_ids": created,
+        "drafts_created": 0, "emails_sent": 0,
     }
 
 

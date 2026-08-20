@@ -48,6 +48,8 @@ _launch_preview_jobs = {}
 _LAUNCH_PREVIEW_JOB_TTL = 6 * 3600
 _launch_runtime_jobs = {}
 _LAUNCH_RUNTIME_JOB_TTL = 24 * 3600
+_relabel_profile_jobs = {}
+_RELABEL_PROFILE_JOB_TTL = 24 * 3600
 _auto_send_jobs = {}
 _AUTO_SEND_JOB_TTL = 24 * 3600
 
@@ -2073,6 +2075,78 @@ async def run_relabel_kol_test(authorization: str = Header(default=""), limit: i
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1500:]}
 
 
+def _prune_relabel_profile_jobs() -> None:
+    now = time.time()
+    for job_id in list(_relabel_profile_jobs):
+        if now - _relabel_profile_jobs[job_id].get("started_ts", 0) > _RELABEL_PROFILE_JOB_TTL:
+            _relabel_profile_jobs.pop(job_id, None)
+
+
+@app.post("/relabel/kol-profiles/start")
+async def start_relabel_kol_profiles(
+    request: Request, authorization: str = Header(default=""),
+):
+    """后台刷新明确 KOL 记录；默认 dry-run，commit 需显式确认口令。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    record_ids = payload.get("record_ids") or []
+    if not isinstance(record_ids, list) or not record_ids:
+        raise HTTPException(status_code=400, detail="record_ids 必须是非空数组")
+    if any(not isinstance(value, str) or not value.strip() for value in record_ids):
+        raise HTTPException(status_code=400, detail="record_ids 每一项都必须是非空字符串")
+    if len(record_ids) > 100:
+        raise HTTPException(status_code=400, detail="单批最多100条")
+    dry_run = payload.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        raise HTTPException(status_code=400, detail="dry_run 必须是 JSON 布尔值")
+    if not dry_run and payload.get("confirm") != "PROFILE_BACKFILL":
+        raise HTTPException(status_code=400, detail="正式写入需 confirm=PROFILE_BACKFILL")
+    _prune_relabel_profile_jobs()
+    request_key = f"{dry_run}|{'|'.join(sorted(set(record_ids)))}"
+    for job_id, job in _relabel_profile_jobs.items():
+        if job.get("status") == "running" and job.get("request_key") == request_key:
+            return {"ok": True, "accepted": True, "already_running": True,
+                    "job_id": job_id, "status": "running"}
+    job_id = "kolprofile-" + uuid.uuid4().hex[:12]
+    _relabel_profile_jobs[job_id] = {
+        "status": "running", "started_ts": time.time(), "request_key": request_key,
+        "started_at": datetime_now_string(), "dry_run": dry_run,
+        "requested": len(record_ids),
+    }
+
+    async def _job():
+        try:
+            result = await relabel.run_profile_records(
+                record_ids, dry_run=dry_run, limit=len(record_ids),
+            )
+            _relabel_profile_jobs[job_id].update(
+                status="success", finished_at=datetime_now_string(), result=result,
+            )
+        except Exception as exc:
+            tr = _tb.format_exc()[-1000:]
+            _relabel_profile_jobs[job_id].update(
+                status="error", finished_at=datetime_now_string(), error=str(exc)[:500],
+            )
+            await _alert_endpoint_failure("/relabel/kol-profiles/start", type(exc).__name__, tr)
+
+    asyncio.create_task(_job())
+    return {"ok": True, "accepted": True, "already_running": False,
+            "job_id": job_id, "status": "running", "dry_run": dry_run}
+
+
+@app.get("/relabel/kol-profiles/jobs/{job_id}")
+async def get_relabel_kol_profile_job(
+    job_id: str, authorization: str = Header(default=""),
+):
+    _check_auth(authorization)
+    _prune_relabel_profile_jobs()
+    job = _relabel_profile_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found or expired")
+    public = {key: value for key, value in job.items() if key not in {"request_key", "started_ts"}}
+    return {"ok": True, "job_id": job_id, **public}
+
+
 @app.post("/zoho/test-send")
 async def zoho_test_send(authorization: str = Header(default=""),
                           brand: str = "POWKONG", to: str = "frankiepan501@gmail.com"):
@@ -2468,7 +2542,8 @@ def _prune_launch_runtime_jobs() -> None:
 
 
 async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
-                                    pool_target: int = 100, queue_limit: int = 120) -> dict:
+                                    pool_target: int = 100, queue_limit: int = 120,
+                                    review_target: int = 20) -> dict:
     if not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise HTTPException(status_code=403, detail="活动队列写入开关未开启")
     _prune_launch_runtime_jobs()
@@ -2491,6 +2566,10 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
             elif mode == "queue":
                 result = await launch_runtime.queue_approved(
                     campaign_id=campaign_id, limit=queue_limit,
+                )
+            elif mode == "review_pool":
+                result = await launch_runtime.append_review_candidates(
+                    campaign_id=campaign_id, review_target=review_target,
                 )
             else:
                 result = await launch_runtime.run_campaign(
@@ -2542,6 +2621,17 @@ async def launch_runtime_queue(request: Request, authorization: str = Header(def
     return await _start_launch_runtime_job(
         campaign_id=_launch_required(payload, "campaign_id"), mode="queue",
         queue_limit=int(payload.get("queue_limit") or 120),
+    )
+
+
+@app.post("/launch/runtime/review-pool")
+async def launch_runtime_review_pool(request: Request, authorization: str = Header(default="")):
+    """后台补充待审核候选；强制零草稿、零邮件。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    return await _start_launch_runtime_job(
+        campaign_id=_launch_required(payload, "campaign_id"), mode="review_pool",
+        review_target=int(payload.get("review_target") or 20),
     )
 
 

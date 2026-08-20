@@ -16,6 +16,77 @@ class FakeRequest:
 
 
 class LaunchRouteTests(unittest.TestCase):
+    def test_profile_backfill_defaults_to_background_dry_run(self):
+        async def exercise():
+            main._relabel_profile_jobs.clear()
+            result = {"dry_run": True, "processed": 1, "writes": 0}
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.relabel, "run_profile_records", new=AsyncMock(return_value=result),
+            ) as run:
+                accepted = await main.start_relabel_kol_profiles(
+                    FakeRequest({"record_ids": ["kol1"]}), authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+                status = await main.get_relabel_kol_profile_job(
+                    accepted["job_id"], authorization="Bearer secret",
+                )
+            main._relabel_profile_jobs.clear()
+            return accepted, status, run
+
+        accepted, status, run = asyncio.run(exercise())
+
+        self.assertTrue(accepted["dry_run"])
+        self.assertEqual("success", status["status"])
+        self.assertEqual(0, status["result"]["writes"])
+        run.assert_awaited_once_with(["kol1"], dry_run=True, limit=1)
+
+    def test_profile_backfill_commit_requires_explicit_confirmation(self):
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.start_relabel_kol_profiles(
+                    FakeRequest({"record_ids": ["kol1"], "dry_run": False}),
+                    authorization="Bearer secret",
+                ))
+        self.assertEqual(400, ctx.exception.status_code)
+
+    def test_profile_backfill_rejects_string_boolean(self):
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.start_relabel_kol_profiles(
+                    FakeRequest({"record_ids": ["kol1"], "dry_run": "false"}),
+                    authorization="Bearer secret",
+                ))
+        self.assertEqual(400, ctx.exception.status_code)
+
+    def test_review_pool_job_never_calls_queue(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+            ), patch.object(
+                main.launch_runtime, "append_review_candidates",
+                new=AsyncMock(return_value={"created": 3, "drafts_created": 0, "emails_sent": 0}),
+            ) as append_review, patch.object(
+                main.launch_runtime, "queue_approved", new=AsyncMock(),
+            ) as queue:
+                accepted = await main.launch_runtime_review_pool(
+                    FakeRequest({"campaign_id": "c1", "review_target": 20}),
+                    authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+                status = await main.get_launch_runtime_job(
+                    accepted["job_id"], authorization="Bearer secret",
+                )
+            main._launch_runtime_jobs.clear()
+            return status, append_review, queue
+
+        status, append_review, queue = asyncio.run(exercise())
+
+        self.assertEqual("success", status["status"])
+        self.assertEqual(0, status["result"]["emails_sent"])
+        append_review.assert_awaited_once_with(campaign_id="c1", review_target=20)
+        queue.assert_not_awaited()
+
     def test_write_route_requires_internal_auth(self):
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(main.launch_evidence_start(FakeRequest({}), authorization=""))
