@@ -30,6 +30,15 @@ class LaunchAutonomyWorkflowScriptTests(unittest.TestCase):
         self.assertIn("$legacyAuditExisting", script)
         self.assertIn("/deactivate", script)
 
+    def test_dave_running_job_does_not_block_piranha_audit_branch(self):
+        script = (
+            pathlib.Path(__file__).parents[1]
+            / "scripts"
+            / "upsert_launch_autonomy_workflows.ps1"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("dave_running_within_expected_window", script)
+
 
 if __name__ == "__main__":
     unittest.main()

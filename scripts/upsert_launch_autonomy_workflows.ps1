@@ -152,6 +152,9 @@ $am = $auditState.map
 $validateDave = @'
 const data = $input.first().json;
 const age = Math.floor(Date.now() / 1000) - Number(data.updated_ts || data.started_ts || 0);
+if (data.status === 'running' && age <= 70 * 60) {
+  return [{json: {...data, validation: 'dave_running_within_expected_window'}}];
+}
 if (data.status !== 'success' || age > 70 * 60) {
   throw new Error('Dave latest autonomous job is not a fresh success: ' + JSON.stringify(data).slice(0, 1000));
 }

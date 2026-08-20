@@ -42,6 +42,15 @@
 - 活动相关156项测试通过。
 - 全仓417项中416项通过；唯一失败为既有Zeabur watchdog日期窗口fixture，与本次KOL改动无关。
 
+## 生产回读（2026-08-20）
+
+- Zeabur部署`6a872ac729f0931a12bf9e06`运行commit `79e04d4`，状态`RUNNING`，服务健康。
+- 食人花真实后台任务`launchruntime-1d80deea2fd6`完成：`status=success`、`business_outcome=supply_in_progress`、品牌剩余额度107、可发库存0、画像刷新写入30、新建定向发现任务4；系统没有为凑数量降低筛选标准。
+- n8n启动工作流`uvBfJBtGH93FPa6w`保持启用；00:35定时执行`969251`自动创建下一轮任务`launchruntime-474812ddcf12`，证明不依赖Codex会话触发。
+- n8n业务审计`1WOenWodtTRlUqWz`保持启用，正式频率为北京时间每小时12/27/42/57分；旧审计`ijIcjoYO9Jm1Vdkw`已停用。
+- 定时烟雾测试`969233`在两任务运行中成功；完成态测试`969242`成功读取食人花`business_result_ok / supply_in_progress / quota_remaining=107 / inventory_after=0 / made_supply_progress=true`。临时每分钟测试频率已恢复为正式15分钟频率。
+- 本轮最终全仓428项中427项通过；唯一失败仍为既有Zeabur watchdog日期窗口fixture，与本次改动无关。
+
 ## 剩余风险与观察项
 
 - 本地YouTube爬虫对异常响应的 `data` 缺失仍可能造成单个任务失败；活动补池会继续换未使用关键词补给，但该爬虫异常应另列P1修复。
