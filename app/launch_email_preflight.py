@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import json
 import os
 import re
 import time
@@ -20,6 +21,7 @@ PLACEHOLDER_MARKERS = (
 DEFAULT_TEST_EMAIL_ALLOWLIST = {"frankiepan501@gmail.com"}
 _RUN_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 _RUN_STATES: dict[tuple[str, str], dict] = {}
+LAUNCH_QUEUE_TEMPLATE_VERSION = "launch-queue-v1"
 
 
 def _monotonic() -> float:
@@ -194,8 +196,39 @@ async def _raw_for_message(brand: str, message: dict, sent_folder_id: str) -> st
     return await zoho.get_message_content(brand, message_id, sent_folder_id) if message_id else ""
 
 
+async def _activity_for_certificate(campaign_id: str, product_id: str) -> dict:
+    rows = await feishu.search_records(config.T_LAUNCH_CAMPAIGN, [{
+        "field_name": "活动ID", "operator": "is", "value": [campaign_id],
+    }])
+    exact = [row for row in rows if ext((row.get("fields") or {}).get("活动ID")) == campaign_id]
+    if len(exact) != 1:
+        raise RuntimeError("活动ID未唯一命中，Raw证书禁止写入")
+    if ext((exact[0].get("fields") or {}).get("产品主记录ID")) != product_id:
+        raise RuntimeError("活动产品与测试产品不一致，Raw证书禁止写入")
+    return exact[0]
+
+
+async def _persist_certificate(*, campaign_id: str, product_id: str, draft_id: str,
+                               brand: str, run_key: str, validation: dict) -> dict:
+    activity = await _activity_for_certificate(campaign_id, product_id)
+    cert = {
+        "campaign_id": campaign_id, "product_id": product_id, "brand": brand,
+        "template_version": LAUNCH_QUEUE_TEMPLATE_VERSION, "passed": True,
+        "passed_at": int(time.time() * 1000), "test_draft_id": draft_id,
+        "run_key": run_key, "checks": validation.get("checks") or {},
+    }
+    raw = json.dumps(cert, ensure_ascii=False, separators=(",", ":"))
+    await feishu.update_record(
+        config.T_LAUNCH_CAMPAIGN, activity["record_id"], {"邮件Raw验证证书": raw},
+    )
+    readback = await feishu.get_record(config.T_LAUNCH_CAMPAIGN, activity["record_id"])
+    if ext((readback.get("fields") or {}).get("邮件Raw验证证书")) != raw:
+        raise RuntimeError("Raw证书写入后回读不一致，禁止正式放行")
+    return cert
+
+
 async def send_and_validate(product_id: str, draft_id: str, brand: str, *, confirm: str,
-                            run_key: str) -> dict:
+                            run_key: str, campaign_id: str = "") -> dict:
     target = require_test_mode(confirm)
     brand = (brand or "").upper()
     if brand not in config.BRAND_CONFIG:
@@ -260,9 +293,16 @@ async def send_and_validate(product_id: str, draft_id: str, brand: str, *, confi
         )
         if not validation["passed"]:
             raise RawValidationError(f"测试邮箱 raw 内容校验失败: {validation['checks']}")
+    certificate = None
+    if campaign_id:
+        certificate = await _persist_certificate(
+            campaign_id=campaign_id, product_id=product_id, draft_id=draft_id,
+            brand=brand, run_key=run_key, validation=validation,
+        )
     return {
         "ok": True, "test_only": True, "brand": brand, "product_id": product_id,
         "draft_id": draft_id, "run_key": run_key, "message_id": message_id,
         "recipient": target, "subject": hit.get("subject") or "", "reused": reused,
         "validation": validation, "production_draft_rows_written": 0,
+        "certificate": certificate,
     }

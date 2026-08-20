@@ -58,6 +58,9 @@ LAUNCH_EVIDENCE_ENABLED = (env("LAUNCH_EVIDENCE_ENABLED", "0") or "0") == "1"
 LAUNCH_PARTICIPATION_WRITE_ENABLED = (
     env("LAUNCH_PARTICIPATION_WRITE_ENABLED", "0") or "0"
 ) == "1"
+LAUNCH_ACTIVITY_QUEUE_ENABLED = (
+    env("LAUNCH_ACTIVITY_QUEUE_ENABLED", "0") or "0"
+) == "1"
 
 # SKU 产品库 (采购治理源, 独立 wiki) — 产品英文名引用拼接用 (2026-06-02).
 # 非 secret, 给默认值避免漏配; 聪哥2号(bitable app)已是该库协作者.

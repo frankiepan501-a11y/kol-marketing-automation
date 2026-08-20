@@ -534,7 +534,7 @@ async def list_folders(brand: str):
     return await _list_folders_raw(brand)
 
 
-async def list_sent_messages(brand: str, limit: int = 30):
+async def list_sent_messages(brand: str, limit: int = 30, start: int = 0):
     folders = await _list_folders_raw(brand)
     sent_folder = None
     for f in folders:
@@ -550,7 +550,7 @@ async def list_sent_messages(brand: str, limit: int = 30):
     fid = sent_folder["folderId"]
     async with httpx.AsyncClient(timeout=30.0) as cli:
         r = await cli.get(
-            f"https://mail.zoho.com/api/accounts/{cfg['account_id']}/messages/view?folderId={fid}&limit={limit}&start=0",
+            f"https://mail.zoho.com/api/accounts/{cfg['account_id']}/messages/view?folderId={fid}&limit={limit}&start={start}",
             headers={"Authorization": f"Zoho-oauthtoken {tok}"},
         )
         r.raise_for_status()

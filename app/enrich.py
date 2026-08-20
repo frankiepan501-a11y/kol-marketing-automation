@@ -353,6 +353,23 @@ def _subscriber_count(value) -> int:
         return 0
 
 
+def _product_type_instruction(product_name: str, category: str) -> str:
+    """给生成模型明确产品类型，避免把底座和手柄互相写错。"""
+    text = f"{product_name} {category}".lower()
+    if any(marker in text for marker in ("dock", "底座", "充电座", "charging station")):
+        return (
+            "产品类型: 这是 Switch / Switch 2 dock（底座类配件），可称为 dock 或 "
+            "Switch accessory；严禁称为 controller / gamepad / 手柄。"
+        )
+    if any(marker in text for marker in ("controller", "gamepad", "手柄", "joy-con", "joycon")):
+        return (
+            "产品类型: 这是 controller / gamepad（手柄类配件）；严禁把整个产品叫成 dock，"
+            "除非只是在描述随附的充电底座。"
+        )
+    safe_name = (product_name or category or "gaming accessory").strip()
+    return f"产品类型: 这是 {safe_name}；只能按该名称/品类描述，严禁自行改成 controller 或 dock。"
+
+
 async def gen_draft(kol_record: dict, product: dict, brand: str,
                     signature: str, breakdown: dict, total: float) -> dict:
     k = kol_record["fields"]
@@ -386,6 +403,7 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
     p_price = pf.get("报价(USD)", 0)
     p_audience = ext(pf.get("目标人群"))
     p_media = ext(pf.get("媒体报道"))
+    product_type_instruction = _product_type_instruction(p_name, p_cat)
 
     # 时效由头 / News Hook (2026-06-08): 借势游戏 IP 上线节点(如戴夫 6/18 DLC). 空=行为不变.
     news_hook = ext(pf.get("时效由头"))
@@ -441,8 +459,7 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
      有几行放几行, 禁止改 href / 禁止合并成一行 / 禁止翻译或改写 <a> 标签里的文字 / 禁止增删链接。
   ✓ CTA 开放式: "Would you be curious to try one? Happy to send it over, no strings attached."
   ✗ 严禁内部 SKU 代号 (YM24/PK02/FL-JC 等), 严禁 <img>, 严禁中文混杂
-  ✗ 产品类型: 这是 Switch 2 无线手柄 (wireless controller / Switch 2 accessory), 充电底座只是随附配件 —
-     主题与正文必须称它为 controller / Switch 2 accessory, 严禁把整个产品叫成 "dock"
+  ✗ {product_type_instruction}
   ✗ 严禁在主题或正文出现任何价格 / 报价 / $ 金额
 
 📌 透明度: 说清品牌/产品, 不承诺佣金, 不推销腔

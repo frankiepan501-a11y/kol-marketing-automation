@@ -8,7 +8,7 @@ import uuid
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_participation, launch_outreach
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_participation, launch_outreach, launch_runtime
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
@@ -46,6 +46,8 @@ _DASHBOARD_REFRESH_JOB_TTL = 4 * 3600
 _DRAFT_REGEN_JOB_TTL = 6 * 3600
 _launch_preview_jobs = {}
 _LAUNCH_PREVIEW_JOB_TTL = 6 * 3600
+_launch_runtime_jobs = {}
+_LAUNCH_RUNTIME_JOB_TTL = 24 * 3600
 
 
 def _check_auth(auth: str):
@@ -2397,6 +2399,87 @@ async def launch_participants_lock(request: Request, authorization: str = Header
     ))
 
 
+def _prune_launch_runtime_jobs() -> None:
+    now = time.time()
+    for job_id in list(_launch_runtime_jobs):
+        if now - _launch_runtime_jobs[job_id].get("started_ts", 0) > _LAUNCH_RUNTIME_JOB_TTL:
+            _launch_runtime_jobs.pop(job_id, None)
+
+
+async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
+                                    pool_target: int = 100, queue_limit: int = 120) -> dict:
+    if not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
+        raise HTTPException(status_code=403, detail="活动队列写入开关未开启")
+    _prune_launch_runtime_jobs()
+    request_key = f"{mode}|{campaign_id}"
+    for job_id, job in _launch_runtime_jobs.items():
+        if job.get("status") == "running" and job.get("request_key") == request_key:
+            return {"ok": True, "accepted": True, "already_running": True,
+                    "job_id": job_id, "status": "running"}
+    job_id = "launchruntime-" + uuid.uuid4().hex[:12]
+    _launch_runtime_jobs[job_id] = {
+        "status": "running", "started_ts": time.time(),
+        "started_at": datetime_now_string(), "request_key": request_key,
+        "campaign_id": campaign_id, "mode": mode,
+    }
+
+    async def _job():
+        try:
+            if mode == "feedback":
+                result = await launch_runtime.daily_feedback(campaign_id)
+            else:
+                result = await launch_runtime.run_campaign(
+                    campaign_id=campaign_id, pool_target=pool_target,
+                    queue_limit=queue_limit,
+                )
+            _launch_runtime_jobs[job_id].update(
+                status="success", finished_at=datetime_now_string(), result=result,
+            )
+        except Exception as exc:
+            tr = _tb.format_exc()[-1000:]
+            _launch_runtime_jobs[job_id].update(
+                status="error", finished_at=datetime_now_string(), error=str(exc)[:500],
+            )
+            await _alert_endpoint_failure(f"/launch/runtime/{mode}", type(exc).__name__, tr)
+
+    asyncio.create_task(_job())
+    return {"ok": True, "accepted": True, "already_running": False,
+            "job_id": job_id, "status": "running"}
+
+
+@app.post("/launch/runtime/start")
+async def launch_runtime_start(request: Request, authorization: str = Header(default="")):
+    """后台执行全池预览→系统通过者补池→生成活动草稿；本接口不发邮件。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    return await _start_launch_runtime_job(
+        campaign_id=_launch_required(payload, "campaign_id"), mode="start",
+        pool_target=int(payload.get("pool_target") or 100),
+        queue_limit=int(payload.get("queue_limit") or 120),
+    )
+
+
+@app.post("/launch/runtime/feedback")
+async def launch_runtime_feedback(request: Request, authorization: str = Header(default="")):
+    """17:00 日反馈：按已发/回复/承诺自动决定扩池、保持或停止。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    return await _start_launch_runtime_job(
+        campaign_id=_launch_required(payload, "campaign_id"), mode="feedback",
+    )
+
+
+@app.get("/launch/runtime/jobs/{job_id}")
+async def get_launch_runtime_job(job_id: str, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    _prune_launch_runtime_jobs()
+    job = _launch_runtime_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found or expired")
+    public = {key: value for key, value in job.items() if key not in {"request_key", "started_ts"}}
+    return {"ok": True, "job_id": job_id, **public}
+
+
 @app.post("/launch/email/test-raw")
 async def launch_email_test_raw(
     authorization: str = Header(default=""),
@@ -2405,14 +2488,19 @@ async def launch_email_test_raw(
     brand: str = "FUNLAB",
     confirm: str = "",
     run_key: str = "",
+    campaign_id: str = "",
 ):
     """只发测试邮箱并回查 sent raw；全局 dry-run 未开启时硬拒绝。"""
     _check_auth(authorization)
-    if not product_id or not draft_id or not run_key:
-        raise HTTPException(status_code=400, detail="product_id, draft_id and run_key required")
+    if not product_id or not draft_id or not run_key or not campaign_id:
+        raise HTTPException(
+            status_code=400,
+            detail="campaign_id, product_id, draft_id and run_key required",
+        )
     try:
         return await launch_email_preflight.send_and_validate(
             product_id, draft_id, brand, confirm=confirm, run_key=run_key,
+            campaign_id=campaign_id,
         )
     except launch_email_preflight.RawValidationError as e:
         tr = _tb.format_exc()[-1000:]

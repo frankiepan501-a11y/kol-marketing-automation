@@ -9,7 +9,7 @@ n8n cron 每 10 分钟触发 → 扫「KOL·媒体人邮件草稿」状态=自�
 - 编辑: 合作状态 未建联→建联中
 - 跟进记录表: 新增一条
 """
-import re, time, asyncio, random
+import json, re, time, asyncio, random
 from . import config, feishu, zoho, coop_status
 from .feishu import ext, xrid
 from .product_dispatch_mode import (
@@ -86,6 +86,7 @@ _dryrun_alerted = False    # 一次性提醒去重 (DRY-RUN 清掉后重置 → 
 _run_lock = asyncio.Lock()
 # 只有活动单人放行模块能显式传入这个进程内对象；常规调用无法因布尔值误开活动锁。
 _LAUNCH_ACTIVITY_RELEASE = object()
+LAUNCH_QUEUE_TEMPLATE_VERSION = "launch-queue-v1"
 
 
 async def _dryrun_alert_once(dry_to: str):
@@ -140,6 +141,140 @@ def _contact_rid_of(f: dict) -> str:
 
 def _product_rid_of(f: dict) -> str:
     return xrid(f.get("关联产品")) or ""
+
+
+def _link_ids(value) -> set[str]:
+    if isinstance(value, dict):
+        return set(value.get("link_record_ids") or value.get("record_ids") or [])
+    if isinstance(value, list):
+        out = set()
+        for item in value:
+            if isinstance(item, str):
+                out.add(item)
+            elif isinstance(item, dict):
+                out.update(item.get("link_record_ids") or item.get("record_ids") or [])
+        return out
+    return set()
+
+
+def _is_activity_queue_draft(rec: dict) -> bool:
+    return _draft_id_of(rec.get("fields") or {}).startswith("launchq-")
+
+
+def _valid_raw_certificate(af: dict, *, campaign_id: str, product_id: str, brand: str) -> bool:
+    try:
+        cert = json.loads(ext(af.get("邮件Raw验证证书")) or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(
+        cert.get("passed") is True
+        and cert.get("campaign_id") == campaign_id
+        and cert.get("product_id") == product_id
+        and str(cert.get("brand") or "").upper() == brand
+        and cert.get("template_version") == LAUNCH_QUEUE_TEMPLATE_VERSION
+    )
+
+
+def validate_activity_queue_gate(activity: dict, participant: dict, draft: dict) -> tuple[bool, list[str]]:
+    """纯规则校验：活动草稿只有在正式活动、精确参与记录和版本一致时才可发送。"""
+    af = activity.get("fields") or {}
+    pf = participant.get("fields") or {}
+    df = draft.get("fields") or {}
+    campaign_id = ext(af.get("活动ID"))
+    product_id = _product_rid_of(df)
+    contact_id = _contact_rid_of(df)
+    version = ext(af.get("KOL已锁定名单版本"))
+    ranking_version = ext(af.get("证据排序版本"))
+    brand = _brand_from_alias(ext(df.get("发送邮箱")))
+    checks = {
+        "活动队列草稿": _is_activity_queue_draft(draft),
+        "运行模式": ext(af.get("运行模式")) == "正式运行",
+        "活动状态": ext(af.get("状态")) == "正式执行中",
+        "发送邮件授权": bool(af.get("发送邮件授权")),
+        "名单锁定授权": bool(af.get("名单锁定授权")),
+        "锁定版本一致": bool(version) and version == ranking_version,
+        "活动ID": bool(campaign_id) and ext(pf.get("活动ID")) == campaign_id,
+        "产品": bool(product_id) and ext(af.get("产品主记录ID")) == product_id
+              and ext(pf.get("产品家族ID")) == product_id,
+        "联系人": bool(contact_id) and contact_id in _link_ids(pf.get("关联KOL"))
+                  and contact_id in _link_ids(df.get("关联KOL")),
+        "关联草稿": draft.get("record_id") in _link_ids(pf.get("关联邮件草稿")),
+        "参与状态": ext(pf.get("参与状态")) == "已入围",
+        "审核结论": ext(pf.get("审核结论")) == "通过",
+        "进入方式": ext(pf.get("进入方式")) == "新开发",
+        "活动分池": ext(pf.get("活动分池")) == "新开发池",
+        "名单版本": bool(version) and ext(pf.get("名单版本")) == version
+                    and ext(pf.get("排序版本")) == version,
+        "Raw验证证书": _valid_raw_certificate(
+            af, campaign_id=campaign_id, product_id=product_id, brand=brand,
+        ),
+        "名单阻塞": not ext(af.get("KOL名单阻塞代码")),
+    }
+    reasons = [name for name, passed in checks.items() if not passed]
+    return not reasons, reasons
+
+
+async def resolve_activity_queue_releases(ready: list[dict]) -> tuple[set[str], int]:
+    """一次读全活动表和参与表，为 ready 草稿生成进程内放行集合。"""
+    activity_drafts = [rec for rec in ready if _is_activity_queue_draft(rec)]
+    if not activity_drafts:
+        return set(), 0
+    participants, activities = await asyncio.gather(
+        feishu.fetch_all_records(config.T_LAUNCH_PARTICIPANT, page_size=500),
+        feishu.fetch_all_records(config.T_LAUNCH_CAMPAIGN, page_size=100),
+    )
+    participant_by_draft = {}
+    for row in participants:
+        for draft_id in _link_ids((row.get("fields") or {}).get("关联邮件草稿")):
+            participant_by_draft.setdefault(draft_id, []).append(row)
+    activity_by_campaign = {
+        ext((row.get("fields") or {}).get("活动ID")): row for row in activities
+    }
+    released = set()
+    failures = 0
+    for draft in activity_drafts:
+        rows = participant_by_draft.get(draft["record_id"], [])
+        if len(rows) != 1:
+            failures += 1
+            continue
+        participant = rows[0]
+        campaign_id = ext((participant.get("fields") or {}).get("活动ID"))
+        activity = activity_by_campaign.get(campaign_id)
+        if not activity:
+            failures += 1
+            continue
+        ok, reasons = validate_activity_queue_gate(activity, participant, draft)
+        if ok:
+            released.add(draft["record_id"])
+        else:
+            failures += 1
+            print(f"[auto_send] activity queue held rid={draft['record_id']}: {','.join(reasons)}")
+    return released, failures
+
+
+async def zoho_sent_counts_24h(brands: list[str] | None = None) -> tuple[dict, dict]:
+    """从 Zoho 发件箱取权威滚动 24h 数；失败品牌返回 errors，调用方对活动流 fail-closed。"""
+    cutoff = int(time.time() * 1000) - 86_400_000
+    brands = brands or list(config.BRAND_CONFIG)
+    counts, errors = {}, {}
+    for brand in brands:
+        try:
+            messages = []
+            for start in (0, 100):
+                data = await zoho.list_sent_messages(brand, limit=100, start=start)
+                if data.get("error"):
+                    raise RuntimeError(data["error"])
+                page = data.get("messages") or []
+                messages.extend(page)
+                if len(page) < 100:
+                    break
+            counts[brand] = sum(
+                int(msg.get("sentDateInGMT") or msg.get("receivedTime") or 0) >= cutoff
+                for msg in messages
+            )
+        except Exception as exc:
+            errors[brand] = str(exc)[:180]
+    return counts, errors
 
 
 def _is_ready_status(f: dict) -> bool:
@@ -483,7 +618,7 @@ async def scan_ready() -> tuple:
                 print(f"[auto_send] product lock read fail, block this run rid={rec['record_id']} product={product_rid}: {e}")
                 skip_product_lock_read += 1
                 continue
-            if locked_mode:
+            if locked_mode and not _is_activity_queue_draft(rec):
                 await _deny_product_locked_ready(rec, locked_mode)
                 skip_product_locked += 1
                 continue
@@ -1095,6 +1230,26 @@ async def _run_unlocked() -> dict:
             "msg": "no ready drafts" if not lock_validation_failures else "product lock validation blocked drafts",
         }
 
+    activity_releases, activity_gate_failures = await resolve_activity_queue_releases(ready)
+    lock_validation_failures += activity_gate_failures
+    # 未拿到活动放行证明的 launchq 草稿只排队等待，不否决、不调用发送器。
+    ready = [
+        rec for rec in ready
+        if not _is_activity_queue_draft(rec) or rec["record_id"] in activity_releases
+    ]
+
+    # Zoho 发件箱是账号真实发送量；Bitable 是业务记录量。限额取两者较大值。
+    zoho_counts, zoho_count_errors = await zoho_sent_counts_24h()
+    for brand, count in zoho_counts.items():
+        sent_24h[brand] = max(sent_24h.get(brand, 0), count)
+    if zoho_count_errors:
+        # 只对活动批量流 fail-closed；不改变原有常规/回复链的可用性。
+        ready = [
+            rec for rec in ready
+            if not (_is_activity_queue_draft(rec)
+                    and _brand_from_alias(ext(rec["fields"].get("发送邮箱"))) in zoho_count_errors)
+        ]
+
     # 按品牌分组 (2026-06-08 配置驱动: 含白牌, 否则白牌草稿 KeyError 崩)
     by_brand = {b: [] for b in config.BRAND_CONFIG}
     for r in ready:
@@ -1136,7 +1291,12 @@ async def _run_unlocked() -> dict:
         b = _brand_from_alias(ext(rec["fields"].get("发送邮箱")))
         if b in _paused_brands:
             continue     # 本轮内该品牌已被暂停 → 跳过其剩余草稿
-        r = await send_one(rec)
+        r = await send_one(
+            rec,
+            activity_release=(
+                _LAUNCH_ACTIVITY_RELEASE if rec["record_id"] in activity_releases else None
+            ),
+        )
         results.append(r)
         if r.get("skipped"):
             runtime_locked_skipped += 1
@@ -1164,6 +1324,8 @@ async def _run_unlocked() -> dict:
         "runtime_locked_skipped": runtime_locked_skipped,
         "queue_size": len(queue),
         "caps": caps_info,
+        "zoho_sent_24h": zoho_counts,
+        "zoho_count_errors": zoho_count_errors,
         "paused_brands": dict(_paused_brands),
         "details": results[:10],
     }
