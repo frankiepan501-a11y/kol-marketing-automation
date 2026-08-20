@@ -163,17 +163,35 @@ if (data.status === 'running' && age <= 45 * 60) {
   return [{json: {...data, validation: 'running_within_expected_window'}}];
 }
 const result = data.result || {};
-const remaining = Number((result.quota || {}).remaining || 0);
-const inventory = Number(result.inventory_after || 0);
-const progress = Number(result.supply_progress || 0);
 if (data.status !== 'success' || age > 35 * 60) {
   throw new Error('Piranha autonomous job is stale or not successful: ' + JSON.stringify(data).slice(0, 1000));
 }
-if (result.business_outcome === 'supply_blocked'
-    || (result.action === 'expand' && remaining > 0 && inventory === 0 && progress <= 0)) {
+const allowedOutcomes = new Set([
+  'stopped', 'held', 'inventory_sufficient', 'quota_exhausted',
+  'ready_inventory_created', 'supply_in_progress', 'supply_blocked', 'no_action_needed',
+]);
+const hasQuota = result.quota && Number.isFinite(result.quota.remaining);
+const hasInventory = Number.isFinite(result.inventory_after);
+const hasProgress = typeof result.made_supply_progress === 'boolean'
+  && result.supply_progress_breakdown
+  && typeof result.supply_progress_breakdown === 'object'
+  && !Array.isArray(result.supply_progress_breakdown);
+if (!allowedOutcomes.has(result.business_outcome) || !hasQuota || !hasInventory || !hasProgress) {
+  throw new Error('Piranha missing or invalid business result fields: ' + JSON.stringify(data).slice(0, 1000));
+}
+if (result.business_outcome === 'supply_blocked') {
   throw new Error('Piranha has unused quota but refill made no supply progress: ' + JSON.stringify(data).slice(0, 1000));
 }
-return [{json: {...data, validation: 'business_result_ok'}}];
+return [{json: {
+  status: data.status, updated_ts: data.updated_ts, validation: 'business_result_ok',
+  result: {
+    business_outcome: result.business_outcome,
+    quota_remaining: result.quota.remaining,
+    inventory_after: result.inventory_after,
+    made_supply_progress: result.made_supply_progress,
+    supply_progress_breakdown: result.supply_progress_breakdown,
+  },
+}}];
 '@
 $auditNodes = @(
     @{

@@ -68,6 +68,65 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         self.assertTrue(all(f["关键词列表"] != "dave the diver gameplay" for f in created_fields))
         self.assertTrue(all(f["筛选-语言"][0] in {"en", "de", "es"} for f in created_fields))
 
+    def test_dave_does_not_use_piranha_dynamic_keyword_generation(self):
+        used = [
+            {"fields": {
+                "任务名": "[活动补池:campaign1] YT KOL - " + word,
+                "关键词列表": word, "爬虫类型": "KOL-YouTube",
+                "任务状态": "3-已完成", "筛选-语言": ["en"],
+            }}
+            for word in keyword_supply._CAMPAIGN_KEYWORDS["dave"]["en"]
+        ]
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "FUNLAB Dave the Diver Controller"}}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=used),
+        ), patch.object(
+            keyword_supply.deepseek, "chat_json", new=AsyncMock(),
+        ) as generate, patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(),
+        ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, dry_run=False,
+            ))
+
+        generate.assert_not_awaited()
+        self.assertEqual("none", result["keyword_source"])
+        self.assertGreater(result["shortfall_tasks"], 0)
+
+    def test_stale_pending_campaign_tasks_do_not_count_as_active_supply(self):
+        old_ms = int(keyword_supply.time.time() * 1000) - keyword_supply.DISCOVERY_ACTIVE_TTL_MS - 1
+        rows = [{"fields": {
+            "任务名": "[活动补池:campaign1] YT KOL - old task",
+            "关键词列表": "old task", "任务状态": "1-待触发",
+            "创建日期": old_ms,
+        }}]
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=rows),
+        ), patch.object(
+            keyword_supply.deepseek, "chat_json",
+            new=AsyncMock(return_value={"keywords": [
+                "mario switch collection showcase",
+                "nintendo desk setup review",
+                "super mario collector room tour",
+            ]}),
+        ), patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(return_value="task1"),
+        ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=120, dry_run=False,
+            ))
+
+        self.assertEqual(0, result["active_pending_before"])
+        self.assertEqual(1, result["stale_pending_before"])
+        self.assertGreater(result["created"], 0)
+
     def test_market_configuration_includes_portuguese_brazil(self):
         portuguese = [m for m in keyword_supply.MARKETS if m["lang"] == "pt"]
 

@@ -19,6 +19,7 @@ from .feishu import ext
 
 T_CRAWLER = "tblQnLHnBa1RjJUE"   # 爬虫任务台 (KOL 营销库内)
 PER_BATCH_LIMIT = 50            # 每词 daemon 抓取上限
+DISCOVERY_ACTIVE_TTL_MS = 2 * 60 * 60 * 1000
 
 # 市场配置: 英语为主(水位15), 非英语市场(产品在卖+KOL库不足)各保持小水位
 MARKETS = [
@@ -117,13 +118,27 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         if ext((row.get("fields") or {}).get("关键词列表")).strip()
     }
     prefix = f"[活动补池:{campaign_id}]"
-    pending_for_campaign = sum(
-        ext((row.get("fields") or {}).get("任务名")).startswith(prefix)
-        and ext((row.get("fields") or {}).get("任务状态")) == "1-待触发"
-        for row in rows
-    )
+    now_ms = int(time.time() * 1000)
+    active_pending_for_campaign = 0
+    stale_pending_for_campaign = 0
+    for row in rows:
+        row_fields = row.get("fields") or {}
+        if not ext(row_fields.get("任务名")).startswith(prefix):
+            continue
+        if ext(row_fields.get("任务状态")) not in {"1-待触发", "2-执行中"}:
+            continue
+        try:
+            created_ms = int(float(row_fields.get("创建日期") or 0))
+            if 0 < created_ms < 100_000_000_000:
+                created_ms *= 1000
+        except (TypeError, ValueError):
+            created_ms = 0
+        if created_ms and 0 <= now_ms - created_ms <= DISCOVERY_ACTIVE_TTL_MS:
+            active_pending_for_campaign += 1
+        else:
+            stale_pending_for_campaign += 1
     target_tasks = max(3, min(9, math.ceil(max(1, int(required_candidates)) / 50)))
-    need = max(0, target_tasks - pending_for_campaign)
+    need = max(0, target_tasks - active_pending_for_campaign)
     candidates = []
     while need and any(_CAMPAIGN_KEYWORDS[theme].get(lang) for lang in languages):
         progressed = False
@@ -143,7 +158,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
 
     keyword_source = "deterministic" if candidates else "none"
     generation_error = ""
-    if need:
+    if need and theme == "piranha":
         prompt = f"""你是海外游戏KOL发现助手。为{theme}主题新品活动补充YouTube创作者搜索词。
 目标语言只能从 {languages} 选择。搜索对象必须是Nintendo/Switch、Mario收藏、主机游戏房或游戏硬件评测创作者；
 不要生成产品购买词、店铺词、官方频道词，不要重复这些词：{sorted(existing_keywords)[-80:]}。
@@ -178,7 +193,10 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         return {
             "ok": True, "created": 0, "would_create": len(candidates),
             "keywords": [{"language": lang, "keyword": word} for lang, word in candidates],
-            "pending_before": pending_for_campaign, "target_tasks": target_tasks,
+            "pending_before": active_pending_for_campaign + stale_pending_for_campaign,
+            "active_pending_before": active_pending_for_campaign,
+            "stale_pending_before": stale_pending_for_campaign,
+            "target_tasks": target_tasks,
             "keyword_source": keyword_source, "shortfall_tasks": need,
             "generation_error": generation_error,
         }
@@ -202,7 +220,10 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         generation_error = f"仍缺{need}个未使用的活动发现关键词"
     return {
         "ok": not errors and not generation_error, "created": created, "errors": errors[:5],
-        "pending_before": pending_for_campaign, "target_tasks": target_tasks,
+        "pending_before": active_pending_for_campaign + stale_pending_for_campaign,
+        "active_pending_before": active_pending_for_campaign,
+        "stale_pending_before": stale_pending_for_campaign,
+        "target_tasks": target_tasks,
         "keywords": [{"language": lang, "keyword": word} for lang, word in candidates],
         "keyword_source": keyword_source, "shortfall_tasks": need,
         "generation_error": generation_error,

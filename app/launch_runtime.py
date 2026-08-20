@@ -311,7 +311,11 @@ async def append_review_candidates(*, campaign_id: str, review_target: int = 20,
             ranking_fields["审核原因"] = ""
             ranking_fields["审核人"] = None
             ranking_fields["审核时间"] = None
-            reason_codes = _pending_review_reason_codes(candidate)
+            reason_codes = list(dict.fromkeys(
+                str(code).strip()
+                for code in (candidate.get("base_filter_reason_codes") or [])
+                if str(code).strip()
+            ))
             if reason_codes:
                 ranking_fields["审核原因代码"] = reason_codes
             if ranking_fields.get("系统审核分流") == "系统建议通过":
@@ -357,32 +361,6 @@ async def append_review_candidates(*, campaign_id: str, review_target: int = 20,
         "batch_id": batch_id, "participant_ids": created,
         "drafts_created": 0, "emails_sent": 0,
     }
-
-
-def _pending_review_reason_codes(candidate: dict) -> list[str]:
-    """把机器筛选原因收敛为运营可复用的活动原因码。"""
-    mapping = {
-        "目标主机不匹配": "目标主机不匹配",
-        "Nintendo/Mario受众或近期硬件内容不匹配": "核心游戏/IP不匹配",
-        "近期目标游戏/主机内容占比不足": "核心游戏/IP不匹配",
-        "近期内容缺少Nintendo/Switch或硬件评测证据": "核心游戏/IP不匹配",
-        "内容风格不匹配": "硬件/配件内容不足",
-        "内容垂类不是主机游戏或游戏硬件评测": "非游戏或泛娱乐",
-        "最近发布记录缺失或过期": "活跃度不足",
-        "国家不在活动目标市场": "地区/语言不匹配",
-        "国家不在销售市场": "地区/语言不匹配",
-        "语言不在活动目标范围": "地区/语言不匹配",
-        "语言不匹配": "地区/语言不匹配",
-        "资料缺失或过期": "资料缺失或过期",
-        "人工核实已过期": "资料缺失或过期",
-        "标签版本不是v2": "资料缺失或过期",
-    }
-    values = []
-    for reason in candidate.get("base_filter_reasons") or []:
-        code = mapping.get(str(reason).strip())
-        if code and code not in values:
-            values.append(code)
-    return values
 
 
 async def _find_queue_draft(queue_key: str) -> dict | None:
@@ -730,7 +708,10 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
     """按活动进度与邮箱余量自治补池；不直接发送邮件，也不降低筛选标准。"""
     lock = _LOCKS.setdefault(campaign_id, asyncio.Lock())
     if lock.locked():
-        return {"campaign_id": campaign_id, "already_running": True}
+        return _with_business_outcome({
+            "campaign_id": campaign_id, "already_running": True,
+            "action": "hold", "held": True, "runtime": "already_running",
+        })
     async with lock:
         activity = await launch_evidence.get_activity(campaign_id)
         activity_fields = activity.get("fields") or {}
@@ -738,13 +719,13 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             ext(activity_fields.get("运行模式")) != "正式运行"
             or ext(activity_fields.get("状态")) != "正式执行中"
         ):
-            return {
+            return _with_business_outcome({
                 "campaign_id": campaign_id, "already_running": False,
                 "action": "hold", "held": True,
                 "runtime": "campaign_not_formally_active",
                 "reason": "活动不是正式运行/正式执行中，自治补池保持暂停",
                 "quality_filters_lowered": False,
-            }
+            })
         try:
             window_end = int(activity_fields.get("窗口结束") or 0)
         except (TypeError, ValueError):
@@ -754,22 +735,26 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                 config.T_LAUNCH_CAMPAIGN, activity["record_id"],
                 {"发送邮件授权": False},
             )
-            return {
+            return _with_business_outcome({
                 "campaign_id": campaign_id, "already_running": False,
                 "action": "stop", "stopped": True,
                 "runtime": "campaign_window_ended",
                 "reason": "活动窗口已结束，已关闭邮件授权并停止补池",
                 "quality_filters_lowered": False,
-            }
+            })
         metrics = await campaign_metrics(campaign_id)
         if metrics["action"] == "stop":
             await feishu.update_record(
                 config.T_LAUNCH_CAMPAIGN, activity["record_id"],
                 {"发送邮件授权": False},
             )
-            return {**metrics, "already_running": False, "stopped": True}
+            return _with_business_outcome({
+                **metrics, "already_running": False, "stopped": True,
+            })
         if metrics["action"] == "hold":
-            return {**metrics, "already_running": False, "held": True}
+            return _with_business_outcome({
+                **metrics, "already_running": False, "held": True,
+            })
 
         product_id = ext(activity_fields.get("产品主记录ID")).strip()
         if not product_id:
@@ -786,13 +771,13 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
         )
         inventory_before = await _campaign_ready_inventory(campaign_id)
         if inventory_before["ready"] >= target_ready:
-            return {
+            return _with_business_outcome({
                 **metrics, "already_running": False, "brand": brand,
                 "quota": quota, "target_ready_inventory": target_ready,
                 "inventory_before": inventory_before["ready"],
                 "inventory_after": inventory_before["ready"],
                 "runtime": "inventory_sufficient",
-            }
+            })
 
         preview = await launch_candidate_preview.preview_candidates(
             "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
@@ -883,17 +868,26 @@ def _section_count(result: dict, section: str, key: str) -> int:
 
 def _with_business_outcome(result: dict) -> dict:
     """给后台任务补业务结果；HTTP没报错不再等同于补池成功。"""
-    progress = sum((
-        _section_count(result, "append", "created"),
-        _section_count(result, "queue", "queued"),
-        _section_count(result, "profile_refresh", "writes"),
-        _section_count(result, "append_after_refresh", "created"),
-        _section_count(result, "queue_after_refresh", "queued"),
-        _section_count(result, "discovery", "created"),
-        _section_count(result, "review_pool", "created"),
-    ))
+    progress_breakdown = {
+        "auto_approved_created": _section_count(result, "append", "created"),
+        "drafts_queued": _section_count(result, "queue", "queued"),
+        "profile_refresh_writes": _section_count(result, "profile_refresh", "writes"),
+        "auto_approved_after_refresh": _section_count(
+            result, "append_after_refresh", "created",
+        ),
+        "drafts_queued_after_refresh": _section_count(
+            result, "queue_after_refresh", "queued",
+        ),
+        "discovery_tasks_created": _section_count(result, "discovery", "created"),
+        "active_discovery_tasks": _section_count(
+            result, "discovery", "active_pending_before",
+        ),
+        "review_candidates_created": _section_count(result, "review_pool", "created"),
+    }
+    made_supply_progress = any(value > 0 for value in progress_breakdown.values())
+    raw_quota = result.get("quota") if isinstance(result.get("quota"), dict) else {}
     try:
-        remaining = max(0, int((result.get("quota") or {}).get("remaining") or 0))
+        remaining = max(0, int(raw_quota.get("remaining") or 0))
     except (TypeError, ValueError):
         remaining = 0
     try:
@@ -911,13 +905,20 @@ def _with_business_outcome(result: dict) -> dict:
         outcome = "quota_exhausted"
     elif inventory_after > 0:
         outcome = "ready_inventory_created"
-    elif progress > 0:
+    elif made_supply_progress:
         outcome = "supply_in_progress"
     elif result.get("action") == "expand":
         outcome = "supply_blocked"
     else:
         outcome = "no_action_needed"
-    return {**result, "business_outcome": outcome, "supply_progress": progress}
+    return {
+        **result,
+        "quota": {**raw_quota, "remaining": remaining},
+        "inventory_after": inventory_after,
+        "business_outcome": outcome,
+        "made_supply_progress": made_supply_progress,
+        "supply_progress_breakdown": progress_breakdown,
+    }
 
 
 def runtime_job_status(result: dict | None) -> str:
@@ -932,7 +933,8 @@ def _runtime_result_summary(result: dict | None) -> dict:
             "action", "brand", "participants", "sent", "replies", "commitments",
             "ontime_posts", "target_ready_inventory", "inventory_before", "inventory_after",
             "inventory_after_master", "stopped", "held", "quality_filters_lowered",
-            "runtime", "business_outcome", "supply_progress",
+            "runtime", "business_outcome", "made_supply_progress",
+            "supply_progress_breakdown",
         ) if key in result
     } | ({"quota": quota} if quota else {})
 

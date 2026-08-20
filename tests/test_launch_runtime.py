@@ -185,6 +185,7 @@ class LaunchRuntimeTests(unittest.TestCase):
         candidate = {
             "contact_id": "missing1", "decision": "eligible_new_cold",
             "base_filter_passed": False, "base_filter_reasons": ["资料缺失或过期"],
+            "base_filter_reason_codes": ["资料缺失或过期"],
             "profile_refresh_needed": True, "review_decision": "待补资料",
             "review_route": "KOL运营审核", "country": "US", "language": "en",
             "platform": "YouTube", "profile_url": "https://youtube.com/@missing",
@@ -272,7 +273,8 @@ class LaunchRuntimeTests(unittest.TestCase):
             result = asyncio.run(launch_runtime.autonomous_refill(campaign_id="campaign1"))
 
         self.assertEqual("supply_blocked", result["business_outcome"])
-        self.assertEqual(0, result["supply_progress"])
+        self.assertFalse(result["made_supply_progress"])
+        self.assertEqual(0, sum(result["supply_progress_breakdown"].values()))
         self.assertEqual(107, result["quota"]["remaining"])
         self.assertEqual(0, result["inventory_after"])
 
@@ -350,7 +352,48 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertTrue(review.await_args.kwargs["operator_only"])
         self.assertEqual(12, result["inventory_after"])
         self.assertEqual("ready_inventory_created", result["business_outcome"])
-        self.assertGreater(result["supply_progress"], 0)
+        self.assertTrue(result["made_supply_progress"])
+        self.assertGreater(sum(result["supply_progress_breakdown"].values()), 0)
+
+    def test_existing_pending_discovery_tasks_keep_supply_in_progress(self):
+        result = launch_runtime._with_business_outcome({
+            "action": "expand",
+            "quota": {"remaining": 107},
+            "inventory_after": 0,
+            "append": {"created": 0},
+            "queue": {"queued": 0},
+            "profile_refresh": {"writes": 0},
+            "append_after_refresh": {"created": 0},
+            "queue_after_refresh": {"queued": 0},
+            "discovery": {"created": 0, "active_pending_before": 4,
+                          "stale_pending_before": 0},
+            "review_pool": {"created": 0},
+        })
+
+        self.assertEqual("supply_in_progress", result["business_outcome"])
+        self.assertTrue(result["made_supply_progress"])
+        self.assertEqual(4, result["supply_progress_breakdown"]["active_discovery_tasks"])
+
+    def test_stale_pending_discovery_tasks_do_not_mask_supply_block(self):
+        result = launch_runtime._with_business_outcome({
+            "action": "expand", "quota": {"remaining": 107}, "inventory_after": 0,
+            "discovery": {"created": 0, "active_pending_before": 0,
+                          "stale_pending_before": 4},
+        })
+
+        self.assertEqual("supply_blocked", result["business_outcome"])
+        self.assertFalse(result["made_supply_progress"])
+
+    def test_early_hold_result_has_complete_business_contract(self):
+        result = launch_runtime._with_business_outcome({
+            "campaign_id": "campaign1", "action": "hold", "held": True,
+            "runtime": "campaign_not_formally_active",
+        })
+
+        self.assertEqual("held", result["business_outcome"])
+        self.assertEqual(0, result["quota"]["remaining"])
+        self.assertEqual(0, result["inventory_after"])
+        self.assertFalse(result["made_supply_progress"])
 
     def test_autonomous_refill_holds_when_campaign_is_not_formally_active(self):
         metrics = {

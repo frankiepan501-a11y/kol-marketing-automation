@@ -69,7 +69,8 @@ class LaunchRouteTests(unittest.TestCase):
             main._launch_runtime_jobs.clear()
             blocked = {
                 "action": "expand", "business_outcome": "supply_blocked",
-                "supply_progress": 0, "inventory_after": 0,
+                "made_supply_progress": False,
+                "supply_progress_breakdown": {}, "inventory_after": 0,
                 "quota": {"remaining": 107},
             }
             with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(

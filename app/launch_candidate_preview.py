@@ -479,54 +479,61 @@ def _nintendo_switch_profile_evidence(fields: dict, *, now_ms: int) -> dict:
     }
 
 
-def _nintendo_switch_profile_reasons(fields: dict, *, now_ms: int | None = None) -> list[str]:
-    """把本次人工审核结论固化为可回放的结构化硬规则。"""
+def _nintendo_switch_profile_issues(
+    fields: dict, *, now_ms: int | None = None,
+) -> list[tuple[str, str]]:
+    """返回(展示原因,稳定原因码)，业务码在判断点生成而非反推文案。"""
     now_ms = now_ms or int(time.time() * 1000)
     evidence = _nintendo_switch_profile_evidence(fields, now_ms=now_ms)
-    reasons: list[str] = []
+    issues: list[tuple[str, str]] = []
     readiness = evidence["readiness"]
     if readiness == "活跃度不足":
-        reasons.append("活跃度不足")
+        issues.append(("活跃度不足", "活跃度不足"))
     elif readiness not in PROFILE_READY_STATES:
-        reasons.append("资料缺失或过期")
+        issues.append(("资料缺失或过期", "资料缺失或过期"))
     elif evidence["manual_verified"]:
         verified_age = evidence["verified_age_days"]
         if verified_age is None or verified_age > PROFILE_FRESH_DAYS:
-            reasons.append("人工核实已过期")
+            issues.append(("人工核实已过期", "资料缺失或过期"))
     else:
         if evidence["tag_version"] != "v2":
-            reasons.append("标签版本不是v2")
+            issues.append(("标签版本不是v2", "资料缺失或过期"))
         age = evidence["captured_age_days"]
         if age is None or age > PROFILE_FRESH_DAYS:
-            reasons.append("资料缺失或过期")
+            issues.append(("资料缺失或过期", "资料缺失或过期"))
         if evidence["posts_90d"] < PROFILE_MIN_POSTS_90D:
-            reasons.append("活跃度不足")
+            issues.append(("活跃度不足", "活跃度不足"))
         last_post_age = evidence["last_post_age_days"]
         if last_post_age is None or last_post_age > PROFILE_ACTIVE_DAYS:
-            reasons.append("最近发布记录缺失或过期")
+            issues.append(("最近发布记录缺失或过期", "活跃度不足"))
 
     ecosystems = set(evidence["ecosystems"])
     if not (ecosystems & SWITCH_ECOSYSTEMS):
-        reasons.append("目标主机不匹配")
+        issues.append(("目标主机不匹配", "目标主机不匹配"))
 
     vertical = evidence["content_vertical"]
     if vertical not in SWITCH_PROFILE_VERTICALS:
-        reasons.append("内容垂类不是主机游戏或游戏硬件评测")
+        issues.append(("内容垂类不是主机游戏或游戏硬件评测", "非游戏或泛娱乐"))
     has_nintendo_audience = bool(evidence["ip_matches"] or evidence["recent_nintendo_matches"])
     has_recent_hardware = bool(
         vertical == "游戏硬件评测" and evidence["recent_hardware_matches"]
     )
     if not (has_nintendo_audience or has_recent_hardware):
-        reasons.append("Nintendo/Mario受众或近期硬件内容不匹配")
+        issues.append(("Nintendo/Mario受众或近期硬件内容不匹配", "核心游戏/IP不匹配"))
     if not evidence["manual_verified"]:
         if evidence["recent_target_title_count"] < PROFILE_MIN_TARGET_TITLES:
-            reasons.append("近期目标游戏/主机内容占比不足")
+            issues.append(("近期目标游戏/主机内容占比不足", "核心游戏/IP不匹配"))
         if not (evidence["recent_nintendo_title_count"] or has_recent_hardware):
-            reasons.append("近期内容缺少Nintendo/Switch或硬件评测证据")
+            issues.append(("近期内容缺少Nintendo/Switch或硬件评测证据", "核心游戏/IP不匹配"))
     if ((evidence["negative_ip_matches"] or evidence["negative_recent_matches"])
             and not (evidence["recent_nintendo_matches"] or has_recent_hardware)):
-        reasons.append("近期或主要内容存在明显非目标游戏/IP信号")
-    return reasons
+        issues.append(("近期或主要内容存在明显非目标游戏/IP信号", "核心游戏/IP不匹配"))
+    return issues
+
+
+def _nintendo_switch_profile_reasons(fields: dict, *, now_ms: int | None = None) -> list[str]:
+    """兼容既有调用：返回人类可读原因；稳定码由筛选结果单独输出。"""
+    return [reason for reason, _ in _nintendo_switch_profile_issues(fields, now_ms=now_ms)]
 
 
 def _base_filter_kol(
@@ -536,8 +543,12 @@ def _base_filter_kol(
     target_fans_min: int | None = None,
     target_fans_max: int | None = None,
     now_ms: int | None = None,
-) -> tuple[bool, list[str]]:
-    reasons = []
+    include_reason_codes: bool = False,
+) -> tuple[bool, list[str]] | tuple[bool, list[str], list[str]]:
+    issues: list[tuple[str, str]] = []
+
+    def add(reason: str, code: str = "") -> None:
+        issues.append((reason, code))
     product_countries = _parse_multiselect(product_fields.get("销售国家"))
     countries = (
         set(target_countries) if target_countries is not None else product_countries
@@ -560,24 +571,33 @@ def _base_filter_kol(
     except (TypeError, ValueError):
         fans = 0
     if target_countries is not None and not countries:
-        reasons.append("活动目标国家未配置")
+        add("活动目标国家未配置", "地区/语言不匹配")
     elif countries and ext(fields.get("国家")) not in countries:
-        reasons.append("国家不在活动目标市场" if target_countries else "国家不在销售市场")
+        add(
+            "国家不在活动目标市场" if target_countries else "国家不在销售市场",
+            "地区/语言不匹配",
+        )
     if target_languages is not None and not languages:
-        reasons.append("活动目标语言未配置")
+        add("活动目标语言未配置", "地区/语言不匹配")
     elif languages and ext(fields.get("语言")) not in languages:
-        reasons.append("语言不在活动目标范围" if target_languages else "语言不匹配")
+        add(
+            "语言不在活动目标范围" if target_languages else "语言不匹配",
+            "地区/语言不匹配",
+        )
     if platforms and ext(fields.get("主平台")) not in platforms:
-        reasons.append("主平台不匹配")
+        add("主平台不匹配")
     if fans_min < 0 or fans_max < 0 or (fans_max and fans_min > fans_max):
-        reasons.append("活动粉丝范围配置无效")
+        add("活动粉丝范围配置无效")
     elif fans < fans_min or (fans_max and fans > fans_max):
-        reasons.append("粉丝量级不匹配")
+        add("粉丝量级不匹配")
     if expected_styles and not (_parse_multiselect(fields.get("内容风格")) & expected_styles):
-        reasons.append("内容风格不匹配")
+        add("内容风格不匹配", "硬件/配件内容不足")
     if _requires_nintendo_switch_profile(product_fields):
-        reasons.extend(_nintendo_switch_profile_reasons(fields, now_ms=now_ms))
-    reasons = list(dict.fromkeys(reasons))
+        issues.extend(_nintendo_switch_profile_issues(fields, now_ms=now_ms))
+    reasons = list(dict.fromkeys(reason for reason, _ in issues))
+    reason_codes = list(dict.fromkeys(code for _, code in issues if code))
+    if include_reason_codes:
+        return not reasons, reasons, reason_codes
     return not reasons, reasons
 
 
@@ -957,13 +977,13 @@ async def preview_candidates(
             email_owners=ctx["owners"], now_ms=now_ms,
         )
         if object_type == "KOL":
-            matched, filter_reasons = _base_filter_kol(
+            matched, filter_reasons, filter_reason_codes = _base_filter_kol(
                 fields, product_fields, ctx["mapping"],
                 target_countries=(activity_ctx or {}).get("target_countries"),
                 target_languages=(activity_ctx or {}).get("target_languages"),
                 target_fans_min=(activity_ctx or {}).get("target_fans_min"),
                 target_fans_max=(activity_ctx or {}).get("target_fans_max"),
-                now_ms=now_ms,
+                now_ms=now_ms, include_reason_codes=True,
             )
             if not matched:
                 filtered_out += 1
@@ -1013,6 +1033,7 @@ async def preview_candidates(
                         "decision": check["decision"],
                         "base_filter_passed": False,
                         "base_filter_reasons": filter_reasons,
+                        "base_filter_reason_codes": filter_reason_codes,
                         "profile_refresh_needed": True,
                         "score": 0, "final_priority": 0,
                         "evidence_level": "无加分", "matched_post_ids": [],
@@ -1033,6 +1054,7 @@ async def preview_candidates(
                 set(ctx["mapping"].get("expected_media_types") or []),
             )
             filter_reasons = []
+            filter_reason_codes = []
 
         if object_type == "KOL" and check["decision"] == "eligible_new_cold":
             market_check = market_consistency_check(
@@ -1066,6 +1088,7 @@ async def preview_candidates(
             "platform": ext(fields.get("主平台")) if object_type == "KOL" else ext(fields.get("主要媒体")),
             "country": ext(fields.get("国家")), "language": ext(fields.get("语言")),
             "base_filter_passed": matched, "base_filter_reasons": filter_reasons,
+            "base_filter_reason_codes": filter_reason_codes,
             "score": score, "breakdown": breakdown,
             "competitor_signal": (ext(fields.get("合作竞品"))[:300] if object_type == "KOL" else ""),
             "competitor_evidence": (ext(fields.get("竞品帖子证据"))[:500] if object_type == "KOL" else ""),
@@ -1148,16 +1171,17 @@ async def replay_candidate(
     fields = record.get("fields") or {}
     now_ms = int(time.time() * 1000)
     if object_type == "KOL":
-        matched, filter_reasons = _base_filter_kol(
+        matched, filter_reasons, filter_reason_codes = _base_filter_kol(
             fields, product_fields, ctx["mapping"],
             target_countries=(activity_ctx or {}).get("target_countries"),
             target_languages=(activity_ctx or {}).get("target_languages"),
             target_fans_min=(activity_ctx or {}).get("target_fans_min"),
             target_fans_max=(activity_ctx or {}).get("target_fans_max"),
-            now_ms=now_ms,
+            now_ms=now_ms, include_reason_codes=True,
         )
     else:
         matched, filter_reasons = True, []
+        filter_reason_codes = []
     check = precheck_contact(
         record, object_type=object_type,
         brand=config.brand_from_text(ext(product_fields.get("品牌"))) or ext(product_fields.get("品牌")).upper(),
@@ -1228,6 +1252,7 @@ async def replay_candidate(
         "candidate": {
             "contact_id": contact_id, "name": _candidate_name(fields, object_type),
             "base_filter_passed": matched, "base_filter_reasons": filter_reasons,
+            "base_filter_reason_codes": filter_reason_codes,
             "profile_evidence": profile_evidence,
             **check, **evidence_rank, **review_snapshot,
         },

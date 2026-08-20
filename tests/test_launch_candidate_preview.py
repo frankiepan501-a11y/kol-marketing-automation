@@ -6,6 +6,23 @@ from app import launch_candidate_preview as preview
 
 
 class LaunchCandidatePreviewTests(unittest.TestCase):
+    def test_base_filter_emits_stable_reason_codes_at_decision_source(self):
+        matched, reasons, reason_codes = preview._base_filter_kol(
+            {
+                "国家": "MY", "语言": "ms", "主平台": "YouTube",
+                "粉丝数": 10000, "内容风格": ["游戏"],
+            },
+            {"品类": "Switch底座", "报价(USD)": 89.99, "销售国家": ["US"]},
+            {"expected_styles": ["游戏"]},
+            target_countries={"US"}, target_languages={"en"},
+            include_reason_codes=True,
+        )
+
+        self.assertFalse(matched)
+        self.assertIn("国家不在活动目标市场", reasons)
+        self.assertIn("语言不在活动目标范围", reasons)
+        self.assertEqual(["地区/语言不匹配"], reason_codes)
+
     def test_activity_market_and_language_override_broader_product_scope(self):
         product_fields = {
             "品类": "手柄", "报价(USD)": 49.99,
@@ -745,6 +762,7 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertEqual("existing_pipeline_same_thread", candidate["decision"])
         self.assertFalse(candidate["base_filter_passed"])
         self.assertIn("目标主机不匹配", candidate["base_filter_reasons"])
+        self.assertIn("目标主机不匹配", candidate["base_filter_reason_codes"])
 
     def test_dave_activity_applies_direct_nyxi_evidence_without_writes(self):
         product = {
