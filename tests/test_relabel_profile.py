@@ -104,6 +104,28 @@ class RelabelProfileTests(unittest.TestCase):
         self.assertIn("Mario", result["ip_tags"])
         self.assertNotIn("硬件改装", result["styles"])
 
+    def test_deterministic_fallback_does_not_label_toy_channel_from_two_game_hits(self):
+        result = relabel.deterministic_profile_classification(
+            name="EL GUERRERO DEL JUGUETE", description="",
+            recent_titles=[
+                "Unique Ghostbusters molds and official Miniland gem",
+                "Airgam Monsters figures that terrified a generation",
+                "Factory-sealed Nintendo box with six unused games",
+                "The rarest 70s comics",
+                "The rarest My Pet Monster in the world",
+                "Toy hunter travels the world",
+                "Toy treasure hunters in Spain",
+                "Banned figures from the 90s",
+                "Collecting stories",
+                "Rare collectible video games",
+            ],
+        )
+
+        self.assertEqual("其他", result["content_vertical"])
+        self.assertEqual(["未知"], result["ecosystems"])
+        self.assertEqual([], result["ip_tags"])
+        self.assertIn("2/10", result["reason"])
+
     def test_deterministic_fallback_blocks_exact_official_or_media_identity(self):
         publisher = relabel.deterministic_profile_classification(
             name="Nintendo", description="", recent_titles=["Nintendo Direct"],

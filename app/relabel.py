@@ -43,6 +43,16 @@ ECOSYSTEM_ORDER = [
     "Switch", "Switch 2", "PlayStation", "Xbox",
     "PC-Steam", "Mobile", "跨平台", "未知",
 ]
+PROFILE_MIN_TARGET_TITLES = 3
+PROFILE_GAME_OR_HARDWARE_CUES = (
+    "game", "gaming", "videojuego", "videojuegos", "nintendo", "switch",
+    "mario", "zelda", "yoshi", "splatoon", "bananza", "pokemon", "pokémon",
+    "jrpg", "rpg", "console", "consola", "consolas", "retro", "gameboy",
+    "game boy", "snes", "3ds", "playstation", "ps5", "ps4", "xbox",
+    "steam", "controller", "gamepad", "dock", "hardware", "accessory",
+    "setup", "gameroom", "game room", "boss", "手柄", "底座", "硬件",
+    "配件", "游戏", "任天堂", "马里奥", "塞尔达", "耀西",
+)
 
 THREAD_STATES = {
     "待回复", "建联中", "洽谈中", "样品评估", "未产出",
@@ -308,11 +318,27 @@ def deterministic_profile_classification(*, name: str, description: str,
         # 但候选仍必须通过活动硬筛和本次人工审核。
         object_type = "KOL"
 
-    ecosystems = _derive_ecosystems(content_text, [])
-    vertical = _derive_vertical(content_text, styles, "")
+    target_title_count = sum(
+        any(cue in (title or "").lower() for cue in PROFILE_GAME_OR_HARDWARE_CUES)
+        for title in (recent_titles or [])
+    )
+    if target_title_count < PROFILE_MIN_TARGET_TITLES:
+        # 搜索词可能只碰巧命中一两条视频；不能据此把整个频道写成 Switch/Nintendo。
+        styles = []
+        tags = []
+        ecosystems = ["未知"]
+        vertical = "其他"
+        reason = (
+            f"确定性兜底：近期目标游戏/主机内容仅 "
+            f"{target_title_count}/{len(recent_titles or [])} 条，保守不贴游戏生态标签"
+        )
+    else:
+        ecosystems = _derive_ecosystems(content_text, [])
+        vertical = _derive_vertical(content_text, styles, "")
+        reason = "确定性兜底：按近期标题关键词分类；外部模型不可用"
     return {
         "type": object_type, "confidence": 0.65,
-        "reason": "确定性兜底：按近期标题关键词分类；外部模型不可用",
+        "reason": reason,
         "styles": styles, "ip_tags": tags, "country_guess": None,
         "content_vertical": vertical, "ecosystems": ecosystems,
         "classification_source": "deterministic_fallback",
