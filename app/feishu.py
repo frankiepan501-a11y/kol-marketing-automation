@@ -160,6 +160,14 @@ def product_links(fields):
 import re as _re
 # RFC 5322-lite, 实际飞书/Zoho 都用这种简化校验
 _EMAIL_RE = _re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+')
+_COMMON_EMAIL_TLDS = ("com", "net", "org", "co", "io", "ai", "gg", "tv")
+
+
+def _looks_like_concatenated_email(value: str) -> bool:
+    """Catch scraped greetings glued after a normal TLD, e.g. `.comHowdy`."""
+    domain = value.rsplit("@", 1)[-1]
+    tlds = "|".join(_COMMON_EMAIL_TLDS)
+    return bool(_re.search(rf"\.(?:{tlds})[A-Z][A-Za-z]+$", domain))
 
 def clean_email(raw: str) -> tuple:
     """从 KOL 主表「邮箱」字段抽出一个能发送的邮箱.
@@ -180,10 +188,20 @@ def clean_email(raw: str) -> tuple:
     matches = _EMAIL_RE.findall(raw)
     if not matches:
         return "", f"未找到有效邮箱: {raw[:60]!r}"
-    first = matches[0].lower()
+    # Scrapers sometimes concatenate surrounding page copy to an email, while
+    # also preserving a clean duplicate later in the same cell.  Keep the old
+    # "first address" rule across different local-parts, but choose the cleanest
+    # variant when the same mailbox appears more than once.
+    first_local = matches[0].split("@", 1)[0].lower()
+    variants = [m for m in matches if m.split("@", 1)[0].lower() == first_local]
+    clean_variants = [m for m in variants if not _looks_like_concatenated_email(m)]
+    if not clean_variants:
+        return "", f"邮箱疑似粘连页面文字: {matches[0][:80]!r}"
+    selected = min(clean_variants, key=lambda m: (len(m), matches.index(m)))
+    first = selected.lower()
     if len(matches) > 1:
         # 多邮箱: 用第一个 + 写原因供运营追溯
-        return first, f"原始字段含 {len(matches)} 个邮箱, 已自动选第一个: {first} (全部: {matches})"
+        return first, f"原始字段含 {len(matches)} 个邮箱, 已自动选同邮箱的干净版本: {first} (全部: {matches})"
     return first, ""
 
 
