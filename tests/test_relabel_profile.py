@@ -124,7 +124,60 @@ class RelabelProfileTests(unittest.TestCase):
         self.assertEqual("其他", result["content_vertical"])
         self.assertEqual(["未知"], result["ecosystems"])
         self.assertEqual([], result["ip_tags"])
+        self.assertTrue(result["clear_profile_tags"])
         self.assertIn("2/10", result["reason"])
+
+    def test_low_support_machine_profile_clears_stale_machine_tags(self):
+        fields = {
+            "合作状态": "未建联",
+            "内容风格": ["游戏"],
+            "IP喜好": "Nintendo, Switch",
+        }
+        videos = [
+            {"title": "Rare toy collection", "published_at": NOW_MS - DAY_MS},
+            {"title": "Vintage comics", "published_at": NOW_MS - 7 * DAY_MS},
+            {"title": "Nintendo sealed box", "published_at": NOW_MS - 14 * DAY_MS},
+        ]
+        classification = relabel.deterministic_profile_classification(
+            name="Toy Channel", description="",
+            recent_titles=[video["title"] for video in videos],
+        )
+
+        update = relabel.plan_profile_update(
+            fields, videos, classification, now_ms=NOW_MS,
+        )
+
+        self.assertEqual([], update["内容风格"])
+        self.assertEqual("", update["IP喜好"])
+        self.assertEqual("其他", update["内容垂类"])
+        self.assertEqual(["未知"], update["主机生态"])
+
+    def test_low_support_machine_profile_preserves_fresh_manual_tags(self):
+        manual_at = NOW_MS - 10 * DAY_MS
+        fields = {
+            "合作状态": "未建联",
+            "资料可用状态": "人工核实有效",
+            "资料核实时间": manual_at,
+            "内容风格": ["游戏"],
+            "IP喜好": "Nintendo",
+        }
+        videos = [
+            {"title": "Rare toy collection", "published_at": NOW_MS - DAY_MS},
+            {"title": "Vintage comics", "published_at": NOW_MS - 7 * DAY_MS},
+            {"title": "Nintendo sealed box", "published_at": NOW_MS - 14 * DAY_MS},
+        ]
+        classification = relabel.deterministic_profile_classification(
+            name="Manually Checked Channel", description="",
+            recent_titles=[video["title"] for video in videos],
+        )
+
+        update = relabel.plan_profile_update(
+            fields, videos, classification, now_ms=NOW_MS,
+        )
+
+        self.assertNotIn("内容风格", update)
+        self.assertNotIn("IP喜好", update)
+        self.assertEqual("人工核实有效", update["资料可用状态"])
 
     def test_deterministic_fallback_blocks_exact_official_or_media_identity(self):
         publisher = relabel.deterministic_profile_classification(

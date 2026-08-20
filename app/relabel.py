@@ -328,6 +328,7 @@ def deterministic_profile_classification(*, name: str, description: str,
         tags = []
         ecosystems = ["未知"]
         vertical = "其他"
+        clear_profile_tags = True
         reason = (
             f"确定性兜底：近期目标游戏/主机内容仅 "
             f"{target_title_count}/{len(recent_titles or [])} 条，保守不贴游戏生态标签"
@@ -335,12 +336,14 @@ def deterministic_profile_classification(*, name: str, description: str,
     else:
         ecosystems = _derive_ecosystems(content_text, [])
         vertical = _derive_vertical(content_text, styles, "")
+        clear_profile_tags = False
         reason = "确定性兜底：按近期标题关键词分类；外部模型不可用"
     return {
         "type": object_type, "confidence": 0.65,
         "reason": reason,
         "styles": styles, "ip_tags": tags, "country_guess": None,
         "content_vertical": vertical, "ecosystems": ecosystems,
+        "clear_profile_tags": clear_profile_tags,
         "classification_source": "deterministic_fallback",
     }
 
@@ -485,9 +488,15 @@ def plan_profile_update(fields: dict, recent_videos: list[dict], classification:
     }
     if latest:
         update["最近发布日"] = latest
-    if styles:
+    clear_profile_tags = bool(classification.get("clear_profile_tags")) and not manual_fresh
+    if clear_profile_tags:
+        # 只有本轮已经拿到足够近期标题、且明确证明旧机器画像是误判时才清理；
+        # 近期人工核实的资料受保护，不被机器空结果覆盖。
+        update["内容风格"] = []
+        update["IP喜好"] = ""
+    elif styles:
         update["内容风格"] = styles
-    if tags:
+    if tags and not clear_profile_tags:
         update["IP喜好"] = ", ".join(tags[:5])
     return update
 
