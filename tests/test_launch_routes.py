@@ -48,6 +48,22 @@ class LaunchRouteTests(unittest.TestCase):
         states = [call.kwargs["status"] for call in persist.await_args_list]
         self.assertEqual(["running", "success"], states)
 
+    def test_latest_autonomous_job_status_reads_campaign_durable_state(self):
+        persisted = {
+            "job_id": "launchruntime-real", "status": "success",
+            "campaign_id": "c1", "mode": "autonomous", "started_ts": 123,
+        }
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+            main.launch_runtime, "load_runtime_job", new=AsyncMock(return_value=persisted),
+        ) as load:
+            status = asyncio.run(main.get_launch_runtime_job(
+                "latest", campaign_id="c1", authorization="Bearer secret",
+            ))
+
+        self.assertEqual("launchruntime-real", status["job_id"])
+        self.assertEqual("success", status["status"])
+        load.assert_awaited_once_with("c1")
+
     def test_profile_backfill_defaults_to_background_dry_run(self):
         async def exercise():
             main._relabel_profile_jobs.clear()

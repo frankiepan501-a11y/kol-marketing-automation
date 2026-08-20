@@ -703,9 +703,36 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
     if lock.locked():
         return {"campaign_id": campaign_id, "already_running": True}
     async with lock:
-        metrics = await campaign_metrics(campaign_id)
         activity = await launch_evidence.get_activity(campaign_id)
         activity_fields = activity.get("fields") or {}
+        if (
+            ext(activity_fields.get("运行模式")) != "正式运行"
+            or ext(activity_fields.get("状态")) != "正式执行中"
+        ):
+            return {
+                "campaign_id": campaign_id, "already_running": False,
+                "action": "hold", "held": True,
+                "runtime": "campaign_not_formally_active",
+                "reason": "活动不是正式运行/正式执行中，自治补池保持暂停",
+                "quality_filters_lowered": False,
+            }
+        try:
+            window_end = int(activity_fields.get("窗口结束") or 0)
+        except (TypeError, ValueError):
+            window_end = 0
+        if window_end and int(time.time() * 1000) > window_end:
+            await feishu.update_record(
+                config.T_LAUNCH_CAMPAIGN, activity["record_id"],
+                {"发送邮件授权": False},
+            )
+            return {
+                "campaign_id": campaign_id, "already_running": False,
+                "action": "stop", "stopped": True,
+                "runtime": "campaign_window_ended",
+                "reason": "活动窗口已结束，已关闭邮件授权并停止补池",
+                "quality_filters_lowered": False,
+            }
+        metrics = await campaign_metrics(campaign_id)
         if metrics["action"] == "stop":
             await feishu.update_record(
                 config.T_LAUNCH_CAMPAIGN, activity["record_id"],

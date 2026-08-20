@@ -2688,9 +2688,12 @@ async def get_launch_runtime_job(job_id: str, campaign_id: str = "",
                                  authorization: str = Header(default="")):
     _check_auth(authorization)
     _prune_launch_runtime_jobs()
-    job = _launch_runtime_jobs.get(job_id)
-    if not job and campaign_id:
-        job = await launch_runtime.load_runtime_job(campaign_id, job_id=job_id)
+    if job_id == "latest" and campaign_id:
+        job = await launch_runtime.load_runtime_job(campaign_id)
+    else:
+        job = _launch_runtime_jobs.get(job_id)
+        if not job and campaign_id:
+            job = await launch_runtime.load_runtime_job(campaign_id, job_id=job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found or expired")
     public = {key: value for key, value in job.items() if key not in {"request_key", "started_ts"}}

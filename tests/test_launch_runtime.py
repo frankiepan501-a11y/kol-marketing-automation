@@ -224,6 +224,7 @@ class LaunchRuntimeTests(unittest.TestCase):
         activity = {"record_id": "a1", "fields": {
             "活动ID": "campaign1", "产品主记录ID": "product1",
             "活动目标语言": ["en", "de", "es"],
+            "运行模式": "正式运行", "状态": "正式执行中",
         }}
         product = {"record_id": "product1", "fields": {
             "品牌": "POWKONG", "产品英文名": "Piranha Plant 2 Dock",
@@ -287,6 +288,59 @@ class LaunchRuntimeTests(unittest.TestCase):
         review.assert_awaited_once()
         self.assertTrue(review.await_args.kwargs["operator_only"])
         self.assertEqual(12, result["inventory_after"])
+
+    def test_autonomous_refill_holds_when_campaign_is_not_formally_active(self):
+        metrics = {
+            "campaign_id": "campaign1", "participants": 20, "sent": 4,
+            "replies": 0, "commitments": 0, "ontime_posts": 0,
+            "action": "expand", "reason": "commitment gap",
+        }
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "运行模式": "影子试跑", "状态": "待人工批准",
+        }}
+        with patch.object(
+            launch_runtime, "campaign_metrics", new=AsyncMock(return_value=metrics),
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime.launch_candidate_preview, "preview_candidates", new=AsyncMock(),
+        ) as preview:
+            result = asyncio.run(launch_runtime.autonomous_refill(campaign_id="campaign1"))
+
+        self.assertTrue(result["held"])
+        self.assertEqual("campaign_not_formally_active", result["runtime"])
+        preview.assert_not_awaited()
+
+    def test_autonomous_refill_stops_after_campaign_window_end(self):
+        metrics = {
+            "campaign_id": "campaign1", "participants": 20, "sent": 4,
+            "replies": 0, "commitments": 0, "ontime_posts": 0,
+            "action": "expand", "reason": "commitment gap",
+        }
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "运行模式": "正式运行", "状态": "正式执行中",
+            "发送邮件授权": True, "窗口结束": 1_700_000_000_000,
+        }}
+        update = AsyncMock()
+        with patch.object(
+            launch_runtime, "campaign_metrics", new=AsyncMock(return_value=metrics),
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(launch_runtime.time, "time", return_value=1_800_000_000), patch.object(
+            launch_runtime.feishu, "update_record", new=update,
+        ), patch.object(
+            launch_runtime.launch_candidate_preview, "preview_candidates", new=AsyncMock(),
+        ) as preview:
+            result = asyncio.run(launch_runtime.autonomous_refill(campaign_id="campaign1"))
+
+        self.assertTrue(result["stopped"])
+        self.assertEqual("campaign_window_ended", result["runtime"])
+        update.assert_awaited_once_with(
+            launch_runtime.config.T_LAUNCH_CAMPAIGN, "a1", {"发送邮件授权": False},
+        )
+        preview.assert_not_awaited()
 
     def test_review_pool_requires_configured_competitor_evidence_to_be_applied(self):
         activity = {"record_id": "a1", "fields": {
