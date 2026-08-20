@@ -7,6 +7,32 @@ from app import keyword_supply
 
 
 class KeywordSupplyBrazilTests(unittest.TestCase):
+    def test_campaign_supply_is_deterministic_idempotent_and_target_language_only(self):
+        rows = [{"fields": {
+            "任务名": "[活动补池:campaign1] YT KOL - dave the diver gameplay",
+            "关键词列表": "dave the diver gameplay", "爬虫类型": "KOL-YouTube",
+            "任务状态": "1-待触发", "筛选-语言": ["en"],
+        }}]
+        activity = {"fields": {"活动目标语言": ["en", "de", "es"]}}
+        product = {"fields": {"产品英文名": "FUNLAB Dave the Diver Controller"}}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=rows),
+        ), patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(return_value="task1"),
+        ) as create_record:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=150, dry_run=False,
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertGreater(result["created"], 0)
+        created_fields = [call.args[1] for call in create_record.await_args_list]
+        self.assertTrue(all("[活动补池:campaign1]" in f["任务名"] for f in created_fields))
+        self.assertTrue(all(f["关键词列表"] != "dave the diver gameplay" for f in created_fields))
+        self.assertTrue(all(f["筛选-语言"][0] in {"en", "de", "es"} for f in created_fields))
+
     def test_market_configuration_includes_portuguese_brazil(self):
         portuguese = [m for m in keyword_supply.MARKETS if m["lang"] == "pt"]
 

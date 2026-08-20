@@ -144,6 +144,23 @@
 4. 食人花补齐产品主记录ID、国家/语言、竞品证据模式（可选“不引用”）、名单版本和首批合格候选。
 5. 两品牌分别做一次“只生成不发送”批次回放；确认活动锁、重复触达、邮箱、产品英文名、链接、占位符和额度均通过后，才打开活动 cold 放量。
 
+## 2026-08-20 P0：两活动无人值守自治补池
+
+目标：Dave 与食人花活动不再依赖 Frankie 每轮打开 Codex 手工触发；系统按小时根据滚动 24 小时邮箱余量、活动承诺缺口和可发送草稿库存自动补池。确定性规则合格者直接进入活动队列；资料缺失或语义边界项只进入 KOL 运营审核，不交 Frankie 逐条判断。
+
+| Phase | Status | Success Check |
+|---|---|---|
+| 9.1 固定接口与安全边界 | complete | 自治入口只补池/建草稿，不直接发信；停止/保持继续以活动承诺和预计按时上稿为准 |
+| 9.2 测试先行与代码实现 | complete | 覆盖库存缺口、主表补池、资料刷新、外部拓新、运营审核分流和任务状态持久化 |
+| 9.3 生产表与 n8n 调度 | pending | 每小时触发两活动并轮询实际完成状态，服务重启后仍可查询 |
+| 9.4 部署与生产小样本 | pending | 两活动各完成一次后台任务回读；无重复触达、无越权发送、无质量阈值下调 |
+
+### P0 implementation seams
+
+1. `launch_runtime.autonomous_refill(...)`：确定性控制器，返回 `action / quota / inventory / append / refresh / discovery / review_pool / queue`。
+2. `/launch/runtime/autonomous-refill` + `/launch/runtime/jobs/{job_id}`：启动后台任务并从活动表持久回读状态；HTTP 受理不等于完成。
+3. n8n：北京时间每小时启动两活动，轮询到 `success/error` 后才结束；`running` 必须继续等待，不能把 200/accepted 当成功。
+
 ### 2026-08-20 Errors Encountered
 
 | Error | Attempt | Resolution |

@@ -930,6 +930,8 @@ async def preview_candidates(
     records = ctx["editors"] if object_type == "媒体人" else ctx["kols"]
     now_ms = int(time.time() * 1000)
     candidates = []
+    profile_refresh_candidate_ids = []
+    profile_refresh_candidates = []
     filtered_out = 0
     evidence_index = (
         launch_competitor_evidence.build_evidence_index(activity_ctx["competitor_posts"])
@@ -965,6 +967,56 @@ async def preview_candidates(
             )
             if not matched:
                 filtered_out += 1
+                stable_failures = {
+                    "活动目标国家未配置", "国家不在活动目标市场", "国家不在销售市场",
+                    "活动目标语言未配置", "语言不在活动目标范围", "语言不匹配",
+                    "主平台不匹配", "活动粉丝范围配置无效", "粉丝量级不匹配",
+                }
+                refreshable_failures = {
+                    "资料缺失或过期", "人工核实已过期", "标签版本不是v2",
+                    "最近发布记录缺失或过期", "目标主机不匹配", "内容风格不匹配",
+                    "内容垂类不是主机游戏或游戏硬件评测",
+                    "Nintendo/Mario受众或近期硬件内容不匹配",
+                    "近期目标游戏/主机内容占比不足",
+                    "近期内容缺少Nintendo/Switch或硬件评测证据",
+                }
+                if (
+                    check["decision"] == "eligible_new_cold"
+                    and any(reason in refreshable_failures for reason in filter_reasons)
+                    and not any(reason in stable_failures for reason in filter_reasons)
+                    and len(profile_refresh_candidate_ids) < 100
+                ):
+                    contact_id = record.get("record_id", "")
+                    profile_refresh_candidate_ids.append(contact_id)
+                    profile_refresh_candidates.append({
+                        "contact_id": contact_id,
+                        "name": _candidate_name(fields, object_type),
+                        "platform": ext(fields.get("主平台")),
+                        "country": ext(fields.get("国家")),
+                        "language": ext(fields.get("语言")),
+                        "followers": int(_numeric(fields.get("粉丝数"))),
+                        "profile_url": feishu.ext_url(fields.get("主链接")).strip(),
+                        "content_summary": ext(fields.get("近期视频标题"))[:1000],
+                        "content_updated_at": _timestamp_ms(fields.get("近期视频抓取时间")),
+                        "relationship_summary": (
+                            f"合作状态={ext(fields.get('合作状态')) or '未标记'}；"
+                            f"邮箱验真={ext(fields.get('邮箱验真状态')) or '未验'}；"
+                            f"重复触达预检={check['decision']}"
+                        ),
+                        "evidence_summary": "资料刷新完成前不参与竞品加分排序",
+                        "review_route": "KOL运营审核",
+                        "review_decision": "待补资料",
+                        "review_instruction": (
+                            "系统刷新后仍缺少活动筛选所需的近期内容画像。请只补齐或核实："
+                            + "；".join(filter_reasons)
+                        )[:1000],
+                        "decision": check["decision"],
+                        "base_filter_passed": False,
+                        "base_filter_reasons": filter_reasons,
+                        "profile_refresh_needed": True,
+                        "score": 0, "final_priority": 0,
+                        "evidence_level": "无加分", "matched_post_ids": [],
+                    })
                 # 全局关系路由优先。已有关系对象即使产品画像不适配，也要保留在
                 # 回放结果中说明“沿用原线程/禁止新 cold”，不能被基础筛选静默吞掉。
                 if check["decision"] == "eligible_new_cold":
@@ -1063,6 +1115,10 @@ async def preview_candidates(
             - counts["existing_pipeline_same_thread"] - counts["republish_requires_commitment"],
             "by_decision": dict(counts),
         },
+        "profile_refresh_candidate_ids": [
+            value for value in profile_refresh_candidate_ids if value
+        ],
+        "profile_refresh_candidates": profile_refresh_candidates,
         "candidates": candidates if internal_full else candidates[:limit],
     }
 

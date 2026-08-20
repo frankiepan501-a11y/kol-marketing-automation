@@ -12,6 +12,7 @@
 边界: 只补 YouTube 爬虫任务台(KOL库同 app 可写; 96%产能)。TK/IG keywords_queue 在专题9app+Apify$5限暂不。
 """
 import time
+import math
 from collections import Counter
 from . import config, feishu, deepseek
 from .feishu import ext
@@ -44,6 +45,129 @@ _LOCALIZATION_MARKERS = {
         "em português", "em portugues",
     ),
 }
+
+_CAMPAIGN_KEYWORDS = {
+    "dave": {
+        "en": [
+            "dave the diver gameplay", "cozy indie games channel",
+            "nintendo switch indie games", "underwater adventure games",
+            "switch 2 game reviews", "indie handheld gamer",
+        ],
+        "de": [
+            "dave the diver deutsch", "indie spiele nintendo switch",
+            "gemütliche spiele kanal", "nintendo switch spiele deutsch",
+        ],
+        "es": [
+            "dave the diver español", "juegos indie nintendo switch",
+            "canal de juegos acogedores", "juegos nintendo switch español",
+        ],
+    },
+    "piranha": {
+        "en": [
+            "super mario gaming collection", "nintendo gaming room setup",
+            "mario fan collection", "switch 2 setup tour",
+            "nintendo fan gaming desk", "retro mario gamer room",
+        ],
+        "de": [
+            "super mario sammlung deutsch", "nintendo spielzimmer deutsch",
+            "mario fan zimmer", "nintendo switch setup deutsch",
+        ],
+        "es": [
+            "colección super mario", "habitación gamer nintendo",
+            "colección fan de mario", "setup nintendo switch español",
+        ],
+    },
+}
+
+
+def _multi_values(value) -> list[str]:
+    if not isinstance(value, list):
+        return [str(value)] if value else []
+    out = []
+    for item in value:
+        if isinstance(item, dict):
+            text = item.get("text") or item.get("name")
+        else:
+            text = item
+        if text:
+            out.append(str(text))
+    return out
+
+
+async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: dict,
+                                 required_candidates: int, dry_run: bool = False) -> dict:
+    """为单个活动补确定性 YouTube 发现任务；只建爬虫任务，不直接创建 KOL。"""
+    rows = await feishu.fetch_all_records(T_CRAWLER)
+    fields = activity.get("fields") or {}
+    product_fields = product.get("fields") or {}
+    language_aliases = {"英语": "en", "德语": "de", "西班牙语": "es"}
+    languages = [
+        language_aliases.get(value, value)
+        for value in _multi_values(fields.get("活动目标语言"))
+        if language_aliases.get(value, value) in {"en", "de", "es"}
+    ] or ["en"]
+    identity = f"{campaign_id} {ext(product_fields.get('产品英文名'))}".lower()
+    theme = "dave" if "dave" in identity else "piranha" if "piranha" in identity else ""
+    if not theme:
+        return {"ok": False, "created": 0, "error": "当前活动缺少可验证的确定性拓词主题"}
+
+    existing_keywords = {
+        ext((row.get("fields") or {}).get("关键词列表")).strip().lower()
+        for row in rows
+        if ext((row.get("fields") or {}).get("关键词列表")).strip()
+    }
+    prefix = f"[活动补池:{campaign_id}]"
+    pending_for_campaign = sum(
+        ext((row.get("fields") or {}).get("任务名")).startswith(prefix)
+        and ext((row.get("fields") or {}).get("任务状态")) == "1-待触发"
+        for row in rows
+    )
+    target_tasks = max(3, min(9, math.ceil(max(1, int(required_candidates)) / 50)))
+    need = max(0, target_tasks - pending_for_campaign)
+    candidates = []
+    while need and any(_CAMPAIGN_KEYWORDS[theme].get(lang) for lang in languages):
+        progressed = False
+        for lang in languages:
+            for word in _CAMPAIGN_KEYWORDS[theme].get(lang, []):
+                normalized = word.strip().lower()
+                if normalized in existing_keywords or any(x[1] == normalized for x in candidates):
+                    continue
+                candidates.append((lang, normalized))
+                need -= 1
+                progressed = True
+                break
+            if need <= 0:
+                break
+        if not progressed:
+            break
+
+    if dry_run:
+        return {
+            "ok": True, "created": 0, "would_create": len(candidates),
+            "keywords": [{"language": lang, "keyword": word} for lang, word in candidates],
+            "pending_before": pending_for_campaign, "target_tasks": target_tasks,
+        }
+
+    now = int(time.time() * 1000)
+    countries_by_language = {"en": ["US", "UK", "CA"], "de": ["DE"], "es": ["ES"]}
+    created, errors = 0, []
+    for lang, word in candidates:
+        try:
+            await feishu.create_record(T_CRAWLER, {
+                "任务名": f"{prefix} YT KOL - {word}",
+                "爬虫类型": "KOL-YouTube", "关键词列表": word,
+                "筛选-国家": countries_by_language[lang], "筛选-语言": [lang],
+                "每批数量上限": PER_BATCH_LIMIT, "任务状态": "1-待触发",
+                "触发": True, "创建日期": now,
+            })
+            created += 1
+        except Exception as exc:
+            errors.append(f"{word}: {str(exc)[:100]}")
+    return {
+        "ok": not errors, "created": created, "errors": errors[:5],
+        "pending_before": pending_for_campaign, "target_tasks": target_tasks,
+        "keywords": [{"language": lang, "keyword": word} for lang, word in candidates],
+    }
 
 
 def _is_localized(word: str, market: dict) -> bool:

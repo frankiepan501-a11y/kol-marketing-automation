@@ -2547,17 +2547,34 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
     if not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise HTTPException(status_code=403, detail="活动队列写入开关未开启")
     _prune_launch_runtime_jobs()
+    if mode == "autonomous":
+        durable = await launch_runtime.load_runtime_job(campaign_id)
+        if (
+            durable and durable.get("status") == "running"
+            and time.time() - float(durable.get("updated_ts") or 0) < 45 * 60
+        ):
+            return {
+                "ok": True, "accepted": True, "already_running": True,
+                "job_id": durable["job_id"], "status": "running",
+                "campaign_id": campaign_id,
+            }
     request_key = f"{mode}|{campaign_id}"
     for job_id, job in _launch_runtime_jobs.items():
         if job.get("status") == "running" and job.get("request_key") == request_key:
             return {"ok": True, "accepted": True, "already_running": True,
                     "job_id": job_id, "status": "running"}
     job_id = "launchruntime-" + uuid.uuid4().hex[:12]
+    started_ts = time.time()
     _launch_runtime_jobs[job_id] = {
-        "status": "running", "started_ts": time.time(),
+        "status": "running", "started_ts": started_ts,
         "started_at": datetime_now_string(), "request_key": request_key,
         "campaign_id": campaign_id, "mode": mode,
     }
+    if mode == "autonomous":
+        await launch_runtime.persist_runtime_job(
+            campaign_id=campaign_id, job_id=job_id, mode=mode,
+            status="running", started_ts=started_ts,
+        )
 
     async def _job():
         try:
@@ -2571,10 +2588,19 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                 result = await launch_runtime.append_review_candidates(
                     campaign_id=campaign_id, review_target=review_target,
                 )
+            elif mode == "autonomous":
+                result = await launch_runtime.autonomous_refill(
+                    campaign_id=campaign_id,
+                )
             else:
                 result = await launch_runtime.run_campaign(
                     campaign_id=campaign_id, pool_target=pool_target,
                     queue_limit=queue_limit,
+                )
+            if mode == "autonomous":
+                await launch_runtime.persist_runtime_job(
+                    campaign_id=campaign_id, job_id=job_id, mode=mode,
+                    status="success", result=result, started_ts=started_ts,
                 )
             _launch_runtime_jobs[job_id].update(
                 status="success", finished_at=datetime_now_string(), result=result,
@@ -2584,6 +2610,14 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
             _launch_runtime_jobs[job_id].update(
                 status="error", finished_at=datetime_now_string(), error=str(exc)[:500],
             )
+            if mode == "autonomous":
+                try:
+                    await launch_runtime.persist_runtime_job(
+                        campaign_id=campaign_id, job_id=job_id, mode=mode,
+                        status="error", error=str(exc), started_ts=started_ts,
+                    )
+                except Exception:
+                    pass
             await _alert_endpoint_failure(f"/launch/runtime/{mode}", type(exc).__name__, tr)
 
     asyncio.create_task(_job())
@@ -2613,6 +2647,18 @@ async def launch_runtime_feedback(request: Request, authorization: str = Header(
     )
 
 
+@app.post("/launch/runtime/autonomous-refill")
+async def launch_runtime_autonomous_refill(
+    request: Request, authorization: str = Header(default=""),
+):
+    """按邮箱余量和活动承诺缺口后台补池；不直接发邮件。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    return await _start_launch_runtime_job(
+        campaign_id=_launch_required(payload, "campaign_id"), mode="autonomous",
+    )
+
+
 @app.post("/launch/runtime/queue")
 async def launch_runtime_queue(request: Request, authorization: str = Header(default="")):
     """只为现有已审活动参与人生成草稿；不重跑全池预览、不发送。"""
@@ -2636,10 +2682,13 @@ async def launch_runtime_review_pool(request: Request, authorization: str = Head
 
 
 @app.get("/launch/runtime/jobs/{job_id}")
-async def get_launch_runtime_job(job_id: str, authorization: str = Header(default="")):
+async def get_launch_runtime_job(job_id: str, campaign_id: str = "",
+                                 authorization: str = Header(default="")):
     _check_auth(authorization)
     _prune_launch_runtime_jobs()
     job = _launch_runtime_jobs.get(job_id)
+    if not job and campaign_id:
+        job = await launch_runtime.load_runtime_job(campaign_id, job_id=job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found or expired")
     public = {key: value for key, value in job.items() if key not in {"request_key", "started_ts"}}

@@ -16,6 +16,38 @@ class FakeRequest:
 
 
 class LaunchRouteTests(unittest.TestCase):
+    def test_autonomous_job_persists_actual_completion_and_survives_memory_miss(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            persisted = {"status": "success", "campaign_id": "c1", "mode": "autonomous",
+                         "result": {"inventory_after": 40}}
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+            ), patch.object(
+                main.launch_runtime, "load_runtime_job", new=AsyncMock(side_effect=[None, persisted]),
+            ), patch.object(
+                main.launch_runtime, "persist_runtime_job", new=AsyncMock(),
+            ) as persist, patch.object(
+                main.launch_runtime, "autonomous_refill",
+                new=AsyncMock(return_value={"inventory_after": 40}),
+            ):
+                accepted = await main.launch_runtime_autonomous_refill(
+                    FakeRequest({"campaign_id": "c1"}), authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+                main._launch_runtime_jobs.clear()
+                status = await main.get_launch_runtime_job(
+                    accepted["job_id"], campaign_id="c1", authorization="Bearer secret",
+                )
+            return accepted, status, persist
+
+        accepted, status, persist = asyncio.run(exercise())
+
+        self.assertTrue(accepted["accepted"])
+        self.assertEqual("success", status["status"])
+        states = [call.kwargs["status"] for call in persist.await_args_list]
+        self.assertEqual(["running", "success"], states)
+
     def test_profile_backfill_defaults_to_background_dry_run(self):
         async def exercise():
             main._relabel_profile_jobs.clear()

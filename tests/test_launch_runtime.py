@@ -14,6 +14,44 @@ def _certificate():
 
 
 class LaunchRuntimeTests(unittest.TestCase):
+    def test_autonomous_append_runs_in_parallel_with_pending_operator_review(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "证据排序版本": "v1", "KOL名单阻塞代码": "",
+        }}
+        pending = {"record_id": "p0", "fields": {
+            "关联KOL": {"link_record_ids": ["old"]},
+            "参与状态": "已入围", "审核结论": "待审核",
+        }}
+        preview = {
+            "ranking_version": "v1", "evidence_pending": False,
+            "candidates": [{
+                "contact_id": "new", "decision": "eligible_new_cold",
+                "review_decision": "通过", "score": 90,
+            }],
+        }
+
+        with patch.object(
+            launch_runtime.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[pending]),
+        ), patch.object(
+            launch_runtime.launch_participation, "_participants_by_unique_key",
+            new=AsyncMock(return_value=[]),
+        ), patch.object(
+            launch_runtime.feishu, "create_record", new=AsyncMock(return_value="part-new"),
+        ) as create_record:
+            result = asyncio.run(launch_runtime.append_auto_approved(
+                campaign_id="campaign1", pool_target=20, preview=preview,
+                allow_parallel_review=True,
+            ))
+
+        self.assertEqual(1, result["created"])
+        self.assertEqual(1, result["pending_review_kept_parallel"])
+        create_record.assert_awaited_once()
+
     def test_auto_append_stops_while_any_candidate_still_needs_review(self):
         activity = {"record_id": "a1", "fields": {
             "活动ID": "campaign1", "产品主记录ID": "product1",
@@ -90,6 +128,165 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual("待审核", fields["审核结论"])
         self.assertEqual("系统建议通过", fields["系统审核分流"])
         self.assertNotIn("关联邮件草稿", fields)
+
+    def test_autonomous_review_pool_only_adds_operator_boundary_items(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "证据排序版本": "v1", "KOL名单阻塞代码": "",
+        }}
+        common = {
+            "decision": "eligible_new_cold", "base_filter_passed": True,
+            "score": 80, "final_priority": 80, "evidence_level": "无加分",
+            "country": "US", "language": "en", "platform": "YouTube",
+            "followers": 10000, "profile_url": "https://youtube.com/@one",
+        }
+        system_candidate = {
+            **common, "contact_id": "system1", "review_decision": "通过",
+            "review_route": "系统建议通过",
+        }
+        operator_candidate = {
+            **common, "contact_id": "operator1", "review_decision": "待审核",
+            "review_route": "KOL运营审核",
+        }
+        created = {"record_id": "part1", "fields": {
+            "参与记录ID": "campaign1|product1|KOL|operator1",
+            "活动ID": "campaign1", "审核结论": "待审核",
+            "关联KOL": {"link_record_ids": ["operator1"]},
+        }}
+
+        with patch.object(
+            launch_runtime.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[]),
+        ), patch.object(
+            launch_runtime.launch_participation, "_participants_by_unique_key",
+            new=AsyncMock(side_effect=[[], [created]]),
+        ), patch.object(
+            launch_runtime.feishu, "create_record", new=AsyncMock(return_value="part1"),
+        ) as create_record:
+            result = asyncio.run(launch_runtime.append_review_candidates(
+                campaign_id="campaign1", review_target=5,
+                preview={"ranking_version": "v1", "evidence_pending": False,
+                         "candidates": [system_candidate, operator_candidate]},
+                operator_only=True,
+            ))
+
+        self.assertEqual(1, result["created"])
+        fields = create_record.await_args.args[1]
+        self.assertEqual(["operator1"], fields["关联KOL"])
+
+    def test_failed_profile_refresh_becomes_pending_information_not_sendable(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "证据排序版本": "v1", "KOL名单阻塞代码": "",
+        }}
+        candidate = {
+            "contact_id": "missing1", "decision": "eligible_new_cold",
+            "base_filter_passed": False, "base_filter_reasons": ["资料缺失或过期"],
+            "profile_refresh_needed": True, "review_decision": "待补资料",
+            "review_route": "KOL运营审核", "country": "US", "language": "en",
+            "platform": "YouTube", "profile_url": "https://youtube.com/@missing",
+        }
+        created = {"record_id": "part1", "fields": {
+            "审核结论": "待补资料", "关联KOL": {"link_record_ids": ["missing1"]},
+        }}
+        with patch.object(
+            launch_runtime.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[]),
+        ), patch.object(
+            launch_runtime.launch_participation, "_participants_by_unique_key",
+            new=AsyncMock(side_effect=[[], [created]]),
+        ), patch.object(
+            launch_runtime.feishu, "create_record", new=AsyncMock(return_value="part1"),
+        ) as create_record:
+            result = asyncio.run(launch_runtime.append_review_candidates(
+                campaign_id="campaign1", review_target=5,
+                preview={"ranking_version": "v1", "evidence_pending": False,
+                         "candidates": [candidate]}, operator_only=True,
+            ))
+
+        self.assertEqual(1, result["created"])
+        fields = create_record.await_args.args[1]
+        self.assertEqual("待补资料", fields["审核结论"])
+        self.assertNotIn("关联邮件草稿", fields)
+
+    def test_autonomous_refill_refreshes_then_requests_discovery_without_lowering_filters(self):
+        metrics = {
+            "campaign_id": "campaign1", "participants": 20, "sent": 4,
+            "replies": 0, "commitments": 0, "ontime_posts": 0,
+            "action": "expand", "reason": "commitment gap",
+        }
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "活动目标语言": ["en", "de", "es"],
+        }}
+        product = {"record_id": "product1", "fields": {
+            "品牌": "POWKONG", "产品英文名": "Piranha Plant 2 Dock",
+        }}
+        preview1 = {
+            "summary": {"eligible_new_cold": 2}, "profile_refresh_candidate_ids": ["k1", "k2"],
+        }
+        preview2 = {
+            "summary": {"eligible_new_cold": 3}, "profile_refresh_candidate_ids": [],
+        }
+        inventories = [
+            {"ready": 0, "pending_review": 0},
+            {"ready": 8, "pending_review": 0},
+            {"ready": 12, "pending_review": 0},
+        ]
+
+        with patch.object(
+            launch_runtime, "campaign_metrics", new=AsyncMock(return_value=metrics),
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(return_value=product),
+        ), patch.object(
+            launch_runtime, "_brand_quota_snapshot",
+            new=AsyncMock(return_value={"brand": "POWKONG", "cap": 120,
+                                        "sent_24h": 13, "remaining": 107}),
+        ), patch.object(
+            launch_runtime, "_campaign_ready_inventory",
+            new=AsyncMock(side_effect=inventories),
+        ), patch.object(
+            launch_runtime.launch_candidate_preview, "preview_candidates",
+            new=AsyncMock(side_effect=[preview1, preview2]),
+        ), patch.object(
+            launch_runtime, "append_auto_approved",
+            new=AsyncMock(side_effect=[{"created": 2}, {"created": 3}]),
+        ) as append_auto, patch.object(
+            launch_runtime, "queue_approved",
+            new=AsyncMock(side_effect=[{"queued": 8}, {"queued": 4}]),
+        ), patch.object(
+            launch_runtime.relabel, "run_profile_records",
+            new=AsyncMock(return_value={"processed": 2, "writes": 2}),
+        ) as refresh, patch.object(
+            launch_runtime.keyword_supply, "ensure_campaign_supply",
+            new=AsyncMock(return_value={"ok": True, "created": 3}),
+        ) as discover, patch.object(
+            launch_runtime, "append_review_candidates",
+            new=AsyncMock(return_value={"created": 1}),
+        ) as review, patch.object(
+            launch_runtime, "_notify_operator_review", new=AsyncMock(return_value={"sent": 1}),
+        ):
+            result = asyncio.run(launch_runtime.autonomous_refill(
+                campaign_id="campaign1", buffer_days=2,
+            ))
+
+        self.assertEqual("expand", result["action"])
+        self.assertEqual(214, result["target_ready_inventory"])
+        refresh.assert_awaited_once_with(["k1", "k2"], dry_run=False, limit=2)
+        self.assertEqual(2, append_auto.await_count)
+        self.assertTrue(all(call.kwargs["allow_parallel_review"] for call in append_auto.await_args_list))
+        discover.assert_awaited_once()
+        review.assert_awaited_once()
+        self.assertTrue(review.await_args.kwargs["operator_only"])
+        self.assertEqual(12, result["inventory_after"])
 
     def test_review_pool_requires_configured_competitor_evidence_to_be_applied(self):
         activity = {"record_id": "a1", "fields": {

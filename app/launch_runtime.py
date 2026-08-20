@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import json
 import re
 import time
 
 from . import (
     config,
+    auto_send,
     draft_router,
     enrich,
     feishu,
@@ -21,6 +23,8 @@ from . import (
     launch_evidence,
     launch_outreach,
     launch_participation,
+    keyword_supply,
+    relabel,
     utm,
 )
 from .feishu import ext, xrid
@@ -32,6 +36,11 @@ class LaunchRuntimeError(RuntimeError):
 
 _LOCKS: dict[str, asyncio.Lock] = {}
 LAUNCH_QUEUE_TEMPLATE_VERSION = "launch-queue-v1"
+RUNTIME_JOB_PREFIX = "[AUTONOMY_JOB]"
+CAMPAIGN_REVIEW_VIEWS = {
+    "launch-20260915-funlab-dave-ys11-5": "vewH5ud840",
+    "launch-20260915-powkong-piranha-v2": "vewTsJRx9G",
+}
 
 
 def _ids(value) -> list[str]:
@@ -139,7 +148,8 @@ async def _participants(campaign_id: str) -> list[dict]:
 
 
 async def append_auto_approved(*, campaign_id: str, pool_target: int,
-                               preview: dict | None = None) -> dict:
+                               preview: dict | None = None,
+                               allow_parallel_review: bool = False) -> dict:
     """只追加系统已有充分资料且 review_decision=通过 的新开发对象；不取消旧记录。"""
     if not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise LaunchRuntimeError("LAUNCH_ACTIVITY_QUEUE_ENABLED 未开启")
@@ -177,7 +187,7 @@ async def append_auto_approved(*, campaign_id: str, pool_target: int,
         and ext((row.get("fields") or {}).get("审核结论")) in {"待审核", "待补资料"}
         for row in existing
     )
-    if outstanding_review:
+    if outstanding_review and not allow_parallel_review:
         return {
             "campaign_id": campaign_id, "pool_before": active_count,
             "eligible_auto_approved": 0, "created": 0,
@@ -219,11 +229,13 @@ async def append_auto_approved(*, campaign_id: str, pool_target: int,
         "campaign_id": campaign_id, "pool_before": active_count,
         "eligible_auto_approved": len(candidates), "created": len(created),
         "pool_after": active_count + len(created), "participant_ids": created,
+        "pending_review_kept_parallel": outstanding_review if allow_parallel_review else 0,
     }
 
 
 async def append_review_candidates(*, campaign_id: str, review_target: int = 20,
-                                   preview: dict | None = None) -> dict:
+                                   preview: dict | None = None,
+                                   operator_only: bool = False) -> dict:
     """补充一个待审核批次；不生成草稿，也不沿用系统自动通过结论。"""
     if not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise LaunchRuntimeError("LAUNCH_ACTIVITY_QUEUE_ENABLED 未开启")
@@ -264,7 +276,21 @@ async def append_review_candidates(*, campaign_id: str, review_target: int = 20,
         candidate for candidate in (preview.get("candidates") or [])
         if candidate.get("contact_id") not in existing_contacts
         and candidate.get("decision") == "eligible_new_cold"
-        and candidate.get("base_filter_passed") is True
+        and (
+            candidate.get("base_filter_passed") is True
+            or (
+                operator_only
+                and candidate.get("profile_refresh_needed") is True
+                and candidate.get("review_decision") == "待补资料"
+            )
+        )
+        and (
+            not operator_only
+            or (
+                candidate.get("review_route") == "KOL运营审核"
+                and candidate.get("review_decision") != "通过"
+            )
+        )
     ][:room]
 
     batch_id = f"review-{time.strftime('%Y%m%d')}-{int(time.time())}"
@@ -278,7 +304,10 @@ async def append_review_candidates(*, campaign_id: str, review_target: int = 20,
             if await launch_participation._participants_by_unique_key(unique_key):
                 continue
             ranking_fields = launch_participation._ranking_fields(candidate, ranking_version)
-            ranking_fields["审核结论"] = "待审核"
+            pending_decision = (
+                "待补资料" if candidate.get("review_decision") == "待补资料" else "待审核"
+            )
+            ranking_fields["审核结论"] = pending_decision
             ranking_fields["审核原因"] = ""
             ranking_fields["审核人"] = None
             ranking_fields["审核时间"] = None
@@ -304,7 +333,7 @@ async def append_review_candidates(*, campaign_id: str, review_target: int = 20,
             if len(matches) != 1:
                 raise LaunchRuntimeError("待审核候选创建后唯一键回读不一致")
             readback = matches[0].get("fields") or {}
-            if ext(readback.get("审核结论")) != "待审核":
+            if ext(readback.get("审核结论")) != pending_decision:
                 raise LaunchRuntimeError("待审核候选被意外放行为通过")
             if _ids(readback.get("关联邮件草稿")):
                 raise LaunchRuntimeError("待审核候选意外关联邮件草稿")
@@ -558,6 +587,301 @@ async def campaign_metrics(campaign_id: str) -> dict:
         "ontime_posts": ontime_posts,
         **control,
     }
+
+
+async def _brand_quota_snapshot(brand: str) -> dict:
+    counts, errors = await auto_send.zoho_sent_counts_24h([brand])
+    if errors.get(brand):
+        raise LaunchRuntimeError(f"{brand} Zoho滚动24小时计数失败，自治补池已停止")
+    sent = max(0, int(counts.get(brand, 0) or 0))
+    cap = max(1, int(auto_send.SEND_DAILY_CAP))
+    return {
+        "brand": brand, "cap": cap, "sent_24h": sent,
+        "remaining": max(0, cap - sent),
+    }
+
+
+async def _campaign_ready_inventory(campaign_id: str) -> dict:
+    participants = await _participants(campaign_id)
+    active = [
+        row for row in participants
+        if ext((row.get("fields") or {}).get("参与状态")) in {"锁定准备中", "已入围"}
+    ]
+    draft_ids = {
+        draft_id for row in active
+        for draft_id in _ids((row.get("fields") or {}).get("关联邮件草稿"))
+    }
+    drafts = await feishu.fetch_all_records(
+        config.T_DRAFT,
+        field_names=["邮件草稿状态", "发送状态", "建议发送时间"],
+        page_size=500,
+    )
+    approved_unsent = 0
+    due_now = 0
+    now_ms = int(time.time() * 1000)
+    for row in drafts:
+        if row.get("record_id") not in draft_ids:
+            continue
+        fields = row.get("fields") or {}
+        if ext(fields.get("邮件草稿状态")) not in {"自动通过", "通过"}:
+            continue
+        if ext(fields.get("发送状态")) not in {"", "未发"}:
+            continue
+        approved_unsent += 1
+        try:
+            scheduled = int(fields.get("建议发送时间") or 0)
+        except (TypeError, ValueError):
+            scheduled = 0
+        if not scheduled or scheduled <= now_ms:
+            due_now += 1
+    return {
+        "participants": len(participants), "active_participants": len(active),
+        "ready": approved_unsent, "due_now": due_now,
+        "pending_review": sum(
+            ext((row.get("fields") or {}).get("审核结论")) in {"待审核", "待补资料"}
+            for row in active
+        ),
+    }
+
+
+async def _notify_operator_review(*, campaign_id: str, activity: dict,
+                                  created: int) -> dict:
+    if created <= 0:
+        return {"sent": 0, "targets": 0}
+    targets = await feishu.fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)
+    if not targets:
+        return {"sent": 0, "targets": 0, "error": "未找到在职KOL运营审核人"}
+    activity_name = (
+        ext((activity.get("fields") or {}).get("活动名称")).strip() or campaign_id
+    )
+    table_url = (
+        f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}"
+        f"?table={config.T_LAUNCH_PARTICIPANT}"
+    )
+    review_view = CAMPAIGN_REVIEW_VIEWS.get(campaign_id)
+    if review_view:
+        table_url += f"&view={review_view}"
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "活动候选待运营审核"},
+        },
+        "elements": [
+            {"tag": "div", "fields": [
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**活动**\n{activity_name}"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**新增边界项**\n{created} 名"}},
+            ]},
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": (
+                "系统已先检查国家、语言、平台、粉丝范围、邮箱和全局重复触达。"
+                "请只打开达人主页，核对近3个月内容品类、实际语言及缺失资料，"
+                "在活动专属审核视图回填通过 / 待补资料 / 排除和原因。"
+                "本批无需 Frankie 逐条审核。"
+            )}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"[打开活动参与记录]({table_url})"}},
+        ],
+    }
+    sent = 0
+    errors = []
+    for name, open_id in targets:
+        try:
+            await feishu.send_card_message(
+                "open_id", open_id, card, biz="KOL", level="P2",
+            )
+            sent += 1
+        except Exception as exc:
+            errors.append(f"{name}: {str(exc)[:120]}")
+    return {"sent": sent, "targets": len(targets), "errors": errors}
+
+
+async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
+                            queue_limit: int = 120, review_target: int = 20,
+                            profile_refresh_limit: int = 30) -> dict:
+    """按活动进度与邮箱余量自治补池；不直接发送邮件，也不降低筛选标准。"""
+    lock = _LOCKS.setdefault(campaign_id, asyncio.Lock())
+    if lock.locked():
+        return {"campaign_id": campaign_id, "already_running": True}
+    async with lock:
+        metrics = await campaign_metrics(campaign_id)
+        activity = await launch_evidence.get_activity(campaign_id)
+        activity_fields = activity.get("fields") or {}
+        if metrics["action"] == "stop":
+            await feishu.update_record(
+                config.T_LAUNCH_CAMPAIGN, activity["record_id"],
+                {"发送邮件授权": False},
+            )
+            return {**metrics, "already_running": False, "stopped": True}
+        if metrics["action"] == "hold":
+            return {**metrics, "already_running": False, "held": True}
+
+        product_id = ext(activity_fields.get("产品主记录ID")).strip()
+        if not product_id:
+            raise LaunchRuntimeError("活动缺少产品主记录ID")
+        product = await feishu.get_record(config.T_PRODUCT, product_id)
+        brand = config.brand_from_text(ext((product.get("fields") or {}).get("品牌")))
+        if brand not in config.BRAND_CONFIG:
+            raise LaunchRuntimeError("活动产品品牌无法匹配Zoho邮箱")
+        quota = await _brand_quota_snapshot(brand)
+        days = max(1, min(int(buffer_days), 3))
+        target_ready = min(
+            auto_send.SEND_DAILY_CAP * 2,
+            max(auto_send.SEND_DAILY_CAP, quota["remaining"] * days),
+        )
+        inventory_before = await _campaign_ready_inventory(campaign_id)
+        if inventory_before["ready"] >= target_ready:
+            return {
+                **metrics, "already_running": False, "brand": brand,
+                "quota": quota, "target_ready_inventory": target_ready,
+                "inventory_before": inventory_before["ready"],
+                "inventory_after": inventory_before["ready"],
+                "runtime": "inventory_sufficient",
+            }
+
+        preview = await launch_candidate_preview.preview_candidates(
+            "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
+        )
+        deficit = max(0, target_ready - inventory_before["ready"])
+        first_append = await append_auto_approved(
+            campaign_id=campaign_id,
+            pool_target=metrics["participants"] + min(deficit, 120),
+            preview=preview, allow_parallel_review=True,
+        )
+        first_queue = await queue_approved(campaign_id=campaign_id, limit=queue_limit)
+        inventory_after_master = await _campaign_ready_inventory(campaign_id)
+
+        refresh_result = {"processed": 0, "writes": 0}
+        second_append = {"created": 0}
+        second_queue = {"queued": 0}
+        latest_preview = preview
+        if inventory_after_master["ready"] < target_ready:
+            refresh_ids = list(dict.fromkeys(
+                preview.get("profile_refresh_candidate_ids") or []
+            ))[:max(0, min(int(profile_refresh_limit), 100))]
+            if refresh_ids:
+                refresh_result = await relabel.run_profile_records(
+                    refresh_ids, dry_run=False, limit=len(refresh_ids),
+                )
+                latest_preview = await launch_candidate_preview.preview_candidates(
+                    "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
+                )
+                remaining = max(0, target_ready - inventory_after_master["ready"])
+                second_append = await append_auto_approved(
+                    campaign_id=campaign_id,
+                    pool_target=(
+                        int(inventory_after_master.get("active_participants")
+                            or metrics["participants"]) + min(remaining, 120)
+                    ),
+                    preview=latest_preview, allow_parallel_review=True,
+                )
+                second_queue = await queue_approved(
+                    campaign_id=campaign_id, limit=queue_limit,
+                )
+        inventory_after = await _campaign_ready_inventory(campaign_id)
+        remaining = max(0, target_ready - inventory_after["ready"])
+
+        discovery = {"ok": True, "created": 0, "skipped": "inventory_sufficient"}
+        review_pool = {"created": 0}
+        review_notification = {"sent": 0}
+        if remaining:
+            discovery = await keyword_supply.ensure_campaign_supply(
+                campaign_id=campaign_id, activity=activity, product=product,
+                required_candidates=remaining, dry_run=False,
+            )
+            review_preview = dict(latest_preview)
+            review_preview["candidates"] = list(latest_preview.get("candidates") or []) + list(
+                latest_preview.get("profile_refresh_candidates") or []
+            )
+            review_pool = await append_review_candidates(
+                campaign_id=campaign_id, review_target=review_target,
+                preview=review_preview, operator_only=True,
+            )
+            review_notification = await _notify_operator_review(
+                campaign_id=campaign_id, activity=activity,
+                created=int(review_pool.get("created") or 0),
+            )
+
+        return {
+            **metrics, "already_running": False, "brand": brand,
+            "quota": quota, "target_ready_inventory": target_ready,
+            "inventory_before": inventory_before["ready"],
+            "inventory_after_master": inventory_after_master["ready"],
+            "inventory_after": inventory_after["ready"],
+            "append": first_append, "queue": first_queue,
+            "profile_refresh": refresh_result,
+            "append_after_refresh": second_append,
+            "queue_after_refresh": second_queue,
+            "discovery": discovery, "review_pool": review_pool,
+            "review_notification": review_notification,
+            "quality_filters_lowered": False,
+        }
+
+
+def _runtime_result_summary(result: dict | None) -> dict:
+    result = result or {}
+    quota = result.get("quota") or {}
+    return {
+        key: result.get(key) for key in (
+            "action", "brand", "participants", "sent", "replies", "commitments",
+            "ontime_posts", "target_ready_inventory", "inventory_before", "inventory_after",
+            "stopped", "held", "quality_filters_lowered",
+        ) if key in result
+    } | ({"quota": quota} if quota else {})
+
+
+async def load_runtime_job(campaign_id: str, job_id: str = "") -> dict | None:
+    activity = await launch_evidence.get_activity(campaign_id)
+    note = ext((activity.get("fields") or {}).get("数据口径备注"))
+    for line in reversed(note.splitlines()):
+        if not line.startswith(RUNTIME_JOB_PREFIX):
+            continue
+        try:
+            payload = json.loads(line[len(RUNTIME_JOB_PREFIX):])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not job_id or payload.get("job_id") == job_id:
+            return payload
+    return None
+
+
+async def persist_runtime_job(*, campaign_id: str, job_id: str, mode: str,
+                              status: str, result: dict | None = None,
+                              error: str = "", started_ts: float | None = None) -> dict:
+    activity = await launch_evidence.get_activity(campaign_id)
+    fields = activity.get("fields") or {}
+    now_ts = int(time.time())
+    previous = None
+    clean_lines = []
+    for line in ext(fields.get("数据口径备注")).splitlines():
+        if line.startswith(RUNTIME_JOB_PREFIX):
+            try:
+                value = json.loads(line[len(RUNTIME_JOB_PREFIX):])
+                if value.get("job_id") == job_id:
+                    previous = value
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            continue
+        clean_lines.append(line)
+    payload = {
+        "job_id": job_id, "campaign_id": campaign_id, "mode": mode,
+        "status": status,
+        "started_ts": int(started_ts or (previous or {}).get("started_ts") or now_ts),
+        "updated_ts": now_ts,
+    }
+    if status == "success":
+        payload["result"] = _runtime_result_summary(result)
+    if error:
+        payload["error"] = str(error)[:300]
+    line = RUNTIME_JOB_PREFIX + json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"),
+    )
+    base = "\n".join(clean_lines).strip()
+    note = ((base[-1800:] + "\n") if base else "") + line
+    await feishu.update_record(
+        config.T_LAUNCH_CAMPAIGN, activity["record_id"],
+        {"数据口径备注": note[-3000:]},
+    )
+    return payload
 
 
 async def daily_feedback(campaign_id: str) -> dict:
