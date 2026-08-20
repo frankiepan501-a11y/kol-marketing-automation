@@ -254,7 +254,7 @@ Handle: @{handle or 'unknown'}
 def deterministic_profile_classification(*, name: str, description: str,
                                          recent_titles: list[str]) -> dict:
     """模型不可用时，用可回放的内容关键词完成保守画像。"""
-    text = " ".join([name or "", description or "", *(recent_titles or [])]).lower()
+    content_text = " ".join(recent_titles or []).lower()
     styles: list[str] = []
     style_cues = (
         ("UNBOX", ("unbox", "unboxing", "开箱")),
@@ -266,11 +266,11 @@ def deterministic_profile_classification(*, name: str, description: str,
         ("游戏", ("gameplay", "walkthrough", "boss", "full game", "gaming", "游戏", "通关")),
     )
     for style, cues in style_cues:
-        if any(cue in text for cue in cues):
+        if any(cue in content_text for cue in cues):
             styles.append(style)
         if len(styles) >= 3:
             break
-    if not styles and any(cue in text for cue in (
+    if not styles and any(cue in content_text for cue in (
         "nintendo", "switch", "mario", "zelda", "playstation", "xbox", "steam",
     )):
         styles.append("游戏")
@@ -285,7 +285,7 @@ def deterministic_profile_classification(*, name: str, description: str,
         ("Xbox", ("xbox",)),
     )
     for tag, cues in tag_cues:
-        if any(cue in text for cue in cues):
+        if any(cue in content_text for cue in cues):
             tags.append(tag)
         if len(tags) >= 5:
             break
@@ -308,8 +308,8 @@ def deterministic_profile_classification(*, name: str, description: str,
         # 但候选仍必须通过活动硬筛和本次人工审核。
         object_type = "KOL"
 
-    ecosystems = _derive_ecosystems(text, [])
-    vertical = _derive_vertical(text, styles, "")
+    ecosystems = _derive_ecosystems(content_text, [])
+    vertical = _derive_vertical(content_text, styles, "")
     return {
         "type": object_type, "confidence": 0.65,
         "reason": "确定性兜底：按近期标题关键词分类；外部模型不可用",

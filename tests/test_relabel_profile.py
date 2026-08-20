@@ -102,6 +102,7 @@ class RelabelProfileTests(unittest.TestCase):
         self.assertEqual("主机游戏", result["content_vertical"])
         self.assertIn("Switch", result["ecosystems"])
         self.assertIn("Mario", result["ip_tags"])
+        self.assertNotIn("硬件改装", result["styles"])
 
     def test_deterministic_fallback_blocks_exact_official_or_media_identity(self):
         publisher = relabel.deterministic_profile_classification(
