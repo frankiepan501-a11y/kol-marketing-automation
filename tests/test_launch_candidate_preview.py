@@ -80,7 +80,8 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
                 "国家": "ES", "语言": "es", "主平台": "YouTube",
                 "粉丝数": 1980000, "内容风格": ["游戏"],
                 "内容垂类": "主机游戏", "主机生态": ["Switch", "Switch 2"],
-                "资料可用状态": "人工核实有效",
+                "资料可用状态": "人工核实有效", "IP喜好": "Yoshi, Tomodachi Life",
+                "资料核实时间": 1_799_000_000_000,
             },
             {
                 "品类": "Switch底座", "报价(USD)": 109.99,
@@ -89,6 +90,7 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
             },
             {"expected_styles": ["游戏", "SETUP", "UNBOX", "测评"]},
             target_countries={"ES"}, target_languages={"es"},
+            now_ms=1_800_000_000_000,
         )
 
         self.assertTrue(matched)
@@ -100,7 +102,7 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
                 "国家": "US", "语言": "en", "主平台": "YouTube",
                 "粉丝数": 2130000, "内容风格": ["游戏"],
                 "内容垂类": "主机游戏", "主机生态": ["Switch", "Switch 2"],
-                "资料可用状态": "活跃度不足",
+                "资料可用状态": "活跃度不足", "IP喜好": "Mario, Zelda",
             },
             {
                 "品类": "Switch底座", "报价(USD)": 109.99,
@@ -113,6 +115,102 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
 
         self.assertFalse(matched)
         self.assertIn("活跃度不足", reasons)
+
+    def test_manual_profile_expires_without_recent_verification_time(self):
+        reasons = preview._nintendo_switch_profile_reasons({
+            "内容垂类": "主机游戏", "主机生态": ["Switch"],
+            "资料可用状态": "人工核实有效", "IP喜好": "Mario",
+        }, now_ms=1_800_000_000_000)
+
+        self.assertIn("人工核实已过期", reasons)
+
+    def test_timestamp_parser_accepts_iso_seconds_and_milliseconds(self):
+        expected = 1_800_000_000_000
+        self.assertEqual(expected, preview._timestamp_ms(expected))
+        self.assertEqual(expected, preview._timestamp_ms(1_800_000_000))
+        self.assertEqual(
+            1_787_219_100_000,
+            preview._timestamp_ms("2026-08-20T17:45:00.000+08:00"),
+        )
+
+    def test_piranha_rejects_minecraft_even_when_switch_and_vertical_match(self):
+        matched, reasons = preview._base_filter_kol(
+            {
+                "国家": "US", "语言": "en", "主平台": "YouTube",
+                "粉丝数": 600000, "内容风格": ["游戏"],
+                "内容垂类": "主机游戏", "主机生态": ["Switch"],
+                "资料可用状态": "人工核实有效", "IP喜好": "Minecraft, Roblox",
+            },
+            {
+                "品类": "Switch底座", "报价(USD)": 109.99,
+                "销售国家": ["US"], "适配主机": ["Switch", "Switch 2"],
+                "适配IP": ["马里奥系列", "Nintendo系列"],
+            },
+            {"expected_styles": ["游戏"]},
+            target_countries={"US"}, target_languages={"en"},
+        )
+
+        self.assertFalse(matched)
+        self.assertIn("Nintendo/Mario受众或近期硬件内容不匹配", reasons)
+
+    def test_piranha_rejects_mixed_ip_when_recent_content_is_non_target(self):
+        reasons = preview._nintendo_switch_profile_reasons({
+            "内容垂类": "主机游戏", "主机生态": ["Switch"],
+            "资料可用状态": "人工核实有效",
+            "资料核实时间": 1_799_000_000_000,
+            "IP喜好": "Mario, Minecraft, Roblox",
+            "近期视频标题": "Minecraft challenge\nNew Roblox roleplay",
+        }, now_ms=1_800_000_000_000)
+
+        self.assertIn("近期或主要内容存在明显非目标游戏/IP信号", reasons)
+
+    def test_piranha_effective_status_still_requires_v2_fresh_data_and_activity(self):
+        matched, reasons = preview._base_filter_kol(
+            {
+                "国家": "US", "语言": "en", "主平台": "YouTube",
+                "粉丝数": 100000, "内容风格": ["游戏"],
+                "内容垂类": "主机游戏", "主机生态": ["Switch"],
+                "资料可用状态": "有效", "IP喜好": "Mario",
+                "标签版本": "", "近期视频抓取时间": 1_700_000_000_000,
+                "最近发布日": 1_700_000_000_000, "近90天发布数": 0,
+            },
+            {
+                "品类": "Switch底座", "报价(USD)": 109.99,
+                "销售国家": ["US"], "适配主机": ["Switch", "Switch 2"],
+                "适配IP": ["马里奥系列", "Nintendo系列"],
+            },
+            {"expected_styles": ["游戏"]},
+            target_countries={"US"}, target_languages={"en"},
+            now_ms=1_800_000_000_000,
+        )
+
+        self.assertFalse(matched)
+        self.assertIn("标签版本不是v2", reasons)
+        self.assertIn("资料缺失或过期", reasons)
+        self.assertIn("活跃度不足", reasons)
+
+    def test_piranha_machine_profile_accepts_v2_fresh_active_nintendo_creator(self):
+        matched, reasons = preview._base_filter_kol(
+            {
+                "国家": "US", "语言": "en", "主平台": "YouTube",
+                "粉丝数": 600000, "内容风格": ["游戏"],
+                "内容垂类": "主机游戏", "主机生态": ["Switch 2"],
+                "资料可用状态": "有效", "IP喜好": "Nintendo, Mario",
+                "标签版本": "v2", "近期视频抓取时间": 1_799_000_000_000,
+                "最近发布日": 1_799_000_000_000, "近90天发布数": 4,
+            },
+            {
+                "品类": "Switch底座", "报价(USD)": 109.99,
+                "销售国家": ["US"], "适配主机": ["Switch", "Switch 2"],
+                "适配IP": ["马里奥系列", "Nintendo系列"],
+            },
+            {"expected_styles": ["游戏"]},
+            target_countries={"US"}, target_languages={"en"},
+            now_ms=1_800_000_000_000,
+        )
+
+        self.assertTrue(matched)
+        self.assertEqual([], reasons)
 
     def test_review_snapshot_routes_head_kol_to_frankie_with_actionable_evidence(self):
         fields = {
@@ -188,6 +286,45 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
                 contact_id="kol1", ranking_version="rank-v2",
             ))
         self.assertEqual(3100, snapshot["final_priority"])
+
+    def test_participant_review_returns_reason_codes_for_single_replay(self):
+        rows = [{"record_id": "part1", "fields": {
+            "活动ID": "c1", "产品家族ID": "p1", "对象类型": "KOL",
+            "名单版本": "rank-v2", "参与状态": "已入围",
+            "关联KOL": ["kol1"], "审核结论": "排除",
+            "审核原因": "受众不匹配",
+            "审核原因代码": ["目标主机不匹配", "核心游戏IP不匹配"],
+            "审核时间": 1_800_000_000_000,
+        }}]
+        with patch.object(preview.config, "T_LAUNCH_PARTICIPANT", "participants"), \
+             patch.object(preview.feishu, "search_records", new=AsyncMock(return_value=rows)):
+            result = asyncio.run(preview._load_participant_review(
+                campaign_id="c1", product_family_id="p1", object_type="KOL",
+                contact_id="kol1", ranking_version="rank-v2",
+            ))
+
+        self.assertTrue(result["is_current"])
+        self.assertEqual("排除", result["review_decision"])
+        self.assertEqual(
+            ["核心游戏IP不匹配", "目标主机不匹配"],
+            result["review_reason_codes"],
+        )
+
+    def test_participant_review_does_not_present_old_version_as_current(self):
+        rows = [{"record_id": "part1", "fields": {
+            "活动ID": "c1", "产品家族ID": "p1", "对象类型": "KOL",
+            "名单版本": "rank-v1", "参与状态": "已取消",
+            "关联KOL": ["kol1"], "审核结论": "通过",
+        }}]
+        with patch.object(preview.config, "T_LAUNCH_PARTICIPANT", "participants"), \
+             patch.object(preview.feishu, "search_records", new=AsyncMock(return_value=rows)):
+            result = asyncio.run(preview._load_participant_review(
+                campaign_id="c1", product_family_id="p1", object_type="KOL",
+                contact_id="kol1", ranking_version="rank-v2",
+            ))
+
+        self.assertFalse(result["is_current"])
+        self.assertNotIn("review_decision", result)
 
     def test_ready_evidence_drift_fails_closed(self):
         activity = {
@@ -446,6 +583,50 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertEqual("eligible_new_cold", result["candidates"][0]["decision"])
         create_mock.assert_not_awaited()
         update_mock.assert_not_awaited()
+
+    def test_preview_keeps_existing_relationship_route_even_when_profile_fails(self):
+        product = {
+            "record_id": "main",
+            "fields": {
+                "产品名": "食人花二代", "品牌": "POWKONG", "品类": "Switch底座",
+                "报价(USD)": 89.99, "销售国家": ["US"],
+                "适配主机": ["Switch", "Switch 2"],
+                "适配IP": ["马里奥系列", "Nintendo系列"],
+                "活动主记录ID": "main",
+            },
+        }
+        kols = [{
+            "record_id": "kol1",
+            "fields": {
+                "账号名": "Existing Creator", "邮箱": "existing@example.com",
+                "合作状态": "洽谈中", "触达路由状态": "沿用原线程",
+                "主平台": "YouTube", "国家": "US", "语言": "en", "粉丝数": 100000,
+                "内容风格": ["游戏"], "内容垂类": "泛游戏娱乐",
+                "主机生态": ["PC-Steam"], "IP喜好": "Minecraft",
+                "资料可用状态": "人工核实有效",
+            },
+        }]
+
+        async def fake_fetch(table_id, field_names=None, page_size=100):
+            return {
+                "products": [product], "kols": kols, "editors": [], "drafts": []
+            }[table_id]
+
+        with patch.object(preview.config, "T_PRODUCT", "products"), \
+             patch.object(preview.config, "T_KOL", "kols"), \
+             patch.object(preview.config, "T_EDITOR", "editors"), \
+             patch.object(preview.config, "T_DRAFT", "drafts"), \
+             patch.object(preview.feishu, "fetch_all_records", side_effect=fake_fetch), \
+             patch.object(preview.dispatch, "fetch_mapping_for_product", new=AsyncMock(return_value={
+                 "expected_styles": ["游戏"], "expected_report_cats": [],
+                 "expected_media_types": [], "matched_rules": 1,
+             })):
+            result = asyncio.run(preview.preview_candidates("main", object_type="KOL", limit=10))
+
+        candidate = result["candidates"][0]
+        self.assertEqual("existing_pipeline_same_thread", candidate["decision"])
+        self.assertFalse(candidate["base_filter_passed"])
+        self.assertIn("目标主机不匹配", candidate["base_filter_reasons"])
 
     def test_dave_activity_applies_direct_nyxi_evidence_without_writes(self):
         product = {
