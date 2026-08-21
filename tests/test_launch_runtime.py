@@ -14,6 +14,34 @@ def _certificate():
 
 
 class LaunchRuntimeTests(unittest.TestCase):
+    def test_sync_outcomes_and_metrics_reuses_the_same_draft_snapshot(self):
+        activity = {"record_id": "a1", "fields": {"活动ID": "campaign1"}}
+        participants = [{"record_id": "p1", "fields": {}}]
+        drafts = [{"record_id": "d1", "fields": {}}]
+        with patch.object(
+            launch_runtime.launch_evidence, "get_activity",
+            new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=participants),
+        ), patch.object(
+            launch_runtime.launch_outcomes, "draft_snapshot",
+            new=AsyncMock(return_value=drafts),
+        ) as snapshot, patch.object(
+            launch_runtime.launch_outcomes, "reconcile_campaign",
+            new=AsyncMock(return_value={"updates_written": 0}),
+        ) as reconcile, patch.object(
+            launch_runtime, "campaign_metrics",
+            new=AsyncMock(return_value={"campaign_id": "campaign1"}),
+        ) as metrics:
+            result = asyncio.run(
+                launch_runtime.sync_campaign_outcomes_and_metrics("campaign1")
+            )
+
+        self.assertEqual("campaign1", result["campaign_id"])
+        snapshot.assert_awaited_once()
+        self.assertIs(drafts, reconcile.await_args.kwargs["drafts"])
+        self.assertIs(drafts, metrics.await_args.kwargs["drafts"])
+
     def test_campaign_metrics_counts_ontime_posts_from_actual_uploads_not_promises(self):
         activity = {"record_id": "a1", "fields": {
             "活动ID": "campaign1", "窗口结束": 1_800_000_000_000,
@@ -34,18 +62,9 @@ class LaunchRuntimeTests(unittest.TestCase):
             {"record_id": "d1", "fields": {"发送状态": "已发送", "是否回复": True}},
             {"record_id": "d2", "fields": {"发送状态": "已发送", "是否回复": True}},
         ]
-        with patch.object(
-            launch_runtime.launch_outcomes, "reconcile_campaign",
-            new=AsyncMock(return_value={"updates_written": 0}),
-        ), patch.object(
-            launch_runtime.launch_evidence, "get_activity",
-            new=AsyncMock(return_value=activity),
-        ), patch.object(
-            launch_runtime, "_participants", new=AsyncMock(return_value=participants),
-        ), patch.object(
-            launch_runtime.feishu, "fetch_all_records", new=AsyncMock(return_value=drafts),
-        ):
-            result = asyncio.run(launch_runtime.campaign_metrics("campaign1"))
+        result = asyncio.run(launch_runtime.campaign_metrics(
+            "campaign1", activity=activity, participants=participants, drafts=drafts,
+        ))
 
         self.assertEqual(2, result["commitments"])
         self.assertEqual(1, result["actual_posts"])
@@ -280,7 +299,7 @@ class LaunchRuntimeTests(unittest.TestCase):
         ]
 
         with patch.object(
-            launch_runtime, "campaign_metrics", new=AsyncMock(return_value=metrics),
+            launch_runtime, "sync_campaign_outcomes_and_metrics", new=AsyncMock(return_value=metrics),
         ), patch.object(
             launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
         ), patch.object(
@@ -342,7 +361,7 @@ class LaunchRuntimeTests(unittest.TestCase):
         ]
 
         with patch.object(
-            launch_runtime, "campaign_metrics", new=AsyncMock(return_value=metrics),
+            launch_runtime, "sync_campaign_outcomes_and_metrics", new=AsyncMock(return_value=metrics),
         ), patch.object(
             launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
         ), patch.object(
@@ -458,7 +477,7 @@ class LaunchRuntimeTests(unittest.TestCase):
             "运行模式": "影子试跑", "状态": "待人工批准",
         }}
         with patch.object(
-            launch_runtime, "campaign_metrics", new=AsyncMock(return_value=metrics),
+            launch_runtime, "sync_campaign_outcomes_and_metrics", new=AsyncMock(return_value=metrics),
         ), patch.object(
             launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
         ), patch.object(
@@ -483,7 +502,7 @@ class LaunchRuntimeTests(unittest.TestCase):
         }}
         update = AsyncMock()
         with patch.object(
-            launch_runtime, "campaign_metrics", new=AsyncMock(return_value=metrics),
+            launch_runtime, "sync_campaign_outcomes_and_metrics", new=AsyncMock(return_value=metrics),
         ), patch.object(
             launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
         ), patch.object(launch_runtime.time, "time", return_value=1_800_000_000), patch.object(

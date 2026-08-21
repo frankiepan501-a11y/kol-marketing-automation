@@ -543,20 +543,18 @@ async def run_campaign(*, campaign_id: str, pool_target: int = 100,
         }
 
 
-async def campaign_metrics(campaign_id: str) -> dict:
-    """先同步可核验结果，再按活动内事实计算扩池/停止动作。"""
-    outcome_reconcile = await launch_outcomes.reconcile_campaign(
-        campaign_id, dry_run=False,
-    )
-    activity = await launch_evidence.get_activity(campaign_id)
+async def campaign_metrics(
+    campaign_id: str, *, activity: dict | None = None,
+    participants: list[dict] | None = None, drafts: list[dict] | None = None,
+) -> dict:
+    """只读计算活动事实指标；本函数不写生产表。"""
+    activity = activity or await launch_evidence.get_activity(campaign_id)
     af = activity.get("fields") or {}
-    participants = await _participants(campaign_id)
+    participants = participants if participants is not None else await _participants(campaign_id)
     draft_ids = {
         did for row in participants for did in _ids((row.get("fields") or {}).get("关联邮件草稿"))
     }
-    drafts = await feishu.fetch_all_records(
-        config.T_DRAFT, field_names=["发送状态", "是否回复"], page_size=500,
-    )
+    drafts = drafts if drafts is not None else await launch_outcomes.draft_snapshot()
     sent = sum(
         row.get("record_id") in draft_ids
         and ext((row.get("fields") or {}).get("发送状态")) in {"已发", "已发送"}
@@ -606,9 +604,25 @@ async def campaign_metrics(campaign_id: str) -> dict:
         "campaign_id": campaign_id, "participants": len(participants),
         "sent": sent, "replies": replies, "commitments": commitments,
         "actual_posts": actual_posts, "ontime_posts": ontime_posts,
-        "outcome_reconcile": outcome_reconcile,
         **control,
     }
+
+
+async def sync_campaign_outcomes_and_metrics(campaign_id: str) -> dict:
+    """复用同一批草稿快照完成事实回填和指标计算，并保留写入回读结果。"""
+    activity = await launch_evidence.get_activity(campaign_id)
+    participants = await _participants(campaign_id)
+    drafts = await launch_outcomes.draft_snapshot()
+    outcome_reconcile = await launch_outcomes.reconcile_campaign(
+        campaign_id, dry_run=False, activity=activity,
+        participants=participants, drafts=drafts,
+    )
+    if outcome_reconcile.get("updates_written"):
+        participants = await _participants(campaign_id)
+    metrics = await campaign_metrics(
+        campaign_id, activity=activity, participants=participants, drafts=drafts,
+    )
+    return {**metrics, "outcome_reconcile": outcome_reconcile}
 
 
 async def _brand_quota_snapshot(brand: str) -> dict:
@@ -757,7 +771,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                 "reason": "活动窗口已结束，已关闭邮件授权并停止补池",
                 "quality_filters_lowered": False,
             })
-        metrics = await campaign_metrics(campaign_id)
+        metrics = await sync_campaign_outcomes_and_metrics(campaign_id)
         if metrics["action"] == "stop":
             await feishu.update_record(
                 config.T_LAUNCH_CAMPAIGN, activity["record_id"],
@@ -1023,7 +1037,7 @@ async def persist_runtime_job(*, campaign_id: str, job_id: str, mode: str,
 
 
 async def daily_feedback(campaign_id: str) -> dict:
-    metrics = await campaign_metrics(campaign_id)
+    metrics = await sync_campaign_outcomes_and_metrics(campaign_id)
     activity = await launch_evidence.get_activity(campaign_id)
     af = activity.get("fields") or {}
     note = (

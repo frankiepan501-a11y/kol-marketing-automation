@@ -1,9 +1,9 @@
 """集中上稿活动的承诺/实际上稿事实回填。
 
-只接受两类可核验事实：
+只接受三类可核验事实：
 1. 达人回复正文里同时出现明确发布动作和具体日期；
-2. 达人回复已被分类为 live_link_received 且正文含公开内容链接，
-   或 KOL 主表已有上稿日期+链接且只能唯一归属一个正式活动参与记录。
+2. 达人回复已被分类为 live_link_received 且正文含内容级公开链接；
+3. “实际上稿时间”还必须能从同一回复提取“已经发布+具体日期”。
 
 “感兴趣 / 要报价 / 洽谈中”不会被推断成承诺日期。
 """
@@ -21,6 +21,7 @@ from .feishu import ext, ext_url
 
 
 DAY_MS = 24 * 60 * 60 * 1000
+DRAFT_CACHE_SECONDS = 60
 ACTIVE_STATES = {"已入围", "锁定准备中"}
 SENT_STATES = {"已发", "已发送"}
 SOCIAL_HOSTS = {
@@ -28,6 +29,7 @@ SOCIAL_HOSTS = {
     "tiktok.com", "www.tiktok.com", "instagram.com", "www.instagram.com",
     "facebook.com", "www.facebook.com", "x.com", "www.x.com",
     "twitter.com", "www.twitter.com", "twitch.tv", "www.twitch.tv",
+    "clips.twitch.tv", "vm.tiktok.com", "vt.tiktok.com",
 }
 OWN_HOST_MARKERS = ("powkong", "funlab", "amazon.", "amzn.")
 
@@ -58,12 +60,21 @@ _COMMITMENT_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"\b(?:yo|nosotros|puedo|podemos|publicaré|publicaremos|planeo|planeamos).{0,35}"
+        r"\b(?:yo\s+|nosotros\s+)?(?:puedo|podemos|planeo|planeamos).{0,35}"
         r"\b(?:publicar|subir|compartir)\b",
         re.I,
     ),
+    re.compile(r"\b(?:publicaré|publicaremos|subiré|subiremos|compartiré|compartiremos)\b", re.I),
+)
+_ACTUAL_PATTERNS = (
+    re.compile(r"\b(?:i|we)\s+(?:posted|published|uploaded|shared|released)\b", re.I),
+    re.compile(r"\b(?:the\s+(?:video|review|post)|it)\s+(?:went|is)\s+live\b", re.I),
+    re.compile(r"\b(?:ich|wir)\s+(?:habe|haben).{0,35}\b(?:gepostet|veröffentlicht|hochgeladen|geteilt)\b", re.I),
+    re.compile(r"\b(?:publiqué|publicamos|subí|subimos|compartí|compartimos)\b", re.I),
 )
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
+_DRAFT_CACHE_AT = 0.0
+_DRAFT_CACHE_ROWS: list[dict] = []
 
 
 def _ids(value) -> list[str]:
@@ -96,17 +107,13 @@ def _date_ms(year: int, month: int, day: int) -> int:
         return 0
 
 
-def extract_explicit_commitment(
-    value: str,
-    *,
-    default_year: int,
-    min_ts: int = 0,
-    max_ts: int = 0,
+def _extract_action_date(
+    value: str, *, action_patterns: tuple[re.Pattern, ...], default_year: int,
+    min_ts: int = 0, max_ts: int = 0,
 ) -> int:
-    """从未引用的本轮回复中提取“明确发布动作+具体日期”。"""
     text = _unquoted_reply_text(value)
     action_matches = [
-        match for pattern in _COMMITMENT_PATTERNS for match in pattern.finditer(text)
+        match for pattern in action_patterns for match in pattern.finditer(text)
     ]
     if not text or not action_matches:
         return 0
@@ -115,11 +122,15 @@ def extract_explicit_commitment(
 
     def same_clause(date_match: re.Match) -> bool:
         for action_match in action_matches:
-            left = min(action_match.end(), date_match.end())
-            right = max(action_match.start(), date_match.start())
-            if right - left > 120:
+            if action_match.end() <= date_match.start():
+                between = text[action_match.end():date_match.start()]
+            elif date_match.end() <= action_match.start():
+                between = text[date_match.end():action_match.start()]
+            else:
+                between = ""
+            if len(between) > 120:
                 continue
-            if not re.search(r"[.!?;\n]", text[left:right]):
+            if not re.search(r"[.!?;\n]", between):
                 return True
         return False
 
@@ -158,6 +169,64 @@ def extract_explicit_commitment(
     return min(valid) if valid else 0
 
 
+def extract_explicit_commitment(
+    value: str,
+    *,
+    default_year: int,
+    min_ts: int = 0,
+    max_ts: int = 0,
+) -> int:
+    """从未引用的本轮回复中提取“明确未来发布动作+具体日期”。"""
+    return _extract_action_date(
+        value, action_patterns=_COMMITMENT_PATTERNS, default_year=default_year,
+        min_ts=min_ts, max_ts=max_ts,
+    )
+
+
+def extract_explicit_actual_date(
+    value: str,
+    *,
+    default_year: int,
+    min_ts: int = 0,
+    max_ts: int = 0,
+) -> int:
+    """只从“已经发布+具体日期”的同一分句提取实际发布日期。"""
+    return _extract_action_date(
+        value, action_patterns=_ACTUAL_PATTERNS, default_year=default_year,
+        min_ts=min_ts, max_ts=max_ts,
+    )
+
+
+def _is_content_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").casefold()
+    path = parsed.path or ""
+    query = parsed.query or ""
+    if host in {"youtu.be"}:
+        return bool(path.strip("/"))
+    if host in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+        return path.startswith(("/shorts/", "/live/")) or (
+            path == "/watch" and bool(re.search(r"(?:^|&)v=[^&]+", query))
+        )
+    if host in {"tiktok.com", "www.tiktok.com"}:
+        return bool(re.match(r"^/@[^/]+/video/\d+", path))
+    if host in {"vm.tiktok.com", "vt.tiktok.com"}:
+        return bool(path.strip("/"))
+    if host in {"instagram.com", "www.instagram.com"}:
+        return path.startswith(("/p/", "/reel/", "/tv/")) and len(path.strip("/").split("/")) >= 2
+    if host in {"facebook.com", "www.facebook.com"}:
+        return path.startswith(("/reel/", "/videos/", "/share/v/", "/share/r/")) or (
+            path in {"/watch", "/watch/"} and bool(re.search(r"(?:^|&)v=[^&]+", query))
+        )
+    if host in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
+        return bool(re.match(r"^/[^/]+/status/\d+", path))
+    if host in {"twitch.tv", "www.twitch.tv"}:
+        return bool(re.match(r"^/videos/\d+", path))
+    if host == "clips.twitch.tv":
+        return bool(path.strip("/"))
+    return False
+
+
 def extract_publication_url(value: str, *, object_type: str = "KOL") -> str:
     text = _unquoted_reply_text(value)
     for raw in _URL_RE.findall(text):
@@ -166,6 +235,8 @@ def extract_publication_url(value: str, *, object_type: str = "KOL") -> str:
         if not host or any(marker in host for marker in OWN_HOST_MARKERS):
             continue
         if object_type == "KOL" and host not in SOCIAL_HOSTS:
+            continue
+        if object_type == "KOL" and not _is_content_url(url):
             continue
         return url
     return ""
@@ -191,54 +262,67 @@ def _default_year(activity_fields: dict) -> int:
     return datetime.now(timezone.utc).year
 
 
-async def reconcile_campaign(campaign_id: str, *, dry_run: bool = True) -> dict:
-    if not config.T_LAUNCH_PARTICIPANT:
-        raise RuntimeError("T_LAUNCH_PARTICIPANT 未配置")
-    activity = await launch_evidence.get_activity(campaign_id)
-    activity_fields = activity.get("fields") or {}
-    all_participants = await feishu.fetch_all_records(
-        config.T_LAUNCH_PARTICIPANT,
-        field_names=[
-            "活动ID", "对象类型", "参与状态", "审核结论", "关联KOL", "关联邮件草稿",
-            "承诺上稿时间", "实际上稿时间", "上稿链接",
-        ],
-        page_size=500,
-    )
-    participants = [
-        row for row in all_participants
-        if ext((row.get("fields") or {}).get("活动ID")) == campaign_id
-    ]
-    drafts = await feishu.fetch_all_records(
+async def draft_snapshot() -> list[dict]:
+    """短时复用草稿快照，避免同一分钟两项活动重复扫描近2万行。"""
+    global _DRAFT_CACHE_AT, _DRAFT_CACHE_ROWS
+    now = time.monotonic()
+    if _DRAFT_CACHE_ROWS and now - _DRAFT_CACHE_AT < DRAFT_CACHE_SECONDS:
+        return _DRAFT_CACHE_ROWS
+    rows = await feishu.fetch_all_records(
         config.T_DRAFT,
         field_names=[
             "发送状态", "发送时间", "是否回复", "回复日期", "回复原文", "场景标签",
         ],
         page_size=500,
     )
-    draft_map = {row.get("record_id"): row for row in drafts if row.get("record_id")}
-    uploaded_kols = await feishu.search_records(
-        config.T_KOL,
-        [{"field_name": "上稿日期", "operator": "isNotEmpty", "value": []}],
-        field_names=["上稿日期", "上稿链接"],
-    )
-    uploaded_by_id = {
-        row.get("record_id"): row for row in uploaded_kols if row.get("record_id")
-    }
+    _DRAFT_CACHE_ROWS = rows
+    _DRAFT_CACHE_AT = now
+    return rows
 
-    eligible_by_kol: dict[str, list[dict]] = {}
-    for row in all_participants:
-        if not _eligible_participant(row, draft_map):
-            continue
-        fields = row.get("fields") or {}
-        if _ts(fields.get("实际上稿时间")):
-            continue
-        for kol_id in _ids(fields.get("关联KOL")):
-            eligible_by_kol.setdefault(kol_id, []).append(row)
+
+def _fields_match(readback: dict, expected: dict) -> bool:
+    for name, value in expected.items():
+        actual = readback.get(name)
+        if name in {"承诺上稿时间", "实际上稿时间"}:
+            if _ts(actual) != _ts(value):
+                return False
+        elif name == "上稿链接":
+            expected_url = ext_url(value) or ext(value)
+            actual_url = ext_url(actual) or ext(actual)
+            if actual_url != expected_url:
+                return False
+        elif ext(actual) != ext(value):
+            return False
+    return True
+
+
+async def reconcile_campaign(
+    campaign_id: str, *, dry_run: bool = True, activity: dict | None = None,
+    participants: list[dict] | None = None, drafts: list[dict] | None = None,
+) -> dict:
+    if not config.T_LAUNCH_PARTICIPANT:
+        raise RuntimeError("T_LAUNCH_PARTICIPANT 未配置")
+    activity = activity or await launch_evidence.get_activity(campaign_id)
+    activity_fields = activity.get("fields") or {}
+    if participants is None:
+        all_participants = await feishu.fetch_all_records(
+            config.T_LAUNCH_PARTICIPANT,
+            field_names=[
+                "活动ID", "对象类型", "参与状态", "审核结论", "关联KOL", "关联邮件草稿",
+                "承诺上稿时间", "实际上稿时间", "上稿链接",
+            ],
+            page_size=500,
+        )
+        participants = [
+            row for row in all_participants
+            if ext((row.get("fields") or {}).get("活动ID")) == campaign_id
+        ]
+    drafts = drafts if drafts is not None else await draft_snapshot()
+    draft_map = {row.get("record_id"): row for row in drafts if row.get("record_id")}
 
     default_year = _default_year(activity_fields)
     window_end = _ts(activity_fields.get("窗口结束"))
     planned, errors = [], []
-    ambiguous_manual_uploads = 0
     missing_live_links = 0
     for participant in participants:
         participant_id = participant.get("record_id")
@@ -256,6 +340,7 @@ async def reconcile_campaign(campaign_id: str, *, dry_run: bool = True) -> dict:
         update = {}
         commitment_source = ""
         actual_source = ""
+        link_source = ""
 
         if not _ts(fields.get("承诺上稿时间")):
             for draft in draft_rows:
@@ -286,34 +371,28 @@ async def reconcile_campaign(campaign_id: str, *, dry_run: bool = True) -> dict:
                 if not link:
                     missing_live_links += 1
                     continue
-                update["实际上稿时间"] = _ts(draft_fields.get("回复日期")) or int(time.time() * 1000)
-                update["上稿链接"] = {"link": link, "text": "打开上稿内容"}
-                actual_source = "reply_live_link"
-                break
-
-        if not _ts(fields.get("实际上稿时间")) and "实际上稿时间" not in update:
-            for kol_id in _ids(fields.get("关联KOL")):
-                uploaded = uploaded_by_id.get(kol_id)
-                if not uploaded:
-                    continue
-                candidates = eligible_by_kol.get(kol_id) or []
-                if len(candidates) != 1 or candidates[0].get("record_id") != participant_id:
-                    ambiguous_manual_uploads += 1
-                    continue
-                upload_fields = uploaded.get("fields") or {}
-                upload_ts = _ts(upload_fields.get("上稿日期"))
-                upload_link = ext_url(upload_fields.get("上稿链接")) or ext(
-                    upload_fields.get("上稿链接")
+                current_link = ext_url(fields.get("上稿链接")) or ext(fields.get("上稿链接"))
+                if current_link != link:
+                    update["上稿链接"] = {"link": link, "text": "打开上稿内容"}
+                    link_source = "reply_content_link"
+                reply_ts = _ts(draft_fields.get("回复日期"))
+                sent_times = [
+                    value for value in (
+                        _ts((row.get("fields") or {}).get("发送时间"))
+                        for row in draft_rows
+                    ) if value
+                ]
+                actual_date = extract_explicit_actual_date(
+                    ext(draft_fields.get("回复原文")),
+                    default_year=default_year,
+                    min_ts=min(sent_times, default=0),
+                    max_ts=(reply_ts + DAY_MS) if reply_ts else (
+                        (window_end + 90 * DAY_MS) if window_end else 0
+                    ),
                 )
-                sent_ts = min(
-                    (_ts((draft.get("fields") or {}).get("发送时间")) for draft in draft_rows),
-                    default=0,
-                )
-                if not upload_ts or not upload_link or (sent_ts and upload_ts < sent_ts):
-                    continue
-                update["实际上稿时间"] = upload_ts
-                update["上稿链接"] = {"link": upload_link, "text": "打开上稿内容"}
-                actual_source = "unique_main_table_upload"
+                if actual_date:
+                    update["实际上稿时间"] = actual_date
+                    actual_source = "explicit_published_date_in_reply"
                 break
 
         if not update:
@@ -323,6 +402,7 @@ async def reconcile_campaign(campaign_id: str, *, dry_run: bool = True) -> dict:
             "fields": update,
             "commitment_source": commitment_source,
             "actual_source": actual_source,
+            "link_source": link_source,
         })
         if dry_run:
             continue
@@ -330,29 +410,31 @@ async def reconcile_campaign(campaign_id: str, *, dry_run: bool = True) -> dict:
             await feishu.update_record(
                 config.T_LAUNCH_PARTICIPANT, participant_id, update,
             )
+            readback = await feishu.get_record(
+                config.T_LAUNCH_PARTICIPANT, participant_id,
+            )
+            if not _fields_match(readback.get("fields") or {}, update):
+                raise RuntimeError("飞书写入后回读不一致")
         except Exception as exc:
             errors.append({"participant_id": participant_id, "error": str(exc)[:160]})
 
-    successful = len(planned) if dry_run else len(planned) - len(errors)
+    failed_ids = {item["participant_id"] for item in errors}
+    successful_plans = [
+        item for item in planned if not dry_run and item["participant_id"] not in failed_ids
+    ]
     return {
         "campaign_id": campaign_id,
         "dry_run": dry_run,
         "participants_scanned": len(participants),
         "updates_planned": len(planned),
-        "updates_written": successful,
-        "commitments_written": sum(bool(item["fields"].get("承诺上稿时间")) for item in planned)
-        if dry_run else sum(
-            bool(item["fields"].get("承诺上稿时间"))
-            and not any(error["participant_id"] == item["participant_id"] for error in errors)
-            for item in planned
-        ),
-        "actuals_written": sum(bool(item["fields"].get("实际上稿时间")) for item in planned)
-        if dry_run else sum(
-            bool(item["fields"].get("实际上稿时间"))
-            and not any(error["participant_id"] == item["participant_id"] for error in errors)
-            for item in planned
-        ),
-        "ambiguous_manual_uploads": ambiguous_manual_uploads,
+        "updates_written": len(successful_plans),
+        "commitments_planned": sum(bool(item["fields"].get("承诺上稿时间")) for item in planned),
+        "commitments_written": sum(bool(item["fields"].get("承诺上稿时间")) for item in successful_plans),
+        "actuals_planned": sum(bool(item["fields"].get("实际上稿时间")) for item in planned),
+        "actuals_written": sum(bool(item["fields"].get("实际上稿时间")) for item in successful_plans),
+        "links_planned": sum(bool(item["fields"].get("上稿链接")) for item in planned),
+        "links_written": sum(bool(item["fields"].get("上稿链接")) for item in successful_plans),
+        "ambiguous_manual_uploads": 0,
         "missing_live_links": missing_live_links,
         "planned": planned,
         "errors": errors,
