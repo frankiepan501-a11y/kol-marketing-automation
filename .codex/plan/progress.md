@@ -395,3 +395,13 @@
 - 修复commit`92e2e0d`已精确部署为Zeabur deployment`6a87ea1b29f0931a12bfb25b`且状态`RUNNING`，`/health=ok`，日报运行与状态查询接口均存在。
 - 卡住的技术回执只在Dave活动`recvsFoRmeGj4Y`中把同一键由`sending`改为`rejected`；非技术业务备注逐字比对未变。随后Frankie-only任务`launchreport-12df0a22e5cd`成功，message_id=`om_x100b674afba06cb0c00611d1b8a2689`，业务写入0、发送回执写入2、最终状态`sent`；运营群未发送。
 - 最新聚焦测试42项、活动相关228项通过；全仓494项通过，唯一失败仍是既有Zeabur watchdog旧日期fixture。两位独立复审最终均无P0/P1。
+
+## 2026-08-21 日报卡真实前端比例修复
+
+- 用户提供真实飞书截图后，确认首版虽然通过API/Card JSON结构校验，但没有完成客户端视觉验收；卡片在超宽桌面窗口被严重纵向拉伸。
+- 已在已登录飞书网页版亲自复现：`width_mode=fill`配合`chart aspect_ratio=2:1 + height=auto`，导致每条进度图高度约等于消息宽度的一半，4条图跨越4—5屏。
+- 已移除全部`chart/linearProgress`和全宽设置，改为每活动两行10格紧凑文字进度条；校验器今后直接拒绝`chart`和`width_mode=fill`。
+- 聚焦回归18项通过；全仓495项通过，唯一失败仍是既有Zeabur watchdog旧日期fixture。
+- 修复commit`48ecdae6fca1e175399f29e3462f962f2f3115c6`已推送并部署，`kol-auto /health=ok`。
+- 修复版Frankie-only样卡message_id=`om_x100b674b5edc3cb0df3b391838d8cd8`；已在飞书网页版打开并截图，两个活动在一屏完整显示。旧/新前端证据分别保存为`.codex/plan/feishu-bad-card-frontend-20260821.jpg`和`.codex/plan/feishu-compact-card-frontend-20260821.jpg`。
+- 运营群定时发送继续关闭；等待Frankie只确认修复版真实截图后再启用17:15群日报。
