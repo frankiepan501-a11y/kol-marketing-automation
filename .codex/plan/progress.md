@@ -362,6 +362,11 @@
 - commit `6750be9`已部署为Zeabur deployment `6a87c75529f0931a12bfadf2`，状态`RUNNING`且`/health=ok`。生产回放`launchruntime-20432240a6c5`正确返回`degraded/supply_blocked`：刷新30、真实供给七项均为0、库存0、剩余额度106。
 - 继续下钻发现实际停摆原因：首批固定词耗尽后，DeepSeek动态拓词返回402，导致`keyword_source=none`、目标发现任务5条而创建0条。已新增受控的食人花长尾词降级池；只有外部模型不可用或产出不足时才使用，并继续受全局去重、目标语言和活动前缀约束。新增失败回归后，关键词供给10项测试全部通过。
 - commit `222aada`已部署为`6a87c9a629f0931a12bfae37 RUNNING`。第二轮生产回放`launchruntime-cef5ebdacaa5`返回`success/supply_in_progress`，`discovery.created=5`、`keyword_source=curated_fallback`；爬虫任务台逐条回读5条均为`触发=true / 1-待触发`，语言分布en2/de2/es1。食人花“真实产出”P0完成。
+- 两条错误频率工作流已按全量读取、最小修改、停用/PUT/重新启用完成修正：`ugM1hX94RrzDWmhj`为`Asia/Shanghai + 0 4 * * 1`，`0wViUZQ6nyJpNtMJ`为`Asia/Shanghai + 30 10 * * 1`；两者active且均保留3节点。配置修复已完成，2026-08-24周一首次真实execution另列11.4A回读，避免把配置正确冒充真实执行验收。
+- 活动结果闭环commit `1e323d3`已部署为`6a87ce1329f0931a12bfaebe RUNNING`，`/health=ok`。新增事实回填只接受：①未引用回复中的明确发布动作+同句具体日期；②`live_link_received`的公开内容链接；③只能唯一归属一个正式活动参与记录的KOL主表上稿日期+链接。普通兴趣、报价、泛洽谈不推断为承诺。
+- 自治指标已纠正：`commitments`仍读明确承诺日期；`ontime_posts`只读`实际上稿时间`并与活动窗口比较，不再把承诺日期当真实上稿。每轮活动反馈/自治补池计算扩池或停止前，先自动同步结果事实。
+- 生产dry-run及commit回放均无错误：Dave扫描182条、食人花扫描43条，当前两者`updates_planned=0 / updates_written=0 / ambiguous=0 / missing_live_link=0`。这表示现有回复暂无满足严格口径的明确承诺或上稿事实，不是漏写；后续新回复/上稿登记会由活动反馈自动回填。
+- 聚焦活动测试181项全部通过；全仓446项中445项通过，唯一失败仍为既有`test_zeabur_watchdog`部署日期窗口fixture，与本次活动结果改动无关。
 
 ### Errors Encountered
 
@@ -370,3 +375,6 @@
 | 读取计划文件时假定`.codex/plan/lessons.md`存在 | 收尾读取 | 文件不存在；本次不新造项目文件，通用时区审计经验按`lesson-capture`写入memory candidate |
 | 直接用`python -m unittest tests...`运行单测 | P0回归首次执行 | 本机嵌入式Python没有把仓库根目录加入`sys.path`，且被`C:\tmp\ml-data-sync\app`同名包污染；改用内联runner把当前仓库插入`sys.path[0]`后再discover |
 | `unittest discover`指定`top_level_dir`但tests不是包 | P0回归第二次执行 | 去掉`top_level_dir`，仅以tests目录discover并按测试名筛选 |
+| PowerShell直接写`git rev-parse @{u}`被解析为哈希字面量 | 本轮分支预检 | 将`@{u}`整体加引号后读取upstream；未影响仓库 |
+| PowerShell把`foreach {...} | ConvertTo-Json`直接接管道触发空管道解析错误 | 首次工作流只读检查 | 先把循环结果存入`$out`，再统一转JSON；随后完成两流回读 |
+| `rg app/launch_*.py`在Windows把通配符当成非法文件路径 | 查找活动模块 | 改为按目录搜索并使用`--glob`/明确文件名；未改生产文件 |
