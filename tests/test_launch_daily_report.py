@@ -147,7 +147,7 @@ class LaunchDailyReportTests(unittest.TestCase):
         self.assertEqual("yellow", yellow["color"])
         self.assertIn("补池", orange["next_action"])
 
-    def test_card_is_json2_with_real_colored_tags_and_two_progress_charts(self):
+    def test_card_is_json2_with_real_colored_tags_and_compact_progress(self):
         snap = {
             "campaign_id": "launch-dave",
             "name": "9·15 FUNLAB 潜水员戴夫联名款",
@@ -177,7 +177,7 @@ class LaunchDailyReportTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], result)
         self.assertEqual("2.0", card["schema"])
-        self.assertEqual({"width_mode": "fill"}, card["config"])
+        self.assertNotEqual("fill", (card.get("config") or {}).get("width_mode"))
         self.assertEqual("KOL集中宣发任务日报 · 2026-08-21", card["header"]["title"]["content"])
         self.assertEqual("green", card["header"]["text_tag_list"][1]["color"])
         encoded = json.dumps(card, ensure_ascii=False)
@@ -187,13 +187,15 @@ class LaunchDailyReportTests(unittest.TestCase):
         self.assertNotIn('"tag": "form"', encoded)
         self.assertNotIn('"tag": "note"', encoded)
         charts = [e for e in card["body"]["elements"] if e.get("tag") == "chart"]
-        self.assertEqual(2, len(charts))
-        self.assertTrue(all(c["chart_spec"]["type"] == "linearProgress" for c in charts))
-        self.assertTrue(all(c["aspect_ratio"] == "2:1" for c in charts))
-        self.assertTrue(all(c["color_theme"] == "brand" for c in charts))
-        self.assertEqual("#2EA121", charts[0]["chart_spec"]["progress"]["style"]["fill"])
-        self.assertEqual(0.1, charts[0]["chart_spec"]["data"]["values"][0]["value"])
-        self.assertEqual(0.7, charts[1]["chart_spec"]["data"]["values"][0]["value"])
+        self.assertEqual([], charts, "聊天卡不得使用会按卡片宽度放大的 chart 画布")
+        progress = next(
+            e["content"] for e in card["body"]["elements"]
+            if e.get("element_id") == "progress_0"
+        )
+        self.assertIn("**上稿进度**　2 / 20　10%", progress)
+        self.assertIn("**邮箱额度**　56 / 80　70%", progress)
+        self.assertIn("█", progress)
+        self.assertIn("░", progress)
 
     def test_run_is_read_only_and_frankie_sample_never_touches_group(self):
         source = {

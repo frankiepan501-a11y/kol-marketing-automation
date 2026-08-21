@@ -284,37 +284,12 @@ def summarize_campaign(
     return snapshot
 
 
-def _progress_chart(*, element_id: str, title: str, label: str, percent: float, color: str) -> dict:
-    # Feishu Card JSON 2.0's official linearProgress example uses
-    # chart_spec.data={"values": [...]}, not the generic VChart dataset array.
-    # https://open.feishu.cn/document/feishu-cards/card-json-v2-components/content-components/chart
-    value = max(0.0, min(1.0, round(float(percent or 0) / 100.0, 4)))
-    fill = {
-        "red": "#D83931",
-        "orange": "#DE7802",
-        "yellow": "#D9A300",
-        "green": "#2EA121",
-        "blue": "#3370FF",
-    }.get(color, "#3370FF")
-    return {
-        "tag": "chart",
-        "element_id": element_id,
-        "aspect_ratio": "2:1",
-        "preview": False,
-        "height": "auto",
-        "color_theme": "brand",
-        "chart_spec": {
-            "type": "linearProgress",
-            "title": {"text": title},
-            "data": {"values": [{"type": label, "value": value, "text": f"{percent:g}%"}]},
-            "direction": "horizontal",
-            "xField": "value",
-            "yField": "type",
-            "seriesField": "type",
-            "progress": {"style": {"fill": fill}},
-            "axes": [{"orient": "left", "domainLine": {"visible": False}}],
-        },
-    }
+def _compact_progress(*, label: str, current: int, target: int, percent: float, color: str) -> str:
+    """Return a compact progress row that cannot expand into a chart canvas."""
+    bounded = max(0.0, min(100.0, float(percent or 0)))
+    filled = min(10, max(0, int(round(bounded / 10))))
+    bar = f'<text_tag color="{color}">{"█" * filled or "·"}</text_tag>{"░" * (10 - filled)}'
+    return f"**{label}**　{current} / {target}　{bounded:g}%\n{bar}"
 
 
 def _worst_color(snapshots: list[dict]) -> str:
@@ -393,20 +368,27 @@ def build_card(snapshots: list[dict], *, day: date) -> dict:
                     f"{error_note}"
                 ),
             },
-            _progress_chart(
-                element_id=f"post_{index}",
-                title="按时上稿目标进度",
-                label=f"{row.get('on_time_posts', 0)} / {row.get('target_posts', 0)}",
-                percent=float(row.get("post_progress_pct") or 0),
-                color=color,
-            ),
-            _progress_chart(
-                element_id=f"quota_{index}",
-                title="邮箱滚动24小时额度使用",
-                label=f"{row.get('quota_sent_24h', 0)} / {row.get('quota_cap', 0)}",
-                percent=float(row.get("quota_progress_pct") or 0),
-                color="orange" if float(row.get("quota_progress_pct") or 0) >= 85 else "blue",
-            ),
+            {
+                "tag": "markdown",
+                "element_id": f"progress_{index}",
+                "content": (
+                    _compact_progress(
+                        label="上稿进度",
+                        current=_number(row.get("on_time_posts")),
+                        target=_number(row.get("target_posts")),
+                        percent=float(row.get("post_progress_pct") or 0),
+                        color=color,
+                    )
+                    + "\n\n"
+                    + _compact_progress(
+                        label="邮箱额度",
+                        current=_number(row.get("quota_sent_24h")),
+                        target=_number(row.get("quota_cap")),
+                        percent=float(row.get("quota_progress_pct") or 0),
+                        color="orange" if float(row.get("quota_progress_pct") or 0) >= 85 else "blue",
+                    )
+                ),
+            },
             {
                 "tag": "markdown",
                 "element_id": f"next_action_{index}",
@@ -427,7 +409,6 @@ def build_card(snapshots: list[dict], *, day: date) -> dict:
     ])
     return {
         "schema": "2.0",
-        "config": {"width_mode": "fill"},
         "header": {
             "template": overall_color,
             "title": {"tag": "plain_text", "content": title},
@@ -461,8 +442,8 @@ def validate_card(card: dict, snapshots: list[dict], *, day: date) -> dict:
     expected_title = f"KOL集中宣发任务日报 · {day.isoformat()}"
     if card.get("schema") != "2.0":
         errors.append("schema必须为2.0")
-    if (card.get("config") or {}).get("width_mode") != "fill":
-        errors.append("Card 2.0必须使用width_mode=fill")
+    if (card.get("config") or {}).get("width_mode") == "fill":
+        errors.append("日报卡片不得强制全宽显示")
     if ((card.get("header") or {}).get("title") or {}).get("content") != expected_title:
         errors.append("主标题不符合固定格式")
     elements = ((card.get("body") or {}).get("elements") or [])
@@ -479,18 +460,16 @@ def validate_card(card: dict, snapshots: list[dict], *, day: date) -> dict:
         errors.append(f"卡片JSON超过30KB：{size_bytes}")
 
     charts = [node for node in nodes if node.get("tag") == "chart"]
-    if snapshots and len(charts) != len(snapshots) * 2:
-        errors.append("每个活动必须有两条进度图")
-    if not snapshots and charts:
-        errors.append("空态卡片不应伪造进度图")
-    for chart in charts:
-        spec = chart.get("chart_spec") or {}
-        if spec.get("type") != "linearProgress":
-            errors.append("进度图必须使用linearProgress")
-        for value in ((spec.get("data") or {}).get("values") or []):
-            number = value.get("value")
-            if not isinstance(number, (int, float)) or isinstance(number, bool) or not 0 <= number <= 1:
-                errors.append("linearProgress值必须为0到1的数字")
+    if charts:
+        errors.append("日报卡片不得使用会随卡片宽度放大的chart画布")
+    progress_rows = [
+        node for node in nodes
+        if node.get("tag") == "markdown" and str(node.get("element_id") or "").startswith("progress_")
+    ]
+    if snapshots and len(progress_rows) != len(snapshots):
+        errors.append("每个活动必须有一块紧凑进度信息")
+    if not snapshots and progress_rows:
+        errors.append("空态卡片不应伪造进度信息")
 
     required_metrics = {
         "today_eligible", "eligible_total", "ready_due", "sent_today", "sent_total",
