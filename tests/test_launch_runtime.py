@@ -384,6 +384,21 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual("supply_blocked", result["business_outcome"])
         self.assertFalse(result["made_supply_progress"])
 
+    def test_profile_refresh_writes_alone_do_not_mask_supply_block(self):
+        result = launch_runtime._with_business_outcome({
+            "action": "expand", "quota": {"remaining": 106}, "inventory_after": 0,
+            "append": {"created": 0}, "queue": {"queued": 0},
+            "profile_refresh": {"writes": 30},
+            "append_after_refresh": {"created": 0},
+            "queue_after_refresh": {"queued": 0},
+            "discovery": {"created": 0, "active_pending_before": 0},
+            "review_pool": {"created": 0},
+        })
+
+        self.assertEqual(30, result["supply_progress_breakdown"]["profile_refresh_writes"])
+        self.assertEqual("supply_blocked", result["business_outcome"])
+        self.assertFalse(result["made_supply_progress"])
+
     def test_early_hold_result_has_complete_business_contract(self):
         result = launch_runtime._with_business_outcome({
             "campaign_id": "campaign1", "action": "hold", "held": True,

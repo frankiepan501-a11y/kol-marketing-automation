@@ -884,7 +884,20 @@ def _with_business_outcome(result: dict) -> dict:
         ),
         "review_candidates_created": _section_count(result, "review_pool", "created"),
     }
-    made_supply_progress = any(value > 0 for value in progress_breakdown.values())
+    # 刷新旧资料只是补全信息，不会增加可发送名单、候选任务或待审对象。
+    # 单独出现刷新写入时，仍应暴露为 supply_blocked，避免“池仍为 0”却报成功。
+    supply_progress_keys = (
+        "auto_approved_created",
+        "drafts_queued",
+        "auto_approved_after_refresh",
+        "drafts_queued_after_refresh",
+        "discovery_tasks_created",
+        "active_discovery_tasks",
+        "review_candidates_created",
+    )
+    made_supply_progress = any(
+        progress_breakdown[key] > 0 for key in supply_progress_keys
+    )
     raw_quota = result.get("quota") if isinstance(result.get("quota"), dict) else {}
     try:
         remaining = max(0, int(raw_quota.get("remaining") or 0))
