@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import re
 import time
@@ -75,6 +76,8 @@ _ACTUAL_PATTERNS = (
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 _DRAFT_CACHE_AT = 0.0
 _DRAFT_CACHE_ROWS: list[dict] = []
+_DRAFT_CACHE_LOCK: asyncio.Lock | None = None
+_DRAFT_CACHE_LOCK_LOOP = None
 
 
 def _ids(value) -> list[str]:
@@ -91,8 +94,19 @@ def _ts(value) -> int:
 def _unquoted_reply_text(value: str) -> str:
     text = html.unescape(str(value or ""))
     text = re.sub(r"(?is)<blockquote\b.*?</blockquote>", "", text)
+    text = re.sub(
+        r"(?is)<(?:div|section)[^>]+class=[\"'][^\"']*"
+        r"(?:gmail_quote|yahoo_quoted|protonmail_quote)[^\"']*[\"'][^>]*>.*$",
+        "",
+        text,
+    )
     text = re.split(
-        r"(?im)^\s*(?:on .{0,160} wrote:|-----original message-----|from:\s.+)$",
+        r"(?im)^\s*(?:"
+        r"on .{0,220} wrote:|"
+        r"am .{0,220} schrieb(?: .{0,100})?:|"
+        r"el .{0,220} escribi[oó](?: .{0,100})?:|"
+        r"-----original message-----|-----ursprüngliche nachricht-----|"
+        r"-----mensaje original-----|from:\s.+|von:\s.+|de:\s.+)\s*$",
         text,
         maxsplit=1,
     )[0]
@@ -227,6 +241,76 @@ def _is_content_url(url: str) -> bool:
     return False
 
 
+def _is_editor_content_url(url: str) -> bool:
+    """媒体人只接受文章页；官网首页、栏目页和语言入口不算上稿。"""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").casefold()
+    if host in SOCIAL_HOSTS:
+        return _is_content_url(url)
+    segments = [segment.casefold() for segment in parsed.path.split("/") if segment]
+    if not segments:
+        return False
+    non_article_paths = {
+        "article", "articles", "blog", "blogs", "de", "en", "es", "fr",
+        "games", "gaming", "home", "index", "index.html", "news", "press",
+        "review", "reviews", "tech", "technology",
+    }
+    navigation_segments = {
+        "about", "author", "authors", "categories", "category", "contact",
+        "people", "search", "staff", "tag", "tags", "team", "topics", "topic",
+    }
+    navigation_leafs = {
+        "all", "archive", "archives", "featured", "latest", "popular", "recent",
+        "trending",
+    }
+    fixed_page_markers = {
+        "accessibility", "advertise", "careers", "conditions", "cookie", "jobs",
+        "copyright", "disclaimer", "faq", "help", "legal", "newsletter", "policy",
+        "privacy", "sitemap", "subscribe", "support", "terms",
+    }
+    if segments[-1] in non_article_paths or any(
+        segment in navigation_segments for segment in segments
+    ):
+        return False
+    last = segments[-1]
+    last_stem = re.sub(r"\.(?:html?|php|aspx?)$", "", last)
+    last_tokens = set(last_stem.replace("_", "-").split("-"))
+    path_tokens = {
+        token
+        for segment in segments
+        for token in re.sub(
+            r"\.(?:html?|php|aspx?)$", "", segment,
+        ).replace("_", "-").split("-")
+    }
+    if (
+        last_stem.isdigit() or last_stem in non_article_paths
+        or last_stem in navigation_leafs or re.fullmatch(r"page-?\d+", last_stem)
+        or path_tokens & fixed_page_markers
+        or path_tokens & navigation_segments
+    ):
+        return False
+    content_sections = {
+        "article", "articles", "blog", "blogs", "games", "gaming", "news",
+        "post", "posts", "review", "reviews", "stories", "story", "tech",
+        "technology",
+    }
+    if re.search(
+        r"/(?:19|20)\d{2}/\d{1,2}/(?:\d{1,2}/)?[^/]+/?$",
+        parsed.path,
+    ):
+        return True
+    if (
+        len(last_stem) >= 16 and last_stem.count("-") >= 2
+        and bool(path_tokens & content_sections)
+        and last_stem not in content_sections
+    ):
+        return True
+    if len(last_stem) >= 20 and last_stem.count("-") >= 3:
+        return True
+    # 查询参数本身无法区分文章ID和栏目/固定页标识；不自动采信，交人工确认。
+    return False
+
+
 def extract_publication_url(value: str, *, object_type: str = "KOL") -> str:
     text = _unquoted_reply_text(value)
     for raw in _URL_RE.findall(text):
@@ -237,6 +321,8 @@ def extract_publication_url(value: str, *, object_type: str = "KOL") -> str:
         if object_type == "KOL" and host not in SOCIAL_HOSTS:
             continue
         if object_type == "KOL" and not _is_content_url(url):
+            continue
+        if object_type != "KOL" and not _is_editor_content_url(url):
             continue
         return url
     return ""
@@ -264,20 +350,75 @@ def _default_year(activity_fields: dict) -> int:
 
 async def draft_snapshot() -> list[dict]:
     """短时复用草稿快照，避免同一分钟两项活动重复扫描近2万行。"""
-    global _DRAFT_CACHE_AT, _DRAFT_CACHE_ROWS
+    global _DRAFT_CACHE_AT, _DRAFT_CACHE_ROWS, _DRAFT_CACHE_LOCK, _DRAFT_CACHE_LOCK_LOOP
     now = time.monotonic()
     if _DRAFT_CACHE_ROWS and now - _DRAFT_CACHE_AT < DRAFT_CACHE_SECONDS:
         return _DRAFT_CACHE_ROWS
-    rows = await feishu.fetch_all_records(
-        config.T_DRAFT,
+    loop = asyncio.get_running_loop()
+    if _DRAFT_CACHE_LOCK is None or _DRAFT_CACHE_LOCK_LOOP is not loop:
+        _DRAFT_CACHE_LOCK = asyncio.Lock()
+        _DRAFT_CACHE_LOCK_LOOP = loop
+    async with _DRAFT_CACHE_LOCK:
+        now = time.monotonic()
+        if _DRAFT_CACHE_ROWS and now - _DRAFT_CACHE_AT < DRAFT_CACHE_SECONDS:
+            return _DRAFT_CACHE_ROWS
+        rows = await feishu.fetch_all_records(
+            config.T_DRAFT,
+            field_names=[
+                "发送状态", "发送时间", "是否回复", "回复日期", "回复原文", "场景标签",
+            ],
+            page_size=500,
+        )
+        _DRAFT_CACHE_ROWS = rows
+        _DRAFT_CACHE_AT = now
+        return rows
+
+
+async def _campaign_participants(campaign_id: str) -> list[dict]:
+    rows = await feishu.search_records(
+        config.T_LAUNCH_PARTICIPANT,
+        [{"field_name": "活动ID", "operator": "is", "value": [campaign_id]}],
         field_names=[
-            "发送状态", "发送时间", "是否回复", "回复日期", "回复原文", "场景标签",
+            "活动ID", "对象类型", "参与状态", "审核结论", "关联KOL", "关联邮件草稿",
+            "承诺上稿时间", "实际上稿时间", "上稿链接",
         ],
-        page_size=500,
     )
-    _DRAFT_CACHE_ROWS = rows
-    _DRAFT_CACHE_AT = now
-    return rows
+    return [
+        row for row in rows
+        if ext((row.get("fields") or {}).get("活动ID")) == campaign_id
+    ]
+
+
+async def _draft_owner(
+    draft_id: str, *, cache: dict[str, list[dict]],
+) -> list[dict]:
+    if draft_id not in cache:
+        rows = await feishu.search_records(
+            config.T_LAUNCH_PARTICIPANT,
+            [{"field_name": "关联邮件草稿", "operator": "contains", "value": [draft_id]}],
+            field_names=["活动ID", "关联邮件草稿"],
+        )
+        cache[draft_id] = [
+            row for row in rows
+            if draft_id in _ids((row.get("fields") or {}).get("关联邮件草稿"))
+        ]
+    return cache[draft_id]
+
+
+async def _source_drafts_belong_only_to_participant(
+    source_draft_ids: set[str], *, campaign_id: str, participant_id: str,
+    cache: dict[str, list[dict]],
+) -> tuple[bool, str]:
+    for draft_id in sorted(source_draft_ids):
+        owners = await _draft_owner(draft_id, cache=cache)
+        if len(owners) != 1:
+            return False, f"草稿{draft_id}关联{len(owners)}条活动参与记录"
+        owner = owners[0]
+        if owner.get("record_id") != participant_id or ext(
+            (owner.get("fields") or {}).get("活动ID")
+        ) != campaign_id:
+            return False, f"草稿{draft_id}不唯一归属当前活动参与记录"
+    return True, ""
 
 
 def _fields_match(readback: dict, expected: dict) -> bool:
@@ -304,25 +445,22 @@ async def reconcile_campaign(
         raise RuntimeError("T_LAUNCH_PARTICIPANT 未配置")
     activity = activity or await launch_evidence.get_activity(campaign_id)
     activity_fields = activity.get("fields") or {}
-    if participants is None:
-        all_participants = await feishu.fetch_all_records(
-            config.T_LAUNCH_PARTICIPANT,
-            field_names=[
-                "活动ID", "对象类型", "参与状态", "审核结论", "关联KOL", "关联邮件草稿",
-                "承诺上稿时间", "实际上稿时间", "上稿链接",
-            ],
-            page_size=500,
-        )
-        participants = [
-            row for row in all_participants
-            if ext((row.get("fields") or {}).get("活动ID")) == campaign_id
-        ]
+    participants = participants if participants is not None else await _campaign_participants(campaign_id)
+    rejected_wrong_campaign = sum(
+        ext((row.get("fields") or {}).get("活动ID")) != campaign_id
+        for row in participants
+    )
+    participants = [
+        row for row in participants
+        if ext((row.get("fields") or {}).get("活动ID")) == campaign_id
+    ]
     drafts = drafts if drafts is not None else await draft_snapshot()
     draft_map = {row.get("record_id"): row for row in drafts if row.get("record_id")}
 
     default_year = _default_year(activity_fields)
     window_end = _ts(activity_fields.get("窗口结束"))
     planned, errors = [], []
+    owner_cache: dict[str, list[dict]] = {}
     missing_live_links = 0
     for participant in participants:
         participant_id = participant.get("record_id")
@@ -341,6 +479,7 @@ async def reconcile_campaign(
         commitment_source = ""
         actual_source = ""
         link_source = ""
+        source_draft_ids: set[str] = set()
 
         if not _ts(fields.get("承诺上稿时间")):
             for draft in draft_rows:
@@ -357,6 +496,7 @@ async def reconcile_campaign(
                 if commitment:
                     update["承诺上稿时间"] = commitment
                     commitment_source = "explicit_reply_date"
+                    source_draft_ids.add(draft.get("record_id"))
                     break
 
         if not _ts(fields.get("实际上稿时间")):
@@ -375,6 +515,7 @@ async def reconcile_campaign(
                 if current_link != link:
                     update["上稿链接"] = {"link": link, "text": "打开上稿内容"}
                     link_source = "reply_content_link"
+                    source_draft_ids.add(draft.get("record_id"))
                 reply_ts = _ts(draft_fields.get("回复日期"))
                 sent_times = [
                     value for value in (
@@ -393,9 +534,18 @@ async def reconcile_campaign(
                 if actual_date:
                     update["实际上稿时间"] = actual_date
                     actual_source = "explicit_published_date_in_reply"
+                    source_draft_ids.add(draft.get("record_id"))
                 break
 
         if not update:
+            continue
+        source_draft_ids.discard(None)
+        unique_owner, owner_error = await _source_drafts_belong_only_to_participant(
+            source_draft_ids, campaign_id=campaign_id, participant_id=participant_id,
+            cache=owner_cache,
+        )
+        if not unique_owner:
+            errors.append({"participant_id": participant_id, "error": owner_error})
             continue
         planned.append({
             "participant_id": participant_id,
@@ -403,6 +553,7 @@ async def reconcile_campaign(
             "commitment_source": commitment_source,
             "actual_source": actual_source,
             "link_source": link_source,
+            "source_draft_ids": sorted(source_draft_ids),
         })
         if dry_run:
             continue
@@ -423,9 +574,12 @@ async def reconcile_campaign(
         item for item in planned if not dry_run and item["participant_id"] not in failed_ids
     ]
     return {
+        "ok": not errors,
+        "degraded": bool(errors),
         "campaign_id": campaign_id,
         "dry_run": dry_run,
         "participants_scanned": len(participants),
+        "participants_rejected_wrong_campaign": rejected_wrong_campaign,
         "updates_planned": len(planned),
         "updates_written": len(successful_plans),
         "commitments_planned": sum(bool(item["fields"].get("承诺上稿时间")) for item in planned),

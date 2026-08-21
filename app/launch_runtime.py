@@ -622,6 +622,14 @@ async def sync_campaign_outcomes_and_metrics(campaign_id: str) -> dict:
     metrics = await campaign_metrics(
         campaign_id, activity=activity, participants=participants, drafts=drafts,
     )
+    if outcome_reconcile.get("errors"):
+        metrics.update({
+            "action": "hold",
+            "reason": (
+                f"活动事实回填失败{len(outcome_reconcile['errors'])}条；"
+                "已暂停扩池，等待回填恢复后再按最新数据控制"
+            ),
+        })
     return {**metrics, "outcome_reconcile": outcome_reconcile}
 
 
@@ -937,7 +945,10 @@ def _with_business_outcome(result: dict) -> dict:
     except (TypeError, ValueError):
         inventory_after = 0
 
-    if result.get("stopped") or result.get("action") == "stop":
+    outcome_errors = len((result.get("outcome_reconcile") or {}).get("errors") or [])
+    if outcome_errors:
+        outcome = "outcome_reconcile_failed"
+    elif result.get("stopped") or result.get("action") == "stop":
         outcome = "stopped"
     elif result.get("held") or result.get("action") == "hold":
         outcome = "held"
@@ -958,27 +969,48 @@ def _with_business_outcome(result: dict) -> dict:
         "quota": {**raw_quota, "remaining": remaining},
         "inventory_after": inventory_after,
         "business_outcome": outcome,
+        "outcome_reconcile_error_count": outcome_errors,
         "made_supply_progress": made_supply_progress,
         "supply_progress_breakdown": progress_breakdown,
     }
 
 
 def runtime_job_status(result: dict | None) -> str:
-    return "degraded" if (result or {}).get("business_outcome") == "supply_blocked" else "success"
+    result = result or {}
+    if result.get("business_outcome") in {"supply_blocked", "outcome_reconcile_failed"}:
+        return "degraded"
+    if (result.get("outcome_reconcile") or {}).get("errors"):
+        return "degraded"
+    return "success"
 
 
 def _runtime_result_summary(result: dict | None) -> dict:
     result = result or {}
     quota = result.get("quota") or {}
-    return {
+    summary = {
         key: result.get(key) for key in (
             "action", "brand", "participants", "sent", "replies", "commitments",
             "ontime_posts", "target_ready_inventory", "inventory_before", "inventory_after",
             "inventory_after_master", "stopped", "held", "quality_filters_lowered",
             "runtime", "business_outcome", "made_supply_progress",
-            "supply_progress_breakdown",
+            "supply_progress_breakdown", "outcome_reconcile_error_count",
         ) if key in result
     } | ({"quota": quota} if quota else {})
+    reconcile = result.get("outcome_reconcile") or {}
+    if reconcile:
+        errors = reconcile.get("errors") or []
+        summary["outcome_reconcile"] = {
+            key: reconcile.get(key) for key in (
+                "ok", "participants_scanned", "updates_planned", "updates_written",
+                "commitments_written", "actuals_written", "links_written",
+            ) if key in reconcile
+        } | {
+            "error_count": len(errors),
+            "failed_participant_ids": [
+                item.get("participant_id") for item in errors if item.get("participant_id")
+            ],
+        }
+    return summary
 
 
 async def load_runtime_job(campaign_id: str, job_id: str = "") -> dict | None:

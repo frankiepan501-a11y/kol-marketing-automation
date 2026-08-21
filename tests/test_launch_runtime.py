@@ -42,6 +42,34 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertIs(drafts, reconcile.await_args.kwargs["drafts"])
         self.assertIs(drafts, metrics.await_args.kwargs["drafts"])
 
+    def test_outcome_reconcile_error_holds_control_instead_of_expanding(self):
+        activity = {"record_id": "a1", "fields": {"活动ID": "campaign1"}}
+        participants = [{"record_id": "p1", "fields": {}}]
+        drafts = [{"record_id": "d1", "fields": {}}]
+        with patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=participants),
+        ), patch.object(
+            launch_runtime.launch_outcomes, "draft_snapshot", new=AsyncMock(return_value=drafts),
+        ), patch.object(
+            launch_runtime.launch_outcomes, "reconcile_campaign",
+            new=AsyncMock(return_value={
+                "updates_written": 0,
+                "errors": [{"participant_id": "p1", "error": "readback failed"}],
+            }),
+        ), patch.object(
+            launch_runtime, "campaign_metrics",
+            new=AsyncMock(return_value={"campaign_id": "campaign1", "action": "expand"}),
+        ):
+            result = asyncio.run(
+                launch_runtime.sync_campaign_outcomes_and_metrics("campaign1")
+            )
+
+        self.assertEqual("hold", result["action"])
+        self.assertIn("暂停扩池", result["reason"])
+        self.assertEqual("degraded", launch_runtime.runtime_job_status(result))
+
     def test_campaign_metrics_counts_ontime_posts_from_actual_uploads_not_promises(self):
         activity = {"record_id": "a1", "fields": {
             "活动ID": "campaign1", "窗口结束": 1_800_000_000_000,
@@ -465,6 +493,21 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(0, result["quota"]["remaining"])
         self.assertEqual(0, result["inventory_after"])
         self.assertFalse(result["made_supply_progress"])
+
+    def test_outcome_reconcile_failure_overrides_supply_success_and_is_persisted(self):
+        result = launch_runtime._with_business_outcome({
+            "action": "expand", "quota": {"remaining": 10}, "inventory_after": 5,
+            "outcome_reconcile": {
+                "ok": False, "updates_written": 0,
+                "errors": [{"participant_id": "p1", "error": "readback failed"}],
+            },
+        })
+        summary = launch_runtime._runtime_result_summary(result)
+
+        self.assertEqual("outcome_reconcile_failed", result["business_outcome"])
+        self.assertEqual("degraded", launch_runtime.runtime_job_status(result))
+        self.assertEqual(1, result["outcome_reconcile_error_count"])
+        self.assertEqual(["p1"], summary["outcome_reconcile"]["failed_participant_ids"])
 
     def test_autonomous_refill_holds_when_campaign_is_not_formally_active(self):
         metrics = {

@@ -2590,17 +2590,23 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                     campaign_id=campaign_id, pool_target=pool_target,
                     queue_limit=queue_limit,
                 )
+            job_status = launch_runtime.runtime_job_status(result)
             if mode == "autonomous":
-                job_status = launch_runtime.runtime_job_status(result)
                 await launch_runtime.persist_runtime_job(
                     campaign_id=campaign_id, job_id=job_id, mode=mode,
                     status=job_status, result=result, started_ts=started_ts,
                 )
-            else:
-                job_status = "success"
             _launch_runtime_jobs[job_id].update(
                 status=job_status, finished_at=datetime_now_string(), result=result,
             )
+            outcome_error_count = len(
+                (result.get("outcome_reconcile") or {}).get("errors") or []
+            )
+            if outcome_error_count:
+                await _alert_endpoint_failure(
+                    f"/launch/runtime/{mode}", "LaunchOutcomeReconcileError",
+                    f"activity outcome readback failed: {outcome_error_count} record(s)",
+                )
         except Exception as exc:
             tr = _tb.format_exc()[-1000:]
             _launch_runtime_jobs[job_id].update(
