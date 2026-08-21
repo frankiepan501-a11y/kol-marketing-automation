@@ -80,6 +80,48 @@ _CAMPAIGN_KEYWORDS = {
     },
 }
 
+# 食人花活动的首批固定词耗尽后，优先由 DeepSeek 生成更长尾的词；
+# 外部模型欠费/不可用时，用这组经过品类约束的词继续建发现任务，避免补池停摆。
+# 这些词只覆盖 Nintendo / Mario 收藏、游戏房、主机硬件评测四类目标受众。
+_CAMPAIGN_FALLBACK_KEYWORDS = {
+    "piranha": {
+        "en": [
+            "super mario collector room tour",
+            "nintendo collection shelf showcase",
+            "mario themed gaming setup tour",
+            "nintendo fan game room makeover",
+            "retro nintendo collection room",
+            "switch 2 gaming desk setup",
+            "nintendo hardware review channel",
+            "switch gaming accessories reviewer",
+            "mario memorabilia collection tour",
+            "nintendo creator setup showcase",
+            "super mario fan cave tour",
+            "nintendo switch setup review channel",
+        ],
+        "de": [
+            "super mario sammlerzimmer tour",
+            "nintendo sammlung zimmer deutsch",
+            "mario gaming setup deutsch",
+            "nintendo spielzimmer tour deutsch",
+            "nintendo hardware test kanal deutsch",
+            "switch 2 gaming setup deutsch",
+            "super mario fan sammlung deutsch",
+            "nintendo zubehör review deutsch",
+        ],
+        "es": [
+            "tour colección super mario",
+            "habitación gamer nintendo español",
+            "setup gamer mario español",
+            "colección fan de nintendo",
+            "canal reseñas hardware nintendo",
+            "setup nintendo switch español",
+            "colección retro nintendo tour",
+            "reseñas accesorios nintendo español",
+        ],
+    },
+}
+
 
 def _multi_values(value) -> list[str]:
     if not isinstance(value, list):
@@ -158,6 +200,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
 
     keyword_source = "deterministic" if candidates else "none"
     generation_error = ""
+    generation_warning = ""
     if need and theme == "piranha":
         prompt = f"""你是海外游戏KOL发现助手。为{theme}主题新品活动补充YouTube创作者搜索词。
 目标语言只能从 {languages} 选择。搜索对象必须是Nintendo/Switch、Mario收藏、主机游戏房或游戏硬件评测创作者；
@@ -187,7 +230,40 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             if candidates:
                 keyword_source = "mixed" if keyword_source == "deterministic" else "dynamic"
         except Exception as exc:
-            generation_error = str(exc)[:160]
+            generation_warning = str(exc)[:160]
+
+    if need and theme == "piranha":
+        fallback_added = 0
+        fallback_positions = {lang: 0 for lang in languages}
+        while need:
+            progressed = False
+            for lang in languages:
+                words = _CAMPAIGN_FALLBACK_KEYWORDS.get(theme, {}).get(lang, [])
+                while fallback_positions[lang] < len(words):
+                    word = words[fallback_positions[lang]].strip().lower()
+                    fallback_positions[lang] += 1
+                    if word in existing_keywords or any(
+                        existing == word for _, existing in candidates
+                    ):
+                        continue
+                    candidates.append((lang, word))
+                    fallback_added += 1
+                    need -= 1
+                    progressed = True
+                    break
+                if need <= 0:
+                    break
+            if not progressed:
+                break
+        if fallback_added:
+            keyword_source = (
+                "curated_fallback"
+                if fallback_added == len(candidates)
+                else "mixed_curated_fallback"
+            )
+
+    if need and generation_warning:
+        generation_error = generation_warning
 
     if dry_run:
         return {
@@ -199,6 +275,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             "target_tasks": target_tasks,
             "keyword_source": keyword_source, "shortfall_tasks": need,
             "generation_error": generation_error,
+            "generation_warning": generation_warning,
         }
 
     now = int(time.time() * 1000)
@@ -227,6 +304,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         "keywords": [{"language": lang, "keyword": word} for lang, word in candidates],
         "keyword_source": keyword_source, "shortfall_tasks": need,
         "generation_error": generation_error,
+        "generation_warning": generation_warning,
     }
 
 

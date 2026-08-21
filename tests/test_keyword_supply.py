@@ -7,6 +7,38 @@ from app import keyword_supply
 
 
 class KeywordSupplyBrazilTests(unittest.TestCase):
+    def test_piranha_uses_curated_fallback_when_dynamic_generation_is_unavailable(self):
+        used = [
+            {"fields": {
+                "任务名": "[活动补池:campaign1] YT KOL - " + word,
+                "关键词列表": word, "爬虫类型": "KOL-YouTube",
+                "任务状态": "3-已完成", "筛选-语言": ["en"],
+            }}
+            for word in keyword_supply._CAMPAIGN_KEYWORDS["piranha"]["en"]
+        ]
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=used),
+        ), patch.object(
+            keyword_supply.deepseek, "chat_json",
+            new=AsyncMock(side_effect=RuntimeError("402 Payment Required")),
+        ), patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(return_value="task1"),
+        ) as create_record:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=250, dry_run=False,
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(5, result["created"])
+        self.assertEqual("curated_fallback", result["keyword_source"])
+        self.assertIn("402 Payment Required", result["generation_warning"])
+        self.assertEqual("", result["generation_error"])
+        self.assertEqual(5, create_record.await_count)
+
     def test_campaign_supply_generates_more_targeted_keywords_after_seed_list_is_exhausted(self):
         used = [
             {"fields": {
