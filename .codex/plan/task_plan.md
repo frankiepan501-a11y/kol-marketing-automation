@@ -221,7 +221,7 @@
 |---|---|---|---|
 | 12.1 设计规格与统计口径 | P0 | complete | 标题、指标、状态阈值、进度条、只读边界、Frankie-only与群发白名单写入规格；独立复审无P0/P1 |
 | 12.2 测试与Card JSON 2.0实现 | P0 | complete | Card JSON 2.0、精确标题、真实彩色状态、每活动两条进度条、跨活动脏关联排除、后台状态查询和跨重启发卡防重均已实现；活动相关225项通过，独立复审无P0/P1 |
-| 12.3 部署与只读生产预览 | P0 | in_progress | Zeabur部署后`notify=false`读取两项真实活动并生成合格卡片，不写表不发邮件 |
-| 12.4 Frankie-only真实样卡 | P0 | pending | 仅Frankie收到1张样卡；保存message_id和实际payload校验结果 |
+| 12.3 部署与只读生产预览 | P0 | complete | `f2571ee`部署后`notify=false`读取两项真实活动并生成合格卡片；2项活动、4条进度图、业务写入0 |
+| 12.4 Frankie-only真实样卡 | P0 | complete | Card 2.0兼容修复`92e2e0d`部署后仅Frankie收到1张样卡；message_id=`om_x100b674afba06cb0c00611d1b8a2689`，发送回执读回`sent` |
 | 12.5 每日17:15运营群定时发送 | P1 | pending | 仅在Frankie确认实际渲染后启用；目标群为KOL现行运营群，不使用旧群 |
 | 12.6 食人花当日只读验证 | P0 | pending | Codex在约定时点回读活动发信、可发送池和额度使用；不发任何飞书验证卡 |
