@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -763,6 +764,65 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertFalse(candidate["base_filter_passed"])
         self.assertIn("目标主机不匹配", candidate["base_filter_reasons"])
         self.assertIn("目标主机不匹配", candidate["base_filter_reason_codes"])
+
+    def test_preview_refresh_queue_skips_fresh_semantic_mismatches(self):
+        now_ms = int(time.time() * 1000)
+        product = {
+            "record_id": "main",
+            "fields": {
+                "产品名": "食人花二代", "品牌": "POWKONG", "品类": "Switch底座",
+                "报价(USD)": 89.99, "销售国家": ["US"],
+                "适配主机": ["Switch", "Switch 2"],
+                "适配IP": ["马里奥系列", "Nintendo系列"],
+                "活动主记录ID": "main",
+            },
+        }
+        fresh_but_wrong = {
+            "record_id": "fresh-wrong",
+            "fields": {
+                "账号名": "Fresh Wrong Creator", "邮箱": "fresh@example.com",
+                "合作状态": "未建联", "主平台": "YouTube",
+                "国家": "US", "语言": "en", "粉丝数": 100000,
+                "内容风格": ["游戏"], "内容垂类": "泛游戏娱乐",
+                "主机生态": ["PC-Steam"], "IP喜好": "Minecraft",
+                "资料可用状态": "有效", "标签版本": "v2",
+                "近期视频抓取时间": now_ms,
+                "最近发布日": now_ms, "近90天发布数": 8,
+                "近期视频标题": "Minecraft challenge\nRoblox roleplay\nFortnite update",
+            },
+        }
+        stale_missing_profile = {
+            "record_id": "stale-profile",
+            "fields": {
+                "账号名": "Stale Creator", "邮箱": "stale@example.com",
+                "合作状态": "未建联", "主平台": "YouTube",
+                "国家": "US", "语言": "en", "粉丝数": 100000,
+                "内容风格": ["游戏"],
+            },
+        }
+
+        async def fake_fetch(table_id, field_names=None, page_size=100):
+            return {
+                "products": [product],
+                "kols": [fresh_but_wrong, stale_missing_profile],
+                "editors": [],
+                "drafts": [],
+            }[table_id]
+
+        with patch.object(preview.config, "T_PRODUCT", "products"), \
+             patch.object(preview.config, "T_KOL", "kols"), \
+             patch.object(preview.config, "T_EDITOR", "editors"), \
+             patch.object(preview.config, "T_DRAFT", "drafts"), \
+             patch.object(preview.feishu, "fetch_all_records", side_effect=fake_fetch), \
+             patch.object(preview.dispatch, "fetch_mapping_for_product", new=AsyncMock(return_value={
+                 "expected_styles": ["游戏"], "expected_report_cats": [],
+                 "expected_media_types": [], "matched_rules": 1,
+             })):
+            result = asyncio.run(preview.preview_candidates(
+                "main", object_type="KOL", limit=10,
+            ))
+
+        self.assertEqual(["stale-profile"], result["profile_refresh_candidate_ids"])
 
     def test_dave_activity_applies_direct_nyxi_evidence_without_writes(self):
         product = {

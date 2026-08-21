@@ -47,6 +47,10 @@ PROFILE_READY_STATES = {"有效", "人工核实有效"}
 PROFILE_FRESH_DAYS = 60
 PROFILE_ACTIVE_DAYS = 90
 PROFILE_MIN_POSTS_90D = 1
+PROFILE_REFRESH_REASONS = {
+    "资料缺失或过期", "人工核实已过期", "标签版本不是v2",
+    "最近发布记录缺失或过期",
+}
 NINTENDO_AUDIENCE_CUES = {
     "nintendo", "任天堂", "mario", "马里奥", "yoshi", "耀西",
     "zelda", "塞尔达", "tomodachi", "动物森友会", "animal crossing",
@@ -992,17 +996,9 @@ async def preview_candidates(
                     "活动目标语言未配置", "语言不在活动目标范围", "语言不匹配",
                     "主平台不匹配", "活动粉丝范围配置无效", "粉丝量级不匹配",
                 }
-                refreshable_failures = {
-                    "资料缺失或过期", "人工核实已过期", "标签版本不是v2",
-                    "最近发布记录缺失或过期", "目标主机不匹配", "内容风格不匹配",
-                    "内容垂类不是主机游戏或游戏硬件评测",
-                    "Nintendo/Mario受众或近期硬件内容不匹配",
-                    "近期目标游戏/主机内容占比不足",
-                    "近期内容缺少Nintendo/Switch或硬件评测证据",
-                }
                 if (
                     check["decision"] == "eligible_new_cold"
-                    and any(reason in refreshable_failures for reason in filter_reasons)
+                    and any(reason in PROFILE_REFRESH_REASONS for reason in filter_reasons)
                     and not any(reason in stable_failures for reason in filter_reasons)
                     and len(profile_refresh_candidate_ids) < 100
                 ):
