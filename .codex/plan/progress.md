@@ -361,6 +361,7 @@
 - 相关3项回归均通过：资料刷新单独发生时返回`supply_blocked`；有效在途发现任务仍返回`supply_in_progress`；过期发现任务不再掩盖阻塞。下一步为全套回归、部署和生产单活动回放。
 - commit `6750be9`已部署为Zeabur deployment `6a87c75529f0931a12bfadf2`，状态`RUNNING`且`/health=ok`。生产回放`launchruntime-20432240a6c5`正确返回`degraded/supply_blocked`：刷新30、真实供给七项均为0、库存0、剩余额度106。
 - 继续下钻发现实际停摆原因：首批固定词耗尽后，DeepSeek动态拓词返回402，导致`keyword_source=none`、目标发现任务5条而创建0条。已新增受控的食人花长尾词降级池；只有外部模型不可用或产出不足时才使用，并继续受全局去重、目标语言和活动前缀约束。新增失败回归后，关键词供给10项测试全部通过。
+- commit `222aada`已部署为`6a87c9a629f0931a12bfae37 RUNNING`。第二轮生产回放`launchruntime-cef5ebdacaa5`返回`success/supply_in_progress`，`discovery.created=5`、`keyword_source=curated_fallback`；爬虫任务台逐条回读5条均为`触发=true / 1-待触发`，语言分布en2/de2/es1。食人花“真实产出”P0完成。
 
 ### Errors Encountered
 

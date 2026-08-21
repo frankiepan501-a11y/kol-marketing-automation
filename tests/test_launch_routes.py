@@ -16,6 +16,34 @@ class FakeRequest:
 
 
 class LaunchRouteTests(unittest.TestCase):
+    def test_outcome_reconcile_defaults_to_dry_run(self):
+        result = {"campaign_id": "c1", "dry_run": True, "updates_planned": 1}
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+            main.launch_outcomes, "reconcile_campaign", new=AsyncMock(return_value=result),
+        ) as reconcile:
+            response = asyncio.run(main.launch_outcomes_reconcile(
+                FakeRequest({"campaign_id": "c1"}), authorization="Bearer secret",
+            ))
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(response["dry_run"])
+        reconcile.assert_awaited_once_with("c1", dry_run=True)
+
+    def test_outcome_reconcile_commit_requires_activity_queue_switch(self):
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+            main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", False,
+        ), patch.object(
+            main.launch_outcomes, "reconcile_campaign", new=AsyncMock(),
+        ) as reconcile:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.launch_outcomes_reconcile(
+                    FakeRequest({"campaign_id": "c1", "dry_run": False}),
+                    authorization="Bearer secret",
+                ))
+
+        self.assertEqual(403, ctx.exception.status_code)
+        reconcile.assert_not_awaited()
+
     def test_autonomous_job_persists_actual_completion_and_survives_memory_miss(self):
         async def exercise():
             main._launch_runtime_jobs.clear()

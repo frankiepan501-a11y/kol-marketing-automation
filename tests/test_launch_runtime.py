@@ -14,6 +14,43 @@ def _certificate():
 
 
 class LaunchRuntimeTests(unittest.TestCase):
+    def test_campaign_metrics_counts_ontime_posts_from_actual_uploads_not_promises(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "窗口结束": 1_800_000_000_000,
+            "目标上稿数": 20, "目标承诺数": 29,
+        }}
+        participants = [
+            {"record_id": "p1", "fields": {
+                "关联邮件草稿": ["d1"],
+                "承诺上稿时间": 1_790_000_000_000,
+                "实际上稿时间": 1_810_000_000_000,
+            }},
+            {"record_id": "p2", "fields": {
+                "关联邮件草稿": ["d2"],
+                "承诺上稿时间": 1_795_000_000_000,
+            }},
+        ]
+        drafts = [
+            {"record_id": "d1", "fields": {"发送状态": "已发送", "是否回复": True}},
+            {"record_id": "d2", "fields": {"发送状态": "已发送", "是否回复": True}},
+        ]
+        with patch.object(
+            launch_runtime.launch_outcomes, "reconcile_campaign",
+            new=AsyncMock(return_value={"updates_written": 0}),
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity",
+            new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=participants),
+        ), patch.object(
+            launch_runtime.feishu, "fetch_all_records", new=AsyncMock(return_value=drafts),
+        ):
+            result = asyncio.run(launch_runtime.campaign_metrics("campaign1"))
+
+        self.assertEqual(2, result["commitments"])
+        self.assertEqual(1, result["actual_posts"])
+        self.assertEqual(0, result["ontime_posts"])
+
     def test_autonomous_append_runs_in_parallel_with_pending_operator_review(self):
         activity = {"record_id": "a1", "fields": {
             "活动ID": "campaign1", "产品主记录ID": "product1",

@@ -21,6 +21,7 @@ from . import (
     feishu,
     launch_candidate_preview,
     launch_evidence,
+    launch_outcomes,
     launch_outreach,
     launch_participation,
     keyword_supply,
@@ -126,12 +127,12 @@ def recommend_feedback_action(*, target_posts: int, target_commitments: int,
         reason = f"本活动明确承诺 {commitments}/{stop_at}，预计按时上稿 {ontime_posts}/{target}"
     elif commitments >= hold_at:
         action = "hold"
-        reason = f"承诺/深度洽谈 {commitments} 已达到备份线 {hold_at}"
+        reason = f"明确承诺 {commitments} 已达到备份线 {hold_at}"
     else:
         action = "expand"
         reply_rate = (replies / sent) if sent else 0
         reason = (
-            f"承诺/深度洽谈 {commitments} 未达到备份线 {hold_at}；"
+            f"明确承诺 {commitments} 未达到备份线 {hold_at}；"
             f"已发 {sent}，回复 {replies}（{reply_rate:.1%}）"
         )
     return {
@@ -543,6 +544,10 @@ async def run_campaign(*, campaign_id: str, pool_target: int = 100,
 
 
 async def campaign_metrics(campaign_id: str) -> dict:
+    """先同步可核验结果，再按活动内事实计算扩池/停止动作。"""
+    outcome_reconcile = await launch_outcomes.reconcile_campaign(
+        campaign_id, dry_run=False,
+    )
     activity = await launch_evidence.get_activity(campaign_id)
     af = activity.get("fields") or {}
     participants = await _participants(campaign_id)
@@ -575,7 +580,16 @@ async def campaign_metrics(campaign_id: str) -> dict:
         if value:
             promised_times.append(value)
     commitments = len(promised_times)
-    ontime_posts = sum(not window_end or value <= window_end for value in promised_times)
+    actual_times = []
+    for row in participants:
+        try:
+            value = int((row.get("fields") or {}).get("实际上稿时间") or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value:
+            actual_times.append(value)
+    actual_posts = len(actual_times)
+    ontime_posts = sum(not window_end or value <= window_end for value in actual_times)
     try:
         target_posts = int(af.get("目标上稿数") or 20)
     except (TypeError, ValueError):
@@ -591,7 +605,8 @@ async def campaign_metrics(campaign_id: str) -> dict:
     return {
         "campaign_id": campaign_id, "participants": len(participants),
         "sent": sent, "replies": replies, "commitments": commitments,
-        "ontime_posts": ontime_posts,
+        "actual_posts": actual_posts, "ontime_posts": ontime_posts,
+        "outcome_reconcile": outcome_reconcile,
         **control,
     }
 
