@@ -408,19 +408,21 @@ def build_card(snapshots: list[dict], *, day: date) -> dict:
                 color="orange" if float(row.get("quota_progress_pct") or 0) >= 85 else "blue",
             ),
             {
-                "tag": "note",
-                "elements": [{"tag": "plain_text", "content": f"系统下一步：{status.get('next_action') or '-'}"}],
+                "tag": "markdown",
+                "element_id": f"next_action_{index}",
+                "content": f"**系统下一步**　{status.get('next_action') or '-'}",
             },
         ])
 
     elements.extend([
         {"tag": "hr"},
         {
-            "tag": "note",
-            "elements": [{"tag": "plain_text", "content": (
+            "tag": "markdown",
+            "element_id": "metric_scope_note",
+            "content": (
                 "活动开发信只计算“活动参与记录”关联且真实发送成功的开发信；"
                 "邮箱额度按 Zoho 滚动24小时全部外发邮件统计，两者口径不同。"
-            )}],
+            ),
         },
     ])
     return {
@@ -760,7 +762,7 @@ async def run(*, day: date | str | None = None, notify: bool = False, frankie_on
         )
         async with _SEND_LOCK:
             persisted = _find_persisted_receipt(activities, send_key)
-            if persisted and persisted.get("status") != "sent":
+            if persisted and persisted.get("status") not in {"sent", "rejected"}:
                 raise DailyReportError(
                     "检测到同一日报上次停在发送中；为避免重复发卡，已暂停自动重发，"
                     "请先按uuid核查飞书消息后再处理"
@@ -784,11 +786,32 @@ async def run(*, day: date | str | None = None, notify: bool = False, frankie_on
                     "updated_ts": int(time.time()),
                 })
                 receipt_writes += 1
-                message_id = await feishu.send_card_message(
-                    recipient_type, recipient_id, card,
-                    biz="KOL", level="P2", format_title=False,
-                    message_uuid=message_uuid,
-                )
+                try:
+                    message_id = await feishu.send_card_message(
+                        recipient_type, recipient_id, card,
+                        biz="KOL", level="P2", format_title=False,
+                        message_uuid=message_uuid,
+                    )
+                except Exception as exc:
+                    error_text = str(exc)
+                    status_prefix, separator, _ = error_text.partition(":")
+                    is_precreate_rejection = (
+                        bool(separator)
+                        and status_prefix.startswith("POST /im/v1/messages")
+                        and status_prefix.rstrip().endswith("→ 400")
+                        and "Failed to create card content" in error_text
+                    )
+                    if is_precreate_rejection:
+                        await _persist_report_receipt(anchor, {
+                            "key": send_key,
+                            "uuid": message_uuid,
+                            "day": report_day.isoformat(),
+                            "status": "rejected",
+                            "error": "Feishu rejected card before message creation",
+                            "updated_ts": int(time.time()),
+                        })
+                        receipt_writes += 1
+                    raise
                 if not message_id:
                     target_name = "Frankie样卡" if frankie_only else "运营群日报"
                     raise DailyReportError(f"{target_name}发送后未返回message_id，已按失败处理")

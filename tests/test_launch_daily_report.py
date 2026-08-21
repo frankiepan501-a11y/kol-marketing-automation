@@ -185,6 +185,7 @@ class LaunchDailyReportTests(unittest.TestCase):
         self.assertIn('<text_tag color="green">进度正常</text_tag>', markdown)
         self.assertNotIn('"tag": "button"', encoded)
         self.assertNotIn('"tag": "form"', encoded)
+        self.assertNotIn('"tag": "note"', encoded)
         charts = [e for e in card["body"]["elements"] if e.get("tag") == "chart"]
         self.assertEqual(2, len(charts))
         self.assertTrue(all(c["chart_spec"]["type"] == "linearProgress" for c in charts))
@@ -453,6 +454,40 @@ class LaunchDailyReportTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(self.report.DailyReportError, "message_id"):
                 asyncio.run(self.report.run(day=self.day, notify=True, frankie_only=True))
+
+    def test_definitive_card_schema_rejection_is_persisted_as_rejected(self):
+        source = {
+            "activities": [self.activity], "participants": [], "drafts": {},
+            "quotas": {"FUNLAB": {"sent_24h": 0, "cap": 80}}, "quota_errors": {},
+        }
+        sender = AsyncMock(side_effect=RuntimeError(
+            'POST /im/v1/messages → 400: {"code":230099,"msg":"Failed to create card content"}',
+        ))
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)), patch.object(
+            self.report.feishu, "send_card_message", new=sender,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Failed to create card content"):
+                asyncio.run(self.report.run(day=self.day, notify=True, frankie_only=True))
+
+        statuses = [call.args[1]["status"] for call in self.persist_receipt.await_args_list]
+        self.assertEqual(["sending", "rejected"], statuses)
+
+    def test_5xx_body_that_mentions_card_rejection_stays_sending(self):
+        source = {
+            "activities": [self.activity], "participants": [], "drafts": {},
+            "quotas": {"FUNLAB": {"sent_24h": 0, "cap": 80}}, "quota_errors": {},
+        }
+        sender = AsyncMock(side_effect=RuntimeError(
+            'POST /im/v1/messages → 500: upstream included 400: Failed to create card content',
+        ))
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)), patch.object(
+            self.report.feishu, "send_card_message", new=sender,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "500"):
+                asyncio.run(self.report.run(day=self.day, notify=True, frankie_only=True))
+
+        statuses = [call.args[1]["status"] for call in self.persist_receipt.await_args_list]
+        self.assertEqual(["sending"], statuses)
 
     def test_group_send_requires_both_flag_and_current_chat_whitelist(self):
         source = {
