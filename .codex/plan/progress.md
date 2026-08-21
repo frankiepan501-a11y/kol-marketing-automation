@@ -405,3 +405,13 @@
 - 修复commit`48ecdae6fca1e175399f29e3462f962f2f3115c6`已推送并部署，`kol-auto /health=ok`。
 - 修复版Frankie-only样卡message_id=`om_x100b674b5edc3cb0df3b391838d8cd8`；已在飞书网页版打开并截图，两个活动在一屏完整显示。旧/新前端证据分别保存为`.codex/plan/feishu-bad-card-frontend-20260821.jpg`和`.codex/plan/feishu-compact-card-frontend-20260821.jpg`。
 - 运营群定时发送继续关闭；等待Frankie只确认修复版真实截图后再启用17:15群日报。
+
+## 2026-08-21 日报卡17:15生产启用
+
+- Frankie已确认紧凑版真实前端排版通过；Zeabur环境开关`KOL_LAUNCH_DAILY_GROUP_ENABLED=1`已用单变量方式新增，未全量覆盖其他环境变量。
+- `kol-automation`已重新部署为`6a87f41da158dec40572653b RUNNING`，部署后`/health=ok`；生产代码仍锁定当前KOL运营群`oc_8b71a652a25ec0dd1c8af2c53e86ed93`和聪哥分身1号发送路由。
+- 已新建并启用独立n8n工作流`3GDllutHPUNPEDHs / KOL Launch - Daily Report (17:15 BJ)`：`Asia/Shanghai + 15 17 * * *`。它不会覆盖现有17:00活动反馈。
+- 工作流用`notify=true + frankie_only=false + async_mode=true`启动后台日报，等待12分钟后查询`job_id`；仅当任务成功、卡片校验成功、确实群发1张且`business_writes=0`时通过，否则execution失败并留下节点级错误。
+- 启用后只读回放`launchreport-170b75618057`成功：2项活动、`validation.ok=true`、`notified=false`、业务写入0、技术回执写入0。该回放没有提前发群。
+- 首次真实群发安排在2026-08-21 17:15北京时间；发出后仍需回读真实群消息并截图确认，不能只看n8n执行成功。
+- 部署脚本经双轴复核后加固：固定workflow ID、全分页查重、只复制kol-auto唯一Authorization、写前/读回校验唯一触发器及完整单链路、失败恢复原payload和原启用状态；同ID幂等重跑与假ID硬失败均已验证。
