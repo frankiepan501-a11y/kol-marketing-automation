@@ -398,6 +398,100 @@ class LaunchRouteTests(unittest.TestCase):
         self.assertTrue(second["already_running"])
         self.assertEqual(await_count, 1)
 
+    def test_launch_daily_report_defaults_to_background_and_exposes_result(self):
+        async def exercise():
+            main._launch_daily_report_jobs.clear()
+            result = {"ok": True, "campaigns": 2, "notified": False}
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch(
+                "app.launch_daily_report.active_campaign_ids",
+                new=AsyncMock(return_value=("c1", "c2")),
+            ), patch(
+                "app.launch_daily_report.run", new=AsyncMock(return_value=result),
+            ):
+                accepted = await main.run_launch_daily_report(
+                    authorization="Bearer secret", day="2026-08-21",
+                )
+                await asyncio.sleep(0)
+                status = await main.get_launch_daily_report_job(
+                    accepted["job_id"], authorization="Bearer secret",
+                )
+            main._launch_daily_report_jobs.clear()
+            return accepted, status
+
+        accepted, status = asyncio.run(exercise())
+
+        self.assertTrue(accepted["accepted"])
+        self.assertFalse(accepted["already_running"])
+        self.assertEqual("success", status["status"])
+        self.assertEqual(2, status["result"]["campaigns"])
+
+    def test_launch_daily_report_reuses_running_job_for_same_request(self):
+        async def exercise():
+            main._launch_daily_report_jobs.clear()
+            gate = asyncio.Event()
+
+            async def slow_report(**kwargs):
+                await gate.wait()
+                return {"ok": True, "campaigns": 2, "notified": kwargs["notify"]}
+
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch(
+                "app.launch_daily_report.active_campaign_ids",
+                new=AsyncMock(return_value=("c1", "c2")),
+            ), patch(
+                "app.launch_daily_report.run", new=AsyncMock(side_effect=slow_report),
+            ) as run:
+                first = await main.run_launch_daily_report(
+                    authorization="Bearer secret", day="2026-08-21", notify=True,
+                )
+                second = await main.run_launch_daily_report(
+                    authorization="Bearer secret", day="2026-08-21", notify=True,
+                )
+                gate.set()
+                await asyncio.sleep(0)
+            main._launch_daily_report_jobs.clear()
+            return first, second, run.await_count
+
+        first, second, await_count = asyncio.run(exercise())
+
+        self.assertEqual(first["job_id"], second["job_id"])
+        self.assertTrue(second["already_running"])
+        self.assertEqual(1, await_count)
+
+    def test_launch_daily_report_new_activity_set_creates_new_job(self):
+        async def exercise():
+            main._launch_daily_report_jobs.clear()
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch(
+                "app.launch_daily_report.active_campaign_ids",
+                new=AsyncMock(side_effect=[("c1",), ("c1", "c2")]),
+            ), patch(
+                "app.launch_daily_report.run",
+                new=AsyncMock(return_value={"ok": True, "campaigns": 2}),
+            ):
+                first = await main.run_launch_daily_report(
+                    authorization="Bearer secret", day="2026-08-21",
+                )
+                await asyncio.sleep(0)
+                second = await main.run_launch_daily_report(
+                    authorization="Bearer secret", day="2026-08-21",
+                )
+                await asyncio.sleep(0)
+            main._launch_daily_report_jobs.clear()
+            return first, second
+
+        first, second = asyncio.run(exercise())
+
+        self.assertNotEqual(first["job_id"], second["job_id"])
+        self.assertFalse(second["reused"])
+
+    def test_launch_daily_report_job_status_requires_known_job(self):
+        main._launch_daily_report_jobs.clear()
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.get_launch_daily_report_job(
+                    "launchreport-missing", authorization="Bearer secret",
+                ))
+        self.assertEqual(404, ctx.exception.status_code)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -321,7 +321,9 @@ def _format_card_title(card: dict, biz: str = "KOL", level: str = "P1") -> dict:
 
 
 async def send_card_message(receive_type: str, receive_id: str, card: dict,
-                            biz: str = "KOL", level: str = "P1") -> str:
+                            biz: str = "KOL", level: str = "P1",
+                            format_title: bool = True,
+                            message_uuid: str = "") -> str:
     """用聪哥分身1号发飞书互动卡片. 2026-05-17 返回 message_id (供 A5 后续 update).
     返回空字符串 = 拿不到 msg_id (不影响主流程)
     2026-05-22 Phase 1: 自动给卡片标题加 {emoji} [{biz}·{level}] 统一前缀.
@@ -330,12 +332,15 @@ async def send_card_message(receive_type: str, receive_id: str, card: dict,
       - 标题格式化失败回退原 card, 不影响送达
     """
     import json
-    card = _format_card_title(card, biz, level)
+    if format_title:
+        card = _format_card_title(card, biz, level)
     body = {
         "receive_id": receive_id,
         "msg_type": "interactive",
         "content": json.dumps(card, ensure_ascii=False),
     }
+    if message_uuid:
+        body["uuid"] = message_uuid[:50]
     resp = await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="notify")
     return (resp.get("data") or {}).get("message_id") or ""
 

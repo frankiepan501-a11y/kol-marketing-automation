@@ -48,6 +48,8 @@ _DASHBOARD_REFRESH_JOB_TTL = 4 * 3600
 _DRAFT_REGEN_JOB_TTL = 6 * 3600
 _launch_preview_jobs = {}
 _LAUNCH_PREVIEW_JOB_TTL = 6 * 3600
+_launch_daily_report_jobs = {}
+_LAUNCH_DAILY_REPORT_JOB_TTL = 24 * 3600
 _launch_runtime_jobs = {}
 _LAUNCH_RUNTIME_JOB_TTL = 24 * 3600
 _relabel_profile_jobs = {}
@@ -2030,6 +2032,110 @@ async def run_upload_task_report(authorization: str = Header(default=""), dry_ru
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1200:]}
+
+
+@app.post("/launch/daily-report/run")
+async def run_launch_daily_report(authorization: str = Header(default=""),
+                                  day: str = "", notify: bool = False,
+                                  frankie_only: bool = True,
+                                  async_mode: bool = True,
+                                  force: bool = False):
+    """KOL集中宣发任务日报。默认只读；显式notify=true才发送。
+
+    默认后台生成并通过 jobs 端点查询，避免全表读取超过网关时间。
+    首轮只允许frankie_only=true。群发还需独立环境开关和当前群白名单。
+    """
+    _check_auth(authorization)
+    from . import launch_daily_report
+    if async_mode:
+        now = time.time()
+        for old_id in list(_launch_daily_report_jobs):
+            if now - _launch_daily_report_jobs[old_id].get("started_ts", 0) > _LAUNCH_DAILY_REPORT_JOB_TTL:
+                _launch_daily_report_jobs.pop(old_id, None)
+        report_day = launch_daily_report._coerce_day(day or None).isoformat()
+        campaign_ids = await launch_daily_report.active_campaign_ids()
+        recipient_key = (
+            f"open_id:{launch_daily_report._frankie_open_id()}"
+            if frankie_only
+            else f"chat_id:{launch_daily_report.CURRENT_GROUP_CHAT_ID}"
+        )
+        request_key = (report_day, recipient_key, tuple(campaign_ids), bool(notify))
+        if not force:
+            for old_id, job in _launch_daily_report_jobs.items():
+                if job.get("request_key") == request_key and job.get("status") in {"running", "success"}:
+                    return {
+                        "ok": True,
+                        "accepted": True,
+                        "already_running": job.get("status") == "running",
+                        "reused": True,
+                        "job_id": old_id,
+                        "status": job.get("status"),
+                    }
+
+        job_id = "launchreport-" + uuid.uuid4().hex[:12]
+        _launch_daily_report_jobs[job_id] = {
+            "status": "running",
+            "started_ts": now,
+            "started_at": datetime_now_string(),
+            "request_key": request_key,
+            "params": {
+                "day": report_day,
+                "notify": bool(notify),
+                "frankie_only": bool(frankie_only),
+                "campaign_ids": list(campaign_ids),
+            },
+        }
+
+        async def _job():
+            try:
+                result = await launch_daily_report.run(
+                    day=report_day, notify=notify, frankie_only=frankie_only,
+                )
+                _launch_daily_report_jobs[job_id].update(
+                    status="success", finished_at=datetime_now_string(), result=result,
+                )
+            except Exception as exc:
+                trace = _tb.format_exc()[-1200:]
+                _launch_daily_report_jobs[job_id].update(
+                    status="error", finished_at=datetime_now_string(), error=str(exc),
+                )
+                await _alert_endpoint_failure("/launch/daily-report/run", str(exc), trace)
+
+        asyncio.create_task(_job())
+        return {
+            "ok": True,
+            "accepted": True,
+            "already_running": False,
+            "reused": False,
+            "job_id": job_id,
+            "status": "running",
+        }
+    try:
+        return await launch_daily_report.run(
+            day=day or None, notify=notify, frankie_only=frankie_only,
+        )
+    except launch_daily_report.DailyReportError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "trace": _tb.format_exc()[-1200:]}
+
+
+@app.get("/launch/daily-report/jobs/{job_id}")
+async def get_launch_daily_report_job(job_id: str, authorization: str = Header(default="")):
+    """查询集中宣发日报后台任务；结果只保存在当前服务进程24小时。"""
+    _check_auth(authorization)
+    now = time.time()
+    for old_id in list(_launch_daily_report_jobs):
+        if now - _launch_daily_report_jobs[old_id].get("started_ts", 0) > _LAUNCH_DAILY_REPORT_JOB_TTL:
+            _launch_daily_report_jobs.pop(old_id, None)
+    job = _launch_daily_report_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "job not found or expired")
+    public_job = {
+        key: value for key, value in job.items()
+        if key not in {"request_key", "started_ts"}
+    }
+    return {"ok": True, "job_id": job_id, **public_job}
 
 
 @app.post("/decision-feedback/run")
