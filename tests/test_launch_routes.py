@@ -16,6 +16,58 @@ class FakeRequest:
 
 
 class LaunchRouteTests(unittest.TestCase):
+    def test_keyword_pilot_defaults_to_read_only_and_caps_preview_at_four(self):
+        result = {"read_only": True, "writes": 0, "would_create": 4}
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+            main.keyword_supply, "run_campaign_pilot", new=AsyncMock(return_value=result),
+        ) as run:
+            response = asyncio.run(main.launch_keyword_supply_pilot(
+                FakeRequest({"campaign_id": "c1", "max_tasks": 99}),
+                authorization="Bearer secret",
+            ))
+
+        self.assertTrue(response["read_only"])
+        self.assertEqual(0, response["writes"])
+        run.assert_awaited_once_with(
+            campaign_id="c1", required_candidates=200, max_tasks=4, dry_run=True,
+        )
+
+    def test_keyword_pilot_commit_requires_exact_confirmation(self):
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+            main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+        ), patch.object(
+            main.keyword_supply, "run_campaign_pilot", new=AsyncMock(),
+        ) as run:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.launch_keyword_supply_pilot(
+                    FakeRequest({"campaign_id": "c1", "dry_run": False}),
+                    authorization="Bearer secret",
+                ))
+
+        self.assertEqual(400, ctx.exception.status_code)
+        run.assert_not_awaited()
+
+    def test_keyword_pilot_commit_creates_only_discovery_tasks(self):
+        result = {"read_only": False, "writes": 4, "created": 4, "emails_sent": 0}
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+            main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+        ), patch.object(
+            main.keyword_supply, "run_campaign_pilot", new=AsyncMock(return_value=result),
+        ) as run:
+            response = asyncio.run(main.launch_keyword_supply_pilot(
+                FakeRequest({
+                    "campaign_id": "c1", "dry_run": False,
+                    "confirm": "CREATE_MAX_4_DISCOVERY_TASKS", "required_candidates": 500,
+                }),
+                authorization="Bearer secret",
+            ))
+
+        self.assertEqual(4, response["writes"])
+        self.assertEqual(0, response["emails_sent"])
+        run.assert_awaited_once_with(
+            campaign_id="c1", required_candidates=500, max_tasks=4, dry_run=False,
+        )
+
     def test_outcome_reconcile_defaults_to_dry_run(self):
         result = {"campaign_id": "c1", "dry_run": True, "updates_planned": 1}
         with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(

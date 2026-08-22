@@ -100,7 +100,7 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         self.assertTrue(all(f["关键词列表"] != "dave the diver gameplay" for f in created_fields))
         self.assertTrue(all(f["筛选-语言"][0] in {"en", "de", "es"} for f in created_fields))
 
-    def test_dave_does_not_use_piranha_dynamic_keyword_generation(self):
+    def test_dave_builds_diverse_traceable_keywords_after_fixed_seeds_are_exhausted(self):
         used = [
             {"fields": {
                 "任务名": "[活动补池:campaign1] YT KOL - " + word,
@@ -109,8 +109,18 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
             }}
             for word in keyword_supply._CAMPAIGN_KEYWORDS["dave"]["en"]
         ]
-        activity = {"fields": {"活动目标语言": ["en"]}}
-        product = {"fields": {"产品英文名": "FUNLAB Dave the Diver Controller"}}
+        activity = {"fields": {
+            "活动目标语言": ["en", "de", "es"],
+            "竞品证据模式": "引用历史证据", "竞品分析状态": "已就绪",
+            "竞品品牌": "NYXI",
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2", "Switch", "PC"],
+            "品类": "手柄",
+            "目标人群": "Dave fans, indie game players, Switch 2 players",
+            "对标关键词": "Dave the Diver; controller; indie game controller",
+        }}
 
         with patch.object(
             keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=used),
@@ -121,12 +131,78 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         ):
             result = asyncio.run(keyword_supply.ensure_campaign_supply(
                 campaign_id="campaign1", activity=activity, product=product,
-                required_candidates=200, dry_run=False,
+                required_candidates=200, dry_run=True, max_tasks=4,
             ))
 
         generate.assert_not_awaited()
-        self.assertEqual("none", result["keyword_source"])
-        self.assertGreater(result["shortfall_tasks"], 0)
+        self.assertEqual(4, result["would_create"])
+        self.assertEqual(0, result["shortfall_tasks"])
+        self.assertFalse(result["quality_filters_lowered"])
+        sources = {item["source"] for item in result["keywords"]}
+        self.assertGreaterEqual(len(sources), 3)
+        self.assertIn("competitor", sources)
+        self.assertIn("ip_theme", sources)
+        self.assertIn("platform", sources)
+        languages = [item["language"] for item in result["keywords"]]
+        self.assertGreaterEqual(languages.count("en"), 2)
+        self.assertIn("de", languages)
+        self.assertIn("es", languages)
+
+    def test_dave_no_competitor_mode_never_leaks_stale_competitor_brand(self):
+        activity = {"fields": {
+            "活动目标语言": ["en", "de", "es"],
+            "竞品证据模式": "不使用竞品证据", "竞品分析状态": "不适用",
+            "竞品品牌": "NYXI",
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"],
+            "品类": "手柄", "目标人群": "indie game players",
+        }}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=[]),
+        ), patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(),
+        ) as create_record:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, dry_run=True, max_tasks=4,
+            ))
+
+        self.assertEqual(4, result["would_create"])
+        self.assertNotIn("competitor", {item["source"] for item in result["keywords"]})
+        self.assertTrue(all("nyxi" not in item["keyword"] for item in result["keywords"]))
+        create_record.assert_not_awaited()
+
+    def test_campaign_keyword_task_persists_source_tag_without_changing_filters(self):
+        activity = {"fields": {
+            "活动目标语言": ["en", "de", "es"],
+            "竞品证据模式": "引用历史证据", "竞品分析状态": "已就绪",
+            "竞品品牌": "NYXI",
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"], "品类": "手柄",
+        }}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=[]),
+        ), patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(return_value="task1"),
+        ) as create_record:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, dry_run=False, max_tasks=4,
+            ))
+
+        self.assertEqual(4, result["created"])
+        for call in create_record.await_args_list:
+            fields = call.args[1]
+            self.assertRegex(fields["任务名"], r"^\[活动补池:campaign1\]\[词源:[a-z_]+\]")
+            self.assertEqual(50, fields["每批数量上限"])
+            self.assertEqual("1-待触发", fields["任务状态"])
+            self.assertTrue(fields["触发"])
 
     def test_stale_pending_campaign_tasks_do_not_count_as_active_supply(self):
         old_ms = int(keyword_supply.time.time() * 1000) - keyword_supply.DISCOVERY_ACTIVE_TTL_MS - 1

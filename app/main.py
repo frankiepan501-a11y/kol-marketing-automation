@@ -2787,6 +2787,32 @@ async def launch_runtime_autonomous_refill(
     )
 
 
+@app.post("/launch/runtime/keyword-pilot")
+async def launch_keyword_supply_pilot(
+    request: Request, authorization: str = Header(default=""),
+):
+    """小批活动拓词灰度；默认只读，提交时最多创建4条爬虫任务，零草稿零邮件。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    dry_run = payload.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        raise HTTPException(status_code=422, detail="dry_run 必须是 JSON 布尔值")
+    max_tasks = max(1, min(4, int(payload.get("max_tasks") or 4)))
+    if not dry_run:
+        if not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
+            raise HTTPException(status_code=403, detail="活动队列写入开关未开启")
+        if payload.get("confirm") != "CREATE_MAX_4_DISCOVERY_TASKS":
+            raise HTTPException(status_code=400, detail="真实灰度需明确确认 CREATE_MAX_4_DISCOVERY_TASKS")
+    return await _run_launch_write(
+        "/launch/runtime/keyword-pilot",
+        lambda: keyword_supply.run_campaign_pilot(
+            campaign_id=_launch_required(payload, "campaign_id"),
+            required_candidates=int(payload.get("required_candidates") or 200),
+            max_tasks=max_tasks, dry_run=dry_run,
+        ),
+    )
+
+
 @app.post("/launch/runtime/queue")
 async def launch_runtime_queue(request: Request, authorization: str = Header(default="")):
     """只为现有已审活动参与人生成草稿；不重跑全池预览、不发送。"""

@@ -15,7 +15,7 @@ import time
 import math
 import re
 from collections import Counter
-from . import config, feishu, deepseek
+from . import config, feishu, deepseek, launch_evidence
 from .feishu import ext
 
 T_CRAWLER = "tblQnLHnBa1RjJUE"   # 爬虫任务台 (KOL 营销库内)
@@ -129,6 +129,183 @@ _CAMPAIGN_FALLBACK_KEYWORDS = {
         ],
     },
 }
+
+_DISCOVERY_BAD_INTENT = re.compile(
+    r"\b(?:buy|price|coupon|discount|deal|cheap|amazon|store|shop|sale)\b",
+    re.I,
+)
+_CATEGORY_EN = {
+    "手柄": "controller", "游戏手柄": "controller", "controller": "controller",
+    "底座": "dock", "充电底座": "charging dock", "dock": "dock",
+    "收纳包": "carrying case", "case": "carrying case",
+}
+_PLATFORM_EN = {
+    "switch 2": "nintendo switch 2", "switch": "nintendo switch",
+    "pc": "pc gaming", "steam deck": "steam deck", "ps5": "playstation 5",
+    "xbox": "xbox",
+}
+
+
+def _split_phrases(value) -> list[str]:
+    values = _multi_values(value)
+    out = []
+    for raw in values:
+        for part in re.split(r"[;,，；|/\n]+", raw):
+            phrase = re.sub(r"\s+", " ", part).strip(" -")
+            if phrase:
+                out.append(phrase)
+    return list(dict.fromkeys(out))
+
+
+def _english_phrase(value: str) -> str:
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not value or not re.search(r"[A-Za-z]", value):
+        return ""
+    # 搜索词不能混入中文；字段中若是“中文（English）”，优先取括号内英文。
+    bracketed = re.findall(r"[（(]([^()（）]*[A-Za-z][^()（）]*)[)）]", value)
+    if bracketed:
+        value = bracketed[-1]
+    value = re.sub(r"[^A-Za-z0-9+&'’\- ]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
+def _discovery_item(*, language: str, keyword: str, source: str,
+                    reason: str) -> dict | None:
+    word = re.sub(r"\s+", " ", keyword).strip().lower()
+    if not (2 <= len(word) <= 80) or _DISCOVERY_BAD_INTENT.search(word):
+        return None
+    return {
+        "language": language, "keyword": word, "source": source,
+        "axes": [source] + (["localization"] if language != "en" else []),
+        "reason": reason,
+    }
+
+
+def _dave_structured_candidates(*, activity_fields: dict, product_fields: dict,
+                                languages: list[str], existing_keywords: set[str]) -> list[dict]:
+    """Dave 灰度词池。只把活动/产品字段编译成词，不把 NYXI 写成系统默认。"""
+    mode = ext(activity_fields.get("竞品证据模式")).strip()
+    evidence_status = ext(activity_fields.get("竞品分析状态")).strip()
+    competitor = _english_phrase(ext(activity_fields.get("竞品品牌")))
+    competitor_enabled = bool(
+        competitor
+        and mode in {launch_evidence.MODE_NEW, launch_evidence.MODE_REUSE}
+        and evidence_status == "已就绪"
+    )
+
+    ips = [
+        phrase for phrase in (
+            _english_phrase(value)
+            for value in _split_phrases(product_fields.get("适配IP"))
+        ) if phrase
+    ]
+    if not ips and "dave" in ext(product_fields.get("产品英文名")).lower():
+        ips = ["dave the diver"]
+
+    platforms = []
+    for value in _split_phrases(product_fields.get("适配主机")):
+        normalized = _english_phrase(value)
+        platform = _PLATFORM_EN.get(normalized, normalized)
+        if platform:
+            platforms.append(platform)
+    platforms = list(dict.fromkeys(platforms)) or ["nintendo switch 2"]
+
+    category_raw = ext(product_fields.get("品类")).strip().lower()
+    category = _CATEGORY_EN.get(category_raw, _english_phrase(category_raw)) or "gaming accessory"
+    benchmark = [
+        phrase for phrase in (
+            _english_phrase(value)
+            for value in _split_phrases(product_fields.get("对标关键词"))
+        ) if phrase and not _DISCOVERY_BAD_INTENT.search(phrase)
+    ]
+    audiences = [
+        phrase for phrase in (
+            _english_phrase(value)
+            for value in _split_phrases(product_fields.get("目标人群"))
+        ) if phrase
+    ]
+
+    by_source: dict[str, dict[str, list[str]]] = {
+        source: {lang: [] for lang in languages}
+        for source in ("competitor", "ip_theme", "platform", "category_feature",
+                       "audience_scenario", "content_format")
+    }
+    if competitor_enabled:
+        if "en" in languages:
+            by_source["competitor"]["en"] += [
+                f"{competitor} controller review", f"{competitor} switch controller review",
+            ]
+        if "de" in languages:
+            by_source["competitor"]["de"].append(f"{competitor} controller test deutsch")
+        if "es" in languages:
+            by_source["competitor"]["es"].append(f"{competitor} mando reseña español")
+
+    for ip in ips[:3]:
+        if "en" in languages:
+            by_source["ip_theme"]["en"] += [f"{ip} review", f"{ip} gameplay channel"]
+        if "de" in languages:
+            by_source["ip_theme"]["de"].append(f"{ip} review deutsch")
+        if "es" in languages:
+            by_source["ip_theme"]["es"].append(f"{ip} reseña español")
+
+    for platform in platforms[:3]:
+        if "en" in languages:
+            by_source["platform"]["en"].append(f"{platform} {category} review")
+        if "de" in languages:
+            by_source["platform"]["de"].append(f"{platform} controller test deutsch")
+        if "es" in languages:
+            by_source["platform"]["es"].append(f"mando {platform} reseña español")
+
+    category_bases = benchmark[:3] or [category]
+    for base in category_bases:
+        if "en" in languages:
+            by_source["category_feature"]["en"].append(f"{base} review channel")
+        if "de" in languages:
+            by_source["category_feature"]["de"].append(f"{base} test deutsch")
+        if "es" in languages:
+            by_source["category_feature"]["es"].append(f"{base} reseña español")
+
+    for audience in audiences[:3]:
+        if "en" in languages:
+            by_source["audience_scenario"]["en"].append(f"{audience} youtube channel")
+    if "en" in languages:
+        by_source["content_format"]["en"] += [
+            f"{category} unboxing channel", f"gaming {category} review channel",
+        ]
+    if "de" in languages:
+        by_source["content_format"]["de"].append(f"gaming {category} unboxing deutsch")
+    if "es" in languages:
+        by_source["content_format"]["es"].append(f"unboxing {category} español")
+
+    # 首批探测优先覆盖“竞品/IP/平台+本地化”，避免 4 条全压同一假设。
+    preferred = []
+    if competitor_enabled and "en" in languages:
+        preferred.append(("competitor", "en"))
+    if "en" in languages:
+        preferred.append(("ip_theme", "en"))
+    if "de" in languages:
+        preferred.append(("platform", "de"))
+    if "es" in languages:
+        preferred.append(("platform", "es"))
+    for source in by_source:
+        for language in languages:
+            preferred.append((source, language))
+
+    items, seen = [], set(existing_keywords)
+    for source, language in preferred:
+        words = by_source.get(source, {}).get(language, [])
+        while words:
+            word = words.pop(0)
+            item = _discovery_item(
+                language=language, keyword=word, source=source,
+                reason=f"由活动的{source}信息生成；用于验证该来源的有效邮箱和合格候选产出",
+            )
+            if not item or item["keyword"] in seen:
+                continue
+            seen.add(item["keyword"])
+            items.append(item)
+            break
+    return items
 
 
 def _multi_values(value) -> list[str]:
@@ -275,7 +452,8 @@ def _append_curated_candidates(
 async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: dict,
                                  required_candidates: int,
                                  approved_candidates: int | None = None,
-                                 dry_run: bool = False) -> dict:
+                                 dry_run: bool = False,
+                                 max_tasks: int | None = None) -> dict:
     """为单个活动补确定性 YouTube 发现任务；只建爬虫任务，不直接创建 KOL。"""
     rows = await feishu.fetch_all_records(T_CRAWLER)
     fields = activity.get("fields") or {}
@@ -317,6 +495,8 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         else:
             stale_pending_for_campaign += 1
     target_tasks = max(3, min(9, math.ceil(max(1, int(required_candidates)) / 50)))
+    if max_tasks is not None:
+        target_tasks = min(target_tasks, max(1, int(max_tasks)))
     if theme == "piranha" and quality_gate["mode"] in {"cooldown", "slow_probe"}:
         target_tasks = 1
     common_result = {
@@ -337,7 +517,14 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         }
     need = max(0, target_tasks - active_pending_for_campaign)
     candidates = []
-    while need and any(_CAMPAIGN_KEYWORDS[theme].get(lang) for lang in languages):
+    if theme == "dave":
+        candidates = _dave_structured_candidates(
+            activity_fields=fields, product_fields=product_fields,
+            languages=languages, existing_keywords=existing_keywords,
+        )[:need]
+        need -= len(candidates)
+    while (theme != "dave" and need
+           and any(_CAMPAIGN_KEYWORDS[theme].get(lang) for lang in languages)):
         progressed = False
         for lang in languages:
             for word in _CAMPAIGN_KEYWORDS[theme].get(lang, []):
@@ -353,7 +540,9 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         if not progressed:
             break
 
-    keyword_source = "deterministic" if candidates else "none"
+    keyword_source = "structured_v1" if theme == "dave" and candidates else (
+        "deterministic" if candidates else "none"
+    )
     generation_error = ""
     generation_warning = ""
     if need and theme == "piranha" and quality_gate["mode"] == "slow_probe":
@@ -415,7 +604,11 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
     if dry_run:
         return {
             "ok": True, "created": 0, "would_create": len(candidates),
-            "keywords": [{"language": lang, "keyword": word} for lang, word in candidates],
+            "keywords": [
+                item if isinstance(item, dict)
+                else {"language": item[0], "keyword": item[1]}
+                for item in candidates
+            ],
             "keyword_source": keyword_source, "shortfall_tasks": need,
             "generation_error": generation_error,
             "generation_warning": generation_warning,
@@ -425,10 +618,16 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
     now = int(time.time() * 1000)
     countries_by_language = {"en": ["US", "UK", "CA"], "de": ["DE"], "es": ["ES"]}
     created, errors = 0, []
-    for lang, word in candidates:
+    for item in candidates:
+        if isinstance(item, dict):
+            lang, word = item["language"], item["keyword"]
+            source = item.get("source") or "deterministic"
+        else:
+            lang, word = item
+            source = "deterministic"
         try:
             await feishu.create_record(T_CRAWLER, {
-                "任务名": f"{prefix} YT KOL - {word}",
+                "任务名": f"{prefix}[词源:{source}] YT KOL - {word}",
                 "爬虫类型": "KOL-YouTube", "关键词列表": word,
                 "筛选-国家": countries_by_language[lang], "筛选-语言": [lang],
                 "每批数量上限": PER_BATCH_LIMIT, "任务状态": "1-待触发",
@@ -441,11 +640,44 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         generation_error = f"仍缺{need}个未使用的活动发现关键词"
     return {
         "ok": not errors and not generation_error, "created": created, "errors": errors[:5],
-        "keywords": [{"language": lang, "keyword": word} for lang, word in candidates],
+        "keywords": [
+            item if isinstance(item, dict)
+            else {"language": item[0], "keyword": item[1]}
+            for item in candidates
+        ],
         "keyword_source": keyword_source, "shortfall_tasks": need,
         "generation_error": generation_error,
         "generation_warning": generation_warning,
         **common_result,
+    }
+
+
+async def run_campaign_pilot(*, campaign_id: str, required_candidates: int = 200,
+                             max_tasks: int = 4, dry_run: bool = True) -> dict:
+    """读真实活动/产品后预演或创建小批发现任务；绝不生成草稿或发送邮件。"""
+    activity = await launch_evidence.get_activity(campaign_id)
+    fields = activity.get("fields") or {}
+    product_id = ext(fields.get("产品主记录ID")).strip()
+    if not product_id:
+        linked = fields.get("关联产品主记录")
+        if isinstance(linked, dict):
+            ids = linked.get("link_record_ids") or linked.get("record_ids") or []
+            product_id = str(ids[0]) if ids else ""
+        elif isinstance(linked, list) and linked:
+            product_id = str(linked[0])
+    if not product_id:
+        raise ValueError(f"活动缺少产品主记录ID: {campaign_id}")
+    product = await feishu.get_record(config.T_PRODUCT, product_id)
+    result = await ensure_campaign_supply(
+        campaign_id=campaign_id, activity=activity, product=product,
+        required_candidates=max(1, int(required_candidates)),
+        dry_run=dry_run, max_tasks=max(1, min(4, int(max_tasks))),
+    )
+    writes = int(result.get("created") or 0)
+    return {
+        **result, "campaign_id": campaign_id, "product_id": product_id,
+        "read_only": bool(dry_run), "writes": writes,
+        "drafts_created": 0, "emails_sent": 0,
     }
 
 
