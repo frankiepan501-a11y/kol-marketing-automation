@@ -471,6 +471,34 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertFalse(context["competitor_evidence_applied"])
         self.assertEqual(context["evidence_status"], "配置无效")
 
+    def test_transient_evidence_read_is_not_reported_as_invalid_configuration(self):
+        activity = {
+            "record_id": "activity1",
+            "fields": {
+                "活动ID": "campaign1", "产品主记录ID": "product1",
+                "竞品证据模式": "引用历史证据", "竞品分析状态": "已就绪",
+                "竞品品牌": "NYXI", "关联竞品帖子": ["post1"],
+                "证据排序版本": "evidence-v4",
+            },
+        }
+        with patch.object(
+            preview.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            preview.launch_evidence, "load_full_snapshot_post_ids",
+            new=AsyncMock(return_value=[]),
+        ), patch.object(
+            preview.launch_evidence, "_validate_linked_records",
+            new=AsyncMock(side_effect=
+                          preview.launch_evidence.EvidenceTemporarilyUnavailableError(
+                              "飞书记录暂时不可用"
+                          )),
+        ):
+            context = asyncio.run(preview._load_activity_context("campaign1", "KOL"))
+
+        self.assertTrue(context["evidence_pending"])
+        self.assertTrue(context["evidence_temporarily_unavailable"])
+        self.assertEqual("暂时不可用", context["evidence_status"])
+
     def test_activity_context_reads_campaign_specific_follower_range(self):
         activity = {
             "record_id": "activity1",

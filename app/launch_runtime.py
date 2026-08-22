@@ -600,8 +600,34 @@ async def campaign_metrics(
         target_posts=target_posts, target_commitments=target_commitments,
         commitments=commitments, sent=sent, replies=replies, ontime_posts=ontime_posts,
     )
+    def is_approved_new_development(row: dict) -> bool:
+        fields = row.get("fields") or {}
+        return bool(
+            ext(fields.get("参与状态")) in {"锁定准备中", "已入围"}
+            and ext(fields.get("审核结论")) == "通过"
+            and ext(fields.get("进入方式")) == "新开发"
+            and ext(fields.get("活动分池")) == "新开发池"
+        )
+
+    approved_new_development = sum(map(is_approved_new_development, participants))
+    approved_cutoff_ms = int(time.time() * 1000) - 24 * 60 * 60 * 1000
+
+    def record_created_ms(row: dict) -> int:
+        try:
+            value = int(float(row.get("created_time") or row.get("createdTime") or 0))
+        except (TypeError, ValueError):
+            return 0
+        return value * 1000 if 0 < value < 100_000_000_000 else value
+
+    approved_new_development_24h = sum(
+        is_approved_new_development(row)
+        and record_created_ms(row) >= approved_cutoff_ms
+        for row in participants
+    )
     return {
         "campaign_id": campaign_id, "participants": len(participants),
+        "approved_new_development": approved_new_development,
+        "approved_new_development_24h": approved_new_development_24h,
         "sent": sent, "replies": replies, "commitments": commitments,
         "actual_posts": actual_posts, "ontime_posts": ontime_posts,
         **control,
@@ -864,7 +890,11 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
         if remaining:
             discovery = await keyword_supply.ensure_campaign_supply(
                 campaign_id=campaign_id, activity=activity, product=product,
-                required_candidates=remaining, dry_run=False,
+                required_candidates=remaining,
+                approved_candidates=int(
+                    metrics.get("approved_new_development_24h") or 0
+                ),
+                dry_run=False,
             )
             review_preview = dict(latest_preview)
             review_preview["candidates"] = list(latest_preview.get("candidates") or []) + list(
@@ -960,6 +990,8 @@ def _with_business_outcome(result: dict) -> dict:
         outcome = "ready_inventory_created"
     elif made_supply_progress:
         outcome = "supply_in_progress"
+    elif (result.get("discovery") or {}).get("skipped") == "quality_cooldown":
+        outcome = "supply_cooling_down"
     elif result.get("action") == "expand":
         outcome = "supply_blocked"
     else:
@@ -997,6 +1029,15 @@ def _runtime_result_summary(result: dict | None) -> dict:
         ) if key in result
     } | ({"quota": quota} if quota else {})
     reconcile = result.get("outcome_reconcile") or {}
+    discovery = result.get("discovery") or {}
+    if discovery:
+        summary["discovery"] = {
+            key: discovery.get(key) for key in (
+                "created", "skipped", "keyword_source", "active_pending_before",
+                "stale_pending_before", "target_tasks", "quality_gate",
+                "quality_filters_lowered",
+            ) if key in discovery
+        }
     if reconcile:
         errors = reconcile.get("errors") or []
         summary["outcome_reconcile"] = {

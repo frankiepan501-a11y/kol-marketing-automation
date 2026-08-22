@@ -33,8 +33,18 @@ class EvidenceVersionConflict(RuntimeError):
     """调用方使用了旧配置版本。"""
 
 
+class EvidenceTemporarilyUnavailableError(RuntimeError):
+    """飞书记录仍存在，但当前瞬时不可读。"""
+
+
 _ACTIVITY_LOCKS: dict[str, asyncio.Lock] = {}
 _BULK_VALIDATE_THRESHOLD = 100
+_TRANSIENT_RECORD_READ_RETRIES = 3
+_VALIDATED_SNAPSHOT_CACHE_TTL_SECONDS = 6 * 60 * 60
+_FULL_SNAPSHOT_ID_CACHE: dict[str, tuple[float, list[str]]] = {}
+_VALIDATED_SNAPSHOT_CACHE: dict[
+    str, tuple[float, tuple[list[dict], list[dict]]]
+] = {}
 _POST_VALIDATION_FIELDS = [
     "竞品品牌", "品牌", "竞品", "采集来源", "KOL平台ID", "KOL账号Handle",
     "KOL账号名", "KOL主页URL", "关联KOL", "平台", "内容类型", "曝光量", "覆盖量",
@@ -86,6 +96,88 @@ def _post_ids_sha256(post_ids: list[str]) -> str:
     return hashlib.sha256("\n".join(post_ids).encode("utf-8")).hexdigest()
 
 
+def _purge_expired_snapshot_caches(now: float) -> None:
+    for cache in (_FULL_SNAPSHOT_ID_CACHE, _VALIDATED_SNAPSHOT_CACHE):
+        for key, value in list(cache.items()):
+            if value[0] <= now:
+                cache.pop(key, None)
+
+
+def _is_transient_record_read_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "1254607" in text or "data not ready" in text
+
+
+async def _get_record_with_retry(table_id: str, record_id: str) -> dict:
+    """飞书记录刚更新时可能短暂返回 1254607；只对该瞬时错误做有界重试。"""
+    for attempt in range(_TRANSIENT_RECORD_READ_RETRIES):
+        try:
+            return await feishu.get_record(table_id, record_id)
+        except Exception as exc:
+            if (
+                attempt >= _TRANSIENT_RECORD_READ_RETRIES - 1
+                or not _is_transient_record_read_error(exc)
+            ):
+                if _is_transient_record_read_error(exc):
+                    raise EvidenceTemporarilyUnavailableError(
+                        f"飞书记录暂时不可用，已重试{_TRANSIENT_RECORD_READ_RETRIES}次: "
+                        f"{table_id}/{record_id}"
+                    ) from exc
+                raise
+            await asyncio.sleep(0.25 * (attempt + 1))
+    raise EvidenceNotFoundError(f"记录读取失败: {record_id}")
+
+
+async def _fetch_all_records_with_retry(
+    table_id: str, *, field_names: list[str], page_size: int,
+) -> list[dict]:
+    for attempt in range(_TRANSIENT_RECORD_READ_RETRIES):
+        try:
+            return await feishu.fetch_all_records(
+                table_id, field_names=field_names, page_size=page_size,
+            )
+        except Exception as exc:
+            if not _is_transient_record_read_error(exc):
+                raise
+            if attempt >= _TRANSIENT_RECORD_READ_RETRIES - 1:
+                raise EvidenceTemporarilyUnavailableError(
+                    f"飞书证据表暂时不可用，已重试{_TRANSIENT_RECORD_READ_RETRIES}次: "
+                    f"{table_id}"
+                ) from exc
+            await asyncio.sleep(0.25 * (attempt + 1))
+    raise EvidenceTemporarilyUnavailableError(f"飞书证据表暂时不可用: {table_id}")
+
+
+async def get_validated_snapshot_records(
+    *, campaign_id: str, activity_fields: dict, competitor_brand: str,
+    post_record_ids: list[str], event_record_ids: list[str],
+) -> tuple[list[dict], list[dict]]:
+    """同一份已锁定快照只做一次全量记录校验，后续补池直接复用进程内结果。"""
+    ranking_version = ext(activity_fields.get("证据排序版本"))
+    config_version = int(activity_fields.get("证据配置版本") or 0)
+    cache_key = "|".join((
+        campaign_id, ranking_version, str(config_version), competitor_brand.upper(),
+        _post_ids_sha256(post_record_ids),
+        _post_ids_sha256(sorted(event_record_ids)),
+    ))
+    now = time.monotonic()
+    _purge_expired_snapshot_caches(now)
+    cached = _VALIDATED_SNAPSHOT_CACHE.get(cache_key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    if cached is not None:
+        _VALIDATED_SNAPSHOT_CACHE.pop(cache_key, None)
+    validated = await _validate_linked_records(
+        competitor_brand=competitor_brand,
+        post_record_ids=post_record_ids,
+        event_record_ids=event_record_ids,
+    )
+    _VALIDATED_SNAPSHOT_CACHE[cache_key] = (
+        now + _VALIDATED_SNAPSHOT_CACHE_TTL_SECONDS, validated,
+    )
+    return validated
+
+
 async def load_full_snapshot_post_ids(*, campaign_id: str, activity_fields: dict) -> list[str]:
     metadata = parse_full_snapshot_metadata(activity_fields)
     if not metadata:
@@ -109,6 +201,18 @@ async def load_full_snapshot_post_ids(*, campaign_id: str, activity_fields: dict
             raise EvidenceValidationError(
                 "Dave 活动 NYXI 全证据数量不符合已审定口径: " + ", ".join(mismatched)
             )
+    snapshot_cache_key = "|".join((
+        campaign_id, ranking_version, str(config_version),
+        str(metadata.get("post_ids_sha256") or ""),
+        str(metadata.get("chunks") or 0), str(metadata.get("total_posts") or 0),
+    ))
+    now = time.monotonic()
+    _purge_expired_snapshot_caches(now)
+    cached_snapshot = _FULL_SNAPSHOT_ID_CACHE.get(snapshot_cache_key)
+    if cached_snapshot is not None and cached_snapshot[0] > now:
+        return list(cached_snapshot[1])
+    if cached_snapshot is not None:
+        _FULL_SNAPSHOT_ID_CACHE.pop(snapshot_cache_key, None)
     prefix = f"{ranking_version}-chunk-"
     rows = await feishu.search_records(
         config.T_LAUNCH_NODE,
@@ -153,6 +257,9 @@ async def load_full_snapshot_post_ids(*, campaign_id: str, activity_fields: dict
     expected_hash = str(metadata.get("post_ids_sha256") or "")
     if expected_hash and _post_ids_sha256(post_ids) != expected_hash:
         raise EvidenceValidationError("全证据快照帖子指纹不一致")
+    _FULL_SNAPSHOT_ID_CACHE[snapshot_cache_key] = (
+        now + _VALIDATED_SNAPSHOT_CACHE_TTL_SECONDS, list(post_ids),
+    )
     return post_ids
 
 
@@ -172,7 +279,7 @@ async def _validate_linked_records(
 ) -> tuple[list[dict], list[dict]]:
     post_map = {}
     if len(post_record_ids) > _BULK_VALIDATE_THRESHOLD:
-        rows = await feishu.fetch_all_records(
+        rows = await _fetch_all_records_with_retry(
             config.T_COMPETITOR_POST, field_names=_POST_VALIDATION_FIELDS, page_size=500,
         )
         requested = set(post_record_ids)
@@ -186,7 +293,11 @@ async def _validate_linked_records(
             async def fetch_one(record_id: str) -> tuple[str, dict]:
                 async with semaphore:
                     try:
-                        row = await feishu.get_record(config.T_COMPETITOR_POST, record_id)
+                        row = await _get_record_with_retry(
+                            config.T_COMPETITOR_POST, record_id,
+                        )
+                    except EvidenceTemporarilyUnavailableError:
+                        raise
                     except Exception as exc:
                         raise EvidenceNotFoundError(f"竞品帖子不存在: {record_id}") from exc
                     return record_id, row
@@ -196,11 +307,13 @@ async def _validate_linked_records(
     posts = []
     for record_id in post_record_ids:
         try:
-            record = post_map.get(record_id) if post_map else await feishu.get_record(
+            record = post_map.get(record_id) if post_map else await _get_record_with_retry(
                 config.T_COMPETITOR_POST, record_id,
             )
             if not record:
                 raise KeyError(record_id)
+        except EvidenceTemporarilyUnavailableError:
+            raise
         except Exception as exc:
             raise EvidenceNotFoundError(f"竞品帖子不存在: {record_id}") from exc
         fields = record.get("fields") or {}
@@ -213,7 +326,9 @@ async def _validate_linked_records(
     events = []
     for record_id in event_record_ids:
         try:
-            record = await feishu.get_record(config.T_COMPETITOR_EVENT, record_id)
+            record = await _get_record_with_retry(config.T_COMPETITOR_EVENT, record_id)
+        except EvidenceTemporarilyUnavailableError:
+            raise
         except Exception as exc:
             raise EvidenceNotFoundError(f"竞品营销事件不存在: {record_id}") from exc
         fields = record.get("fields") or {}

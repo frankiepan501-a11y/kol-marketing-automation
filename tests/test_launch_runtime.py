@@ -75,15 +75,20 @@ class LaunchRuntimeTests(unittest.TestCase):
             "活动ID": "campaign1", "窗口结束": 1_800_000_000_000,
             "目标上稿数": 20, "目标承诺数": 29,
         }}
+        now_ms = int(launch_runtime.time.time() * 1000)
         participants = [
-            {"record_id": "p1", "fields": {
+            {"record_id": "p1", "created_time": now_ms, "fields": {
                 "关联邮件草稿": ["d1"],
                 "承诺上稿时间": 1_790_000_000_000,
                 "实际上稿时间": 1_810_000_000_000,
+                "参与状态": "已入围", "审核结论": "通过",
+                "进入方式": "新开发", "活动分池": "新开发池",
             }},
             {"record_id": "p2", "fields": {
                 "关联邮件草稿": ["d2"],
                 "承诺上稿时间": 1_795_000_000_000,
+                "参与状态": "已入围", "审核结论": "待审核",
+                "进入方式": "新开发", "活动分池": "新开发池",
             }},
         ]
         drafts = [
@@ -97,6 +102,8 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(2, result["commitments"])
         self.assertEqual(1, result["actual_posts"])
         self.assertEqual(0, result["ontime_posts"])
+        self.assertEqual(1, result["approved_new_development"])
+        self.assertEqual(1, result["approved_new_development_24h"])
 
     def test_autonomous_append_runs_in_parallel_with_pending_operator_review(self):
         activity = {"record_id": "a1", "fields": {
@@ -365,6 +372,7 @@ class LaunchRuntimeTests(unittest.TestCase):
     def test_autonomous_refill_refreshes_then_requests_discovery_without_lowering_filters(self):
         metrics = {
             "campaign_id": "campaign1", "participants": 20, "sent": 4,
+            "approved_new_development": 9, "approved_new_development_24h": 3,
             "replies": 0, "commitments": 0, "ontime_posts": 0,
             "action": "expand", "reason": "commitment gap",
         }
@@ -432,6 +440,7 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(2, append_auto.await_count)
         self.assertTrue(all(call.kwargs["allow_parallel_review"] for call in append_auto.await_args_list))
         discover.assert_awaited_once()
+        self.assertEqual(3, discover.await_args.kwargs["approved_candidates"])
         review.assert_awaited_once()
         self.assertTrue(review.await_args.kwargs["operator_only"])
         self.assertEqual(12, result["inventory_after"])
@@ -457,6 +466,31 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual("supply_in_progress", result["business_outcome"])
         self.assertTrue(result["made_supply_progress"])
         self.assertEqual(4, result["supply_progress_breakdown"]["active_discovery_tasks"])
+
+    def test_runtime_summary_keeps_discovery_quality_gate_for_audit(self):
+        summary = launch_runtime._runtime_result_summary({
+            "action": "expand", "quota": {"remaining": 107}, "inventory_after": 0,
+            "business_outcome": "supply_blocked", "made_supply_progress": False,
+            "supply_progress_breakdown": {},
+            "discovery": {
+                "created": 0, "skipped": "quality_cooldown",
+                "quality_gate": {"mode": "cooldown", "recent_valid_emails": 0},
+            },
+        })
+
+        self.assertEqual("quality_cooldown", summary["discovery"]["skipped"])
+        self.assertEqual("cooldown", summary["discovery"]["quality_gate"]["mode"])
+
+    def test_intentional_quality_cooldown_is_visible_without_false_failure(self):
+        result = launch_runtime._with_business_outcome({
+            "action": "expand", "quota": {"remaining": 107},
+            "inventory_after": 0,
+            "discovery": {"created": 0, "active_pending_before": 0,
+                          "skipped": "quality_cooldown"},
+        })
+
+        self.assertEqual("supply_cooling_down", result["business_outcome"])
+        self.assertEqual("success", launch_runtime.runtime_job_status(result))
 
     def test_stale_pending_discovery_tasks_do_not_mask_supply_block(self):
         result = launch_runtime._with_business_outcome({

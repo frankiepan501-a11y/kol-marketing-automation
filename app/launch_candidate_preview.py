@@ -773,8 +773,13 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
             evidence_source = "activity_node_snapshot"
     except Exception as exc:
         snapshot_error = str(exc)
+        snapshot_temporarily_unavailable = (
+            isinstance(exc, launch_evidence.EvidenceTemporarilyUnavailableError)
+            or launch_evidence._is_transient_record_read_error(exc)
+        )
     else:
         snapshot_error = ""
+        snapshot_temporarily_unavailable = False
     # A legacy activity may predate these fields entirely.  Preserve the old
     # product-level scope in that case, but fail closed when a current activity
     # explicitly contains an empty target field.
@@ -812,6 +817,7 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
     )
     posts = []
     evidence_error = snapshot_error
+    evidence_temporarily_unavailable = snapshot_temporarily_unavailable
     if mode == launch_evidence.MODE_NONE:
         if status != "不适用" or brand or post_ids or event_ids:
             evidence_error = "不使用竞品证据的字段组合无效"
@@ -823,17 +829,28 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
 
     if not evidence_error and mode in {launch_evidence.MODE_NEW, launch_evidence.MODE_REUSE} and status == "已就绪":
         try:
-            posts, _ = await launch_evidence._validate_linked_records(
-                competitor_brand=brand,
-                post_record_ids=post_ids,
-                event_record_ids=event_ids,
-            )
+            if evidence_source == "activity_node_snapshot":
+                posts, _ = await launch_evidence.get_validated_snapshot_records(
+                    campaign_id=campaign_id, activity_fields=fields,
+                    competitor_brand=brand, post_record_ids=post_ids,
+                    event_record_ids=event_ids,
+                )
+            else:
+                posts, _ = await launch_evidence._validate_linked_records(
+                    competitor_brand=brand,
+                    post_record_ids=post_ids,
+                    event_record_ids=event_ids,
+                )
+        except launch_evidence.EvidenceTemporarilyUnavailableError as exc:
+            evidence_error = str(exc)
+            evidence_temporarily_unavailable = True
+            posts = []
         except Exception as exc:
             evidence_error = str(exc)
             posts = []
     if evidence_error:
         evidence_pending = True
-        status = "配置无效"
+        status = "暂时不可用" if evidence_temporarily_unavailable else "配置无效"
     applicable = bool(exact_scope and posts and not evidence_error)
     return {
         "activity": activity,
@@ -841,6 +858,7 @@ async def _load_activity_context(campaign_id: str, object_type: str) -> dict:
         "evidence_mode": mode,
         "evidence_status": status or "配置无效",
         "evidence_pending": evidence_pending,
+        "evidence_temporarily_unavailable": evidence_temporarily_unavailable,
         "ranking_version": ranking_version,
         "competitor_posts": posts if applicable else [],
         "competitor_evidence_applied": applicable,

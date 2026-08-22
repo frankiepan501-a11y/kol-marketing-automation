@@ -39,6 +39,36 @@ class LaunchAutonomyWorkflowScriptTests(unittest.TestCase):
 
         self.assertIn("dave_running_within_expected_window", script)
 
+    def test_audit_collects_both_campaign_results_before_failing(self):
+        script = (
+            pathlib.Path(__file__).parents[1]
+            / "scripts"
+            / "upsert_launch_autonomy_workflows.ps1"
+        ).read_text(encoding="utf-8")
+
+        dave_validator = script.split("$validateDave = @'", 1)[1].split("'@", 1)[0]
+        piranha_validator = script.split("$validatePiranha = @'", 1)[1].split("'@", 1)[0]
+        self.assertNotIn("throw new Error", dave_validator)
+        self.assertNotIn("throw new Error", piranha_validator)
+        self.assertIn("$validateBoth", script)
+        self.assertIn("Campaign Audit Merge", script)
+        self.assertIn("Validate Both Campaigns", script)
+        self.assertIn("both_campaigns_checked", script)
+        self.assertGreaterEqual(script.count("onError = 'continueRegularOutput'"), 2)
+
+    def test_upsert_preserves_unmanaged_remote_nodes_and_restores_active_state(self):
+        script = (
+            pathlib.Path(__file__).parents[1]
+            / "scripts"
+            / "upsert_launch_autonomy_workflows.ps1"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("$current.nodes | Where-Object", script)
+        self.assertIn("$current.connections.PSObject.Properties", script)
+        self.assertIn("$current.settings.PSObject.Properties", script)
+        self.assertIn("$wasActive = [bool]$current.active", script)
+        self.assertIn("automatic reactivation also failed", script)
+
 
 if __name__ == "__main__":
     unittest.main()

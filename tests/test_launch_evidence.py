@@ -6,6 +6,142 @@ from app import launch_evidence
 
 
 class LaunchEvidenceContractTests(unittest.TestCase):
+    def setUp(self):
+        for name in ("_VALIDATED_SNAPSHOT_CACHE", "_FULL_SNAPSHOT_ID_CACHE"):
+            cache = getattr(launch_evidence, name, None)
+            if cache is not None:
+                cache.clear()
+
+    def test_transient_data_not_ready_is_retried_before_marking_post_missing(self):
+        post = {"record_id": "post1", "fields": {
+            "竞品品牌": "NYXI", "KOL账号Handle": "indiealpaca",
+        }}
+        get_record = AsyncMock(side_effect=[
+            RuntimeError("1254607 Data not ready"), post,
+        ])
+
+        with patch.object(launch_evidence.feishu, "get_record", new=get_record), \
+             patch.object(launch_evidence.asyncio, "sleep", new=AsyncMock()) as sleep:
+            posts, events = asyncio.run(launch_evidence._validate_linked_records(
+                competitor_brand="NYXI", post_record_ids=["post1"],
+                event_record_ids=[],
+            ))
+
+        self.assertEqual([post], posts)
+        self.assertEqual([], events)
+        self.assertEqual(2, get_record.await_count)
+        sleep.assert_awaited_once()
+
+    def test_persistent_data_not_ready_remains_temporary_not_missing(self):
+        get_record = AsyncMock(side_effect=RuntimeError("1254607 Data not ready"))
+        with patch.object(
+            launch_evidence.feishu, "get_record", new=get_record,
+        ), patch.object(launch_evidence.asyncio, "sleep", new=AsyncMock()):
+            with self.assertRaises(
+                launch_evidence.EvidenceTemporarilyUnavailableError,
+            ) as raised:
+                asyncio.run(launch_evidence._validate_linked_records(
+                    competitor_brand="NYXI", post_record_ids=["post1"],
+                    event_record_ids=[],
+                ))
+
+        self.assertIn("暂时不可用", str(raised.exception))
+        self.assertNotIn("不存在", str(raised.exception))
+        self.assertEqual(
+            launch_evidence._TRANSIENT_RECORD_READ_RETRIES, get_record.await_count,
+        )
+
+    def test_persistent_bulk_data_not_ready_remains_temporary_not_invalid(self):
+        fetch_all = AsyncMock(side_effect=RuntimeError("1254607 Data not ready"))
+        with patch.object(
+            launch_evidence.feishu, "fetch_all_records", new=fetch_all,
+        ), patch.object(launch_evidence.asyncio, "sleep", new=AsyncMock()):
+            with self.assertRaises(
+                launch_evidence.EvidenceTemporarilyUnavailableError,
+            ):
+                asyncio.run(launch_evidence._validate_linked_records(
+                    competitor_brand="NYXI",
+                    post_record_ids=[f"post-{index}" for index in range(101)],
+                    event_record_ids=[],
+                ))
+
+        self.assertEqual(
+            launch_evidence._TRANSIENT_RECORD_READ_RETRIES, fetch_all.await_count,
+        )
+
+    def test_confirmed_snapshot_records_are_reused_without_reloading_all_posts(self):
+        fields = {
+            "竞品品牌": "NYXI", "证据配置版本": 2,
+            "证据排序版本": "evidence-v4",
+        }
+        posts = [{"record_id": "post1", "fields": {"竞品品牌": "NYXI"}}]
+        validate = AsyncMock(return_value=(posts, []))
+
+        with patch.object(
+            launch_evidence, "_validate_linked_records", new=validate,
+        ):
+            first = asyncio.run(launch_evidence.get_validated_snapshot_records(
+                campaign_id="campaign-1", activity_fields=fields,
+                competitor_brand="NYXI", post_record_ids=["post1"],
+                event_record_ids=[],
+            ))
+            second = asyncio.run(launch_evidence.get_validated_snapshot_records(
+                campaign_id="campaign-1", activity_fields=fields,
+                competitor_brand="NYXI", post_record_ids=["post1"],
+                event_record_ids=[],
+            ))
+
+        self.assertEqual((posts, []), first)
+        self.assertEqual(first, second)
+        self.assertEqual(1, validate.await_count)
+
+    def test_confirmed_snapshot_cache_expires_and_revalidates(self):
+        fields = {
+            "竞品品牌": "NYXI", "证据配置版本": 2,
+            "证据排序版本": "evidence-v4",
+        }
+        validate = AsyncMock(side_effect=[([{"record_id": "old"}], []),
+                                          ([{"record_id": "new"}], [])])
+        with patch.object(
+            launch_evidence, "_validate_linked_records", new=validate,
+        ):
+            first = asyncio.run(launch_evidence.get_validated_snapshot_records(
+                campaign_id="campaign-1", activity_fields=fields,
+                competitor_brand="NYXI", post_record_ids=["post1"],
+                event_record_ids=[],
+            ))
+            cache_key = next(iter(launch_evidence._VALIDATED_SNAPSHOT_CACHE))
+            _, cached_value = launch_evidence._VALIDATED_SNAPSHOT_CACHE[cache_key]
+            launch_evidence._VALIDATED_SNAPSHOT_CACHE[cache_key] = (-1.0, cached_value)
+            second = asyncio.run(launch_evidence.get_validated_snapshot_records(
+                campaign_id="campaign-1", activity_fields=fields,
+                competitor_brand="NYXI", post_record_ids=["post1"],
+                event_record_ids=[],
+            ))
+
+        self.assertEqual("old", first[0][0]["record_id"])
+        self.assertEqual("new", second[0][0]["record_id"])
+        self.assertEqual(2, validate.await_count)
+
+    def test_snapshot_cache_purges_expired_keys_not_requested_again(self):
+        launch_evidence._VALIDATED_SNAPSHOT_CACHE["expired-old-version"] = (
+            -1.0, ([], []),
+        )
+        with patch.object(
+            launch_evidence, "_validate_linked_records",
+            new=AsyncMock(return_value=([], [])),
+        ):
+            asyncio.run(launch_evidence.get_validated_snapshot_records(
+                campaign_id="campaign-new", activity_fields={
+                    "证据排序版本": "evidence-v9", "证据配置版本": 9,
+                }, competitor_brand="NYXI", post_record_ids=["post-new"],
+                event_record_ids=[],
+            ))
+
+        self.assertNotIn(
+            "expired-old-version", launch_evidence._VALIDATED_SNAPSHOT_CACHE,
+        )
+
     def test_full_snapshot_nodes_reconstruct_exact_post_set(self):
         activity_fields = {
             "竞品品牌": "NYXI", "证据配置版本": 2, "证据排序版本": "evidence-v4",
@@ -33,6 +169,37 @@ class LaunchEvidenceContractTests(unittest.TestCase):
             ))
 
         self.assertEqual(["post1", "post2", "post3"], result)
+
+    def test_full_snapshot_ids_are_reused_without_reloading_nodes(self):
+        activity_fields = {
+            "竞品品牌": "NYXI", "证据配置版本": 2,
+            "证据排序版本": "evidence-v5",
+            "证据等待/变更说明": (
+                'FULL_EVIDENCE_SNAPSHOT:{"ranking_version":"evidence-v5",'
+                '"config_version":2,"total_posts":1,"chunks":1,"chunk_size":1,'
+                '"official_excluded":0,'
+                '"post_ids_sha256":"'
+                + launch_evidence._post_ids_sha256(["post1"]) + '"}'
+            ),
+        }
+        rows = [{"record_id": "n1", "fields": {
+            "节点代码": "evidence-v5-chunk-001", "节点状态": "已确认",
+            "竞品品牌": "NYXI", "目标证据配置版本": 2,
+            "待确认竞品帖子": ["post1"], "允许外部动作": False,
+        }}]
+        with patch.object(
+            launch_evidence.feishu, "search_records", new=AsyncMock(return_value=rows),
+        ) as search:
+            first = asyncio.run(launch_evidence.load_full_snapshot_post_ids(
+                campaign_id="campaign-1", activity_fields=activity_fields,
+            ))
+            second = asyncio.run(launch_evidence.load_full_snapshot_post_ids(
+                campaign_id="campaign-1", activity_fields=activity_fields,
+            ))
+
+        self.assertEqual(["post1"], first)
+        self.assertEqual(first, second)
+        self.assertEqual(1, search.await_count)
 
     def test_full_snapshot_duplicate_posts_fail_closed(self):
         fields = {

@@ -159,6 +159,159 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         self.assertEqual(1, result["stale_pending_before"])
         self.assertGreater(result["created"], 0)
 
+    def test_real_running_status_counts_as_active_campaign_supply(self):
+        now_ms = int(keyword_supply.time.time() * 1000)
+        rows = [{"fields": {
+            "任务名": "[活动补池:campaign1] YT KOL - running probe",
+            "关键词列表": "running probe", "任务状态": "2-运行中",
+            "创建日期": now_ms, "筛选-语言": ["en"],
+        }}]
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=rows),
+        ), patch.object(
+            keyword_supply.deepseek, "chat_json",
+            new=AsyncMock(return_value={"keywords": ["nintendo collector channel"]}),
+        ), patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(return_value="task1"),
+        ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=1, dry_run=True,
+            ))
+
+        self.assertEqual(1, result["active_pending_before"])
+        self.assertEqual(2, result["would_create"])
+
+    def test_piranha_low_yield_recent_tasks_enter_cooldown_without_lowering_filters(self):
+        now_ms = int(keyword_supply.time.time() * 1000)
+        rows = [{"fields": {
+            "任务名": f"[活动补池:campaign1] YT KOL - low yield {index}",
+            "关键词列表": f"low yield {index}", "任务状态": "3-已完成",
+            "创建日期": now_ms - index * 60_000,
+            "实际产出-新增": 0,
+            "执行日志": "待入库: 0\n其中有邮箱: 0",
+            "筛选-语言": ["en"],
+        }} for index in range(12)]
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=rows),
+        ), patch.object(
+            keyword_supply.deepseek, "chat_json", new=AsyncMock(),
+        ) as generate, patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(),
+        ) as create_record:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=300, approved_candidates=1, dry_run=False,
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("quality_cooldown", result["skipped"])
+        self.assertEqual("cooldown", result["quality_gate"]["mode"])
+        self.assertEqual(0, result["created"])
+        self.assertFalse(result["quality_filters_lowered"])
+        generate.assert_not_awaited()
+        create_record.assert_not_awaited()
+
+    def test_piranha_low_yield_after_cooldown_allows_only_one_probe_task(self):
+        now_ms = int(keyword_supply.time.time() * 1000)
+        old_ms = now_ms - keyword_supply.LOW_YIELD_PROBE_COOLDOWN_MS - 1
+        rows = [{"fields": {
+            "任务名": f"[活动补池:campaign1] YT KOL - exhausted {index}",
+            "关键词列表": f"exhausted {index}", "任务状态": "3-已完成",
+            "创建日期": old_ms - index * 60_000,
+            "实际产出-新增": 0,
+            "执行日志": "待入库: 0\n其中有邮箱: 0",
+            "筛选-语言": ["en"],
+        }} for index in range(12)]
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=rows),
+        ), patch.object(
+            keyword_supply.deepseek, "chat_json", new=AsyncMock(return_value={
+                "keywords": [{"language": "en", "keyword": "nintendo collector review"}],
+            }),
+        ), patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(),
+        ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=300, approved_candidates=1, dry_run=True,
+            ))
+
+        self.assertEqual("slow_probe", result["quality_gate"]["mode"])
+        self.assertEqual(1, result["target_tasks"])
+        self.assertLessEqual(result["would_create"], 1)
+        self.assertFalse(result["quality_filters_lowered"])
+
+    def test_piranha_missing_email_signal_fails_closed_instead_of_expanding(self):
+        now_ms = int(keyword_supply.time.time() * 1000)
+        rows = [{"fields": {
+            "任务名": f"[活动补池:campaign1] YT KOL - changed log {index}",
+            "关键词列表": f"changed log {index}", "任务状态": "3-已完成",
+            "创建日期": now_ms - index * 60_000,
+            "实际产出-新增": 0,
+            "执行日志": "crawler output format changed",
+            "筛选-语言": ["en"],
+        }} for index in range(12)]
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=rows),
+        ), patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(),
+        ) as create_record:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=300, approved_candidates=0, dry_run=False,
+            ))
+
+        self.assertEqual("quality_cooldown", result["skipped"])
+        self.assertIn(
+            "email_yield_signal_unavailable", result["quality_gate"]["reasons"],
+        )
+        self.assertEqual(0.0, result["quality_gate"]["email_signal_coverage"])
+        create_record.assert_not_awaited()
+
+    def test_piranha_partial_email_signal_coverage_also_fails_closed(self):
+        now_ms = int(keyword_supply.time.time() * 1000)
+        rows = [{"fields": {
+            "任务名": f"[活动补池:campaign1] YT KOL - partial log {index}",
+            "关键词列表": f"partial log {index}", "任务状态": "3-已完成",
+            "创建日期": now_ms - index * 60_000,
+            "执行日志": (
+                "其中有邮箱: 3" if index < 6 else "new unstructured log"
+            ),
+            "筛选-语言": ["en"],
+        }} for index in range(12)]
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=rows),
+        ), patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(),
+        ) as create_record:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=300, approved_candidates=50, dry_run=False,
+            ))
+
+        self.assertEqual("quality_cooldown", result["skipped"])
+        self.assertEqual(0.5, result["quality_gate"]["email_signal_coverage"])
+        self.assertIn(
+            "email_yield_signal_unavailable", result["quality_gate"]["reasons"],
+        )
+        create_record.assert_not_awaited()
+
     def test_market_configuration_includes_portuguese_brazil(self):
         portuguese = [m for m in keyword_supply.MARKETS if m["lang"] == "pt"]
 

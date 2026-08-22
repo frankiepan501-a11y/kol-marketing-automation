@@ -58,18 +58,62 @@ function Upsert-Workflow([string]$Name, $Nodes, $Connections, $Settings, $Existi
     $current = $null
     if ($existing) {
         $current = Invoke-RestMethod -Headers $apiHeaders -Uri "$n8nBase/workflows/$($existing.id)"
-        if ($current.active) {
-            Invoke-RestMethod -Method Post -Headers $apiHeaders -ContentType 'application/json' -Uri "$n8nBase/workflows/$($existing.id)/deactivate" | Out-Null
+    }
+    $managedNames = @($Nodes | ForEach-Object { $_.name })
+    $payloadNodes = @($Nodes)
+    $payloadConnections = @{}
+    $payloadSettings = @{}
+    if ($current) {
+        # Existing workflows may contain production-only nodes or settings added after this
+        # script was written. Preserve them and replace only this script's managed nodes.
+        $payloadNodes = @(
+            @($current.nodes | Where-Object { $_.name -notin $managedNames }) + @($Nodes)
+        )
+        foreach ($property in $current.connections.PSObject.Properties) {
+            $payloadConnections[$property.Name] = $property.Value
+        }
+        foreach ($managedName in $managedNames) {
+            $payloadConnections.Remove($managedName)
+        }
+        if ($current.settings) {
+            foreach ($property in $current.settings.PSObject.Properties) {
+                $payloadSettings[$property.Name] = $property.Value
+            }
         }
     }
-    $payload = @{ name = $Name; nodes = $Nodes; connections = $Connections; settings = $Settings }
+    foreach ($key in $Connections.Keys) { $payloadConnections[$key] = $Connections[$key] }
+    foreach ($key in $Settings.Keys) { $payloadSettings[$key] = $Settings[$key] }
+    $payload = @{
+        name = $Name
+        nodes = $payloadNodes
+        connections = $payloadConnections
+        settings = $payloadSettings
+    }
     $json = $payload | ConvertTo-Json -Depth 30 -Compress
     if ($existing) {
-        $workflow = Invoke-RestMethod -Method Put -Headers $apiHeaders -ContentType 'application/json' -Uri "$n8nBase/workflows/$($existing.id)" -Body $json
+        $wasActive = [bool]$current.active
+        try {
+            if ($wasActive) {
+                Invoke-RestMethod -Method Post -Headers $apiHeaders -ContentType 'application/json' -Uri "$n8nBase/workflows/$($existing.id)/deactivate" | Out-Null
+            }
+            $workflow = Invoke-RestMethod -Method Put -Headers $apiHeaders -ContentType 'application/json' -Uri "$n8nBase/workflows/$($existing.id)" -Body $json
+            if ($wasActive) {
+                $workflow = Invoke-RestMethod -Method Post -Headers $apiHeaders -ContentType 'application/json' -Uri "$n8nBase/workflows/$($workflow.id)/activate"
+            }
+        } catch {
+            if ($wasActive) {
+                try {
+                    Invoke-RestMethod -Method Post -Headers $apiHeaders -ContentType 'application/json' -Uri "$n8nBase/workflows/$($existing.id)/activate" | Out-Null
+                } catch {
+                    Write-Warning "Workflow $($existing.id) update failed and automatic reactivation also failed."
+                }
+            }
+            throw
+        }
     } else {
         $workflow = Invoke-RestMethod -Method Post -Headers $apiHeaders -ContentType 'application/json' -Uri "$n8nBase/workflows" -Body $json
+        $workflow = Invoke-RestMethod -Method Post -Headers $apiHeaders -ContentType 'application/json' -Uri "$n8nBase/workflows/$($workflow.id)/activate"
     }
-    $workflow = Invoke-RestMethod -Method Post -Headers $apiHeaders -ContentType 'application/json' -Uri "$n8nBase/workflows/$($workflow.id)/activate"
     return $workflow
 }
 
@@ -150,29 +194,35 @@ if (-not $auditExisting) { $auditExisting = $legacyAuditExisting }
 $auditState = Get-NodeIdMap $auditExisting
 $am = $auditState.map
 $validateDave = @'
-const data = $input.first().json;
+const data = $input.first().json || {};
 const age = Math.floor(Date.now() / 1000) - Number(data.updated_ts || data.started_ts || 0);
+let ok = true;
+let validation = 'fresh_success';
+let error = '';
 if (data.status === 'running' && age <= 70 * 60) {
-  return [{json: {...data, validation: 'dave_running_within_expected_window'}}];
+  validation = 'dave_running_within_expected_window';
+} else if (data.status !== 'success' || age > 70 * 60) {
+  ok = false;
+  validation = 'unhealthy';
+  error = 'Dave latest autonomous job is not a fresh success';
 }
-if (data.status !== 'success' || age > 70 * 60) {
-  throw new Error('Dave latest autonomous job is not a fresh success: ' + JSON.stringify(data).slice(0, 1000));
-}
-return [{json: data}];
+return [{json: {campaign: 'dave', ok, validation, error, age_seconds: age, data}}];
 '@
 $validatePiranha = @'
-const data = $input.first().json;
+const data = $input.first().json || {};
 const age = Math.floor(Date.now() / 1000) - Number(data.updated_ts || data.started_ts || 0);
+let ok = true;
+let validation = 'business_result_ok';
+let error = '';
 if (data.status === 'running' && age <= 45 * 60) {
-  return [{json: {...data, validation: 'running_within_expected_window'}}];
+  validation = 'running_within_expected_window';
+  return [{json: {campaign: 'piranha', ok, validation, error, age_seconds: age, data}}];
 }
 const result = data.result || {};
-if (data.status !== 'success' || age > 35 * 60) {
-  throw new Error('Piranha autonomous job is stale or not successful: ' + JSON.stringify(data).slice(0, 1000));
-}
 const allowedOutcomes = new Set([
   'stopped', 'held', 'inventory_sufficient', 'quota_exhausted',
-  'ready_inventory_created', 'supply_in_progress', 'supply_blocked', 'no_action_needed',
+  'ready_inventory_created', 'supply_in_progress', 'supply_cooling_down',
+  'supply_blocked', 'no_action_needed',
 ]);
 const hasQuota = result.quota && Number.isFinite(result.quota.remaining);
 const hasInventory = Number.isFinite(result.inventory_after);
@@ -180,22 +230,41 @@ const hasProgress = typeof result.made_supply_progress === 'boolean'
   && result.supply_progress_breakdown
   && typeof result.supply_progress_breakdown === 'object'
   && !Array.isArray(result.supply_progress_breakdown);
-if (!allowedOutcomes.has(result.business_outcome) || !hasQuota || !hasInventory || !hasProgress) {
-  throw new Error('Piranha missing or invalid business result fields: ' + JSON.stringify(data).slice(0, 1000));
-}
-if (result.business_outcome === 'supply_blocked') {
-  throw new Error('Piranha has unused quota but refill made no supply progress: ' + JSON.stringify(data).slice(0, 1000));
+if (data.status !== 'success' || age > 35 * 60) {
+  ok = false;
+  validation = 'unhealthy';
+  error = 'Piranha autonomous job is stale or not successful';
+} else if (!allowedOutcomes.has(result.business_outcome) || !hasQuota || !hasInventory || !hasProgress) {
+  ok = false;
+  validation = 'invalid_business_result';
+  error = 'Piranha missing or invalid business result fields';
+} else if (result.business_outcome === 'supply_blocked') {
+  ok = false;
+  validation = 'supply_blocked';
+  error = 'Piranha has unused quota but refill made no supply progress';
 }
 return [{json: {
-  status: data.status, updated_ts: data.updated_ts, validation: 'business_result_ok',
-  result: {
-    business_outcome: result.business_outcome,
-    quota_remaining: result.quota.remaining,
-    inventory_after: result.inventory_after,
-    made_supply_progress: result.made_supply_progress,
-    supply_progress_breakdown: result.supply_progress_breakdown,
-  },
+  campaign: 'piranha', ok, validation, error, age_seconds: age,
+  data: {status: data.status, updated_ts: data.updated_ts, result},
 }}];
+'@
+$validateBoth = @'
+const reports = $input.all().map(item => item.json || {});
+const byCampaign = Object.fromEntries(reports.map(report => [report.campaign, report]));
+const missing = ['dave', 'piranha'].filter(name => !byCampaign[name]);
+const failed = reports.filter(report => report.ok !== true);
+const summary = {
+  validation: 'both_campaigns_checked',
+  checked_campaigns: reports.map(report => report.campaign).filter(Boolean).sort(),
+  missing_campaigns: missing,
+  dave: byCampaign.dave || null,
+  piranha: byCampaign.piranha || null,
+};
+if (missing.length || failed.length) {
+  throw new Error('Launch autonomy audit found unhealthy campaign(s) after checking both: '
+    + JSON.stringify(summary).slice(0, 5000));
+}
+return [{json: summary}];
 '@
 $auditNodes = @(
     @{
@@ -212,6 +281,7 @@ $auditNodes = @(
         type = 'n8n-nodes-base.httpRequest'
         typeVersion = 4.2
         position = @(260, 80)
+        onError = 'continueRegularOutput'
         parameters = @{
             method = 'GET'
             url = "$serviceBase/launch/runtime/jobs/latest?campaign_id=launch-20260915-funlab-dave-ys11-5"
@@ -234,6 +304,7 @@ $auditNodes = @(
         type = 'n8n-nodes-base.httpRequest'
         typeVersion = 4.2
         position = @(260, 360)
+        onError = 'continueRegularOutput'
         parameters = @{
             method = 'GET'
             url = "$serviceBase/launch/runtime/jobs/latest?campaign_id=launch-20260915-powkong-piranha-v2"
@@ -249,6 +320,22 @@ $auditNodes = @(
         typeVersion = 2
         position = @(520, 360)
         parameters = @{ jsCode = $validatePiranha }
+    },
+    @{
+        id = Node-Id $am 'Campaign Audit Merge'
+        name = 'Campaign Audit Merge'
+        type = 'n8n-nodes-base.merge'
+        typeVersion = 3
+        position = @(780, 220)
+        parameters = @{ mode = 'append'; options = @{} }
+    },
+    @{
+        id = Node-Id $am 'Validate Both Campaigns'
+        name = 'Validate Both Campaigns'
+        type = 'n8n-nodes-base.code'
+        typeVersion = 2
+        position = @(1040, 220)
+        parameters = @{ jsCode = $validateBoth }
     }
 )
 $auditConnections = @{
@@ -258,6 +345,13 @@ $auditConnections = @{
     ) }
     'Dave Latest Status' = Main-To 'Dave Validate Fresh Success'
     'Piranha Latest Status' = Main-To 'Piranha Validate Fresh Success'
+    'Dave Validate Fresh Success' = @{ main = ,@(
+        @{ node = 'Campaign Audit Merge'; type = 'main'; index = 0 }
+    ) }
+    'Piranha Validate Fresh Success' = @{ main = ,@(
+        @{ node = 'Campaign Audit Merge'; type = 'main'; index = 1 }
+    ) }
+    'Campaign Audit Merge' = Main-To 'Validate Both Campaigns'
 }
 $auditWorkflow = Upsert-Workflow $auditName $auditNodes $auditConnections $settings $auditExisting
 if ($legacyAuditExisting -and $legacyAuditExisting.id -ne $auditWorkflow.id) {

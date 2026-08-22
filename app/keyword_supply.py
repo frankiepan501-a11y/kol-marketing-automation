@@ -13,6 +13,7 @@
 """
 import time
 import math
+import re
 from collections import Counter
 from . import config, feishu, deepseek
 from .feishu import ext
@@ -20,6 +21,13 @@ from .feishu import ext
 T_CRAWLER = "tblQnLHnBa1RjJUE"   # 爬虫任务台 (KOL 营销库内)
 PER_BATCH_LIMIT = 50            # 每词 daemon 抓取上限
 DISCOVERY_ACTIVE_TTL_MS = 2 * 60 * 60 * 1000
+LOW_YIELD_PROBE_COOLDOWN_MS = 2 * 60 * 60 * 1000
+LOW_YIELD_RECENT_SAMPLE = 12
+LOW_YIELD_MIN_EMAIL_SAMPLES = 6
+LOW_YIELD_MIN_EMAIL_SIGNAL_COVERAGE = 0.80
+LOW_YIELD_MIN_COMPLETED_FOR_CONVERSION = 6
+LOW_YIELD_MIN_EMAILS_PER_TASK = 0.25
+LOW_YIELD_MIN_APPROVED_PER_TASK = 0.10
 
 # 市场配置: 英语为主(水位15), 非英语市场(产品在卖+KOL库不足)各保持小水位
 MARKETS = [
@@ -137,8 +145,137 @@ def _multi_values(value) -> list[str]:
     return out
 
 
+def _created_ms(fields: dict) -> int:
+    try:
+        value = int(float(fields.get("创建日期") or 0))
+    except (TypeError, ValueError):
+        return 0
+    return value * 1000 if 0 < value < 100_000_000_000 else value
+
+
+def _valid_email_output(fields: dict) -> int | None:
+    match = re.search(r"其中有邮箱\s*[:：]\s*(\d+)", ext(fields.get("执行日志")))
+    return int(match.group(1)) if match else None
+
+
+def _campaign_discovery_quality(
+    rows: list[dict], *, prefix: str, approved_candidates: int | None, now_ms: int,
+) -> dict:
+    campaign_rows = [
+        row for row in rows
+        if ext((row.get("fields") or {}).get("任务名")).startswith(prefix)
+    ]
+    completed = [
+        row for row in campaign_rows
+        if ext((row.get("fields") or {}).get("任务状态")) == "3-已完成"
+    ]
+    completed.sort(
+        key=lambda row: _created_ms(row.get("fields") or {}), reverse=True,
+    )
+    recent = completed[:LOW_YIELD_RECENT_SAMPLE]
+    recent_dated = [
+        row for row in recent if _created_ms(row.get("fields") or {}) > 0
+    ]
+    email_outputs = [
+        value for value in (
+            _valid_email_output(row.get("fields") or {}) for row in recent
+        ) if value is not None
+    ]
+    recent_valid_emails = sum(email_outputs)
+    emails_per_task = (
+        recent_valid_emails / len(email_outputs) if email_outputs else None
+    )
+    email_signal_coverage = (
+        len(email_outputs) / len(recent_dated) if recent_dated else 0.0
+    )
+    approved_per_task = (
+        max(0, int(approved_candidates)) / len(recent)
+        if approved_candidates is not None and recent else None
+    )
+    reasons = []
+    if (
+        len(recent_dated) >= LOW_YIELD_MIN_EMAIL_SAMPLES
+        and email_signal_coverage < LOW_YIELD_MIN_EMAIL_SIGNAL_COVERAGE
+    ):
+        # 当前任务表没有结构化“有效邮箱数”字段，只能读取版本化日志口径。
+        # 一旦日志格式漂移，宁可降速探测，也不能静默恢复机械扩池。
+        reasons.append("email_yield_signal_unavailable")
+    if (
+        len(email_outputs) >= LOW_YIELD_MIN_EMAIL_SAMPLES
+        and emails_per_task is not None
+        and emails_per_task < LOW_YIELD_MIN_EMAILS_PER_TASK
+    ):
+        reasons.append("recent_valid_email_yield_low")
+    if (
+        len(recent) >= LOW_YIELD_MIN_COMPLETED_FOR_CONVERSION
+        and approved_per_task is not None
+        and approved_per_task < LOW_YIELD_MIN_APPROVED_PER_TASK
+    ):
+        reasons.append("approved_candidate_conversion_low")
+    last_created_ms = max(
+        (_created_ms(row.get("fields") or {}) for row in campaign_rows), default=0,
+    )
+    low_yield = bool(reasons)
+    cooling_down = bool(
+        low_yield and last_created_ms
+        and 0 <= now_ms - last_created_ms < LOW_YIELD_PROBE_COOLDOWN_MS
+    )
+    return {
+        "mode": "cooldown" if cooling_down else "slow_probe" if low_yield else "normal",
+        "reasons": reasons,
+        "completed_tasks": len(completed),
+        "recent_tasks_checked": len(recent),
+        "recent_dated_tasks": len(recent_dated),
+        "email_output_samples": len(email_outputs),
+        "email_signal_source": "execution_log_v1",
+        "email_signal_coverage": round(email_signal_coverage, 3),
+        "recent_valid_emails": recent_valid_emails,
+        "valid_emails_per_task": (
+            round(emails_per_task, 3) if emails_per_task is not None else None
+        ),
+        "approved_candidates": approved_candidates,
+        "approved_signal_source": "activity_new_development_approved_last_24h",
+        "approved_per_recent_task": (
+            round(approved_per_task, 3) if approved_per_task is not None else None
+        ),
+        "last_task_created_ms": last_created_ms,
+        "cooldown_ms": LOW_YIELD_PROBE_COOLDOWN_MS,
+    }
+
+
+def _append_curated_candidates(
+    *, theme: str, languages: list[str], existing_keywords: set[str],
+    candidates: list[tuple[str, str]], need: int,
+) -> tuple[int, int]:
+    added = 0
+    positions = {lang: 0 for lang in languages}
+    while need:
+        progressed = False
+        for lang in languages:
+            words = _CAMPAIGN_FALLBACK_KEYWORDS.get(theme, {}).get(lang, [])
+            while positions[lang] < len(words):
+                word = words[positions[lang]].strip().lower()
+                positions[lang] += 1
+                if word in existing_keywords or any(
+                    existing == word for _, existing in candidates
+                ):
+                    continue
+                candidates.append((lang, word))
+                added += 1
+                need -= 1
+                progressed = True
+                break
+            if need <= 0:
+                break
+        if not progressed:
+            break
+    return need, added
+
+
 async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: dict,
-                                 required_candidates: int, dry_run: bool = False) -> dict:
+                                 required_candidates: int,
+                                 approved_candidates: int | None = None,
+                                 dry_run: bool = False) -> dict:
     """为单个活动补确定性 YouTube 发现任务；只建爬虫任务，不直接创建 KOL。"""
     rows = await feishu.fetch_all_records(T_CRAWLER)
     fields = activity.get("fields") or {}
@@ -161,25 +298,43 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
     }
     prefix = f"[活动补池:{campaign_id}]"
     now_ms = int(time.time() * 1000)
+    quality_gate = _campaign_discovery_quality(
+        rows, prefix=prefix, approved_candidates=approved_candidates, now_ms=now_ms,
+    )
     active_pending_for_campaign = 0
     stale_pending_for_campaign = 0
     for row in rows:
         row_fields = row.get("fields") or {}
         if not ext(row_fields.get("任务名")).startswith(prefix):
             continue
-        if ext(row_fields.get("任务状态")) not in {"1-待触发", "2-执行中"}:
+        if ext(row_fields.get("任务状态")) not in {
+            "1-待触发", "2-执行中", "2-运行中",
+        }:
             continue
-        try:
-            created_ms = int(float(row_fields.get("创建日期") or 0))
-            if 0 < created_ms < 100_000_000_000:
-                created_ms *= 1000
-        except (TypeError, ValueError):
-            created_ms = 0
+        created_ms = _created_ms(row_fields)
         if created_ms and 0 <= now_ms - created_ms <= DISCOVERY_ACTIVE_TTL_MS:
             active_pending_for_campaign += 1
         else:
             stale_pending_for_campaign += 1
     target_tasks = max(3, min(9, math.ceil(max(1, int(required_candidates)) / 50)))
+    if theme == "piranha" and quality_gate["mode"] in {"cooldown", "slow_probe"}:
+        target_tasks = 1
+    common_result = {
+        "pending_before": active_pending_for_campaign + stale_pending_for_campaign,
+        "active_pending_before": active_pending_for_campaign,
+        "stale_pending_before": stale_pending_for_campaign,
+        "target_tasks": target_tasks,
+        "quality_gate": quality_gate,
+        "quality_filters_lowered": False,
+    }
+    if theme == "piranha" and quality_gate["mode"] == "cooldown":
+        return {
+            "ok": True, "created": 0, "would_create": 0,
+            "skipped": "quality_cooldown", "keywords": [],
+            "keyword_source": "quality_cooldown", "shortfall_tasks": target_tasks,
+            "generation_error": "", "generation_warning": "",
+            **common_result,
+        }
     need = max(0, target_tasks - active_pending_for_campaign)
     candidates = []
     while need and any(_CAMPAIGN_KEYWORDS[theme].get(lang) for lang in languages):
@@ -201,6 +356,16 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
     keyword_source = "deterministic" if candidates else "none"
     generation_error = ""
     generation_warning = ""
+    if need and theme == "piranha" and quality_gate["mode"] == "slow_probe":
+        need, fallback_added = _append_curated_candidates(
+            theme=theme, languages=languages, existing_keywords=existing_keywords,
+            candidates=candidates, need=need,
+        )
+        if fallback_added:
+            keyword_source = (
+                "curated_fallback"
+                if fallback_added == len(candidates) else "mixed_curated_fallback"
+            )
     if need and theme == "piranha":
         prompt = f"""你是海外游戏KOL发现助手。为{theme}主题新品活动补充YouTube创作者搜索词。
 目标语言只能从 {languages} 选择。搜索对象必须是Nintendo/Switch、Mario收藏、主机游戏房或游戏硬件评测创作者；
@@ -233,28 +398,10 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             generation_warning = str(exc)[:160]
 
     if need and theme == "piranha":
-        fallback_added = 0
-        fallback_positions = {lang: 0 for lang in languages}
-        while need:
-            progressed = False
-            for lang in languages:
-                words = _CAMPAIGN_FALLBACK_KEYWORDS.get(theme, {}).get(lang, [])
-                while fallback_positions[lang] < len(words):
-                    word = words[fallback_positions[lang]].strip().lower()
-                    fallback_positions[lang] += 1
-                    if word in existing_keywords or any(
-                        existing == word for _, existing in candidates
-                    ):
-                        continue
-                    candidates.append((lang, word))
-                    fallback_added += 1
-                    need -= 1
-                    progressed = True
-                    break
-                if need <= 0:
-                    break
-            if not progressed:
-                break
+        need, fallback_added = _append_curated_candidates(
+            theme=theme, languages=languages, existing_keywords=existing_keywords,
+            candidates=candidates, need=need,
+        )
         if fallback_added:
             keyword_source = (
                 "curated_fallback"
@@ -269,13 +416,10 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         return {
             "ok": True, "created": 0, "would_create": len(candidates),
             "keywords": [{"language": lang, "keyword": word} for lang, word in candidates],
-            "pending_before": active_pending_for_campaign + stale_pending_for_campaign,
-            "active_pending_before": active_pending_for_campaign,
-            "stale_pending_before": stale_pending_for_campaign,
-            "target_tasks": target_tasks,
             "keyword_source": keyword_source, "shortfall_tasks": need,
             "generation_error": generation_error,
             "generation_warning": generation_warning,
+            **common_result,
         }
 
     now = int(time.time() * 1000)
@@ -297,14 +441,11 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         generation_error = f"仍缺{need}个未使用的活动发现关键词"
     return {
         "ok": not errors and not generation_error, "created": created, "errors": errors[:5],
-        "pending_before": active_pending_for_campaign + stale_pending_for_campaign,
-        "active_pending_before": active_pending_for_campaign,
-        "stale_pending_before": stale_pending_for_campaign,
-        "target_tasks": target_tasks,
         "keywords": [{"language": lang, "keyword": word} for lang, word in candidates],
         "keyword_source": keyword_source, "shortfall_tasks": need,
         "generation_error": generation_error,
         "generation_warning": generation_warning,
+        **common_result,
     }
 
 
