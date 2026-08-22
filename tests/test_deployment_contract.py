@@ -14,7 +14,7 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertEqual(schedule["expression"], "30 9 * * 1,3,5")
 
         start = next(node for node in workflow["nodes"] if node["id"] == "start")
-        self.assertIn('"brand":"NYXI"', start["parameters"]["jsonBody"])
+        self.assertNotIn('"brand":"NYXI"', start["parameters"]["jsonBody"])
         self.assertIn('"platform":"YouTube"', start["parameters"]["jsonBody"])
         self.assertIn('"force":false', start["parameters"]["jsonBody"])
         self.assertFalse(start.get("retryOnFail", False))
@@ -32,6 +32,7 @@ class DeploymentContractTests(unittest.TestCase):
         )
         self.assertNotIn("tblMMhnj2hEbhF6y", sources)
         self.assertNotIn("oc_4ddd938ddb73201ed7354337eb2226ac", sources)
+        self.assertNotIn('Literal["NYXI"]', sources)
 
     def test_single_video_replay_endpoint_is_available(self):
         main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")

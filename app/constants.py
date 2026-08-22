@@ -6,10 +6,7 @@ TABLES = {
     "marketing_events": "tblpZaWYEWy54Sll",
 }
 
-KEYWORD = "nyxi"
-BRAND = "NYXI"
-PLATFORM = "YouTube"
-CONFIG_RECORD_ID = "recvrM7WDZ0ZV9"
+DEFAULT_PLATFORM = "YouTube"
 
 POST_SINGLE_SELECT_FIELDS = {
     "平台",

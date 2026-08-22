@@ -7,9 +7,11 @@ from app.collector import (
     build_update,
     index_rows_by_unique_key,
     index_youtube_rows_by_post_id,
-    is_nyxi_youtube_identity,
+    is_youtube_identity,
     post_unique_key,
     repair_interrupted_insert_fields,
+    select_enabled_configs,
+    normalize_video,
 )
 from app.core import (
     BEIJING,
@@ -42,13 +44,24 @@ class FakeJobTests(unittest.TestCase):
             self.assertEqual(finished_status(job)[0], expected_code)
 
     def test_durable_assert_does_not_match_a_job_id_prefix(self):
-        from app.job_status import durable_job_snapshot
+        from app.job_status import durable_job_snapshot, durable_job_snapshot_many
 
         self.assertIsNone(
             durable_job_snapshot(
                 "ytinc-abc", {"YouTube历史进度": "云端增量完成；job=ytinc-abcd；x"}
             )
         )
+
+    def test_durable_assert_aggregates_multi_brand_config_rows(self):
+        from app.job_status import durable_job_snapshot_many
+
+        rows = [
+            {"YouTube历史进度": "云端增量完成；job=ytinc-abc；x"},
+            {"YouTube历史进度": "云端增量跳过；job=ytinc-abc；x"},
+        ]
+        snapshot = durable_job_snapshot_many("ytinc-abc", rows)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["config_count"], 2)
 
 
 def event(day, *, source="官方确认", confirmed="已确认", brand="NYXI"):
@@ -148,17 +161,59 @@ class IncrementalTests(unittest.TestCase):
         )
         self.assertIs(indexed["5:dQw4w9WgXcQ"], target)
 
-    def test_partial_insert_is_included_in_next_refresh(self):
+    def test_partial_insert_is_included_in_next_refresh_for_any_brand(self):
         self.assertTrue(
-            is_nyxi_youtube_identity(
+            is_youtube_identity(
                 {
-                    "竞品品牌": "NYXI",
+                    "竞品品牌": "GameSir",
                     "唯一键": "5:dQw4w9WgXcQ",
                     "平台": "",
                     "帖子ID": "dQw4w9WgXcQ",
-                }
+                },
+                brand="GameSir",
             )
         )
+
+    def test_enabled_configs_are_selected_by_platform_and_optional_brand(self):
+        rows = [
+            {"_record_id": "nyxi-yt", "启用": True, "平台": "YouTube", "竞品品牌": "NYXI", "关键词": "nyxi"},
+            {"_record_id": "gamesir-yt", "启用": True, "平台": "YouTube", "竞品品牌": "GameSir", "关键词": "gamesir"},
+            {"_record_id": "nyxi-x", "启用": True, "平台": "X", "竞品品牌": "NYXI", "关键词": "nyxi"},
+            {"_record_id": "off-yt", "启用": False, "平台": "YouTube", "竞品品牌": "Other", "关键词": "other"},
+        ]
+        self.assertEqual(
+            [row["_record_id"] for row in select_enabled_configs(rows, platform="YouTube")],
+            ["nyxi-yt", "gamesir-yt"],
+        )
+        self.assertEqual(
+            [row["_record_id"] for row in select_enabled_configs(rows, platform="YouTube", brand="GameSir")],
+            ["gamesir-yt"],
+        )
+
+    def test_normalize_video_uses_configured_brand_keyword_and_relation(self):
+        video = {
+            "id": "dQw4w9WgXcQ",
+            "snippet": {
+                "channelId": "UCgamesir123",
+                "channelTitle": "GameSir Review",
+                "title": "GameSir G8 review",
+                "description": "GameSir G8 review",
+                "publishedAt": "2026-08-20T00:00:00Z",
+            },
+            "statistics": {"viewCount": "123"},
+        }
+        fields = normalize_video(
+            video,
+            None,
+            config={"竞品品牌": "GameSir", "关键词": "gamesir", "关键词别名": "GameSir Gaming"},
+            evidence={"sources": [], "queries": [], "windows": []},
+            batch_id="batch",
+            captured_at=datetime(2026, 8, 23, tzinfo=timezone.utc),
+            config_record_id="gamesir-yt",
+        )
+        self.assertEqual(fields["竞品品牌"], "GameSir")
+        self.assertEqual(fields["命中关键词"], "gamesir")
+        self.assertEqual(fields["关联监控任务"], [{"id": "gamesir-yt"}])
 
     def test_query_matrix_is_grouped_and_deduplicated(self):
         config = {
@@ -277,7 +332,7 @@ class IncrementalTests(unittest.TestCase):
                 self.calls.append(records[0][1])
 
         fake = FakeFeishu()
-        IncrementalCollector(fake, None).mark_success({"最近采集水位": "new"})
+        IncrementalCollector(fake, None).mark_success("gamesir-yt", {"最近采集水位": "new"})
         self.assertEqual(fake.calls, [{"运行状态": "正常"}, {"最近采集水位": "new"}])
 
 

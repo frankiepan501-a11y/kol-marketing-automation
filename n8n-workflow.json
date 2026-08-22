@@ -1,5 +1,5 @@
 {
-  "name": "SocialEcho - NYXI YouTube Incremental (Mon + Launch Wed/Fri)",
+  "name": "SocialEcho - Multi-brand YouTube Incremental (Mon + Launch Wed/Fri)",
   "nodes": [
     {
       "id": "schedule",
@@ -20,7 +20,7 @@
     },
     {
       "id": "start",
-      "name": "Start NYXI Incremental",
+      "name": "Start Multi-brand Incremental",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [500, 300],
@@ -38,7 +38,7 @@
         "sendBody": true,
         "contentType": "json",
         "specifyBody": "json",
-        "jsonBody": "={\"brand\":\"NYXI\",\"platform\":\"YouTube\",\"mode\":\"commit\",\"force\":false}",
+        "jsonBody": "={\"platform\":\"YouTube\",\"mode\":\"commit\",\"force\":false}",
         "options": {
           "timeout": 30000
         }
@@ -73,7 +73,7 @@
       },
       "parameters": {
         "method": "GET",
-        "url": "=https://socialecho-youtube-incremental.zeabur.app/runs/{{ $(\"Start NYXI Incremental\").item.json.job_id }}/assert",
+        "url": "=https://socialecho-youtube-incremental.zeabur.app/runs/{{ $(\"Start Multi-brand Incremental\").item.json.job_id }}/assert",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {
@@ -87,14 +87,14 @@
       "main": [
         [
           {
-            "node": "Start NYXI Incremental",
+            "node": "Start Multi-brand Incremental",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Start NYXI Incremental": {
+    "Start Multi-brand Incremental": {
       "main": [
         [
           {

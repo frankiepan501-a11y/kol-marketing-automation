@@ -12,9 +12,9 @@ from pydantic import BaseModel
 
 from .clients import FeishuClient, YouTubeClient
 from .collector import IncrementalCollector
-from .constants import BASE_TOKEN, CONFIG_RECORD_ID, TABLES
-from .core import is_youtube_video_id
-from .job_status import durable_job_snapshot, finished_status
+from .constants import BASE_TOKEN, CONFIG_READ_FIELDS, DEFAULT_PLATFORM, TABLES
+from .core import is_youtube_video_id, scalar
+from .job_status import durable_job_snapshot_many, finished_status
 
 BUILD_VERSION = os.environ.get("BUILD_VERSION", "dev")
 COMMIT_ENABLED = os.environ.get("COMMIT_ENABLED", "0") == "1"
@@ -32,14 +32,18 @@ _jobs: dict[str, dict[str, Any]] = {}
 
 
 class RunRequest(BaseModel):
-    brand: Literal["NYXI"] = "NYXI"
-    platform: Literal["YouTube"] = "YouTube"
+    brand: str | None = None
+    platform: Literal["YouTube"] = DEFAULT_PLATFORM
+    config_record_id: str | None = None
     mode: Literal["preview", "commit"] = "commit"
     force: bool = False
 
 
 class ReplayRequest(BaseModel):
     mode: Literal["preview", "commit"] = "preview"
+    brand: str | None = None
+    platform: Literal["YouTube"] = DEFAULT_PLATFORM
+    config_record_id: str | None = None
 
 
 def _authorized(authorization: str | None) -> None:
@@ -60,12 +64,24 @@ def _execute(job_id: str, request: RunRequest) -> None:
     collector: IncrementalCollector | None = None
     try:
         collector = IncrementalCollector(FeishuClient(), YouTubeClient())
-        result = collector.run(
-            now=started,
-            commit=request.mode == "commit",
-            force=request.force,
-            job_id=job_id,
-        )
+        if request.config_record_id or request.brand:
+            result = collector.run(
+                now=started,
+                commit=request.mode == "commit",
+                force=request.force,
+                job_id=job_id,
+                config_record_id=request.config_record_id,
+                brand=request.brand,
+                platform=request.platform,
+            )
+        else:
+            result = collector.run_many(
+                now=started,
+                commit=request.mode == "commit",
+                force=request.force,
+                job_id=job_id,
+                platform=request.platform,
+            )
         _jobs[job_id] = {
             "job_id": job_id,
             "status": result.get("status", "completed"),
@@ -84,9 +100,13 @@ def _execute(job_id: str, request: RunRequest) -> None:
         )
     except Exception as error:
         logger.exception("job failed id=%s type=%s", job_id, type(error).__name__)
-        if request.mode == "commit" and collector is not None:
+        if request.mode == "commit" and collector is not None and request.config_record_id:
             try:
-                collector.mark_failure(error, job_id=job_id)
+                collector.mark_failure(
+                    error,
+                    config_record_id=request.config_record_id,
+                    job_id=job_id,
+                )
             except Exception:
                 logger.exception("failed to record failure state id=%s", job_id)
         _jobs[job_id] = {
@@ -117,20 +137,34 @@ def durable_status(
 ) -> dict[str, Any]:
     """Read the durable run summary stored in Feishu, surviving service restarts."""
     _authorized(authorization)
-    config = FeishuClient().get_record(
-        BASE_TOKEN, TABLES["keyword_config"], CONFIG_RECORD_ID
+    configs = FeishuClient().list_records(
+        BASE_TOKEN, TABLES["keyword_config"], field_names=CONFIG_READ_FIELDS
     )
+    enabled = [
+        row
+        for row in configs
+        if scalar(row.get("启用")) is True and scalar(row.get("平台")) == DEFAULT_PLATFORM
+    ]
     return {
         "ok": True,
         "service": "socialecho-youtube-incremental",
         "version": BUILD_VERSION,
-        "run_status": config.get("运行状态"),
-        "last_success_at": config.get("最近成功采集时间"),
-        "waterline": config.get("最近采集水位"),
-        "last_new_posts": config.get("最近新增帖子数"),
-        "candidate_new_kols": config.get("最近新增KOL候选数"),
-        "summary": config.get("YouTube历史进度"),
-        "error_summary": config.get("错误摘要"),
+        "config_count": len(enabled),
+        "configs": [
+            {
+                "config_record_id": row.get("_record_id"),
+                "brand": row.get("竞品品牌"),
+                "platform": row.get("平台"),
+                "run_status": row.get("运行状态"),
+                "last_success_at": row.get("最近成功采集时间"),
+                "waterline": row.get("最近采集水位"),
+                "last_new_posts": row.get("最近新增帖子数"),
+                "candidate_new_kols": row.get("最近新增KOL候选数"),
+                "summary": row.get("YouTube历史进度"),
+                "error_summary": row.get("错误摘要"),
+            }
+            for row in enabled
+        ],
     }
 
 
@@ -173,10 +207,14 @@ def assert_finished(
     _authorized(authorization)
     job = _jobs.get(job_id)
     if not job:
-        config = FeishuClient().get_record(
-            BASE_TOKEN, TABLES["keyword_config"], CONFIG_RECORD_ID
+        configs = FeishuClient().list_records(
+            BASE_TOKEN, TABLES["keyword_config"], field_names=CONFIG_READ_FIELDS
         )
-        job = durable_job_snapshot(job_id, config)
+        matching = [
+            row for row in configs
+            if f"job={job_id}" in str(row.get("YouTube历史进度") or "")
+        ]
+        job = durable_job_snapshot_many(job_id, matching)
     status_code, payload = finished_status(job)
     if status_code != 200:
         raise HTTPException(status_code=status_code, detail=payload["detail"])
@@ -201,6 +239,9 @@ def replay(
             video_id,
             now=datetime.now(timezone.utc),
             commit=request.mode == "commit",
+            config_record_id=request.config_record_id,
+            brand=request.brand,
+            platform=request.platform,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from None

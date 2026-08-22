@@ -7,12 +7,9 @@ from typing import Any
 from .clients import ApiError, FeishuClient, YouTubeClient
 from .constants import (
     BASE_TOKEN,
-    BRAND,
     CONFIG_READ_FIELDS,
-    CONFIG_RECORD_ID,
+    DEFAULT_PLATFORM,
     EVENT_READ_FIELDS,
-    KEYWORD,
-    PLATFORM,
     POST_READ_FIELDS,
     POST_SINGLE_SELECT_FIELDS,
     TABLES,
@@ -45,16 +42,34 @@ def post_unique_key(video_id: str) -> str:
     return f"5:{video_id}"
 
 
-def is_nyxi_youtube_identity(row: dict[str, Any]) -> bool:
+def is_youtube_identity(row: dict[str, Any], *, brand: str | None = None) -> bool:
     """Include a normal row or a base-created row missing its platform select."""
-    if _text(row.get("竞品品牌")).casefold() != BRAND.casefold():
+    if brand and _text(row.get("竞品品牌")).casefold() != brand.casefold():
         return False
     video_id = _text(row.get("帖子ID"))
     if not is_youtube_video_id(video_id):
         return False
-    return _text(row.get("平台")) == PLATFORM or _text(row.get("唯一键")) == post_unique_key(
+    return _text(row.get("平台")) == DEFAULT_PLATFORM or _text(row.get("唯一键")) == post_unique_key(
         video_id
     )
+
+
+def select_enabled_configs(
+    rows: list[dict[str, Any]], *, platform: str = DEFAULT_PLATFORM, brand: str | None = None
+) -> list[dict[str, Any]]:
+    """Select enabled monitoring rows; one row is one brand/platform cursor."""
+    selected: list[dict[str, Any]] = []
+    for row in rows:
+        if scalar(row.get("启用")) is not True:
+            continue
+        if _text(row.get("平台")) != platform:
+            continue
+        if brand and _text(row.get("竞品品牌")).casefold() != brand.casefold():
+            continue
+        if not _text(row.get("竞品品牌")) or not _text(row.get("关键词")):
+            continue
+        selected.append(row)
+    return selected
 
 
 def index_youtube_rows_by_post_id(
@@ -63,7 +78,7 @@ def index_youtube_rows_by_post_id(
     """Index only requested YouTube IDs and fail closed on an existing duplicate."""
     indexed: dict[str, dict[str, Any]] = {}
     for row in rows:
-        if _text(row.get("平台")) != PLATFORM:
+        if _text(row.get("平台")) != DEFAULT_PLATFORM:
             continue
         post_id = _text(row.get("帖子ID"))
         if post_id not in target_ids:
@@ -136,12 +151,14 @@ def _published(value: Any) -> str:
         return text[:19].replace("T", " ")
 
 
-def _relevance(title: str, content: str, config: dict[str, Any]) -> tuple[str, int, str]:
+def _relevance(
+    title: str, content: str, config: dict[str, Any], *, keyword: str
+) -> tuple[str, int, str]:
     haystack = f"{title} {content}".casefold()
     for exclusion in split_terms(config.get("排除词")):
         if exclusion.casefold() in haystack:
             return "无关", 0, f"命中排除词：{exclusion}"
-    signals = [KEYWORD, *split_terms(config.get("关键词别名"))]
+    signals = [keyword, *split_terms(config.get("关键词别名"))]
     hits = [term for term in signals if term.casefold() in haystack]
     if hits:
         return "疑似", 60, f"命中竞品关键词：{', '.join(hits[:3])}；待AI复核"
@@ -165,6 +182,7 @@ def normalize_video(
     evidence: dict[str, list[str]],
     batch_id: str,
     captured_at: datetime,
+    config_record_id: str,
 ) -> dict[str, Any]:
     video_id = str(video.get("id") or "")
     snippet = video.get("snippet") if isinstance(video.get("snippet"), dict) else {}
@@ -179,14 +197,17 @@ def normalize_video(
         custom_url = f"@{custom_url.lstrip('/')}"
     title = str(snippet.get("title") or "")
     content = str(snippet.get("description") or "")
-    relevance, score, reason = _relevance(title, content, config)
+    brand = _text(config.get("竞品品牌"))
+    keyword = _text(config.get("关键词")).casefold() or brand.casefold()
+    platform = _text(config.get("平台")) or DEFAULT_PLATFORM
+    relevance, score, reason = _relevance(title, content, config, keyword=keyword)
     sources = list(dict.fromkeys([*(evidence.get("sources") or []), "YouTube API"]))
     raw = {"video": video, "channel": channel, "evidence": evidence}
     fields: dict[str, Any] = {
         "唯一键": post_unique_key(video_id),
-        "竞品品牌": BRAND,
-        "命中关键词": KEYWORD,
-        "平台": PLATFORM,
+        "竞品品牌": brand,
+        "命中关键词": keyword,
+        "平台": platform,
         "帖子ID": video_id,
         "帖子标题": title,
         "帖子内容": content,
@@ -220,7 +241,7 @@ def normalize_video(
         "营销阶段": "待分析",
         "AI分析状态": "待分析",
         "人工复核状态": "待复核",
-        "关联监控任务": [{"id": CONFIG_RECORD_ID}],
+        "关联监控任务": [{"id": config_record_id}],
     }
     return {name: value for name, value in fields.items() if value not in (None, "")}
 
@@ -265,10 +286,10 @@ def build_update(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str
 
 
 def repair_interrupted_insert_fields(
-    existing: dict[str, Any], incoming: dict[str, Any]
+    existing: dict[str, Any], incoming: dict[str, Any], *, brand: str | None = None
 ) -> dict[str, Any]:
-    """Finish only an interrupted NYXI insert; never rewrite reviewed rows."""
-    if _text(existing.get("竞品品牌")).casefold() != BRAND.casefold():
+    """Finish only an interrupted insert; never rewrite reviewed rows."""
+    if brand and _text(existing.get("竞品品牌")).casefold() != brand.casefold():
         return {}
     if _text(existing.get("唯一键")) != _text(incoming.get("唯一键")):
         return {}
@@ -286,21 +307,50 @@ class IncrementalCollector:
         self.feishu = feishu
         self.youtube = youtube
 
-    def _config(self) -> dict[str, Any]:
-        config = self.feishu.get_record(BASE_TOKEN, TABLES["keyword_config"], CONFIG_RECORD_ID)
-        if scalar(config.get("启用")) is not True:
-            raise ValueError("NYXI YouTube config is disabled")
-        if _text(config.get("平台")) != PLATFORM or _text(config.get("关键词")).casefold() != KEYWORD:
-            raise ValueError("NYXI YouTube config identity mismatch")
-        return {name: config.get(name) for name in CONFIG_READ_FIELDS} | {"_record_id": CONFIG_RECORD_ID}
+    def list_enabled_configs(
+        self, *, platform: str = DEFAULT_PLATFORM, brand: str | None = None
+    ) -> list[dict[str, Any]]:
+        rows = self.feishu.list_records(
+            BASE_TOKEN, TABLES["keyword_config"], field_names=CONFIG_READ_FIELDS
+        )
+        return select_enabled_configs(rows, platform=platform, brand=brand)
 
-    def mark_started(self, *, job_id: str, now: datetime) -> None:
+    def _config(
+        self,
+        *,
+        config_record_id: str | None = None,
+        brand: str | None = None,
+        platform: str = DEFAULT_PLATFORM,
+    ) -> dict[str, Any]:
+        if config_record_id:
+            config = self.feishu.get_record(
+                BASE_TOKEN, TABLES["keyword_config"], config_record_id
+            )
+            config = {name: config.get(name) for name in CONFIG_READ_FIELDS} | {
+                "_record_id": config_record_id
+            }
+        else:
+            configs = self.list_enabled_configs(platform=platform, brand=brand)
+            if not configs:
+                raise ValueError("no enabled monitoring config matches the request")
+            if len(configs) > 1:
+                raise ValueError("multiple monitoring configs match; config_record_id is required")
+            config = configs[0]
+        if scalar(config.get("启用")) is not True:
+            raise ValueError("monitoring config is disabled")
+        if _text(config.get("平台")) != platform:
+            raise ValueError("monitoring config platform mismatch")
+        if brand and _text(config.get("竞品品牌")).casefold() != brand.casefold():
+            raise ValueError("monitoring config brand mismatch")
+        return config
+
+    def mark_started(self, *, config_record_id: str, job_id: str, now: datetime) -> None:
         self.feishu.batch_update(
             BASE_TOKEN,
             TABLES["keyword_config"],
             [
                 (
-                    CONFIG_RECORD_ID,
+                    config_record_id,
                     {
                         "YouTube历史进度": (
                             f"云端增量运行中；job={job_id}；开始={display_datetime(now)}；"
@@ -314,21 +364,23 @@ class IncrementalCollector:
         self.feishu.batch_update(
             BASE_TOKEN,
             TABLES["keyword_config"],
-            [(CONFIG_RECORD_ID, {"运行状态": "待运行"})],
+            [(config_record_id, {"运行状态": "待运行"})],
         )
 
-    def mark_skipped(self, *, job_id: str, now: datetime, reason: str) -> None:
+    def mark_skipped(
+        self, *, config_record_id: str, job_id: str, now: datetime, reason: str
+    ) -> None:
         self.feishu.batch_update(
             BASE_TOKEN,
             TABLES["keyword_config"],
-            [(CONFIG_RECORD_ID, {"运行状态": "正常"})],
+            [(config_record_id, {"运行状态": "正常"})],
         )
         self.feishu.batch_update(
             BASE_TOKEN,
             TABLES["keyword_config"],
             [
                 (
-                    CONFIG_RECORD_ID,
+                    config_record_id,
                     {
                         "YouTube历史进度": (
                             f"云端增量跳过；job={job_id}；时间={display_datetime(now)}；"
@@ -340,17 +392,17 @@ class IncrementalCollector:
             ],
         )
 
-    def mark_success(self, config_fields: dict[str, Any]) -> None:
+    def mark_success(self, config_record_id: str, config_fields: dict[str, Any]) -> None:
         """Set the select first so a later failure cannot advance the waterline."""
         self.feishu.batch_update(
             BASE_TOKEN,
             TABLES["keyword_config"],
-            [(CONFIG_RECORD_ID, {"运行状态": "正常"})],
+            [(config_record_id, {"运行状态": "正常"})],
         )
         self.feishu.batch_update(
             BASE_TOKEN,
             TABLES["keyword_config"],
-            [(CONFIG_RECORD_ID, config_fields)],
+            [(config_record_id, config_fields)],
         )
 
     def _search(
@@ -359,7 +411,8 @@ class IncrementalCollector:
         evidence: dict[str, dict[str, list[str]]] = {}
         calls = 0
         window = f"{rfc3339(start)}/{rfc3339(end)}"
-        for terms in query_groups(config, KEYWORD).values():
+        keyword = _text(config.get("关键词")) or _text(config.get("竞品品牌"))
+        for terms in query_groups(config, keyword).values():
             for query in terms:
                 token: str | None = None
                 for page_number in range(1, 11):
@@ -399,16 +452,29 @@ class IncrementalCollector:
         commit: bool,
         force: bool = False,
         job_id: str = "",
+        config_record_id: str | None = None,
+        brand: str | None = None,
+        platform: str = DEFAULT_PLATFORM,
     ) -> dict[str, Any]:
-        config = self._config()
+        config = self._config(
+            config_record_id=config_record_id,
+            brand=brand,
+            platform=platform,
+        )
+        config_record_id = str(config.get("_record_id") or config_record_id or "")
+        brand = _text(config.get("竞品品牌"))
+        platform = _text(config.get("平台")) or platform
         events = self.feishu.list_records(
             BASE_TOKEN, TABLES["marketing_events"], field_names=EVENT_READ_FIELDS
         )
-        decision = schedule_decision(now, events, brand=BRAND, force=force)
+        decision = schedule_decision(now, events, brand=brand, force=force)
         if not decision.should_run:
             if commit:
                 self.mark_skipped(
-                    job_id=job_id or "direct-run", now=now, reason=decision.reason
+                    config_record_id=config_record_id,
+                    job_id=job_id or "direct-run",
+                    now=now,
+                    reason=decision.reason,
                 )
             return {
                 "ok": True,
@@ -419,7 +485,11 @@ class IncrementalCollector:
             }
 
         if commit:
-            self.mark_started(job_id=job_id or "direct-run", now=now)
+            self.mark_started(
+                config_record_id=config_record_id,
+                job_id=job_id or "direct-run",
+                now=now,
+            )
 
         start, end = incremental_window(config, now)
         evidence, search_calls = self._search(config, start, end)
@@ -429,11 +499,13 @@ class IncrementalCollector:
         existing_rows = [
             row
             for row in all_rows
-            if _text(row.get("竞品品牌")).casefold() == BRAND.casefold()
-            and _text(row.get("平台")) == PLATFORM
+            if _text(row.get("竞品品牌")).casefold() == brand.casefold()
+            and _text(row.get("平台")) == platform
         ]
         current_ids = {
-            _text(row.get("帖子ID")) for row in all_rows if is_nyxi_youtube_identity(row)
+            _text(row.get("帖子ID"))
+            for row in all_rows
+            if is_youtube_identity(row, brand=brand)
         }
         requested_ids = sorted(current_ids | set(evidence))
         existing = index_rows_by_unique_key(
@@ -467,6 +539,7 @@ class IncrementalCollector:
                     evidence=evidence.get(video_id, {"sources": [], "queries": [], "windows": []}),
                     batch_id=batch_id,
                     captured_at=now,
+                    config_record_id=config_record_id,
                 )
             )
 
@@ -484,7 +557,7 @@ class IncrementalCollector:
             if not old:
                 continue
             change = build_update(old, row)
-            change.update(repair_interrupted_insert_fields(old, row))
+            change.update(repair_interrupted_insert_fields(old, row, brand=brand))
             if change:
                 updates.append((str(old["_record_id"]), change))
         new_channels = {
@@ -531,14 +604,14 @@ class IncrementalCollector:
                 "最近新增帖子数": len(new_rows),
                 "最近新增KOL候选数": len(new_channels),
                 "YouTube历史进度": (
-                    "云端增量完成；调度=周一09:30+新品期周三/周五09:30；"
+                    f"云端增量完成；品牌={brand}；平台={platform}；调度=周一09:30+新品期周三/周五09:30；"
                     f"job={job_id or batch_id}；batch={batch_id}；"
                     f"窗口={rfc3339(start)}/{rfc3339(end)}；"
                     f"新增={len(new_rows)}；公开数据更新={len(updates)}；不可用={len(set(requested_ids) - found_ids)}"
                 ),
                 "错误摘要": "",
             }
-            self.mark_success(config_fields)
+            self.mark_success(config_record_id, config_fields)
 
         return {
             "ok": True,
@@ -561,13 +634,88 @@ class IncrementalCollector:
             "outbound_messages": 0,
         }
 
+    def run_many(
+        self,
+        *,
+        now: datetime,
+        commit: bool,
+        force: bool = False,
+        job_id: str = "",
+        brand: str | None = None,
+        platform: str = DEFAULT_PLATFORM,
+    ) -> dict[str, Any]:
+        """Run every enabled brand/platform config selected from Feishu."""
+        configs = self.list_enabled_configs(platform=platform, brand=brand)
+        if not configs:
+            raise ValueError("no enabled monitoring configs match the request")
+        results: list[dict[str, Any]] = []
+        for config in configs:
+            config_record_id = str(config.get("_record_id") or "")
+            try:
+                result = self.run(
+                    now=now,
+                    commit=commit,
+                    force=force,
+                    job_id=job_id,
+                    config_record_id=config_record_id,
+                    platform=platform,
+                )
+            except Exception as error:
+                if commit:
+                    self.mark_failure(
+                        error,
+                        config_record_id=config_record_id,
+                        job_id=job_id,
+                    )
+                raise
+            results.append(result)
+        statuses = {str(result.get("status") or "") for result in results}
+        status = "failed" if "failed" in statuses else "completed"
+        return {
+            "ok": True,
+            "status": status,
+            "mode": "commit" if commit else "preview",
+            "config_count": len(results),
+            "configs": [
+                {
+                    "config_record_id": config.get("_record_id"),
+                    "brand": config.get("竞品品牌"),
+                    "platform": config.get("平台"),
+                    "status": result.get("status"),
+                    "new_posts": result.get("new_posts", 0),
+                    "updated_existing": result.get("updated_existing", 0),
+                    "candidate_new_kols": result.get("candidate_new_kols", 0),
+                    "reason": result.get("reason", ""),
+                }
+                for config, result in zip(configs, results)
+            ],
+            "new_posts": sum(int(result.get("new_posts", 0) or 0) for result in results),
+            "updated_existing": sum(int(result.get("updated_existing", 0) or 0) for result in results),
+            "candidate_new_kols": sum(int(result.get("candidate_new_kols", 0) or 0) for result in results),
+            "kol_master_writes": 0,
+            "outbound_messages": 0,
+        }
+
     def replay_video(
-        self, video_id: str, *, now: datetime, commit: bool = False
+        self,
+        video_id: str,
+        *,
+        now: datetime,
+        commit: bool = False,
+        config_record_id: str | None = None,
+        brand: str | None = None,
+        platform: str = DEFAULT_PLATFORM,
     ) -> dict[str, Any]:
         """Re-run one public video without advancing the incremental waterline."""
         if not is_youtube_video_id(video_id):
             raise ValueError("invalid YouTube video id")
-        config = self._config()
+        config = self._config(
+            config_record_id=config_record_id,
+            brand=brand,
+            platform=platform,
+        )
+        config_record_id = str(config.get("_record_id") or config_record_id or "")
+        brand = _text(config.get("竞品品牌"))
         rows = self.feishu.list_records(
             BASE_TOKEN, TABLES["competitor_posts"], field_names=POST_READ_FIELDS
         )
@@ -615,10 +763,11 @@ class IncrementalCollector:
             evidence={"sources": ["YouTube API"], "queries": [], "windows": []},
             batch_id=batch_id,
             captured_at=now,
+            config_record_id=config_record_id,
         )
         change = build_update(existing, incoming) if existing else incoming
         if existing:
-            change.update(repair_interrupted_insert_fields(existing, incoming))
+            change.update(repair_interrupted_insert_fields(existing, incoming, brand=brand))
         if commit and change:
             if existing:
                 self.feishu.batch_update(
@@ -659,14 +808,20 @@ class IncrementalCollector:
             "outbound_messages": 0,
         }
 
-    def mark_failure(self, error: Exception, *, job_id: str = "") -> None:
+    def mark_failure(
+        self,
+        error: Exception,
+        *,
+        config_record_id: str,
+        job_id: str = "",
+    ) -> None:
         code = error.code if isinstance(error, ApiError) else type(error).__name__
         self.feishu.batch_update(
             BASE_TOKEN,
             TABLES["keyword_config"],
             [
                 (
-                    CONFIG_RECORD_ID,
+                    config_record_id,
                     {
                         "错误摘要": f"云端增量失败：{code}",
                         "YouTube历史进度": (
@@ -680,5 +835,5 @@ class IncrementalCollector:
         self.feishu.batch_update(
             BASE_TOKEN,
             TABLES["keyword_config"],
-            [(CONFIG_RECORD_ID, {"运行状态": "失败"})],
+            [(config_record_id, {"运行状态": "失败"})],
         )

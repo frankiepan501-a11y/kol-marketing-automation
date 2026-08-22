@@ -40,3 +40,40 @@ def durable_job_snapshot(
     if summary.startswith("云端增量运行中；"):
         return {**common, "status": "running"}
     return None
+
+
+def durable_job_snapshot_many(
+    job_id: str, configs: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Aggregate per-config summaries for a multi-brand run after restart."""
+    snapshots = [
+        snapshot
+        for config in configs
+        if (snapshot := durable_job_snapshot(job_id, config)) is not None
+    ]
+    if not snapshots:
+        return None
+    if any(snapshot.get("status") == "failed" for snapshot in snapshots):
+        failed = next(snapshot for snapshot in snapshots if snapshot.get("status") == "failed")
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "error_type": failed.get("error_type", "durable_failure"),
+            "durable": True,
+            "config_count": len(snapshots),
+        }
+    if any(snapshot.get("status") == "running" for snapshot in snapshots):
+        return {
+            "job_id": job_id,
+            "status": "running",
+            "durable": True,
+            "config_count": len(snapshots),
+        }
+    return {
+        "job_id": job_id,
+        "status": "completed",
+        "ok": True,
+        "durable": True,
+        "config_count": len(snapshots),
+        "summaries": [snapshot.get("summary", "") for snapshot in snapshots],
+    }
