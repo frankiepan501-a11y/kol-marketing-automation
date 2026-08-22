@@ -2813,6 +2813,36 @@ async def launch_keyword_supply_pilot(
     )
 
 
+@app.post("/launch/runtime/keyword-pilot/replay")
+async def launch_keyword_supply_pilot_replay(
+    request: Request, authorization: str = Header(default=""),
+):
+    """Dave灰度新增候选的指定名单只读回放；不扫全池、不写表、不发信。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    campaign_id = _launch_required(payload, "campaign_id")
+    if campaign_id != keyword_supply.DAVE_KEYWORD_PILOT_CAMPAIGN_ID:
+        raise HTTPException(status_code=422, detail="当前回放只允许Dave灰度活动")
+    contact_ids = payload.get("contact_ids")
+    if not isinstance(contact_ids, list):
+        raise HTTPException(status_code=422, detail="contact_ids 必须是数组")
+    try:
+        return {
+            "ok": True,
+            **(await launch_candidate_preview.replay_candidates_targeted(
+                campaign_id=campaign_id, contact_ids=contact_ids, object_type="KOL",
+            )),
+        }
+    except launch_evidence.EvidenceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/launch/runtime/keyword-pilot/replay", str(exc), tr)
+        raise HTTPException(status_code=500, detail="灰度候选回放失败；未产生任何业务写入")
+
+
 @app.post("/launch/runtime/queue")
 async def launch_runtime_queue(request: Request, authorization: str = Header(default="")):
     """只为现有已审活动参与人生成草稿；不重跑全池预览、不发送。"""

@@ -68,6 +68,39 @@ class LaunchRouteTests(unittest.TestCase):
             campaign_id="c1", required_candidates=500, max_tasks=4, dry_run=False,
         )
 
+    def test_keyword_pilot_replay_is_scoped_and_read_only(self):
+        result = {
+            "read_only": True, "writes": 0, "drafts_created": 0,
+            "emails_sent": 0, "candidates": [{"contact_id": "kol1"}],
+        }
+        request = FakeRequest({
+            "campaign_id": main.keyword_supply.DAVE_KEYWORD_PILOT_CAMPAIGN_ID,
+            "contact_ids": ["kol1"],
+        })
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+            main.launch_candidate_preview, "replay_candidates_targeted",
+            new=AsyncMock(return_value=result),
+        ) as replay:
+            response = asyncio.run(main.launch_keyword_supply_pilot_replay(
+                request, authorization="Bearer secret",
+            ))
+
+        self.assertTrue(response["read_only"])
+        self.assertEqual(0, response["writes"])
+        replay.assert_awaited_once_with(
+            campaign_id=main.keyword_supply.DAVE_KEYWORD_PILOT_CAMPAIGN_ID,
+            contact_ids=["kol1"], object_type="KOL",
+        )
+
+    def test_keyword_pilot_replay_rejects_other_campaigns(self):
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.launch_keyword_supply_pilot_replay(
+                    FakeRequest({"campaign_id": "other", "contact_ids": ["kol1"]}),
+                    authorization="Bearer secret",
+                ))
+        self.assertEqual(422, ctx.exception.status_code)
+
     def test_outcome_reconcile_defaults_to_dry_run(self):
         result = {"campaign_id": "c1", "dry_run": True, "updates_planned": 1}
         with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(

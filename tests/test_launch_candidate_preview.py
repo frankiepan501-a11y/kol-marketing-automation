@@ -918,5 +918,75 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         update_mock.assert_not_awaited()
 
 
+    def test_targeted_replay_evaluates_only_requested_contacts_and_never_writes(self):
+        activity = {"fields": {
+            "产品主记录ID": "product1",
+            "活动目标国家": ["US"], "活动目标语言": ["en"],
+        }}
+        family = {
+            "canonical_product_id": "product1", "product_ids": ["product1"],
+            "target": {"record_id": "product1", "fields": {
+                "产品英文名": "Dave Controller", "品牌": "FUNLAB",
+                "品类": "手柄", "适配主机": ["Switch 2"], "报价(USD)": 49.99,
+            }},
+        }
+        contacts = {
+            "kol1": {"record_id": "kol1", "fields": {
+                "账号名": "Good Creator", "邮箱": "good@example.com",
+                "主平台": "YouTube", "国家": "US", "语言": "en", "粉丝数": 10000,
+                "内容风格": ["游戏评测"], "迁移备注": "[词源:competitor]",
+                "主链接": {"link": "https://youtube.com/@good"},
+            }},
+            "kol2": {"record_id": "kol2", "fields": {
+                "账号名": "Wrong Market", "邮箱": "wrong@example.com",
+                "主平台": "YouTube", "国家": "BR", "语言": "pt", "粉丝数": 10000,
+                "内容风格": ["游戏评测"], "迁移备注": "[词源:ip]",
+            }},
+        }
+
+        async def fake_get(table_id, record_id):
+            return contacts[record_id]
+
+        with patch.object(
+            preview.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            preview, "_load_targeted_product_family", new=AsyncMock(return_value=family),
+        ), patch.object(
+            preview.dispatch, "fetch_mapping_for_product",
+            new=AsyncMock(return_value={"expected_styles": ["游戏评测"]}),
+        ), patch.object(
+            preview.feishu, "get_record", new=fake_get,
+        ), patch.object(
+            preview, "fast_precheck_contact",
+            new=AsyncMock(return_value={
+                "decision": "eligible_new_cold", "reasons": ["预检通过"],
+                "allowed_as_new_cold": True, "campaign_pool": "new_development",
+                "recommended_route": "activity_cold_pool", "email": "go***@example.com",
+            }),
+        ), patch.object(
+            preview, "_base_filter_kol", side_effect=[
+                (True, [], []),
+                (False, ["国家不在活动目标市场"], ["地区/语言不匹配"]),
+            ],
+        ), patch.object(
+            preview, "score_kol", return_value=(90, {"地区匹配": 25}),
+        ), patch.object(
+            preview, "build_review_snapshot", return_value={
+                "review_route": "KOL运营审核", "review_decision": "待审核",
+            }):
+            result = asyncio.run(preview.replay_candidates_targeted(
+                campaign_id="campaign1", contact_ids=["kol1", "kol2", "kol1"],
+            ))
+
+        self.assertTrue(result["read_only"])
+        self.assertEqual(0, result["writes"])
+        self.assertEqual(0, result["drafts_created"])
+        self.assertEqual(0, result["emails_sent"])
+        self.assertEqual(2, result["summary"]["evaluated"])
+        self.assertEqual("eligible_new_cold", result["candidates"][0]["decision"])
+        self.assertEqual("blocked_base_filter", result["candidates"][1]["decision"])
+        self.assertEqual("competitor", result["candidates"][0]["keyword_source"])
+
+
 if __name__ == "__main__":
     unittest.main()

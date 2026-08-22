@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -744,6 +745,260 @@ async def _load_context(product_id: str) -> dict:
         "family": family, "kols": kols, "editors": editors, "drafts": drafts,
         "mapping": mapping, "owners": _email_owners(kols, editors),
         "draft_index": _draft_identity_index(drafts),
+    }
+
+
+async def _load_targeted_product_family(product_id: str) -> dict:
+    """只读取指定产品家族，供小批候选回放使用。"""
+    product = await feishu.get_record(config.T_PRODUCT, product_id)
+    fields = product.get("fields") or {}
+    canonical_id = _canonical_id(product)
+    merge_key = ext(fields.get("活动归并键")).strip()
+    product_filter = (
+        {"field_name": "活动归并键", "operator": "is", "value": [merge_key]}
+        if merge_key else
+        {"field_name": "活动主记录ID", "operator": "is", "value": [canonical_id]}
+    )
+    rows = await feishu.search_records(
+        config.T_PRODUCT, [product_filter], field_names=PRODUCT_FIELDS,
+    )
+    members = {product_id, canonical_id}
+    for row in rows:
+        row_fields = row.get("fields") or {}
+        same_canonical = _canonical_id(row) == canonical_id
+        same_merge_key = bool(
+            merge_key and ext(row_fields.get("活动归并键")).strip() == merge_key
+        )
+        if same_canonical or same_merge_key:
+            members.add(row.get("record_id", ""))
+    members.discard("")
+    return {
+        "canonical_product_id": canonical_id,
+        "merge_key": merge_key,
+        "product_ids": sorted(members),
+        "target": product,
+    }
+
+
+async def fast_precheck_contact(
+    *, contact: dict, object_type: str, brand: str, product_ids: set[str],
+) -> dict:
+    """只查指定联系人/邮箱的历史，执行与全池相同的重复触达预检。"""
+    if object_type not in {"KOL", "媒体人"}:
+        raise ValueError("object_type must be KOL or 媒体人")
+    fields = contact.get("fields") or {}
+    contact_id = contact.get("record_id", "")
+    email, _ = feishu.clean_email(ext(fields.get("邮箱")))
+    if not email:
+        return precheck_contact(
+            contact, object_type=object_type, brand=brand,
+            product_ids=product_ids, drafts=[], email_owners={},
+            now_ms=int(time.time() * 1000),
+        )
+
+    async def exact_email_owners(table_id: str, owner_type: str) -> set[tuple[str, str]]:
+        rows = await feishu.search_records(
+            table_id,
+            [{"field_name": "邮箱", "operator": "contains", "value": [email]}],
+            field_names=["邮箱"],
+        )
+        owners = set()
+        for row in rows:
+            row_email, _ = feishu.clean_email(ext((row.get("fields") or {}).get("邮箱")))
+            if row_email == email:
+                owners.add((owner_type, row.get("record_id", "")))
+        return owners
+
+    relation_field = "关联媒体人" if object_type == "媒体人" else "关联KOL"
+    drafts_by_contact, drafts_by_email, kol_owners, editor_owners = await asyncio.gather(
+        feishu.search_records(config.T_DRAFT, [
+            {"field_name": relation_field, "operator": "contains", "value": [contact_id]},
+        ], field_names=DRAFT_FIELDS),
+        feishu.search_records(config.T_DRAFT, [
+            {"field_name": "收件邮箱", "operator": "contains", "value": [email]},
+        ], field_names=DRAFT_FIELDS),
+        exact_email_owners(config.T_KOL, "KOL"),
+        exact_email_owners(config.T_EDITOR, "媒体人"),
+    )
+    drafts = []
+    seen_drafts = set()
+    for draft in drafts_by_contact + drafts_by_email:
+        draft_fields = draft.get("fields") or {}
+        draft_email, _ = feishu.clean_email(ext(draft_fields.get("收件邮箱")))
+        linked = contact_id in _link_ids(draft_fields.get(relation_field))
+        if not linked and draft_email != email:
+            continue
+        draft_id = draft.get("record_id", "")
+        if draft_id not in seen_drafts:
+            seen_drafts.add(draft_id)
+            drafts.append(draft)
+    return precheck_contact(
+        contact, object_type=object_type, brand=brand,
+        product_ids=product_ids, drafts=drafts,
+        email_owners={email: kol_owners | editor_owners},
+        now_ms=int(time.time() * 1000),
+    )
+
+
+def _pilot_keyword_source(fields: dict) -> str:
+    note = ext(fields.get("迁移备注"))
+    match = re.search(r"\[词源:([a-z_]+)\]", note)
+    return match.group(1) if match else "unknown"
+
+
+async def replay_candidates_targeted(
+    *, campaign_id: str, contact_ids: list[str], object_type: str = "KOL",
+) -> dict:
+    """小批指定候选只读回放；不扫全池，不计算竞品全证据排名。"""
+    if object_type != "KOL":
+        raise ValueError("targeted replay currently supports KOL only")
+    unique_ids = list(dict.fromkeys(str(value or "").strip() for value in contact_ids))
+    unique_ids = [value for value in unique_ids if value]
+    if not unique_ids:
+        raise ValueError("contact_ids required")
+    if len(unique_ids) > 20:
+        raise ValueError("targeted replay supports at most 20 contacts")
+
+    activity = await launch_evidence.get_activity(campaign_id)
+    activity_fields = activity.get("fields") or {}
+    product_id = _activity_product_id(activity_fields)
+    if not product_id:
+        raise ValueError(f"活动缺少产品主记录ID: {campaign_id}")
+    family = await _load_targeted_product_family(product_id)
+    product_fields = family["target"].get("fields") or {}
+    brand = (
+        config.brand_from_text(ext(product_fields.get("品牌")))
+        or ext(product_fields.get("品牌")).upper()
+    )
+    mapping = await dispatch.fetch_mapping_for_product(
+        ext(product_fields.get("品类")),
+        list(_parse_multiselect(product_fields.get("适配主机"))),
+    )
+    target_countries = (
+        _parse_multiselect(activity_fields.get("活动目标国家"))
+        if "活动目标国家" in activity_fields else None
+    )
+    target_languages = (
+        _parse_multiselect(activity_fields.get("活动目标语言"))
+        if "活动目标语言" in activity_fields else None
+    )
+    target_fans_min = (
+        int(_numeric(activity_fields.get("KOL粉丝下限")))
+        if activity_fields.get("KOL粉丝下限") not in (None, "") else None
+    )
+    target_fans_max = (
+        int(_numeric(activity_fields.get("KOL粉丝上限")))
+        if activity_fields.get("KOL粉丝上限") not in (None, "") else None
+    )
+    records = await asyncio.gather(*(
+        feishu.get_record(config.T_KOL, contact_id) for contact_id in unique_ids
+    ))
+    semaphore = asyncio.Semaphore(3)
+    now_ms = int(time.time() * 1000)
+
+    async def evaluate(record: dict) -> dict:
+        async with semaphore:
+            fields = record.get("fields") or {}
+            matched, filter_reasons, filter_reason_codes = _base_filter_kol(
+                fields, product_fields, mapping,
+                target_countries=target_countries,
+                target_languages=target_languages,
+                target_fans_min=target_fans_min,
+                target_fans_max=target_fans_max,
+                now_ms=now_ms, include_reason_codes=True,
+            )
+            check = await fast_precheck_contact(
+                contact=record, object_type="KOL", brand=brand,
+                product_ids=set(family["product_ids"]),
+            )
+            if matched and check["decision"] == "eligible_new_cold":
+                market_check = market_consistency_check(
+                    fields, target_countries=target_countries,
+                )
+                if not market_check["passed"]:
+                    market_check["email"] = check.get("email", "")
+                    check = market_check
+            score, breakdown = score_kol(
+                fields, product_fields,
+                set(mapping.get("expected_styles") or []),
+                set(dispatch.CATEGORY_PLATFORMS.get(ext(product_fields.get("品类")), [])),
+            )
+            evidence_rank = {
+                "evidence_level": "本回放未计算竞品加分",
+                "final_priority": score, "matched_post_ids": [], "evidence_posts": [],
+            }
+            if not matched and check["decision"] == "eligible_new_cold":
+                final_decision = "blocked_base_filter"
+                review_snapshot = {
+                    "review_route": "系统排除", "review_decision": "排除",
+                    "review_instruction": "确定性活动筛选未通过，无需人工复审。",
+                }
+            else:
+                final_decision = check["decision"]
+                review_snapshot = (
+                    build_review_snapshot(fields, evidence_rank, now_ms=now_ms, precheck=check)
+                    if matched else {
+                        "review_route": "系统排除", "review_decision": "排除",
+                        "review_instruction": "邮箱、关系或活动筛选未通过，无需人工复审。",
+                    }
+                )
+            return {
+                "contact_id": record.get("record_id", ""),
+                "name": _candidate_name(fields, "KOL"),
+                "keyword_source": _pilot_keyword_source(fields),
+                "profile_url": feishu.ext_url(fields.get("主链接")).strip(),
+                "platform": ext(fields.get("主平台")),
+                "country": ext(fields.get("国家")),
+                "language": ext(fields.get("语言")),
+                "followers": int(_numeric(fields.get("粉丝数"))),
+                "has_valid_email": bool(feishu.clean_email(ext(fields.get("邮箱")))[0]),
+                "content_styles": sorted(_parse_multiselect(fields.get("内容风格"))),
+                "base_filter_passed": matched,
+                "base_filter_reasons": filter_reasons,
+                "base_filter_reason_codes": filter_reason_codes,
+                "precheck_decision": check["decision"],
+                "decision": final_decision,
+                "decision_reasons": (
+                    filter_reasons if final_decision == "blocked_base_filter"
+                    else (check.get("reasons") or filter_reasons)
+                ),
+                "score": score, "breakdown": breakdown,
+                **review_snapshot,
+            }
+
+    candidates = await asyncio.gather(*(evaluate(record) for record in records))
+    counts = Counter(candidate["decision"] for candidate in candidates)
+    source_summary = {}
+    for source in sorted({candidate["keyword_source"] for candidate in candidates}):
+        rows = [candidate for candidate in candidates if candidate["keyword_source"] == source]
+        source_summary[source] = {
+            "discovered": len(rows),
+            "valid_email": sum(candidate["has_valid_email"] for candidate in rows),
+            "base_filter_passed": sum(candidate["base_filter_passed"] for candidate in rows),
+            "eligible_new_cold": sum(
+                candidate["decision"] == "eligible_new_cold" for candidate in rows
+            ),
+            "operator_review": sum(
+                candidate.get("review_route") == "KOL运营审核" for candidate in rows
+            ),
+        }
+    return {
+        "read_only": True, "writes": 0, "drafts_created": 0, "emails_sent": 0,
+        "campaign_id": campaign_id,
+        "product": {
+            "product_id": product_id,
+            "canonical_product_id": family["canonical_product_id"],
+            "name": ext(product_fields.get("产品英文名")) or ext(product_fields.get("产品名")),
+            "brand": brand,
+        },
+        "target_countries": sorted(target_countries or []),
+        "target_languages": sorted(target_languages or []),
+        "evidence_ranking_included": False,
+        "summary": {
+            "requested": len(unique_ids), "evaluated": len(candidates),
+            "by_decision": dict(counts), "by_source": source_summary,
+        },
+        "candidates": candidates,
     }
 
 
