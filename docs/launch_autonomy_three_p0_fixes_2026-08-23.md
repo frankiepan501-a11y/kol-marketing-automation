@@ -39,12 +39,18 @@
 
 ## 生产部署与回读
 
-部署 commit、Zeabur deployment、n8n 工作流回读和首次真实定时执行结果在生产验证完成后补入本节。验收必须同时包含：
+- 生产 commit：`515fea89743d6a2649d19fb7c6777266f69a20c6`。
+- Zeabur deployment：`6a89d705ba5938b7572310a5`，状态 `RUNNING`，`/health=ok`。
+- n8n 开始工作流：`uvBfJBtGH93FPa6w`，启用，4 节点，时区 `Asia/Shanghai`。
+- n8n 审计工作流：`1WOenWodtTRlUqWz`，启用，7 节点；真实 execution `986912` 为 `success`，完整经过 Dave、食人花、Merge 和最终汇总，输出 `both_campaigns_checked`。
+- 食人花真实后台 job `launchruntime-35abd9e75366` 为 `success / supply_cooling_down`：`quality_gate.mode=cooldown`、新建发现任务 `0`、`quality_filters_lowered=false`。
+- Dave 真实后台 job `launchruntime-bcf7eb52baf7` 在 24 分 51 秒后完成证据与候选处理，没有再报“NYXI 证据不存在/配置无效”；最终为 `degraded / supply_blocked`，原因已经推进到下一层：固定活动搜索词耗尽且 Dave 尚无备用拓词，和本次证据读取故障不同。
+- 全程没有手动发送开发信；生产回放只启动了文档已明确“不直接发邮件”的后台补池入口。
 
-- Dave 后台任务不再把临时读取错误标成证据无效；
-- 食人花输出 `quality_gate`，低产时不批量新建任务；
-- n8n 同一 execution 中可看到 Dave、食人花及最终汇总三个结果；
-- 全程没有手动发送开发信。
+## 新暴露但未混入本次范围的 P0
+
+- Dave 仍缺活动专用备用拓词/低产探测策略。证据读取不再拦截它，但 `keyword_source=none`、`shortfall_tasks=4`，所以没有新增发现任务。
+- 该项需要单独设计 Dave 的候选来源边界和回归样本，不能照搬食人花的 Mario/Nintendo 收藏词，也不能为了填满邮箱额度降低国家、语言、内容、重复触达等硬筛选。
 
 ## 回滚边界
 
