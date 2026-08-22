@@ -14,6 +14,7 @@
 import time
 import math
 import re
+import asyncio
 from collections import Counter
 from . import config, feishu, deepseek, launch_evidence
 from .feishu import ext
@@ -28,6 +29,10 @@ LOW_YIELD_MIN_EMAIL_SIGNAL_COVERAGE = 0.80
 LOW_YIELD_MIN_COMPLETED_FOR_CONVERSION = 6
 LOW_YIELD_MIN_EMAILS_PER_TASK = 0.25
 LOW_YIELD_MIN_APPROVED_PER_TASK = 0.10
+DAVE_KEYWORD_PILOT_CAMPAIGN_ID = "launch-20260915-funlab-dave-ys11-5"
+DAVE_KEYWORD_PILOT_TAG = "[灰度:dave-keyword-v1]"
+DAVE_KEYWORD_PILOT_MAX_TASKS = 4
+_DAVE_KEYWORD_PILOT_LOCK = asyncio.Lock()
 
 # 市场配置: 英语为主(水位15), 非英语市场(产品在卖+KOL库不足)各保持小水位
 MARKETS = [
@@ -131,7 +136,14 @@ _CAMPAIGN_FALLBACK_KEYWORDS = {
 }
 
 _DISCOVERY_BAD_INTENT = re.compile(
-    r"\b(?:buy|price|coupon|discount|deal|cheap|amazon|store|shop|sale)\b",
+    r"\b(?:"
+    r"buy(?:ing)?|prices?|coupons?|discounts?|deals?|cheap|amazon|stores?|"
+    r"shops?|shopping|sales?|official(?:ly)?|"
+    r"kaufen|preise?|gutscheine?|rabatte?|angebote?|guenstig\w*|günstig\w*|"
+    r"l[aä]den?|offiziell\w*|"
+    r"compr(?:ar|a|as|ando)|precios?|cup[oó]nes?|descuentos?|ofertas?|"
+    r"barat[oa]s?|tiendas?|oficial(?:es)?"
+    r")\b",
     re.I,
 )
 _CATEGORY_EN = {
@@ -143,6 +155,11 @@ _PLATFORM_EN = {
     "switch 2": "nintendo switch 2", "switch": "nintendo switch",
     "pc": "pc gaming", "steam deck": "steam deck", "ps5": "playstation 5",
     "xbox": "xbox",
+}
+_PILOT_COUNTRIES_BY_LANGUAGE = {
+    "en": ["US", "UK", "CA", "AU", "IE", "NZ"],
+    "de": ["DE", "AT", "CH"],
+    "es": ["ES", "MX"],
 }
 
 
@@ -170,14 +187,17 @@ def _english_phrase(value: str) -> str:
 
 
 def _discovery_item(*, language: str, keyword: str, source: str,
-                    reason: str) -> dict | None:
+                    reason: str, axes: list[str] | None = None,
+                    evidence_mode: str = "") -> dict | None:
     word = re.sub(r"\s+", " ", keyword).strip().lower()
     if not (2 <= len(word) <= 80) or _DISCOVERY_BAD_INTENT.search(word):
         return None
     return {
         "language": language, "keyword": word, "source": source,
-        "axes": [source] + (["localization"] if language != "en" else []),
-        "reason": reason,
+        "axes": list(dict.fromkeys(
+            (axes or [source]) + (["localization"] if language != "en" else [])
+        )),
+        "reason": reason, "evidence_mode": evidence_mode,
     }
 
 
@@ -298,7 +318,19 @@ def _dave_structured_candidates(*, activity_fields: dict, product_fields: dict,
             word = words.pop(0)
             item = _discovery_item(
                 language=language, keyword=word, source=source,
-                reason=f"由活动的{source}信息生成；用于验证该来源的有效邮箱和合格候选产出",
+                reason=(
+                    f"由活动的{source}信息生成；"
+                    f"用于验证该来源的有效邮箱和合格候选产出"
+                ),
+                axes={
+                    "competitor": ["competitor", "category_feature", "content_format"],
+                    "ip_theme": ["ip_theme", "content_format"],
+                    "platform": ["platform", "category_feature", "content_format"],
+                    "category_feature": ["category_feature", "content_format"],
+                    "audience_scenario": ["audience_scenario", "content_format"],
+                    "content_format": ["category_feature", "content_format"],
+                }[source],
+                evidence_mode=mode if source == "competitor" else "",
             )
             if not item or item["keyword"] in seen:
                 continue
@@ -453,7 +485,8 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
                                  required_candidates: int,
                                  approved_candidates: int | None = None,
                                  dry_run: bool = False,
-                                 max_tasks: int | None = None) -> dict:
+                                 max_tasks: int | None = None,
+                                 structured_pilot: bool = False) -> dict:
     """为单个活动补确定性 YouTube 发现任务；只建爬虫任务，不直接创建 KOL。"""
     rows = await feishu.fetch_all_records(T_CRAWLER)
     fields = activity.get("fields") or {}
@@ -464,6 +497,51 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         for value in _multi_values(fields.get("活动目标语言"))
         if language_aliases.get(value, value) in {"en", "de", "es"}
     ] or ["en"]
+    target_country_list = list(dict.fromkeys(
+        value.strip().upper()
+        for value in _multi_values(fields.get("活动目标国家"))
+        if value.strip()
+    ))
+    target_countries = set(target_country_list)
+    pilot_countries_by_language = {}
+    locally_covered = set()
+    for language in languages:
+        if language == "en":
+            continue
+        matched = [
+            country for country in _PILOT_COUNTRIES_BY_LANGUAGE[language]
+            if country in target_countries
+        ]
+        pilot_countries_by_language[language] = matched
+        locally_covered.update(matched)
+    if "en" in languages:
+        # 活动以英语区为主：未配置对应本地语种的目标国家交给英语组，
+        # DE/ES 等已有本地语种的国家不重复抓。
+        pilot_countries_by_language["en"] = [
+            country for country in target_country_list
+            if country not in locally_covered
+        ]
+    covered_target_countries = {
+        country
+        for countries in pilot_countries_by_language.values()
+        for country in countries
+    }
+    uncovered_target_countries = [
+        country for country in target_country_list
+        if country not in covered_target_countries
+    ]
+    if structured_pilot:
+        languages = [
+            language for language in languages
+            if pilot_countries_by_language.get(language)
+        ]
+        if not languages:
+            return {
+                "ok": False, "created": 0, "would_create": 0,
+                "error": "活动目标国家与活动目标语言没有可执行交集",
+                "quality_filters_lowered": False,
+                "uncovered_target_countries": uncovered_target_countries,
+            }
     identity = f"{campaign_id} {ext(product_fields.get('产品英文名'))}".lower()
     theme = "dave" if "dave" in identity else "piranha" if "piranha" in identity else ""
     if not theme:
@@ -475,6 +553,23 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         if ext((row.get("fields") or {}).get("关键词列表")).strip()
     }
     prefix = f"[活动补池:{campaign_id}]"
+    pilot_prefix = f"{prefix}{DAVE_KEYWORD_PILOT_TAG}"
+    pilot_rows = [
+        row for row in rows
+        if ext((row.get("fields") or {}).get("任务名")).startswith(pilot_prefix)
+    ]
+    if structured_pilot and len(pilot_rows) >= DAVE_KEYWORD_PILOT_MAX_TASKS:
+        return {
+            "ok": True, "created": 0, "would_create": 0,
+            "skipped": "pilot_already_created", "keywords": [],
+            "keyword_source": "structured_v1", "shortfall_tasks": 0,
+            "generation_error": "", "generation_warning": "",
+            "pending_before": 0, "active_pending_before": 0,
+            "stale_pending_before": 0, "target_tasks": 0,
+            "quality_gate": {"mode": "not_recomputed"},
+            "quality_filters_lowered": False,
+            "uncovered_target_countries": uncovered_target_countries,
+        }
     now_ms = int(time.time() * 1000)
     quality_gate = _campaign_discovery_quality(
         rows, prefix=prefix, approved_candidates=approved_candidates, now_ms=now_ms,
@@ -497,7 +592,13 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
     target_tasks = max(3, min(9, math.ceil(max(1, int(required_candidates)) / 50)))
     if max_tasks is not None:
         target_tasks = min(target_tasks, max(1, int(max_tasks)))
-    if theme == "piranha" and quality_gate["mode"] in {"cooldown", "slow_probe"}:
+    if structured_pilot:
+        target_tasks = min(
+            target_tasks,
+            max(0, DAVE_KEYWORD_PILOT_MAX_TASKS - len(pilot_rows)),
+        )
+    quality_gate_enabled = theme == "piranha" or structured_pilot
+    if quality_gate_enabled and quality_gate["mode"] in {"cooldown", "slow_probe"}:
         target_tasks = 1
     common_result = {
         "pending_before": active_pending_for_campaign + stale_pending_for_campaign,
@@ -506,8 +607,9 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         "target_tasks": target_tasks,
         "quality_gate": quality_gate,
         "quality_filters_lowered": False,
+        "uncovered_target_countries": uncovered_target_countries,
     }
-    if theme == "piranha" and quality_gate["mode"] == "cooldown":
+    if quality_gate_enabled and quality_gate["mode"] == "cooldown":
         return {
             "ok": True, "created": 0, "would_create": 0,
             "skipped": "quality_cooldown", "keywords": [],
@@ -515,15 +617,18 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             "generation_error": "", "generation_warning": "",
             **common_result,
         }
-    need = max(0, target_tasks - active_pending_for_campaign)
+    need = (
+        target_tasks if structured_pilot
+        else max(0, target_tasks - active_pending_for_campaign)
+    )
     candidates = []
-    if theme == "dave":
+    if theme == "dave" and structured_pilot:
         candidates = _dave_structured_candidates(
             activity_fields=fields, product_fields=product_fields,
             languages=languages, existing_keywords=existing_keywords,
         )[:need]
         need -= len(candidates)
-    while (theme != "dave" and need
+    while (not structured_pilot and need
            and any(_CAMPAIGN_KEYWORDS[theme].get(lang) for lang in languages)):
         progressed = False
         for lang in languages:
@@ -540,7 +645,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         if not progressed:
             break
 
-    keyword_source = "structured_v1" if theme == "dave" and candidates else (
+    keyword_source = "structured_v1" if structured_pilot and candidates else (
         "deterministic" if candidates else "none"
     )
     generation_error = ""
@@ -616,7 +721,10 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         }
 
     now = int(time.time() * 1000)
-    countries_by_language = {"en": ["US", "UK", "CA"], "de": ["DE"], "es": ["ES"]}
+    countries_by_language = (
+        pilot_countries_by_language if structured_pilot
+        else {"en": ["US", "UK", "CA"], "de": ["DE"], "es": ["ES"]}
+    )
     created, errors = 0, []
     for item in candidates:
         if isinstance(item, dict):
@@ -626,8 +734,12 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             lang, word = item
             source = "deterministic"
         try:
+            task_name = (
+                f"{pilot_prefix}[词源:{source}] YT KOL - {word}"
+                if structured_pilot else f"{prefix} YT KOL - {word}"
+            )
             await feishu.create_record(T_CRAWLER, {
-                "任务名": f"{prefix}[词源:{source}] YT KOL - {word}",
+                "任务名": task_name,
                 "爬虫类型": "KOL-YouTube", "关键词列表": word,
                 "筛选-国家": countries_by_language[lang], "筛选-语言": [lang],
                 "每批数量上限": PER_BATCH_LIMIT, "任务状态": "1-待触发",
@@ -657,6 +769,13 @@ async def run_campaign_pilot(*, campaign_id: str, required_candidates: int = 200
     """读真实活动/产品后预演或创建小批发现任务；绝不生成草稿或发送邮件。"""
     activity = await launch_evidence.get_activity(campaign_id)
     fields = activity.get("fields") or {}
+    if campaign_id != DAVE_KEYWORD_PILOT_CAMPAIGN_ID:
+        raise ValueError("当前灰度只允许戴夫活动；其他产品须在灰度通过并定稿后启用")
+    if (
+        ext(fields.get("运行模式")) != "正式运行"
+        or ext(fields.get("状态")) != "正式执行中"
+    ):
+        raise ValueError("戴夫活动不是正式运行/正式执行中，禁止创建灰度任务")
     product_id = ext(fields.get("产品主记录ID")).strip()
     if not product_id:
         linked = fields.get("关联产品主记录")
@@ -668,11 +787,22 @@ async def run_campaign_pilot(*, campaign_id: str, required_candidates: int = 200
     if not product_id:
         raise ValueError(f"活动缺少产品主记录ID: {campaign_id}")
     product = await feishu.get_record(config.T_PRODUCT, product_id)
-    result = await ensure_campaign_supply(
-        campaign_id=campaign_id, activity=activity, product=product,
-        required_candidates=max(1, int(required_candidates)),
-        dry_run=dry_run, max_tasks=max(1, min(4, int(max_tasks))),
-    )
+    if ext((product.get("fields") or {}).get("派单模式")) != "活动专用":
+        raise ValueError("戴夫产品未处于活动专用锁，禁止创建灰度任务")
+    async def execute_pilot() -> dict:
+        return await ensure_campaign_supply(
+            campaign_id=campaign_id, activity=activity, product=product,
+            required_candidates=max(1, int(required_candidates)),
+            dry_run=dry_run, max_tasks=max(1, min(4, int(max_tasks))),
+            structured_pilot=True,
+        )
+
+    if dry_run:
+        result = await execute_pilot()
+    else:
+        # 当前生产为单实例；锁内重新读取任务台，避免两个同时提交各写4条。
+        async with _DAVE_KEYWORD_PILOT_LOCK:
+            result = await execute_pilot()
     writes = int(result.get("created") or 0)
     return {
         **result, "campaign_id": campaign_id, "product_id": product_id,

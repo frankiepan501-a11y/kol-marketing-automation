@@ -6,6 +6,7 @@
 |---|---|---|---|---|
 | 2026-08-23 | 一个活动的竞品被误认为以后所有活动默认竞品 | 灰度实例参数与通用任务模型没有显式分开 | 活动必须显式保存竞品模式/品牌/证据版本；测试覆盖换竞品与无竞品两种反例 | project docs / knowledge concept |
 | 2026-08-23 | 关键词任务可持续增加，但合格候选仍为0 | 把任务数或有效邮箱当成业务产出 | 以合格可触达候选为主指标；低产来源自动冷却、换源并报告排除原因 | project docs / AGENTS candidate |
+| 2026-08-23 | 灰度逻辑在真实验证前进入共享自治入口 | 把“已有实现”误当成“已可生产复用” | 新策略先用显式pilot开关和单活动白名单隔离；真实验收通过后才迁移共享入口 | project docs / engineering handoff |
 
 ## Failed Attempts
 
@@ -15,6 +16,7 @@
 | 2 | 直接运行裸`python -m unittest` | PowerShell找不到`python` | 本机脚本按全局规范固定使用`C:\tmp\py311-embed\python.exe` |
 | 3 | 嵌入式Python直接discover当前仓库 | 导入了`C:\tmp\ml-data-sync\app`同名包 | 内联runner先把当前仓库插入`sys.path[0]`再discover，避免同名包污染 |
 | 4 | Browser Harness新开页面后立即调用页面函数 | 首次出现脚本尚未可见的瞬时`ReferenceError` | 先回读页面文字/函数状态，或通过真实按钮触发并读DOM结果，不把工具时序误判成业务失败 |
+| 5 | 直接给嵌入式Python设置`PYTHONPATH`后重跑 | `python311._pth`启用了隔离模式，仍导入`C:\tmp\ml-data-sync\app` | 用内联runner在进程内把当前仓库插入`sys.path[0]`，不要把模块污染误判成测试失败 |
 
 ## User Corrections
 
