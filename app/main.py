@@ -2798,6 +2798,9 @@ async def launch_keyword_supply_pilot(
     if not isinstance(dry_run, bool):
         raise HTTPException(status_code=422, detail="dry_run 必须是 JSON 布尔值")
     max_tasks = max(1, min(4, int(payload.get("max_tasks") or 4)))
+    pilot_version = str(payload.get("pilot_version") or "v1").strip().lower()
+    if pilot_version not in {"v1", "v2"}:
+        raise HTTPException(status_code=422, detail="pilot_version 只能是 v1 或 v2")
     if not dry_run:
         if not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
             raise HTTPException(status_code=403, detail="活动队列写入开关未开启")
@@ -2808,7 +2811,7 @@ async def launch_keyword_supply_pilot(
         lambda: keyword_supply.run_campaign_pilot(
             campaign_id=_launch_required(payload, "campaign_id"),
             required_candidates=int(payload.get("required_candidates") or 200),
-            max_tasks=max_tasks, dry_run=dry_run,
+            max_tasks=max_tasks, dry_run=dry_run, pilot_version=pilot_version,
         ),
     )
 

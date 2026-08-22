@@ -69,6 +69,7 @@ GAME_OR_CONSOLE_CONTENT_CUES = NINTENDO_TITLE_CUES | HARDWARE_CONTENT_CUES | {
     "xbox", "pokemon", "pokémon", "gameroom", "game room",
 }
 PROFILE_MIN_TARGET_TITLES = 3
+T_CRAWLER_TASK = "tblQnLHnBa1RjJUE"
 NON_TARGET_AUDIENCE_CUES = {
     "roblox", "minecraft", "fortnite", "fall guys", "gta", "valorant",
     "league of legends", "英雄联盟", "call of duty", "warcraft", "魔兽世界",
@@ -840,10 +841,33 @@ async def fast_precheck_contact(
     )
 
 
-def _pilot_keyword_source(fields: dict) -> str:
+def _pilot_keyword_source(fields: dict, task_sources: dict[str, str] | None = None) -> str:
     note = ext(fields.get("迁移备注"))
     match = re.search(r"\[词源:([a-z_]+)\]", note)
-    return match.group(1) if match else "unknown"
+    if match:
+        return match.group(1)
+    for keyword, source in (task_sources or {}).items():
+        if keyword and keyword in note.lower():
+            return source
+    return "unknown"
+
+
+async def _pilot_task_sources(campaign_id: str) -> dict[str, str]:
+    prefix = f"[活动补池:{campaign_id}][灰度:"
+    rows = await feishu.search_records(
+        T_CRAWLER_TASK,
+        [{"field_name": "任务名", "operator": "contains", "value": [prefix]}],
+        field_names=["任务名", "关键词列表"],
+    )
+    sources = {}
+    for row in rows:
+        fields = row.get("fields") or {}
+        name = ext(fields.get("任务名"))
+        match = re.search(r"\[词源:([a-z_]+)\]", name)
+        keyword = ext(fields.get("关键词列表")).strip().lower()
+        if match and keyword:
+            sources[keyword] = match.group(1)
+    return sources
 
 
 async def replay_candidates_targeted(
@@ -874,6 +898,7 @@ async def replay_candidates_targeted(
         ext(product_fields.get("品类")),
         list(_parse_multiselect(product_fields.get("适配主机"))),
     )
+    task_sources = await _pilot_task_sources(campaign_id)
     target_countries = (
         _parse_multiselect(activity_fields.get("活动目标国家"))
         if "活动目标国家" in activity_fields else None
@@ -933,6 +958,17 @@ async def replay_candidates_targeted(
                     "review_route": "系统排除", "review_decision": "排除",
                     "review_instruction": "确定性活动筛选未通过，无需人工复审。",
                 }
+            elif check["decision"] in {"blocked", "hold_duplicate_identity"}:
+                final_decision = check["decision"]
+                review_snapshot = {
+                    "review_route": "系统排除" if final_decision == "blocked" else "系统暂缓",
+                    "review_decision": "排除" if final_decision == "blocked" else "暂缓",
+                    "review_instruction": (
+                        "邮箱或禁用状态未通过，无需人工复审。"
+                        if final_decision == "blocked"
+                        else "先归并重复身份，再重新执行单条回放。"
+                    ),
+                }
             else:
                 final_decision = check["decision"]
                 review_snapshot = (
@@ -945,7 +981,7 @@ async def replay_candidates_targeted(
             return {
                 "contact_id": record.get("record_id", ""),
                 "name": _candidate_name(fields, "KOL"),
-                "keyword_source": _pilot_keyword_source(fields),
+                "keyword_source": _pilot_keyword_source(fields, task_sources),
                 "profile_url": feishu.ext_url(fields.get("主链接")).strip(),
                 "platform": ext(fields.get("主平台")),
                 "country": ext(fields.get("国家")),

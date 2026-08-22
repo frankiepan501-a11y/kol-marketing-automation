@@ -952,6 +952,9 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         ), patch.object(
             preview, "_load_targeted_product_family", new=AsyncMock(return_value=family),
         ), patch.object(
+            preview, "_pilot_task_sources",
+            new=AsyncMock(return_value={"seed": "competitor"}),
+        ), patch.object(
             preview.dispatch, "fetch_mapping_for_product",
             new=AsyncMock(return_value={"expected_styles": ["游戏评测"]}),
         ), patch.object(

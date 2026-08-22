@@ -31,6 +31,7 @@ LOW_YIELD_MIN_EMAILS_PER_TASK = 0.25
 LOW_YIELD_MIN_APPROVED_PER_TASK = 0.10
 DAVE_KEYWORD_PILOT_CAMPAIGN_ID = "launch-20260915-funlab-dave-ys11-5"
 DAVE_KEYWORD_PILOT_TAG = "[灰度:dave-keyword-v1]"
+DAVE_KEYWORD_PILOT_V2_TAG = "[灰度:dave-keyword-v2]"
 DAVE_KEYWORD_PILOT_MAX_TASKS = 4
 _DAVE_KEYWORD_PILOT_LOCK = asyncio.Lock()
 
@@ -202,7 +203,8 @@ def _discovery_item(*, language: str, keyword: str, source: str,
 
 
 def _dave_structured_candidates(*, activity_fields: dict, product_fields: dict,
-                                languages: list[str], existing_keywords: set[str]) -> list[dict]:
+                                languages: list[str], existing_keywords: set[str],
+                                pilot_version: str = "v1") -> list[dict]:
     """Dave 灰度词池。只把活动/产品字段编译成词，不把 NYXI 写成系统默认。"""
     mode = ext(activity_fields.get("竞品证据模式")).strip()
     evidence_status = ext(activity_fields.get("竞品分析状态")).strip()
@@ -297,6 +299,25 @@ def _dave_structured_candidates(*, activity_fields: dict, product_fields: dict,
     if "es" in languages:
         by_source["content_format"]["es"].append(f"unboxing {category} español")
 
+    if pilot_version == "v2":
+        # v1真实灰度显示：IP泛词会把Dave人名/真实潜水/垃圾箱潜水混进来，
+        # 德西语“test/reseña”也不足以锁定游戏创作者。v2至少交叉3个轴，
+        # 仍保留同样的市场硬闸，方便做同批对比，不靠放宽筛选换数量。
+        if competitor_enabled and "en" in languages:
+            by_source["competitor"]["en"] = [f"{competitor} switch controller review"]
+        if ips and "en" in languages:
+            by_source["ip_theme"]["en"] = [
+                f"{ips[0]} nintendo switch gameplay review",
+            ]
+        if platforms and "de" in languages:
+            by_source["platform"]["de"] = [
+                f"{platforms[0]} controller gaming test deutsch",
+            ]
+        if platforms and "es" in languages:
+            by_source["platform"]["es"] = [
+                f"mando {platforms[0]} review gaming españa",
+            ]
+
     # 首批探测优先覆盖“竞品/IP/平台+本地化”，避免 4 条全压同一假设。
     preferred = []
     if competitor_enabled and "en" in languages:
@@ -324,7 +345,10 @@ def _dave_structured_candidates(*, activity_fields: dict, product_fields: dict,
                 ),
                 axes={
                     "competitor": ["competitor", "category_feature", "content_format"],
-                    "ip_theme": ["ip_theme", "content_format"],
+                    "ip_theme": (
+                        ["ip_theme", "platform", "content_format"]
+                        if pilot_version == "v2" else ["ip_theme", "content_format"]
+                    ),
                     "platform": ["platform", "category_feature", "content_format"],
                     "category_feature": ["category_feature", "content_format"],
                     "audience_scenario": ["audience_scenario", "content_format"],
@@ -486,7 +510,8 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
                                  approved_candidates: int | None = None,
                                  dry_run: bool = False,
                                  max_tasks: int | None = None,
-                                 structured_pilot: bool = False) -> dict:
+                                 structured_pilot: bool = False,
+                                 pilot_version: str = "v1") -> dict:
     """为单个活动补确定性 YouTube 发现任务；只建爬虫任务，不直接创建 KOL。"""
     rows = await feishu.fetch_all_records(T_CRAWLER)
     fields = activity.get("fields") or {}
@@ -553,7 +578,12 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         if ext((row.get("fields") or {}).get("关键词列表")).strip()
     }
     prefix = f"[活动补池:{campaign_id}]"
-    pilot_prefix = f"{prefix}{DAVE_KEYWORD_PILOT_TAG}"
+    if pilot_version not in {"v1", "v2"}:
+        raise ValueError("pilot_version must be v1 or v2")
+    pilot_tag = (
+        DAVE_KEYWORD_PILOT_V2_TAG if pilot_version == "v2" else DAVE_KEYWORD_PILOT_TAG
+    )
+    pilot_prefix = f"{prefix}{pilot_tag}"
     pilot_rows = [
         row for row in rows
         if ext((row.get("fields") or {}).get("任务名")).startswith(pilot_prefix)
@@ -562,7 +592,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         return {
             "ok": True, "created": 0, "would_create": 0,
             "skipped": "pilot_already_created", "keywords": [],
-            "keyword_source": "structured_v1", "shortfall_tasks": 0,
+            "keyword_source": f"structured_{pilot_version}", "shortfall_tasks": 0,
             "generation_error": "", "generation_warning": "",
             "pending_before": 0, "active_pending_before": 0,
             "stale_pending_before": 0, "target_tasks": 0,
@@ -626,6 +656,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         candidates = _dave_structured_candidates(
             activity_fields=fields, product_fields=product_fields,
             languages=languages, existing_keywords=existing_keywords,
+            pilot_version=pilot_version,
         )[:need]
         need -= len(candidates)
     while (not structured_pilot and need
@@ -645,7 +676,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         if not progressed:
             break
 
-    keyword_source = "structured_v1" if structured_pilot and candidates else (
+    keyword_source = f"structured_{pilot_version}" if structured_pilot and candidates else (
         "deterministic" if candidates else "none"
     )
     generation_error = ""
@@ -765,7 +796,8 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
 
 
 async def run_campaign_pilot(*, campaign_id: str, required_candidates: int = 200,
-                             max_tasks: int = 4, dry_run: bool = True) -> dict:
+                             max_tasks: int = 4, dry_run: bool = True,
+                             pilot_version: str = "v1") -> dict:
     """读真实活动/产品后预演或创建小批发现任务；绝不生成草稿或发送邮件。"""
     activity = await launch_evidence.get_activity(campaign_id)
     fields = activity.get("fields") or {}
@@ -794,7 +826,7 @@ async def run_campaign_pilot(*, campaign_id: str, required_candidates: int = 200
             campaign_id=campaign_id, activity=activity, product=product,
             required_candidates=max(1, int(required_candidates)),
             dry_run=dry_run, max_tasks=max(1, min(4, int(max_tasks))),
-            structured_pilot=True,
+            structured_pilot=True, pilot_version=pilot_version,
         )
 
     if dry_run:
@@ -806,6 +838,7 @@ async def run_campaign_pilot(*, campaign_id: str, required_candidates: int = 200
     writes = int(result.get("created") or 0)
     return {
         **result, "campaign_id": campaign_id, "product_id": product_id,
+        "pilot_version": pilot_version,
         "read_only": bool(dry_run), "writes": writes,
         "drafts_created": 0, "emails_sent": 0,
     }

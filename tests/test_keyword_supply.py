@@ -352,6 +352,45 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         self.assertEqual(0, result["created"])
         create_record.assert_not_awaited()
 
+    def test_dave_v2_uses_three_axis_terms_and_ignores_completed_v1_batch(self):
+        rows = [{"fields": {
+            "任务名": (
+                "[活动补池:campaign1][灰度:dave-keyword-v1]"
+                f"[词源:platform] YT KOL - v1 word {index}"
+            ),
+            "关键词列表": f"v1 word {index}", "任务状态": "3-已完成",
+        }} for index in range(4)]
+        activity = {"fields": {
+            "活动目标语言": ["en", "de", "es"],
+            "活动目标国家": ["US", "UK", "DE", "ES"],
+            "竞品证据模式": "引用历史证据", "竞品分析状态": "已就绪",
+            "竞品品牌": "NYXI",
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"],
+            "品类": "手柄",
+        }}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=rows),
+        ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, dry_run=True, max_tasks=4,
+                structured_pilot=True, pilot_version="v2",
+            ))
+
+        self.assertEqual("structured_v2", result["keyword_source"])
+        self.assertEqual(4, result["would_create"])
+        words = {item["keyword"] for item in result["keywords"]}
+        self.assertIn("nyxi switch controller review", words)
+        self.assertIn("dave the diver nintendo switch gameplay review", words)
+        self.assertIn("nintendo switch 2 controller gaming test deutsch", words)
+        self.assertIn("mando nintendo switch 2 review gaming españa", words)
+        ip_item = next(item for item in result["keywords"] if item["source"] == "ip_theme")
+        self.assertEqual(["ip_theme", "platform", "content_format"], ip_item["axes"])
+
     def test_discovery_item_blocks_official_and_multilingual_purchase_intent(self):
         blocked = [
             ("en", "official controller store"),

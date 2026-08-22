@@ -30,6 +30,7 @@ class LaunchRouteTests(unittest.TestCase):
         self.assertEqual(0, response["writes"])
         run.assert_awaited_once_with(
             campaign_id="c1", required_candidates=200, max_tasks=4, dry_run=True,
+            pilot_version="v1",
         )
 
     def test_keyword_pilot_commit_requires_exact_confirmation(self):
@@ -66,6 +67,7 @@ class LaunchRouteTests(unittest.TestCase):
         self.assertEqual(0, response["emails_sent"])
         run.assert_awaited_once_with(
             campaign_id="c1", required_candidates=500, max_tasks=4, dry_run=False,
+            pilot_version="v1",
         )
 
     def test_keyword_pilot_replay_is_scoped_and_read_only(self):
