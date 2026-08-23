@@ -44,7 +44,7 @@ def validate_card(card, records):
     payload = json.dumps(card, ensure_ascii=False)
     required = [
         "谁来处理", "请在", "现在需要你做什么", "真实发送流程",
-        "先看对方原邮件", "去审核这",
+        "先看对方原邮件", "打开待审核邮件列表",
     ]
     missing = [text for text in required if text not in payload]
     urls = []

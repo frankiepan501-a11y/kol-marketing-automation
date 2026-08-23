@@ -162,7 +162,7 @@ class SlaDigestTests(unittest.TestCase):
         self.assertIn("今天 4 小时内", reviewer_text)
         self.assertIn("先补齐运单号和物流商", reviewer_text)
         self.assertIn("点「通过」后，邮件会进入真实发送流程", reviewer_text)
-        self.assertIn("去审核这 4 封邮件", reviewer_text)
+        self.assertIn("打开待审核邮件列表", reviewer_text)
         self.assertIn("record=rec_quote", reviewer_text)
         self.assertIn("record=rec_reply", reviewer_text)
         self.assertNotIn("record=rec_cold", reviewer_text)
@@ -262,9 +262,9 @@ class SlaDigestTests(unittest.TestCase):
         self.assertIn("先看对方原邮件", payload)
         self.assertIn("没问题点「通过」", payload)
         self.assertIn("需要修改就先改正文", payload)
-        self.assertIn("不适合回复就点「否决」或「退回重做」", payload)
+        self.assertIn("不适合发送就点「否决」或「退回重做」", payload)
         self.assertIn("系统已自动排除处理完的邮件", payload)
-        self.assertEqual(payload.count("去审核这 2 封邮件"), 1)
+        self.assertEqual(payload.count("打开待审核邮件列表"), 1)
         for jargon in ["SLA", "超时", "队列", "reply", "affiliate_quote", "幂等", "元数据"]:
             self.assertNotIn(jargon, payload)
 

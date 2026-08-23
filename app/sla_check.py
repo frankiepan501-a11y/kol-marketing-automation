@@ -193,6 +193,11 @@ def _top_record_lines(items: list, now_ms: int, limit: int = 5) -> str:
 def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str) -> dict:
     """Build an actionable queue-management card; this card never approves or sends email itself."""
     oldest = max((_draft_age_hours(rec, now_ms) for rec in items), default=0)
+    review_steps = (
+        "1. 点下面按钮打开待审核邮件。\n"
+        "2. 先看对方原邮件，再检查系统生成的邮件草稿。\n"
+        "3. 没问题点「通过」；需要修改就先改正文；不适合发送就点「否决」或「退回重做」。"
+    )
     if audience == "frankie":
         title = f"有 {len(items)} 封重要邮件超过 48 小时没处理"
         owner_label = "需要谁处理"
@@ -210,11 +215,7 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
         owner = "独立站运营专员"
         deadline_label = "请在"
         deadline = "明天前处理完"
-        action_text = (
-            "1. 点下面按钮打开待审核邮件。\n"
-            "2. 先看对方原邮件，再检查系统生成的回复。\n"
-            "3. 没问题点「通过」；需要修改就先改正文；不适合回复就点「否决」或「退回重做」。"
-        )
+        action_text = review_steps
         header_template = "yellow"
     else:
         title = f"有 {len(items)} 封重要合作邮件待审核"
@@ -223,9 +224,7 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
         deadline_label = "请在"
         deadline = "今天 4 小时内处理"
         action_text = (
-            "1. 点下面按钮打开待审核邮件。\n"
-            "2. 先看对方原邮件，再检查系统生成的回复。\n"
-            "3. 没问题点「通过」；需要修改就先改正文；不适合回复就点「否决」或「退回重做」。\n"
+            f"{review_steps}\n"
             "4. **看到“待补运单信息”时，先补齐运单号和物流商，再检查正文并点「通过」。**"
         )
         header_template = "orange"
@@ -254,7 +253,7 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
             {"tag": "div", "text": {"tag": "lark_md", "content":
                 f"**建议先处理这 {min(5, len(items))} 封（等待最久）**\n{_top_record_lines(items, now_ms)}"}},
             {"tag": "action", "actions": [
-                {"tag": "button", "text": {"tag": "plain_text", "content": f"去审核这 {len(items)} 封邮件"},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "打开待审核邮件列表"},
                  "url": _queue_url(), "type": "primary"},
             ]},
             {"tag": "note", "elements": [
