@@ -22,6 +22,7 @@
 | 4 | Browser Harness新开页面后立即调用页面函数 | 首次出现脚本尚未可见的瞬时`ReferenceError` | 先回读页面文字/函数状态，或通过真实按钮触发并读DOM结果，不把工具时序误判成业务失败 |
 | 5 | 直接给嵌入式Python设置`PYTHONPATH`后重跑 | `python311._pth`启用了隔离模式，仍导入`C:\tmp\ml-data-sync\app` | 用内联runner在进程内把当前仓库插入`sys.path[0]`，不要把模块污染误判成测试失败 |
 | 6 | 用默认`python -m pytest`直接跑最终回归 | 再次被`C:\tmp\ml-data-sync\app`同名包抢占，收集阶段报ImportError | 本仓库固定用内联runner先插入当前worktree，再调用pytest；最终108项通过 |
+| 7 | 按`lark-base-record-get.md`使用`--fields`裁剪输出 | 本机`lark-cli 1.0.64`返回`unknown flag --fields`，文档与已安装版本不一致 | 当前版本先去掉`--fields`回读整条记录；下次使用可选参数前先跑对应`--help`核对，不把参数失败误判为飞书数据异常 |
 
 ## User Corrections
 
@@ -39,3 +40,26 @@
 - 现象：隔离Chrome已在9222端口运行，但Browser Harness默认发现路径的WebSocket握手超时；`127.0.0.1:9222/json/version`返回404，而`localhost:9222/json/version`正常返回Chrome DevTools信息。
 - 最小恢复：本轮显式设置`BU_CDP_URL=http://localhost:9222`后执行成功。
 - 业务影响：仅影响本机可视化原型验收，不影响KOL生产服务；不要把此工具连接错误误判为词源逻辑失败。
+
+# 2026-08-24 双活动进度审计
+
+## Candidate Lessons
+
+| Symptom | Cause | Prevention | Promote to |
+|---|---|---|---|
+| 活动表人工审核通过后仍不生成草稿 | 活动参与记录与KOL主表`触达路由状态`是两个独立闸门，审核动作只改了前者 | 人工通过应生成可审计的路由结论并只解除本条`待人工核对`；已有线程/近期触达仍由全局预检保留 | project docs / KOL SOP |
+| 20条待审记录看似有库存，运营却无法高效判断 | 系统把多个可能原因拼成通用说明，且没有主证据帖子 | 只有“具体缺口＋证据链接＋单一判断问题＋回填选项”齐全才计为可执行人审库存 | project docs / human review rule |
+| 15分钟审计连续报错但错误只剩字段残片 | 服务端时间格式未被正确解析，合并节点又把异常摘要截断 | 审计必须用真实返回样本做时间解析回归，并输出固定业务摘要；execution error要能直接指导运营 | project docs / n8n audit SOP |
+
+## Failed Attempts
+
+| Attempt | Result | Prevention |
+|---|---|---|
+| 在当前lark-cli上使用`base +record-list --page-all` | 1.0.64版本不支持该参数 | 先读当前`--help`；用`--offset + --limit`分页并核对`has_more` |
+| 直接用PowerShell插值检查敏感环境变量长度 | 插值表达式可能把变量值带入终端输出 | 先把存在性和长度计算为普通布尔/整数，再只输出布尔/整数；任何诊断不得回显原值 |
+| 调用标称只读的定向回放端点定位单条预检 | 端点失败路径会调用内部告警，可能产生一条非业务通知 | 调用前先查路由异常处理；优先使用纯函数、本地回放或明确无通知的状态端点 |
+
+## Secret/Privacy Review
+
+- [x] 未记录任何API key、token、邮箱正文或KOL个人资料。
+- [x] 只保存可复用规则、聚合事实和证据入口。

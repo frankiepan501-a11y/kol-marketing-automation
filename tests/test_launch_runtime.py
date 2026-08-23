@@ -14,6 +14,98 @@ def _certificate():
 
 
 class LaunchRuntimeTests(unittest.TestCase):
+    def test_manual_approval_commits_only_controlled_import_route_only_hold(self):
+        participant = {"record_id": "part1", "fields": {
+            "活动ID": "campaign1", "参与状态": "已入围", "审核结论": "通过",
+            "进入方式": "新开发", "活动分池": "新开发池",
+            "关联KOL": {"link_record_ids": ["kol1"]}, "关联邮件草稿": [],
+        }}
+        kol = {"record_id": "kol1", "fields": {
+            "合作状态": "未建联", "触达路由状态": "待核对",
+            "资料可用状态": "有效",
+            "迁移备注": "[CONTROLLED_IMPORT] campaign=campaign1; author=a1; no_auto_email=true",
+        }}
+        product = {"record_id": "product1", "fields": {"品牌": "FUNLAB"}}
+        route_only_hold = {
+            "decision": "hold_active_or_recent",
+            "reasons": ["触达路由状态=待核对，禁止直接进入新开发池"],
+            "evidence_draft_ids": [],
+        }
+        readback = {"record_id": "kol1", "fields": {
+            **kol["fields"], "触达路由状态": "可新开发",
+        }}
+
+        with patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(side_effect=[kol, readback]),
+        ), patch.object(
+            launch_runtime.launch_outreach, "_fast_precheck",
+            new=AsyncMock(return_value=route_only_hold),
+        ), patch.object(
+            launch_runtime.feishu, "update_record",
+            new=AsyncMock(return_value={"record_id": "kol1", "_accepted_without_record": True}),
+        ) as update_record:
+            result = asyncio.run(
+                launch_runtime.reconcile_approved_controlled_import_routes(
+                    campaign_id="campaign1", product=product,
+                    product_id="product1", brand="FUNLAB",
+                    participants=[participant],
+                )
+            )
+
+        self.assertEqual(1, result["updated"])
+        self.assertEqual("可新开发", update_record.await_args.args[2]["触达路由状态"])
+        self.assertEqual("route_only_manual_hold_committed", result["details"][0]["result"])
+
+    def test_manual_approval_keeps_existing_thread_and_recent_contact_blocks(self):
+        participants = [
+            {"record_id": "part-thread", "fields": {
+                "活动ID": "campaign1", "参与状态": "已入围", "审核结论": "通过",
+                "进入方式": "新开发", "活动分池": "新开发池",
+                "关联KOL": {"link_record_ids": ["kol-thread"]},
+            }},
+            {"record_id": "part-recent", "fields": {
+                "活动ID": "campaign1", "参与状态": "已入围", "审核结论": "通过",
+                "进入方式": "新开发", "活动分池": "新开发池",
+                "关联KOL": {"link_record_ids": ["kol-recent"]},
+            }},
+        ]
+        controlled = {
+            "合作状态": "未建联", "触达路由状态": "待核对",
+            "资料可用状态": "有效",
+            "迁移备注": "[CONTROLLED_IMPORT] campaign=campaign1; no_auto_email=true",
+        }
+        product = {"record_id": "product1", "fields": {"品牌": "FUNLAB"}}
+        decisions = [
+            {"decision": "existing_pipeline_same_thread", "reasons": ["已有线程"],
+             "evidence_draft_ids": ["draft1"]},
+            {"decision": "hold_active_or_recent", "reasons": ["同品牌 30 天内已有触达"],
+             "evidence_draft_ids": ["draft2"]},
+        ]
+
+        with patch.object(
+            launch_runtime.feishu, "get_record",
+            new=AsyncMock(side_effect=[
+                {"record_id": "kol-thread", "fields": controlled},
+                {"record_id": "kol-recent", "fields": controlled},
+            ]),
+        ), patch.object(
+            launch_runtime.launch_outreach, "_fast_precheck",
+            new=AsyncMock(side_effect=decisions),
+        ), patch.object(
+            launch_runtime.feishu, "update_record", new=AsyncMock(),
+        ) as update_record:
+            result = asyncio.run(
+                launch_runtime.reconcile_approved_controlled_import_routes(
+                    campaign_id="campaign1", product=product,
+                    product_id="product1", brand="FUNLAB",
+                    participants=participants,
+                )
+            )
+
+        self.assertEqual(0, result["updated"])
+        self.assertEqual(2, result["kept_blocked"])
+        update_record.assert_not_awaited()
+
     def test_sync_outcomes_and_metrics_reuses_the_same_draft_snapshot(self):
         activity = {"record_id": "a1", "fields": {"活动ID": "campaign1"}}
         participants = [{"record_id": "p1", "fields": {}}]

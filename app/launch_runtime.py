@@ -374,6 +374,92 @@ async def _find_queue_draft(queue_key: str) -> dict | None:
     return exact[0] if exact else None
 
 
+async def reconcile_approved_controlled_import_routes(
+    *, campaign_id: str, product: dict, product_id: str, brand: str,
+    participants: list[dict],
+) -> dict:
+    """提交活动人工审核结论，但只解除受控导入记录的单一“待核对”闸。
+
+    同产品历史、已有线程、近期同品牌触达、重复身份和无效邮箱仍由
+    ``_fast_precheck`` 优先裁决；任何这些证据存在时都不改主表路由。
+    """
+    details: list[dict] = []
+    updated = 0
+    kept_blocked = 0
+    route_only_reason = "触达路由状态=待核对，禁止直接进入新开发池"
+
+    for participant in participants:
+        pf = participant.get("fields") or {}
+        participant_id = participant.get("record_id", "")
+        base = {"participant_id": participant_id}
+        if (
+            ext(pf.get("活动ID")) != campaign_id
+            or ext(pf.get("参与状态")) != "已入围"
+            or ext(pf.get("审核结论")) != "通过"
+            or ext(pf.get("进入方式")) != "新开发"
+            or ext(pf.get("活动分池")) != "新开发池"
+            or _ids(pf.get("关联邮件草稿"))
+        ):
+            details.append({**base, "result": "participant_gate_not_eligible"})
+            continue
+
+        contact_ids = _ids(pf.get("关联KOL"))
+        if len(contact_ids) != 1:
+            details.append({**base, "result": "participant_contact_not_unique"})
+            continue
+        contact_id = contact_ids[0]
+        kol = await feishu.get_record(config.T_KOL, contact_id)
+        kf = kol.get("fields") or {}
+        marker = ext(kf.get("迁移备注"))
+        if (
+            ext(kf.get("合作状态")) != "未建联"
+            or ext(kf.get("触达路由状态")) != "待核对"
+            or ext(kf.get("资料可用状态")) not in {"有效", "人工核实有效"}
+            or "[CONTROLLED_IMPORT]" not in marker
+            or f"campaign={campaign_id}" not in marker
+            or "no_auto_email=true" not in marker
+        ):
+            details.append({**base, "contact_id": contact_id,
+                            "result": "controlled_import_gate_not_eligible"})
+            continue
+
+        precheck = await launch_outreach._fast_precheck(
+            kol=kol, product=product, product_id=product_id,
+            contact_id=contact_id, brand=brand,
+        )
+        if not (
+            precheck.get("decision") == "hold_active_or_recent"
+            and list(precheck.get("reasons") or []) == [route_only_reason]
+            and not list(precheck.get("evidence_draft_ids") or [])
+        ):
+            kept_blocked += 1
+            details.append({
+                **base, "contact_id": contact_id,
+                "result": "kept_global_precheck_block",
+                "decision": precheck.get("decision") or "unknown",
+            })
+            continue
+
+        await feishu.update_record(
+            config.T_KOL, contact_id, {"触达路由状态": "可新开发"},
+        )
+        readback = await feishu.get_record(config.T_KOL, contact_id)
+        if ext((readback.get("fields") or {}).get("触达路由状态")) != "可新开发":
+            raise LaunchRuntimeError(
+                f"人工审核路由提交后回读不一致: participant={participant_id}"
+            )
+        updated += 1
+        details.append({
+            **base, "contact_id": contact_id,
+            "result": "route_only_manual_hold_committed",
+        })
+
+    return {
+        "campaign_id": campaign_id, "checked": len(participants),
+        "updated": updated, "kept_blocked": kept_blocked, "details": details,
+    }
+
+
 async def _queue_one(*, activity: dict, participant: dict, product: dict,
                      brand: str) -> dict:
     af = activity.get("fields") or {}
@@ -494,6 +580,10 @@ async def queue_approved(*, campaign_id: str, limit: int = 120) -> dict:
     if ext((product.get("fields") or {}).get("派单模式")) != "活动专用":
         raise LaunchRuntimeError("活动产品未处于活动专用锁")
     rows = await _participants(campaign_id)
+    route_reconcile = await reconcile_approved_controlled_import_routes(
+        campaign_id=campaign_id, product=product, product_id=product_id,
+        brand=brand, participants=rows,
+    )
     eligible = [
         row for row in rows
         if ext((row.get("fields") or {}).get("参与状态")) == "已入围"
@@ -516,6 +606,7 @@ async def queue_approved(*, campaign_id: str, limit: int = 120) -> dict:
     details = await asyncio.gather(*(one(row) for row in eligible))
     return {
         "campaign_id": campaign_id, "brand": brand, "eligible": len(eligible),
+        "route_reconcile": route_reconcile,
         "queued": sum(bool(x.get("draft_id")) and not x.get("reused") for x in details),
         "reused": sum(bool(x.get("reused")) for x in details),
         "skipped_or_failed": sum(not x.get("draft_id") for x in details),
