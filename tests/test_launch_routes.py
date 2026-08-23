@@ -620,7 +620,9 @@ class LaunchRouteTests(unittest.TestCase):
 
         self.assertFalse(accepted["already_running"])
         self.assertNotEqual("launchruntime-interrupted", accepted["job_id"])
-        refill.assert_awaited_once_with(campaign_id="c1")
+        refill.assert_awaited_once()
+        self.assertEqual("c1", refill.await_args.kwargs["campaign_id"])
+        self.assertEqual(accepted["job_id"], refill.await_args.kwargs["runtime_job_id"])
 
     def test_autonomous_job_persists_degraded_when_supply_is_blocked(self):
         async def exercise():

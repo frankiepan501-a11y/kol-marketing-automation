@@ -373,7 +373,12 @@ class LaunchEvidenceAuthorImportTests(unittest.TestCase):
             "eligible_for_master_write": False,
             "write_block_reasons": ["missing_valid_email"],
         })
-        sample = {"candidates": [{"author_key": "server-only"}], "unmatched_authors": 100}
+        sample = {
+            "candidates": [
+                {"author_key": f"server-only-{index}"} for index in range(20)
+            ],
+            "unmatched_authors": 100,
+        }
         activity_ctx = {"ranking_version": "evidence-v4"}
         activity = {"record_id": "activity1", "fields": {
             "活动ID": importer.DAVE_CAMPAIGN_ID, "产品主记录ID": "product1",
@@ -397,6 +402,7 @@ class LaunchEvidenceAuthorImportTests(unittest.TestCase):
             ))
 
         self.assertEqual(1, result["planned"])
+        self.assertEqual(36, result["next_offset"])
         self.assertEqual(["nextcreator"], result["selected_handles"])
         build.assert_awaited_once_with(
             campaign_id=importer.DAVE_CAMPAIGN_ID, limit=20, offset=17,

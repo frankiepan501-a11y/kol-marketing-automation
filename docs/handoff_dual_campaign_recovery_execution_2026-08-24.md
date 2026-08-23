@@ -16,12 +16,12 @@
 
 ## 改动范围
 
-- `app/launch_runtime.py`：待审资料重算、结果摘要保留、重启状态收口。
+- `app/launch_runtime.py`：待审资料重算、Dave证据自治续供、证据窗口游标、多个后台job独立留存、结果摘要保留、重启状态收口。
 - `app/launch_evidence_author_import.py`：Dave活动证据续供，每轮最多3名待审核对象。
 - `app/launch_competitor_evidence.py`、`app/launch_candidate_preview.py`：证据作者稳定续取窗口。
 - `app/keyword_supply.py`：食人花七层确定性词源，竞品层仅按活动显式配置开启。
 - `app/main.py`：后台任务入口、写入确认闸和重启恢复。
-- `scripts/upsert_launch_autonomy_workflows.ps1`：15分钟业务审计可读错误。
+- `scripts/upsert_launch_autonomy_workflows.ps1`：15分钟业务审计按结果/额度/库存/供给分项判定；错误含最新时间与下一步；全量PUT保留现有节点扩展属性和未受管分支。
 
 ## 安全边界
 
@@ -32,8 +32,8 @@
 
 ## 验证
 
-- 相关联合回归：212项＋9个子样例通过。
-- 全仓：602项＋23个子样例通过；唯一失败为既有Zeabur watchdog旧日期fixture，与KOL改动无关。
+- 修复后相关回归：91项＋3个子样例通过。
+- 全仓：604项＋23个子样例通过；唯一失败为既有Zeabur watchdog旧日期fixture，与KOL改动无关。
 - 生产最终验收尚需：最终部署版本回读、Dave续供、双活动自治、n8n 15分钟审计和发送中心raw证书抽检。
 
 ## 剩余风险与回滚

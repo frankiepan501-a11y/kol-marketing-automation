@@ -3,14 +3,17 @@ import unittest
 
 
 class LaunchAutonomyWorkflowScriptTests(unittest.TestCase):
-    def test_piranha_audit_requires_complete_business_result_contract(self):
+    def test_both_audits_require_complete_business_result_contract(self):
         script = (
             pathlib.Path(__file__).parents[1]
             / "scripts"
             / "upsert_launch_autonomy_workflows.ps1"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("allowedOutcomes", script)
+        self.assertGreaterEqual(script.count("allowedOutcomes"), 2)
+        self.assertGreaterEqual(script.count("hasQuota"), 2)
+        self.assertGreaterEqual(script.count("hasInventory"), 2)
+        self.assertGreaterEqual(script.count("hasProgress"), 2)
         self.assertIn("made_supply_progress", script)
         self.assertIn("supply_progress_breakdown", script)
         self.assertIn("missing or invalid business result fields", script)
@@ -69,6 +72,9 @@ class LaunchAutonomyWorkflowScriptTests(unittest.TestCase):
         self.assertIn("activity: 'Piranha'", script)
         self.assertIn("`activity=${report.activity}", script)
         self.assertIn("inventory=", script)
+        self.assertIn("latest=", script)
+        self.assertIn("quota=", script)
+        self.assertIn("parts=", script)
         self.assertIn("supply=", script)
         self.assertIn("next=", script)
         self.assertNotIn("JSON.stringify(summary).slice(0, 5000)", script)
@@ -81,6 +87,8 @@ class LaunchAutonomyWorkflowScriptTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("$current.nodes | Where-Object", script)
+        self.assertIn("Merge-MissingProperties", script)
+        self.assertIn("$target.node -notin $managedNames", script)
         self.assertIn("$current.connections.PSObject.Properties", script)
         self.assertIn("$current.settings.PSObject.Properties", script)
         self.assertIn("$wasActive = [bool]$current.active", script)

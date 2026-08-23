@@ -52,6 +52,28 @@ function Main-To([string]$NodeName) {
     return @{ main = ,@(@{ node = $NodeName; type = 'main'; index = 0 }) }
 }
 
+function Merge-MissingProperties($Desired, $Existing) {
+    if (-not ($Desired -is [System.Collections.IDictionary]) -or -not $Existing) {
+        return $Desired
+    }
+    $properties = if ($Existing -is [System.Collections.IDictionary]) {
+        $Existing.GetEnumerator() | ForEach-Object {
+            [pscustomobject]@{ Name = $_.Key; Value = $_.Value }
+        }
+    } else {
+        $Existing.PSObject.Properties
+    }
+    foreach ($property in $properties) {
+        $name = [string]$property.Name
+        if (-not $Desired.Contains($name)) {
+            $Desired[$name] = $property.Value
+        } elseif ($Desired[$name] -is [System.Collections.IDictionary]) {
+            Merge-MissingProperties $Desired[$name] $property.Value | Out-Null
+        }
+    }
+    return $Desired
+}
+
 function Upsert-Workflow([string]$Name, $Nodes, $Connections, $Settings, $Existing = $null) {
     $existing = $Existing
     if (-not $existing) { $existing = Get-ExistingWorkflow $Name }
@@ -66,14 +88,18 @@ function Upsert-Workflow([string]$Name, $Nodes, $Connections, $Settings, $Existi
     if ($current) {
         # Existing workflows may contain production-only nodes or settings added after this
         # script was written. Preserve them and replace only this script's managed nodes.
+        $mergedManagedNodes = @($Nodes | ForEach-Object {
+            $desiredNode = $_
+            $currentNode = $current.nodes | Where-Object { $_.name -eq $desiredNode.name } |
+                Select-Object -First 1
+            Merge-MissingProperties $desiredNode $currentNode
+        })
         $payloadNodes = @(
-            @($current.nodes | Where-Object { $_.name -notin $managedNames }) + @($Nodes)
+            @($current.nodes | Where-Object { $_.name -notin $managedNames })
+            + $mergedManagedNodes
         )
         foreach ($property in $current.connections.PSObject.Properties) {
             $payloadConnections[$property.Name] = $property.Value
-        }
-        foreach ($managedName in $managedNames) {
-            $payloadConnections.Remove($managedName)
         }
         if ($current.settings) {
             foreach ($property in $current.settings.PSObject.Properties) {
@@ -81,7 +107,25 @@ function Upsert-Workflow([string]$Name, $Nodes, $Connections, $Settings, $Existi
             }
         }
     }
-    foreach ($key in $Connections.Keys) { $payloadConnections[$key] = $Connections[$key] }
+    foreach ($key in $Connections.Keys) {
+        $replacement = $Connections[$key]
+        if ($current -and $current.connections.$key) {
+            # 保留生产上后来接到“非受管节点”的分支；本脚本只替换受管节点之间的线。
+            $extras = @()
+            foreach ($branch in @($current.connections.$key.main)) {
+                foreach ($target in @($branch)) {
+                    if ($target.node -and $target.node -notin $managedNames) {
+                        $extras += $target
+                    }
+                }
+            }
+            if ($extras.Count -gt 0) {
+                $firstBranch = @($replacement.main[0]) + $extras
+                $replacement = @{ main = ,@($firstBranch) }
+            }
+        }
+        $payloadConnections[$key] = $replacement
+    }
     foreach ($key in $Settings.Keys) { $payloadSettings[$key] = $Settings[$key] }
     $payload = @{
         name = $Name
@@ -213,26 +257,58 @@ const result = data.result || {};
 const updated = parseServiceTimestamp(data.updated_ts || data.started_ts);
 const age = updated ? Math.max(0, Math.floor(Date.now() / 1000) - updated) : 999999999;
 let ok = true;
-let validation = 'fresh_success';
+let validation = 'business_result_ok';
 let error = '';
 let nextStep = 'continue_normal_operation';
 if (data.status === 'running' && age <= 70 * 60) {
   validation = 'dave_running_within_expected_window';
   nextStep = 'wait_for_background_job';
-} else if (data.status !== 'success' || age > 70 * 60) {
-  ok = false;
-  validation = 'unhealthy';
-  error = 'Dave autonomous job is stale, degraded, or failed';
-  nextStep = result.business_outcome === 'supply_blocked'
-    ? 'refresh_pending_reviews_or_continue_activity_competitor_evidence'
-    : 'inspect_latest_job_and_rerun_autonomous_refill';
+} else {
+  const allowedOutcomes = new Set([
+    'stopped', 'held', 'inventory_sufficient', 'quota_exhausted',
+    'ready_inventory_created', 'supply_in_progress', 'supply_cooling_down',
+    'supply_blocked', 'no_action_needed',
+  ]);
+  const hasQuota = result.quota && Number.isFinite(result.quota.remaining);
+  const hasInventory = Number.isFinite(result.inventory_after);
+  const hasProgress = typeof result.made_supply_progress === 'boolean'
+    && result.supply_progress_breakdown
+    && typeof result.supply_progress_breakdown === 'object'
+    && !Array.isArray(result.supply_progress_breakdown);
+  if (data.status !== 'success' || age > 70 * 60) {
+    ok = false;
+    validation = 'unhealthy';
+    error = 'Dave autonomous job is stale, degraded, or failed';
+    nextStep = result.business_outcome === 'supply_blocked'
+      ? 'refresh_pending_reviews_or_continue_activity_competitor_evidence'
+      : 'inspect_latest_job_and_rerun_autonomous_refill';
+  } else if (!allowedOutcomes.has(result.business_outcome) || !hasQuota || !hasInventory || !hasProgress) {
+    ok = false;
+    validation = 'invalid_business_result';
+    error = 'Dave missing or invalid business result fields';
+    nextStep = 'inspect_service_result_contract';
+  } else if (result.business_outcome === 'supply_blocked') {
+    ok = false;
+    validation = 'supply_blocked';
+    error = 'Dave has unused quota but refill made no supply progress';
+    nextStep = 'refresh_pending_reviews_or_continue_activity_competitor_evidence';
+  }
 }
+const parts = result.supply_progress_breakdown || {};
 return [{json: {
   campaign: 'dave', activity: 'Dave', ok, validation, error,
+  updated_at: data.updated_ts || data.started_ts || 'missing',
   age_seconds: age, status: data.status || 'missing',
   inventory: Number(result.inventory_after || 0),
   quota_remaining: Number((result.quota || {}).remaining || 0),
-  supply: result.business_outcome || 'unknown', next_step: nextStep,
+  supply: result.business_outcome || 'unknown',
+  supply_parts: {
+    drafts: Number(parts.drafts_queued || 0) + Number(parts.drafts_queued_after_refresh || 0),
+    approved: Number(parts.auto_approved_created || 0) + Number(parts.auto_approved_after_refresh || 0),
+    discovery: Number(parts.discovery_tasks_created || 0),
+    review: Number(parts.review_candidates_created || 0) + Number(parts.evidence_candidates_imported || 0),
+  },
+  next_step: nextStep,
   data: {status: data.status, updated_ts: data.updated_ts, result},
 }}];
 '@
@@ -262,8 +338,10 @@ if (data.status === 'running' && age <= 45 * 60) {
   validation = 'running_within_expected_window';
   return [{json: {
     campaign: 'piranha', activity: 'Piranha', ok, validation, error,
+    updated_at: data.updated_ts || data.started_ts || 'missing',
     age_seconds: age, status: data.status, inventory: 0, quota_remaining: 0,
-    supply: 'background_running', next_step: 'wait_for_background_job', data,
+    supply: 'background_running', supply_parts: {},
+    next_step: 'wait_for_background_job', data,
   }}];
 }
 const result = data.result || {};
@@ -296,12 +374,21 @@ if (data.status !== 'success' || age > 35 * 60) {
   error = 'Piranha has unused quota but refill made no supply progress';
   nextStep = 'run_seven_layer_candidate_supply_and_refresh_pending_reviews';
 }
+const parts = result.supply_progress_breakdown || {};
 return [{json: {
   campaign: 'piranha', activity: 'Piranha', ok, validation, error,
+  updated_at: data.updated_ts || data.started_ts || 'missing',
   age_seconds: age, status: data.status || 'missing',
   inventory: Number(result.inventory_after || 0),
   quota_remaining: Number((result.quota || {}).remaining || 0),
-  supply: result.business_outcome || 'unknown', next_step: nextStep,
+  supply: result.business_outcome || 'unknown',
+  supply_parts: {
+    drafts: Number(parts.drafts_queued || 0) + Number(parts.drafts_queued_after_refresh || 0),
+    approved: Number(parts.auto_approved_created || 0) + Number(parts.auto_approved_after_refresh || 0),
+    discovery: Number(parts.discovery_tasks_created || 0),
+    review: Number(parts.review_candidates_created || 0) + Number(parts.evidence_candidates_imported || 0),
+  },
+  next_step: nextStep,
   data: {status: data.status, updated_ts: data.updated_ts, result},
 }}];
 '@
@@ -320,12 +407,16 @@ const summary = {
 if (missing.length || failed.length) {
   const readable = [
     byCampaign.dave || {activity: 'Dave', status: 'missing', inventory: 0,
-      supply: 'missing', next_step: 'rerun_autonomous_refill'},
+      updated_at: 'missing', quota_remaining: 0, supply: 'missing', supply_parts: {},
+      next_step: 'rerun_autonomous_refill'},
     byCampaign.piranha || {activity: 'Piranha', status: 'missing', inventory: 0,
-      supply: 'missing', next_step: 'rerun_autonomous_refill'},
+      updated_at: 'missing', quota_remaining: 0, supply: 'missing', supply_parts: {},
+      next_step: 'rerun_autonomous_refill'},
   ].map(report =>
-    `activity=${report.activity}; status=${report.status}; inventory=${report.inventory}; `
-    + `supply=${report.supply}; next=${report.next_step}; detail=${report.error || report.validation}`
+    `activity=${report.activity}; latest=${report.updated_at}; status=${report.status}; `
+    + `inventory=${report.inventory}; quota=${report.quota_remaining}; supply=${report.supply}; `
+    + `parts=${JSON.stringify(report.supply_parts || {})}; next=${report.next_step}; `
+    + `detail=${report.error || report.validation}`
   ).join(' | ');
   throw new Error('KOL launch autonomy audit blocked | ' + readable);
 }

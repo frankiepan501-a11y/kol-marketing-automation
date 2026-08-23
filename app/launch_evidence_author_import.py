@@ -535,11 +535,20 @@ async def run_continuation_import(
     base_result = {
         "campaign_id": campaign_id, "source_job_id": source_job_id,
         "offset": offset, "sample_size": len(sample.get("candidates") or []),
+        "unmatched_authors": int(sample.get("unmatched_authors") or 0),
         "eligible": len(eligible), "planned": len(selected),
         "selected_handles": [_handle(candidate) for candidate in selected],
         "blocked": len(enrichment.get("candidates") or []) - len(eligible),
         "writes": 0, "drafts_created": 0, "emails_sent": 0,
     }
+    sample_size = int(base_result["sample_size"])
+    unmatched_authors = int(base_result["unmatched_authors"])
+    if not sample_size or offset + sample_size >= unmatched_authors:
+        next_offset = 17
+    else:
+        # 已导入对象会从未匹配池消失，减去本轮导入数避免跨过后续作者。
+        next_offset = max(17, offset + sample_size - len(selected))
+    base_result["next_offset"] = next_offset
     if not commit or not selected:
         return {
             **base_result, "read_only": not commit,

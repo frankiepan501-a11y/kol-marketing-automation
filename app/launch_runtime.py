@@ -21,6 +21,7 @@ from . import (
     feishu,
     launch_candidate_preview,
     launch_evidence,
+    launch_evidence_author_import,
     launch_outcomes,
     launch_outreach,
     launch_participation,
@@ -36,6 +37,7 @@ class LaunchRuntimeError(RuntimeError):
 
 
 _LOCKS: dict[str, asyncio.Lock] = {}
+_JOB_NOTE_LOCKS: dict[str, asyncio.Lock] = {}
 LAUNCH_QUEUE_TEMPLATE_VERSION = "launch-queue-v1"
 RUNTIME_JOB_PREFIX = "[AUTONOMY_JOB]"
 CAMPAIGN_REVIEW_VIEWS = {
@@ -960,7 +962,8 @@ async def _notify_operator_review(*, campaign_id: str, activity: dict,
 
 async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                             queue_limit: int = 120, review_target: int = 20,
-                            profile_refresh_limit: int = 30) -> dict:
+                            profile_refresh_limit: int = 30,
+                            runtime_job_id: str = "") -> dict:
     """按活动进度与邮箱余量自治补池；不直接发送邮件，也不降低筛选标准。"""
     lock = _LOCKS.setdefault(campaign_id, asyncio.Lock())
     if lock.locked():
@@ -1091,6 +1094,38 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
         inventory_after = await _campaign_ready_inventory(campaign_id)
         remaining = max(0, target_ready - inventory_after["ready"])
 
+        evidence_continuation = {"planned": 0, "participation_writes": 0}
+        if (
+            remaining
+            and campaign_id == launch_evidence_author_import.DAVE_CAMPAIGN_ID
+        ):
+            continuation_job_id = runtime_job_id or (
+                "launchruntime-autonomous-" + hashlib.sha1(
+                    f"{campaign_id}|{int(time.time())}".encode("utf-8")
+                ).hexdigest()[:12]
+            )
+            continuation_offset = _dave_evidence_continuation_offset(
+                activity_fields, current_job_id=continuation_job_id,
+            )
+            try:
+                evidence_continuation = await (
+                    launch_evidence_author_import.run_continuation_import(
+                        campaign_id=campaign_id,
+                        source_job_id=continuation_job_id,
+                        offset=continuation_offset,
+                        sample_limit=20,
+                        import_limit=3,
+                        commit=True,
+                    )
+                )
+            except Exception as exc:
+                evidence_continuation = {
+                    "offset": continuation_offset,
+                    "planned": 0,
+                    "participation_writes": 0,
+                    "error": str(exc)[:240],
+                }
+
         discovery = {"ok": True, "created": 0, "skipped": "inventory_sufficient"}
         review_pool = {"created": 0}
         review_notification = {"sent": 0}
@@ -1127,6 +1162,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             "pending_review_reconcile": pending_review_reconcile,
             "append_after_refresh": second_append,
             "queue_after_refresh": second_queue,
+            "evidence_continuation": evidence_continuation,
             "discovery": discovery, "review_pool": review_pool,
             "review_notification": review_notification,
             "quality_filters_lowered": False,
@@ -1158,6 +1194,9 @@ def _with_business_outcome(result: dict) -> dict:
             result, "discovery", "active_pending_before",
         ),
         "review_candidates_created": _section_count(result, "review_pool", "created"),
+        "evidence_candidates_imported": _section_count(
+            result, "evidence_continuation", "participation_writes",
+        ),
     }
     # 刷新旧资料只是补全信息，不会增加可发送名单、候选任务或待审对象。
     # 单独出现刷新写入时，仍应暴露为 supply_blocked，避免“池仍为 0”却报成功。
@@ -1169,6 +1208,7 @@ def _with_business_outcome(result: dict) -> dict:
         "discovery_tasks_created",
         "active_discovery_tasks",
         "review_candidates_created",
+        "evidence_candidates_imported",
     )
     made_supply_progress = any(
         progress_breakdown[key] > 0 for key in supply_progress_keys
@@ -1261,7 +1301,7 @@ def _runtime_result_summary(result: dict | None) -> dict:
         }
     for key in (
         "profile_refresh", "pending_review_reconcile", "append_after_refresh",
-        "queue_after_refresh", "review_pool",
+        "queue_after_refresh", "review_pool", "evidence_continuation",
     ):
         section = result.get(key)
         if isinstance(section, dict):
@@ -1269,7 +1309,8 @@ def _runtime_result_summary(result: dict | None) -> dict:
                 name: section.get(name) for name in (
                     "processed", "writes", "updated", "auto_passed",
                     "actionable_pending", "missing_snapshot", "created", "queued",
-                    "skipped", "errors",
+                    "skipped", "errors", "offset", "next_offset", "sample_size",
+                    "eligible", "planned", "participation_writes",
                 ) if name in section
             }
     for key in (
@@ -1311,44 +1352,75 @@ async def load_runtime_job(campaign_id: str, job_id: str = "") -> dict | None:
     return None
 
 
+def _dave_evidence_continuation_offset(
+    activity_fields: dict, *, current_job_id: str = "",
+) -> int:
+    """从最近一次已完成自治任务继续证据窗口；NYXI只作用于Dave当前活动。"""
+    note = ext((activity_fields or {}).get("数据口径备注"))
+    for line in reversed(note.splitlines()):
+        if not line.startswith(RUNTIME_JOB_PREFIX):
+            continue
+        try:
+            payload = json.loads(line[len(RUNTIME_JOB_PREFIX):])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if current_job_id and payload.get("job_id") == current_job_id:
+            continue
+        continuation = ((payload.get("result") or {}).get("evidence_continuation") or {})
+        try:
+            offset = int(continuation.get("next_offset"))
+        except (TypeError, ValueError):
+            continue
+        return max(17, offset)
+    return 17
+
+
 async def persist_runtime_job(*, campaign_id: str, job_id: str, mode: str,
                               status: str, result: dict | None = None,
                               error: str = "", started_ts: float | None = None) -> dict:
-    activity = await launch_evidence.get_activity(campaign_id)
-    fields = activity.get("fields") or {}
-    now_ts = int(time.time())
-    previous = None
-    clean_lines = []
-    for line in ext(fields.get("数据口径备注")).splitlines():
-        if line.startswith(RUNTIME_JOB_PREFIX):
-            try:
-                value = json.loads(line[len(RUNTIME_JOB_PREFIX):])
-                if value.get("job_id") == job_id:
-                    previous = value
-            except (TypeError, ValueError, json.JSONDecodeError):
-                pass
-            continue
-        clean_lines.append(line)
-    payload = {
-        "job_id": job_id, "campaign_id": campaign_id, "mode": mode,
-        "status": status,
-        "started_ts": int(started_ts or (previous or {}).get("started_ts") or now_ts),
-        "updated_ts": now_ts,
-    }
-    if result is not None and status in {"success", "degraded", "error"}:
-        payload["result"] = _runtime_result_summary(result)
-    if error:
-        payload["error"] = str(error)[:300]
-    line = RUNTIME_JOB_PREFIX + json.dumps(
-        payload, ensure_ascii=False, separators=(",", ":"),
-    )
-    base = "\n".join(clean_lines).strip()
-    note = ((base[-1800:] + "\n") if base else "") + line
-    await feishu.update_record(
-        config.T_LAUNCH_CAMPAIGN, activity["record_id"],
-        {"数据口径备注": note[-3000:]},
-    )
-    return payload
+    lock = _JOB_NOTE_LOCKS.setdefault(campaign_id, asyncio.Lock())
+    async with lock:
+        activity = await launch_evidence.get_activity(campaign_id)
+        fields = activity.get("fields") or {}
+        now_ts = int(time.time())
+        previous = None
+        ordinary_lines = []
+        other_job_lines = []
+        for existing_line in ext(fields.get("数据口径备注")).splitlines():
+            if existing_line.startswith(RUNTIME_JOB_PREFIX):
+                try:
+                    value = json.loads(existing_line[len(RUNTIME_JOB_PREFIX):])
+                    if value.get("job_id") == job_id:
+                        previous = value
+                        continue
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+                other_job_lines.append(existing_line)
+            else:
+                ordinary_lines.append(existing_line)
+        payload = {
+            "job_id": job_id, "campaign_id": campaign_id, "mode": mode,
+            "status": status,
+            "started_ts": int(started_ts or (previous or {}).get("started_ts") or now_ts),
+            "updated_ts": now_ts,
+        }
+        if result is not None and status in {"success", "degraded", "error"}:
+            payload["result"] = _runtime_result_summary(result)
+        if error:
+            payload["error"] = str(error)[:300]
+        current_line = RUNTIME_JOB_PREFIX + json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"),
+        )
+        # 保留同活动其他后台任务，确保自治补池与证据续供可分别按job_id回查。
+        retained = ordinary_lines + other_job_lines[-5:] + [current_line]
+        while len("\n".join(retained)) > 3000 and len(retained) > 1:
+            retained.pop(0)
+        note = "\n".join(retained)[-3000:]
+        await feishu.update_record(
+            config.T_LAUNCH_CAMPAIGN, activity["record_id"],
+            {"数据口径备注": note},
+        )
+        return payload
 
 
 async def daily_feedback(campaign_id: str) -> dict:

@@ -548,14 +548,15 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(0, result["inventory_after"])
 
     def test_autonomous_refill_refreshes_then_requests_discovery_without_lowering_filters(self):
+        campaign_id = launch_runtime.launch_evidence_author_import.DAVE_CAMPAIGN_ID
         metrics = {
-            "campaign_id": "campaign1", "participants": 20, "sent": 4,
+            "campaign_id": campaign_id, "participants": 20, "sent": 4,
             "approved_new_development": 9, "approved_new_development_24h": 3,
             "replies": 0, "commitments": 0, "ontime_posts": 0,
             "action": "expand", "reason": "commitment gap",
         }
         activity = {"record_id": "a1", "fields": {
-            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "活动ID": campaign_id, "产品主记录ID": "product1",
             "活动目标语言": ["en", "de", "es"],
             "运行模式": "正式运行", "状态": "正式执行中",
         }}
@@ -605,6 +606,12 @@ class LaunchRuntimeTests(unittest.TestCase):
             new=AsyncMock(return_value={"checked": 1, "updated": 1,
                                         "auto_passed": 1, "actionable_pending": 0}),
         ) as reconcile, patch.object(
+            launch_runtime.launch_evidence_author_import, "run_continuation_import",
+            new=AsyncMock(return_value={
+                "offset": 17, "next_offset": 34, "planned": 3,
+                "participation_writes": 3, "drafts_created": 0, "emails_sent": 0,
+            }),
+        ) as continue_evidence, patch.object(
             launch_runtime.keyword_supply, "ensure_campaign_supply",
             new=AsyncMock(return_value={"ok": True, "created": 3}),
         ) as discover, patch.object(
@@ -614,7 +621,8 @@ class LaunchRuntimeTests(unittest.TestCase):
             launch_runtime, "_notify_operator_review", new=AsyncMock(return_value={"sent": 1}),
         ):
             result = asyncio.run(launch_runtime.autonomous_refill(
-                campaign_id="campaign1", buffer_days=2,
+                campaign_id=campaign_id, buffer_days=2,
+                runtime_job_id="launchruntime-current-job",
             ))
 
         self.assertEqual("expand", result["action"])
@@ -623,6 +631,11 @@ class LaunchRuntimeTests(unittest.TestCase):
             ["pending1", "k1", "k2"], dry_run=False, limit=3,
         )
         reconcile.assert_awaited_once()
+        continue_evidence.assert_awaited_once_with(
+            campaign_id=campaign_id,
+            source_job_id="launchruntime-current-job",
+            offset=17, sample_limit=20, import_limit=3, commit=True,
+        )
         self.assertEqual(2, append_auto.await_count)
         self.assertTrue(all(call.kwargs["allow_parallel_review"] for call in append_auto.await_args_list))
         discover.assert_awaited_once()
@@ -632,7 +645,69 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(12, result["inventory_after"])
         self.assertEqual("ready_inventory_created", result["business_outcome"])
         self.assertTrue(result["made_supply_progress"])
+        self.assertEqual(3, result["supply_progress_breakdown"]["evidence_candidates_imported"])
         self.assertGreater(sum(result["supply_progress_breakdown"].values()), 0)
+
+    def test_dave_evidence_cursor_uses_latest_completed_runtime_result(self):
+        old = launch_runtime.RUNTIME_JOB_PREFIX + json.dumps({
+            "job_id": "launchruntime-old", "status": "success",
+            "result": {"evidence_continuation": {"next_offset": 54}},
+        })
+        current = launch_runtime.RUNTIME_JOB_PREFIX + json.dumps({
+            "job_id": "launchruntime-current", "status": "running",
+        })
+
+        offset = launch_runtime._dave_evidence_continuation_offset(
+            {"数据口径备注": old + "\n" + current},
+            current_job_id="launchruntime-current",
+        )
+
+        self.assertEqual(54, offset)
+
+    def test_runtime_job_persistence_keeps_other_job_ids(self):
+        state = {"note": "业务备注"}
+
+        async def get_activity(_campaign_id):
+            return {"record_id": "activity1", "fields": {
+                "数据口径备注": state["note"],
+            }}
+
+        async def update_record(_table, _record_id, fields):
+            state["note"] = fields["数据口径备注"]
+            return {"record_id": "activity1", "fields": fields}
+
+        async def scenario():
+            await launch_runtime.persist_runtime_job(
+                campaign_id="campaign1", job_id="launchruntime-a",
+                mode="autonomous", status="running", started_ts=100,
+            )
+            await launch_runtime.persist_runtime_job(
+                campaign_id="campaign1", job_id="launchruntime-b",
+                mode="evidence_author_continuation", status="running", started_ts=101,
+            )
+            await launch_runtime.persist_runtime_job(
+                campaign_id="campaign1", job_id="launchruntime-a",
+                mode="autonomous", status="success",
+                result=launch_runtime._with_business_outcome({
+                    "action": "expand", "quota": {"remaining": 10},
+                    "inventory_after": 1,
+                }), started_ts=100,
+            )
+            return (
+                await launch_runtime.load_runtime_job("campaign1", "launchruntime-a"),
+                await launch_runtime.load_runtime_job("campaign1", "launchruntime-b"),
+            )
+
+        with patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=get_activity,
+        ), patch.object(
+            launch_runtime.feishu, "update_record", new=update_record,
+        ):
+            first, second = asyncio.run(scenario())
+
+        self.assertEqual("success", first["status"])
+        self.assertEqual("running", second["status"])
+        self.assertIn("业务备注", state["note"])
 
     def test_existing_pending_discovery_tasks_keep_supply_in_progress(self):
         result = launch_runtime._with_business_outcome({
