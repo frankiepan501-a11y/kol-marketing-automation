@@ -14,3 +14,7 @@
 - Added exact-record links and the existing `在途草稿` view `vewMC2JoMf` to the card.
 - Added fixture/live self-test. Live read-only result: P1=25, P2=2, P1 over 48h=0; no writes, email sends, or group sends.
 - Added project handoff `docs/handoff_kol_sla_digest_2026-08-23.md`.
+- Code review found and the implementation now fixes: a default-on Frankie-only production gate, explicit Frankie identity, persistent P2 daily replay protection, tracking-followup instructions, accurate metadata-write wording, live view/record target checks, and sent-message read-back checks.
+- Target suite now has 6 passing tests, including an atomic date-level P2 claim independent of queue membership. All 25 test files were rerun individually: 24 passed; only the pre-existing `test_zeabur_watchdog.py` baseline failure remains.
+- Both standards and spec re-reviews report no remaining findings after the card wording and P2 idempotency fixes.
+- Re-ran the production read-only preflight after review fixes: P1=25, P2=2, P1 over 48h=0; exact view and top-five record targets are reachable; no writes, email sends, or group sends.

@@ -198,10 +198,15 @@ NOTIFY_USERS = [(p.split(":", 1)[0], p.split(":", 1)[1]) for p in NOTIFY_USERS_S
 KOL_REVIEWER_JOB_TITLE = env("KOL_REVIEWER_JOB_TITLE", "独立站运营专员")
 
 # KOL SLA 汇总卡 (2026-08-23): P1 每次 SLA cron 发负责人私聊；P2 仅北京时间指定小时发每日汇总。
+# 默认保留 Frankie-only 生产闸：新版本部署后仍只发 Frankie；样卡确认并明确切 0 后才触达运营。
 # 视图使用“在途草稿”，卡片中的最老记录另带 record_id 直达链接。
 KOL_SLA_P2_DIGEST_HOUR = int(env("KOL_SLA_P2_DIGEST_HOUR", "12") or 12)
 KOL_SLA_TIMEZONE = env("KOL_SLA_TIMEZONE", "Asia/Shanghai")
 KOL_DRAFT_QUEUE_VIEW_ID = env("KOL_DRAFT_QUEUE_VIEW_ID", "vewMC2JoMf")
+KOL_SLA_CARD_FRANKIE_ONLY = (env("KOL_SLA_CARD_FRANKIE_ONLY", "1") or "1") != "0"
+KOL_FRANKIE_NAME = env("KOL_FRANKIE_NAME", "潘志聪-Frankie")
+KOL_FRANKIE_OPEN_ID = env("KOL_FRANKIE_OPEN_ID", "ou_629ce01f4bc31de078e10fcb038dbf78")
+KOL_SLA_STATE_DIR = env("KOL_SLA_STATE_DIR", "/tmp/kol_sla_digest")
 
 # 服务鉴权 (n8n 调用 webhook 时 Header: Authorization: Bearer <INTERNAL_TOKEN>)
 INTERNAL_TOKEN = env("INTERNAL_TOKEN", required=True)

@@ -710,7 +710,8 @@ async def resolve_notify_targets(role: str) -> list:
                 if u[0].startswith("潘") or "晓丹" in u[0]]
 
     if role == "frankie":
-        return [u for u in config.NOTIFY_USERS if u[0].startswith("潘")]
+        # 唯一、显式身份；不能按姓氏模糊筛选，避免误发给其他潘姓同事。
+        return [(config.KOL_FRANKIE_NAME, config.KOL_FRANKIE_OPEN_ID)] if config.KOL_FRANKIE_OPEN_ID else []
 
     # reviewer / ship_main 都用职务实时查
     by_title = await fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)

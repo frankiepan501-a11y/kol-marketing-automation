@@ -22,6 +22,7 @@ V1 寄样链路 SLA (扫"寄样订单号 != 空"的草稿):
   → 草稿表"低ROI60d标记"=True + 主表「维护标签」加"低ROI候选" + 飞书卡片提示
 """
 import datetime as dt
+import os
 import re, time
 from collections import Counter
 from zoneinfo import ZoneInfo
@@ -102,6 +103,57 @@ def _draft_age_hours(rec: dict, now_ms: int) -> int:
     return max(0, int((now_ms - generated) / 3600 / 1000))
 
 
+def _local_date(timestamp_ms: int) -> dt.date:
+    try:
+        timezone = ZoneInfo(config.KOL_SLA_TIMEZONE)
+    except Exception:
+        timezone = ZoneInfo("Asia/Shanghai")
+    return dt.datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone).date()
+
+
+def _p2_already_notified_today(rec: dict, now_ms: int) -> bool:
+    try:
+        sent_at = int((rec.get("fields") or {}).get("卡片发送时间") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(sent_at and _local_date(sent_at) == _local_date(now_ms))
+
+
+def _claim_p2_daily_run(now_ms: int) -> bool:
+    """Atomically claim today's P2 run, independent of any draft remaining pending."""
+    day = _local_date(now_ms).isoformat()
+    state_dir = config.KOL_SLA_STATE_DIR
+    os.makedirs(state_dir, exist_ok=True)
+    claim_path = os.path.join(state_dir, f"p2-{day}.claimed")
+    try:
+        fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(str(now_ms))
+    return True
+
+
+def _release_p2_daily_claim(now_ms: int) -> None:
+    day = _local_date(now_ms).isoformat()
+    claim_path = os.path.join(config.KOL_SLA_STATE_DIR, f"p2-{day}.claimed")
+    try:
+        os.unlink(claim_path)
+    except FileNotFoundError:
+        pass
+
+
+async def _p2_marker_exists_today(now_ms: int) -> bool:
+    """Bitable marker survives service restarts even after the claimed draft leaves the queue."""
+    marked = await feishu.search_records(config.T_DRAFT, [
+        {"field_name": "SLA已升级", "operator": "is", "value": ["true"]},
+    ], field_names=["邮件草稿来源", "卡片发送时间", "SLA已升级"])
+    return any(
+        _draft_source(rec) not in P1_DRAFT_SOURCES and _p2_already_notified_today(rec, now_ms)
+        for rec in marked
+    )
+
+
 def _queue_url() -> str:
     base = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_DRAFT}"
     view_id = (getattr(config, "KOL_DRAFT_QUEUE_VIEW_ID", "") or "").strip()
@@ -163,9 +215,16 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
         deadline = "4 小时内处理"
         intro = (
             "这些记录涉及 KOL 回复、商务报价、寄样确认或运单跟进。"
-            "请核对对方原邮件与草稿：正确则通过；不合适则否决或退回重生；需小改则改正文后通过。"
+            "回复/报价/寄样确认：核对原邮件和草稿，正确则通过；不合适则否决或退回重生。"
+            "**运单跟进：必须先补齐运单号和物流商，再检查正文并通过，不能直接点通过。**"
         )
         header_template = "orange"
+
+    metadata_line = (
+        "- 系统仅记录本次提醒所需的元数据（已提醒、提醒时间），不改正文、审批状态或寄样状态，也不会发送邮件"
+        if level == "P2"
+        else "- 本卡不会修改任何草稿字段，也不会发送邮件"
+    )
 
     return {
         "config": {"wide_screen_mode": True},
@@ -187,7 +246,7 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
                 "**系统已检查**\n"
                 "- 仅统计草稿状态仍为「待审」；运单跟进另含「待修改」\n"
                 "- 已按生成时间计算 24h / 48h 超时\n"
-                "- 本卡只做提醒，不会修改草稿，也不会发送邮件\n"
+                f"{metadata_line}\n"
                 "- 点「通过」后会进入真实邮件发送队列，不能盲点"}},
             {"tag": "div", "text": {"tag": "lark_md", "content":
                 f"**最老记录（可直接打开）**\n{_top_record_lines(items, now_ms)}"}},
@@ -235,7 +294,7 @@ async def collect_sla_overdue_drafts(now_ms: int) -> dict:
     """Read-only collection and classification used by production and the Frankie-only preflight."""
     field_names = [
         "邮件主题", "邮件草稿来源", "邮件草稿状态", "对象类型", "AI评分",
-        "生成时间", "寄样阶段", "审批意见", "SLA已升级",
+        "生成时间", "寄样阶段", "审批意见", "SLA已升级", "卡片发送时间",
     ]
     waiting_review = await feishu.search_records(config.T_DRAFT, [
         {"field_name": "邮件草稿状态", "operator": "is", "value": ["待审"]},
@@ -252,6 +311,10 @@ async def collect_sla_overdue_drafts(now_ms: int) -> dict:
     overdue = [rec for rec in all_items if _draft_age_hours(rec, now_ms) >= SLA_HOURS_REVIEW]
     p1_items = [rec for rec in overdue if _draft_source(rec) in P1_DRAFT_SOURCES]
     p2_items = [rec for rec in overdue if _draft_source(rec) not in P1_DRAFT_SOURCES]
+    # “每日一张”用任一 P2 记录的当日提醒时间作为持久标记。只要今天已经留痕，
+    # 同小时重试、人工重跑或服务重启都不会再发第二张。
+    p2_already_sent_today = any(_p2_already_notified_today(rec, now_ms) for rec in p2_items)
+    p2_due_today = [] if p2_already_sent_today else list(p2_items)
     p1_over_48h = [
         rec for rec in p1_items
         if _draft_age_hours(rec, now_ms) >= SLA_HOURS_FRANKIE_EXCEPTION
@@ -261,6 +324,8 @@ async def collect_sla_overdue_drafts(now_ms: int) -> dict:
         "overdue": overdue,
         "p1": p1_items,
         "p2": p2_items,
+        "p2_due_today": p2_due_today,
+        "p2_already_sent_today": p2_already_sent_today,
         "p1_over_48h": p1_over_48h,
     }
 
@@ -272,9 +337,14 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
     overdue = collected["overdue"]
     p1_items = collected["p1"]
     p2_items = collected["p2"]
+    p2_due_today = collected["p2_due_today"]
     p1_over_48h = collected["p1_over_48h"]
 
-    reviewer_targets = await feishu.resolve_notify_targets("ship_main")
+    frankie_targets = await feishu.resolve_notify_targets("frankie")
+    if config.KOL_SLA_CARD_FRANKIE_ONLY:
+        reviewer_targets = frankie_targets
+    else:
+        reviewer_targets = await feishu.resolve_notify_targets("ship_main")
     reviewer_delivery = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
     frankie_delivery = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
     p2_delivery = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
@@ -287,23 +357,42 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
         )
     if p1_over_48h:
         frankie_delivery = await _send_digest(
-            await feishu.resolve_notify_targets("frankie"),
+            frankie_targets,
             build_sla_digest_card(p1_over_48h, now_ms, audience="frankie", level="P1"),
             level="P1",
         )
-    if p2_items and _is_p2_digest_hour(now_ms):
-        p2_delivery = await _send_digest(
-            reviewer_targets,
-            build_sla_digest_card(p2_items, now_ms, audience="reviewer", level="P2"),
-            level="P2",
-        )
+    p2_claim_record_id = ""
+    p2_claim_persisted = False
+    if p2_due_today and _is_p2_digest_hour(now_ms):
+        already_marked = await _p2_marker_exists_today(now_ms)
+        locally_claimed = False if already_marked else _claim_p2_daily_run(now_ms)
+        if not already_marked and locally_claimed:
+            # 先写持久标记，再发卡。服务重启看 Bitable 标记；同实例并发看原子日期文件。
+            p2_claim_record_id = min((rec.get("record_id") or "") for rec in p2_due_today)
+            try:
+                await feishu.update_record(config.T_DRAFT, p2_claim_record_id, {
+                    "SLA已升级": True,
+                    "卡片发送时间": now_ms,
+                })
+            except Exception as e:
+                _release_p2_daily_claim(now_ms)
+                p2_delivery = {
+                    "sent": 0, "failed": 1,
+                    "errors": [f"P2 daily claim failed: {str(e)[:120]}"], "message_ids": [],
+                }
+                print(f"[sla_check digest] P2 daily claim failed, skip send: {e}")
+            else:
+                p2_claim_persisted = True
+                p2_delivery = await _send_digest(
+                    reviewer_targets,
+                    build_sla_digest_card(p2_due_today, now_ms, audience="reviewer", level="P2"),
+                    level="P2",
+                )
 
-    newly_marked = 0
+    reminder_timestamps_written = int(p2_claim_persisted)
     delivered_items = []
-    if reviewer_delivery["sent"]:
-        delivered_items.extend(p1_items)
     if p2_delivery["sent"]:
-        delivered_items.extend(p2_items)
+        delivered_items.extend(p2_due_today)
     if delivered_items:
         seen_delivered = set()
         for rec in delivered_items:
@@ -311,13 +400,13 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
             if not rid or rid in seen_delivered:
                 continue
             seen_delivered.add(rid)
-            if (rec.get("fields") or {}).get("SLA已升级"):
+            if rid == p2_claim_record_id:
                 continue
             try:
-                await _mark_escalated(rid)
-                newly_marked += 1
+                await feishu.update_record(config.T_DRAFT, rid, {"卡片发送时间": now_ms})
+                reminder_timestamps_written += 1
             except Exception as e:
-                print(f"[sla_check digest] mark escalated fail: {e}")
+                print(f"[sla_check digest] write reminder timestamp fail: {e}")
 
     return {
         "layer": 1,
@@ -326,10 +415,12 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
         "p1_overdue": len(p1_items),
         "p1_over_48h": len(p1_over_48h),
         "p2_overdue": len(p2_items),
+        "p2_due_today": len(p2_due_today),
         "reviewer_digest_sent": int(reviewer_delivery["sent"] > 0),
         "frankie_digest_sent": int(frankie_delivery["sent"] > 0),
         "p2_digest_sent": int(p2_delivery["sent"] > 0),
-        "newly_marked": newly_marked,
+        "newly_marked": 0,
+        "reminder_timestamps_written": reminder_timestamps_written,
         "delivery_failures": (
             reviewer_delivery["failed"] + frankie_delivery["failed"] + p2_delivery["failed"]
         ),

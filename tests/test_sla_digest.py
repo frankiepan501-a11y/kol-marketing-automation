@@ -1,6 +1,7 @@
 import asyncio
 import datetime as dt
 import os
+import tempfile
 import unittest
 from zoneinfo import ZoneInfo
 
@@ -38,7 +39,7 @@ def at_local(year, month, day, hour):
     return int(dt.datetime(year, month, day, hour, tzinfo=SHANGHAI).timestamp() * 1000)
 
 
-def draft(rid, source, age_hours, now_ms, *, status="待审", subject=None):
+def draft(rid, source, age_hours, now_ms, *, status="待审", subject=None, card_sent_ms=0):
     return {
         "record_id": rid,
         "fields": {
@@ -48,6 +49,7 @@ def draft(rid, source, age_hours, now_ms, *, status="待审", subject=None):
             "邮件主题": subject or f"subject-{rid}",
             "AI评分": 8,
             "生成时间": now_ms - age_hours * 3600 * 1000,
+            "卡片发送时间": card_sent_ms,
         },
     }
 
@@ -62,7 +64,11 @@ class SlaDigestTests(unittest.TestCase):
             "nudge": sla_check._layer_soft_nudge,
             "layer3": sla_check._layer3_no_content_30d,
             "layer4": sla_check._layer4_low_roi_60d,
+            "frankie_only": sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY,
+            "state_dir": sla_check.config.KOL_SLA_STATE_DIR,
         }
+        self.state_tmp = tempfile.TemporaryDirectory()
+        sla_check.config.KOL_SLA_STATE_DIR = self.state_tmp.name
 
     def tearDown(self):
         feishu.search_records = self.originals["search_records"]
@@ -72,6 +78,9 @@ class SlaDigestTests(unittest.TestCase):
         sla_check._layer_soft_nudge = self.originals["nudge"]
         sla_check._layer3_no_content_30d = self.originals["layer3"]
         sla_check._layer4_low_roi_60d = self.originals["layer4"]
+        sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = self.originals["frankie_only"]
+        sla_check.config.KOL_SLA_STATE_DIR = self.originals["state_dir"]
+        self.state_tmp.cleanup()
 
     def _install_fakes(self, waiting_review, waiting_tracking=()):
         sent = []
@@ -79,6 +88,11 @@ class SlaDigestTests(unittest.TestCase):
 
         async def fake_search(table_id, filters, field_names=None):
             conditions = {x["field_name"]: x["value"] for x in filters}
+            if conditions.get("SLA已升级") == ["true"]:
+                return [
+                    rec for rec in list(waiting_review) + list(waiting_tracking)
+                    if (rec.get("fields") or {}).get("SLA已升级")
+                ]
             if conditions.get("邮件草稿状态") == ["待修改"]:
                 return list(waiting_tracking)
             if conditions.get("邮件草稿状态") == ["待审"]:
@@ -118,6 +132,7 @@ class SlaDigestTests(unittest.TestCase):
         return sent, updated
 
     def test_p1_digest_is_one_card_to_reviewer_and_one_48h_exception_to_frankie(self):
+        sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = False
         now_ms = at_local(2026, 8, 23, 18)
         rows = [
             draft("rec_reply", "reply", 29, now_ms),
@@ -143,6 +158,7 @@ class SlaDigestTests(unittest.TestCase):
         self.assertIn("独立站运营专员", reviewer_text)
         self.assertIn("4 小时内处理", reviewer_text)
         self.assertIn("系统已检查", reviewer_text)
+        self.assertIn("先补齐运单号和物流商", reviewer_text)
         self.assertIn("record=rec_quote", reviewer_text)
         self.assertIn("record=rec_reply", reviewer_text)
         self.assertNotIn("record=rec_cold", reviewer_text)
@@ -161,6 +177,7 @@ class SlaDigestTests(unittest.TestCase):
         self.assertEqual(layer["p2_digest_sent"], 0)
 
     def test_p2_digest_is_sent_once_in_the_daily_hour_only(self):
+        sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = False
         noon_ms = at_local(2026, 8, 23, 12)
         rows = [
             draft("rec_cold", "cold", 30, noon_ms),
@@ -180,9 +197,51 @@ class SlaDigestTests(unittest.TestCase):
         self.assertIn("followup", card_text)
         self.assertIn("secondary_outreach", card_text)
         self.assertEqual(result["layer_1"]["p2_digest_sent"], 1)
-        self.assertEqual({rid for rid, _ in updated}, {"rec_cold", "rec_followup", "rec_secondary"})
+        self.assertEqual(
+            updated,
+            [
+                ("rec_cold", {"SLA已升级": True, "卡片发送时间": noon_ms}),
+                ("rec_followup", {"卡片发送时间": noon_ms}),
+                ("rec_secondary", {"卡片发送时间": noon_ms}),
+            ],
+        )
+
+    def test_p2_digest_does_not_repeat_when_today_was_already_recorded(self):
+        sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = False
+        noon_ms = at_local(2026, 8, 23, 12)
+        rows = [
+            draft("rec_cold", "cold", 30, noon_ms, card_sent_ms=noon_ms - 60_000),
+            draft("rec_new", "followup", 31, noon_ms),
+        ]
+        sent, updated = self._install_fakes(rows)
+
+        result = asyncio.run(sla_check.run(now_ms=noon_ms))
+
+        self.assertEqual(sent, [])
+        self.assertEqual(updated, [])
+        self.assertEqual(result["layer_1"]["p2_overdue"], 2)
+        self.assertEqual(result["layer_1"]["p2_due_today"], 0)
+
+    def test_p2_daily_run_claim_is_atomic_and_independent_of_queue_records(self):
+        noon_ms = at_local(2026, 8, 23, 12)
+
+        self.assertTrue(sla_check._claim_p2_daily_run(noon_ms))
+        self.assertFalse(sla_check._claim_p2_daily_run(noon_ms))
+
+    def test_frankie_only_gate_routes_reviewer_digest_to_explicit_frankie(self):
+        sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = True
+        now_ms = at_local(2026, 8, 23, 18)
+        rows = [draft("rec_reply", "reply", 29, now_ms)]
+        sent, _ = self._install_fakes(rows)
+
+        result = asyncio.run(sla_check.run(now_ms=now_ms))
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["receive_id"], "ou_frankie")
+        self.assertEqual(result["layer_1"]["reviewer_digest_sent"], 1)
 
     def test_p2_digest_is_silent_outside_the_daily_hour(self):
+        sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = False
         evening_ms = at_local(2026, 8, 23, 18)
         rows = [draft("rec_cold", "cold", 30, evening_ms)]
         sent, updated = self._install_fakes(rows)

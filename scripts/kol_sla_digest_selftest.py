@@ -69,6 +69,34 @@ def validate_card(card, records):
     return errors
 
 
+async def validate_live_targets(records):
+    """Validate the exact Bitable view/records behind every card URL without writing data."""
+    errors = []
+    view_id = (sla_check.config.KOL_DRAFT_QUEUE_VIEW_ID or "").strip()
+    if not view_id:
+        errors.append("missing_queue_view_id")
+    else:
+        try:
+            view = await feishu.api(
+                "GET",
+                f"/bitable/v1/apps/{sla_check.config.FEISHU_APP_TOKEN}/tables/"
+                f"{sla_check.config.T_DRAFT}/views/{view_id}",
+            )
+            if not (view.get("data") or {}).get("view"):
+                errors.append("queue_view_not_found")
+        except Exception as exc:
+            errors.append(f"queue_view_unreachable={str(exc)[:120]}")
+    for rec in records[:5]:
+        rid = rec.get("record_id") or ""
+        try:
+            found = await feishu.get_record(sla_check.config.T_DRAFT, rid)
+            if found.get("record_id") != rid:
+                errors.append(f"record_link_mismatch={rid}")
+        except Exception as exc:
+            errors.append(f"record_link_unreachable={rid}:{str(exc)[:80]}")
+    return errors
+
+
 async def read_live(now_ms):
     collected = await sla_check.collect_sla_overdue_drafts(now_ms)
     return collected["p1"], collected
@@ -92,10 +120,16 @@ async def send_frankie_sample(card):
     readback = await feishu.api("GET", f"/im/v1/messages/{message_id}", which="notify")
     message = (readback.get("data") or {}).get("items") or []
     first = message[0] if message else {}
+    raw_content = first.get("body", {}).get("content") or first.get("content") or ""
+    expected_title = sample["header"]["title"]["content"]
+    if expected_title not in raw_content or sla_check._queue_url() not in raw_content:
+        raise RuntimeError("message read-back is missing the expected title or queue button URL")
     return {
         "message_id": message_id,
         "readback_msg_type": first.get("msg_type"),
-        "readback_has_content": bool(first.get("body", {}).get("content") or first.get("content")),
+        "readback_has_content": bool(raw_content),
+        "readback_contains_title": expected_title in raw_content,
+        "readback_contains_queue_url": sla_check._queue_url() in raw_content,
     }
 
 
@@ -118,6 +152,8 @@ async def main():
 
     card = sla_check.build_sla_digest_card(records, now_ms, audience="reviewer", level="P1")
     errors = validate_card(card, records)
+    if args.live:
+        errors.extend(await validate_live_targets(records))
     result = {
         "ok": not errors,
         "mode": "live" if args.live else "fixture",

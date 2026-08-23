@@ -25,8 +25,8 @@ Replace per-draft KOL SLA card floods with role-based digest cards that reduce F
 |---|---|---|
 | Inspect current SLA and notification code | complete | Current production behavior and send seams identified |
 | Add red tests for digest behavior | complete | Tests failed on existing per-record implementation |
-| Implement P1/P2/48h digest routing | complete | Three targeted tests pass |
-| Add card self-test and run regressions | in progress | Fixture/live self-test and targeted suite pass; full suite/review pending |
+| Implement P1/P2/48h digest routing | complete | Six targeted tests pass |
+| Add card self-test and run regressions | complete | Fixture/live target checks pass; 24/25 test files pass and the only failure matches baseline |
 | Send Frankie-only sample | pending | Real card message id returned and read-back/render check completed |
 | Frankie approval and production deploy | blocked on sample approval | Deployment verified by version/execution output |
 | Documentation and closeout | pending | Handoff, plan, lesson, and final priorities recorded |
