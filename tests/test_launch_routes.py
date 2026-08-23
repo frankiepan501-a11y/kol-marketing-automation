@@ -16,6 +16,53 @@ class FakeRequest:
 
 
 class LaunchRouteTests(unittest.TestCase):
+    def test_evidence_author_continuation_defaults_to_server_side_dry_run(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.launch_evidence_author_import, "run_continuation_import",
+                new=AsyncMock(return_value={
+                    "read_only": True, "planned": 2, "writes": 0,
+                    "drafts_created": 0, "emails_sent": 0,
+                }),
+            ) as run:
+                accepted = await main.launch_evidence_author_continuation_route(
+                    FakeRequest({
+                        "campaign_id": main.launch_evidence_author_import.DAVE_CAMPAIGN_ID,
+                        "offset": 17,
+                    }), authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+                status = await main.get_launch_runtime_job(
+                    accepted["job_id"], authorization="Bearer secret",
+                )
+            main._launch_runtime_jobs.clear()
+            return status, run
+
+        status, run = asyncio.run(exercise())
+
+        self.assertEqual("success", status["status"])
+        self.assertTrue(status["result"]["read_only"])
+        self.assertEqual(17, run.await_args.kwargs["offset"])
+        self.assertFalse(run.await_args.kwargs["commit"])
+        self.assertTrue(run.await_args.kwargs["source_job_id"].startswith("launchruntime-"))
+
+    def test_evidence_author_continuation_commit_requires_exact_confirmation(self):
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+            main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+        ), patch.object(
+            main.config, "LAUNCH_PARTICIPATION_WRITE_ENABLED", True,
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.launch_evidence_author_continuation_route(
+                    FakeRequest({
+                        "campaign_id": main.launch_evidence_author_import.DAVE_CAMPAIGN_ID,
+                        "dry_run": False, "offset": 17,
+                    }), authorization="Bearer secret",
+                ))
+
+        self.assertEqual(400, ctx.exception.status_code)
+
     def test_evidence_author_import_defaults_to_background_dry_run(self):
         seeds = [
             {"platform": "YouTube", "handle": "MekelKasanova", "creator_id": "",
@@ -199,6 +246,37 @@ class LaunchRouteTests(unittest.TestCase):
         self.assertEqual(2, status["result"]["imported"])
         audit_call.assert_awaited_once()
         self.assertEqual("error", persist.await_args.kwargs["status"])
+
+    def test_interrupted_autonomous_job_is_not_left_running_after_service_restart(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            durable = {
+                "job_id": "launchruntime-autonomous-old", "status": "running",
+                "campaign_id": "campaign1", "mode": "autonomous", "started_ts": 123,
+            }
+            recovered = {
+                **durable, "status": "error",
+                "error": "service_restarted_before_job_completion",
+            }
+            with patch.object(
+                main.config, "INTERNAL_TOKEN", "secret",
+            ), patch.object(
+                main.launch_runtime, "load_runtime_job", new=AsyncMock(return_value=durable),
+            ), patch.object(
+                main.launch_runtime, "persist_runtime_job",
+                new=AsyncMock(return_value=recovered),
+            ) as persist:
+                status = await main.get_launch_runtime_job(
+                    durable["job_id"], campaign_id="campaign1",
+                    authorization="Bearer secret",
+                )
+            return status, persist
+
+        status, persist = asyncio.run(exercise())
+
+        self.assertEqual("error", status["status"])
+        self.assertEqual("service_restarted_before_job_completion", status["error"])
+        self.assertEqual("autonomous", persist.await_args.kwargs["mode"])
 
     def test_latest_running_import_uses_live_memory_without_false_restart_error(self):
         async def exercise():

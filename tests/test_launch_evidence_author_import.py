@@ -364,6 +364,51 @@ class LaunchEvidenceAuthorImportTests(unittest.TestCase):
         self.assertEqual(["draft1"], [row["record_id"] for row in result])
         fetch.assert_awaited_once()
 
+    def test_continuation_import_selects_only_current_server_verified_candidates(self):
+        eligible = self._candidate()
+        eligible.update({"handle": "nextcreator", "author_key": "youtube|handle:nextcreator"})
+        blocked = self._candidate()
+        blocked.update({
+            "handle": "blockedcreator", "author_key": "youtube|handle:blockedcreator",
+            "eligible_for_master_write": False,
+            "write_block_reasons": ["missing_valid_email"],
+        })
+        sample = {"candidates": [{"author_key": "server-only"}], "unmatched_authors": 100}
+        activity_ctx = {"ranking_version": "evidence-v4"}
+        activity = {"record_id": "activity1", "fields": {
+            "活动ID": importer.DAVE_CAMPAIGN_ID, "产品主记录ID": "product1",
+            "证据排序版本": "evidence-v4",
+        }}
+        with patch.object(
+            importer.preview, "_build_unmatched_evidence_author_sample",
+            new=AsyncMock(return_value=(sample, activity_ctx, [], [])),
+        ) as build, patch.object(
+            importer.preview, "enrich_unmatched_evidence_authors",
+            new=AsyncMock(return_value={
+                "ranking_version": "evidence-v4", "candidates": [blocked, eligible],
+            }),
+        ) as enrich, patch.object(
+            importer.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(importer, "_commit_selected", new=AsyncMock()) as commit:
+            result = asyncio.run(importer.run_continuation_import(
+                campaign_id=importer.DAVE_CAMPAIGN_ID, offset=17,
+                sample_limit=20, import_limit=3, commit=False,
+                source_job_id="launchruntime-current-job",
+            ))
+
+        self.assertEqual(1, result["planned"])
+        self.assertEqual(["nextcreator"], result["selected_handles"])
+        build.assert_awaited_once_with(
+            campaign_id=importer.DAVE_CAMPAIGN_ID, limit=20, offset=17,
+        )
+        enrich.assert_awaited_once_with(
+            campaign_id=importer.DAVE_CAMPAIGN_ID, limit=20,
+            seed_candidates=sample["candidates"],
+            source_job_id="launchruntime-current-job",
+            _include_verified_email=True, _reattach_server_evidence=True,
+        )
+        commit.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

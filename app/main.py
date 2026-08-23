@@ -2656,10 +2656,13 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                                     seed_candidates: list[dict] | None = None,
                                     source_job_id: str = "",
                                     controlled_import_commit: bool = False,
-                                    expected_handles: list[str] | None = None) -> dict:
+                                    expected_handles: list[str] | None = None,
+                                    continuation_offset: int = 17,
+                                    continuation_import_limit: int = 3) -> dict:
     read_only_modes = {"evidence_author_pilot", "evidence_author_enrichment"}
     is_read_only = mode in read_only_modes or (
-        mode == "evidence_author_import" and not controlled_import_commit
+        mode in {"evidence_author_import", "evidence_author_continuation"}
+        and not controlled_import_commit
     )
     if not is_read_only and not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise HTTPException(status_code=403, detail="活动队列写入开关未开启")
@@ -2680,9 +2683,12 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
         "seed_candidates": seed_candidates, "source_job_id": source_job_id,
         "controlled_import_commit": controlled_import_commit,
         "expected_handles": expected_handles or [],
+        "continuation_offset": continuation_offset,
+        "continuation_import_limit": continuation_import_limit,
     }
     durable_job = mode == "autonomous" or (
-        mode == "evidence_author_import" and controlled_import_commit
+        mode in {"evidence_author_import", "evidence_author_continuation"}
+        and controlled_import_commit
     )
     if durable_job:
         await launch_runtime.persist_runtime_job(
@@ -2724,6 +2730,16 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                     expected_handles=_launch_runtime_jobs[job_id].get("expected_handles") or [],
                     commit=bool(_launch_runtime_jobs[job_id].get("controlled_import_commit")),
                 )
+            elif mode == "evidence_author_continuation":
+                result = await launch_evidence_author_import.run_continuation_import(
+                    campaign_id=campaign_id, source_job_id=job_id,
+                    offset=int(_launch_runtime_jobs[job_id].get("continuation_offset") or 0),
+                    sample_limit=20,
+                    import_limit=int(
+                        _launch_runtime_jobs[job_id].get("continuation_import_limit") or 3
+                    ),
+                    commit=bool(_launch_runtime_jobs[job_id].get("controlled_import_commit")),
+                )
             else:
                 result = await launch_runtime.run_campaign(
                     campaign_id=campaign_id, pool_target=pool_target,
@@ -2749,7 +2765,10 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
         except Exception as exc:
             tr = _tb.format_exc()[-1000:]
             audit_result = None
-            if mode == "evidence_author_import" and controlled_import_commit:
+            if (
+                mode in {"evidence_author_import", "evidence_author_continuation"}
+                and controlled_import_commit
+            ):
                 try:
                     audit_result = await (
                         launch_evidence_author_import.audit_controlled_import_progress(
@@ -2986,6 +3005,39 @@ async def launch_evidence_author_import_route(
     )
 
 
+@app.post("/launch/runtime/evidence-author-continuation")
+async def launch_evidence_author_continuation_route(
+    request: Request, authorization: str = Header(default=""),
+):
+    """Dave竞品证据续供；服务端取当前证据，最多导入3名待审核对象。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    campaign_id = _launch_required(payload, "campaign_id")
+    if campaign_id != launch_evidence_author_import.DAVE_CAMPAIGN_ID:
+        raise HTTPException(status_code=422, detail="当前证据续供只允许Dave灰度活动")
+    dry_run = payload.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        raise HTTPException(status_code=422, detail="dry_run必须是JSON布尔值")
+    offset = max(0, min(1000, int(payload.get("offset") or 17)))
+    import_limit = max(1, min(3, int(payload.get("import_limit") or 3)))
+    if not dry_run:
+        if not (
+            config.LAUNCH_ACTIVITY_QUEUE_ENABLED
+            and config.LAUNCH_PARTICIPATION_WRITE_ENABLED
+        ):
+            raise HTTPException(status_code=403, detail="活动参与记录写入开关未开启")
+        if payload.get("confirm") != "IMPORT_NEXT_DAVE_EVIDENCE_AUTHORS_NO_EMAIL":
+            raise HTTPException(
+                status_code=400,
+                detail="真实续供需明确确认IMPORT_NEXT_DAVE_EVIDENCE_AUTHORS_NO_EMAIL",
+            )
+    return await _start_launch_runtime_job(
+        campaign_id=campaign_id, mode="evidence_author_continuation",
+        controlled_import_commit=not dry_run,
+        continuation_offset=offset, continuation_import_limit=import_limit,
+    )
+
+
 @app.post("/launch/runtime/queue")
 async def launch_runtime_queue(request: Request, authorization: str = Header(default="")):
     """只为现有已审活动参与人生成草稿；不重跑全池预览、不发送。"""
@@ -3027,16 +3079,16 @@ async def get_launch_runtime_job(job_id: str, campaign_id: str = "",
             job = await launch_runtime.load_runtime_job(campaign_id, job_id=job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found or expired")
-    if (
-        not memory_job and campaign_id and job.get("status") == "running"
-        and job.get("mode") == "evidence_author_import"
-    ):
-        audit_result = await launch_evidence_author_import.audit_controlled_import_progress(
-            campaign_id,
-        )
+    if not memory_job and campaign_id and job.get("status") == "running":
+        audit_result = job.get("result")
+        if job.get("mode") in {"evidence_author_import", "evidence_author_continuation"}:
+            audit_result = await (
+                launch_evidence_author_import.audit_controlled_import_progress(campaign_id)
+            )
         job = await launch_runtime.persist_runtime_job(
             campaign_id=campaign_id, job_id=job.get("job_id") or job_id,
-            mode="evidence_author_import", status="error", result=audit_result,
+            mode=job.get("mode") or "unknown",
+            status="error", result=audit_result,
             error="service_restarted_before_job_completion",
             started_ts=job.get("started_ts"),
         )

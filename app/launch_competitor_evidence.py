@@ -483,10 +483,11 @@ def candidate_for_verified_author_key(index: dict, author_key: str) -> dict | No
 
 
 def rank_unmatched_author_candidates(
-    index: dict, contacts: list[dict], *, limit: int = 20,
+    index: dict, contacts: list[dict], *, limit: int = 20, offset: int = 0,
 ) -> dict:
     """从竞品帖子反推出尚未进入主库的作者；结果只读且默认禁止写入。"""
     limit = max(1, min(int(limit), 100))
+    offset = max(0, int(offset))
     matched_authors = _matched_author_keys(index, contacts)
     posts_by_author: dict[str, list[dict]] = defaultdict(list)
     for post in index["valid_posts"]:
@@ -510,8 +511,9 @@ def rank_unmatched_author_candidates(
         "drafts_created": 0,
         "emails_sent": 0,
         "unmatched_authors": len(candidates),
-        "sample_size": min(limit, len(candidates)),
-        "candidates": candidates[:limit],
+        "offset": offset,
+        "sample_size": min(limit, max(0, len(candidates) - offset)),
+        "candidates": candidates[offset:offset + limit],
     }
 
 

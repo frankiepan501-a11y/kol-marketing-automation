@@ -1260,6 +1260,19 @@ def _runtime_result_summary(result: dict | None) -> dict:
             ],
         }
     for key in (
+        "profile_refresh", "pending_review_reconcile", "append_after_refresh",
+        "queue_after_refresh", "review_pool",
+    ):
+        section = result.get(key)
+        if isinstance(section, dict):
+            summary[key] = {
+                name: section.get(name) for name in (
+                    "processed", "writes", "updated", "auto_passed",
+                    "actionable_pending", "missing_snapshot", "created", "queued",
+                    "skipped", "errors",
+                ) if name in section
+            }
+    for key in (
         "read_only", "planned", "imported", "writes", "master_writes",
         "participation_writes", "participation_records", "drafts_created",
         "draft_count", "emails_sent", "guard", "durable_audit",

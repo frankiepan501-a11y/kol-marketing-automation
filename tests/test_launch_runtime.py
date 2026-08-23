@@ -667,6 +667,24 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual("quality_cooldown", summary["discovery"]["skipped"])
         self.assertEqual("cooldown", summary["discovery"]["quality_gate"]["mode"])
 
+    def test_runtime_summary_keeps_pending_review_reconcile_for_restart_audit(self):
+        summary = launch_runtime._runtime_result_summary({
+            "action": "expand", "quota": {"remaining": 100}, "inventory_after": 0,
+            "business_outcome": "supply_blocked", "made_supply_progress": False,
+            "supply_progress_breakdown": {},
+            "profile_refresh": {"processed": 20, "writes": 8},
+            "pending_review_reconcile": {
+                "updated": 8, "auto_passed": 3, "actionable_pending": 5,
+                "missing_snapshot": 0,
+            },
+            "queue_after_refresh": {"queued": 3},
+        })
+
+        self.assertEqual(8, summary["profile_refresh"]["writes"])
+        self.assertEqual(3, summary["pending_review_reconcile"]["auto_passed"])
+        self.assertEqual(5, summary["pending_review_reconcile"]["actionable_pending"])
+        self.assertEqual(3, summary["queue_after_refresh"]["queued"])
+
     def test_intentional_quality_cooldown_is_visible_without_false_failure(self):
         result = launch_runtime._with_business_outcome({
             "action": "expand", "quota": {"remaining": 107},

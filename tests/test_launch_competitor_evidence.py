@@ -339,6 +339,34 @@ class LaunchCompetitorEvidenceTests(unittest.TestCase):
         self.assertTrue(passed["passed"])
         self.assertEqual([], passed["reason_codes"])
 
+    def test_unmatched_author_ranking_supports_a_stable_continuation_window(self):
+        posts = [
+            {"record_id": f"post-{index}", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL账号Handle": f"creator{index}",
+                "KOL主页URL": f"https://youtube.com/@creator{index}",
+                "曝光量": 1000 - index,
+            }}
+            for index in range(8)
+        ]
+
+        first = evidence.rank_unmatched_author_candidates(
+            evidence.build_evidence_index(posts), [], limit=3, offset=0,
+        )
+        second = evidence.rank_unmatched_author_candidates(
+            evidence.build_evidence_index(posts), [], limit=3, offset=3,
+        )
+
+        self.assertEqual(0, first["offset"])
+        self.assertEqual(3, second["offset"])
+        self.assertEqual(3, first["sample_size"])
+        self.assertEqual(3, second["sample_size"])
+        self.assertTrue(
+            set(row["author_key"] for row in first["candidates"]).isdisjoint(
+                row["author_key"] for row in second["candidates"]
+            )
+        )
+
     def test_relation_ids_accept_lark_cli_direct_id_shape(self):
         posts = [{"record_id": "post1", "fields": {
             "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",

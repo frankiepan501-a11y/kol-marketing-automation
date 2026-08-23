@@ -56,6 +56,23 @@ class LaunchAutonomyWorkflowScriptTests(unittest.TestCase):
         self.assertIn("both_campaigns_checked", script)
         self.assertGreaterEqual(script.count("onError = 'continueRegularOutput'"), 2)
 
+    def test_audit_parses_service_timezone_and_throws_a_business_readable_summary(self):
+        script = (
+            pathlib.Path(__file__).parents[1]
+            / "scripts"
+            / "upsert_launch_autonomy_workflows.ps1"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("parseServiceTimestamp", script)
+        self.assertIn("replace(/([+-]\\d{2})(\\d{2})$/", script)
+        self.assertIn("activity: 'Dave'", script)
+        self.assertIn("activity: 'Piranha'", script)
+        self.assertIn("`activity=${report.activity}", script)
+        self.assertIn("inventory=", script)
+        self.assertIn("supply=", script)
+        self.assertIn("next=", script)
+        self.assertNotIn("JSON.stringify(summary).slice(0, 5000)", script)
+
     def test_upsert_preserves_unmanaged_remote_nodes_and_restores_active_state(self):
         script = (
             pathlib.Path(__file__).parents[1]

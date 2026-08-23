@@ -195,28 +195,76 @@ $auditState = Get-NodeIdMap $auditExisting
 $am = $auditState.map
 $validateDave = @'
 const data = $input.first().json || {};
-const age = Math.floor(Date.now() / 1000) - Number(data.updated_ts || data.started_ts || 0);
+function parseServiceTimestamp(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
+  }
+  const raw = String(value || '').trim();
+  if (!raw) return 0;
+  if (/^\d+(\.\d+)?$/.test(raw)) {
+    const numeric = Number(raw);
+    return numeric > 1e12 ? Math.floor(numeric / 1000) : Math.floor(numeric);
+  }
+  const normalized = raw.replace(' ', 'T').replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+}
+const result = data.result || {};
+const updated = parseServiceTimestamp(data.updated_ts || data.started_ts);
+const age = updated ? Math.max(0, Math.floor(Date.now() / 1000) - updated) : 999999999;
 let ok = true;
 let validation = 'fresh_success';
 let error = '';
+let nextStep = 'continue_normal_operation';
 if (data.status === 'running' && age <= 70 * 60) {
   validation = 'dave_running_within_expected_window';
+  nextStep = 'wait_for_background_job';
 } else if (data.status !== 'success' || age > 70 * 60) {
   ok = false;
   validation = 'unhealthy';
-  error = 'Dave latest autonomous job is not a fresh success';
+  error = 'Dave autonomous job is stale, degraded, or failed';
+  nextStep = result.business_outcome === 'supply_blocked'
+    ? 'refresh_pending_reviews_or_continue_activity_competitor_evidence'
+    : 'inspect_latest_job_and_rerun_autonomous_refill';
 }
-return [{json: {campaign: 'dave', ok, validation, error, age_seconds: age, data}}];
+return [{json: {
+  campaign: 'dave', activity: 'Dave', ok, validation, error,
+  age_seconds: age, status: data.status || 'missing',
+  inventory: Number(result.inventory_after || 0),
+  quota_remaining: Number((result.quota || {}).remaining || 0),
+  supply: result.business_outcome || 'unknown', next_step: nextStep,
+  data: {status: data.status, updated_ts: data.updated_ts, result},
+}}];
 '@
 $validatePiranha = @'
 const data = $input.first().json || {};
-const age = Math.floor(Date.now() / 1000) - Number(data.updated_ts || data.started_ts || 0);
+function parseServiceTimestamp(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
+  }
+  const raw = String(value || '').trim();
+  if (!raw) return 0;
+  if (/^\d+(\.\d+)?$/.test(raw)) {
+    const numeric = Number(raw);
+    return numeric > 1e12 ? Math.floor(numeric / 1000) : Math.floor(numeric);
+  }
+  const normalized = raw.replace(' ', 'T').replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+}
+const updated = parseServiceTimestamp(data.updated_ts || data.started_ts);
+const age = updated ? Math.max(0, Math.floor(Date.now() / 1000) - updated) : 999999999;
 let ok = true;
 let validation = 'business_result_ok';
 let error = '';
+let nextStep = 'continue_normal_operation';
 if (data.status === 'running' && age <= 45 * 60) {
   validation = 'running_within_expected_window';
-  return [{json: {campaign: 'piranha', ok, validation, error, age_seconds: age, data}}];
+  return [{json: {
+    campaign: 'piranha', activity: 'Piranha', ok, validation, error,
+    age_seconds: age, status: data.status, inventory: 0, quota_remaining: 0,
+    supply: 'background_running', next_step: 'wait_for_background_job', data,
+  }}];
 }
 const result = data.result || {};
 const allowedOutcomes = new Set([
@@ -234,17 +282,26 @@ if (data.status !== 'success' || age > 35 * 60) {
   ok = false;
   validation = 'unhealthy';
   error = 'Piranha autonomous job is stale or not successful';
+  nextStep = result.business_outcome === 'supply_blocked'
+    ? 'run_seven_layer_candidate_supply_and_refresh_pending_reviews'
+    : 'inspect_latest_job_and_rerun_autonomous_refill';
 } else if (!allowedOutcomes.has(result.business_outcome) || !hasQuota || !hasInventory || !hasProgress) {
   ok = false;
   validation = 'invalid_business_result';
   error = 'Piranha missing or invalid business result fields';
+  nextStep = 'inspect_service_result_contract';
 } else if (result.business_outcome === 'supply_blocked') {
   ok = false;
   validation = 'supply_blocked';
   error = 'Piranha has unused quota but refill made no supply progress';
+  nextStep = 'run_seven_layer_candidate_supply_and_refresh_pending_reviews';
 }
 return [{json: {
-  campaign: 'piranha', ok, validation, error, age_seconds: age,
+  campaign: 'piranha', activity: 'Piranha', ok, validation, error,
+  age_seconds: age, status: data.status || 'missing',
+  inventory: Number(result.inventory_after || 0),
+  quota_remaining: Number((result.quota || {}).remaining || 0),
+  supply: result.business_outcome || 'unknown', next_step: nextStep,
   data: {status: data.status, updated_ts: data.updated_ts, result},
 }}];
 '@
@@ -261,8 +318,16 @@ const summary = {
   piranha: byCampaign.piranha || null,
 };
 if (missing.length || failed.length) {
-  throw new Error('Launch autonomy audit found unhealthy campaign(s) after checking both: '
-    + JSON.stringify(summary).slice(0, 5000));
+  const readable = [
+    byCampaign.dave || {activity: 'Dave', status: 'missing', inventory: 0,
+      supply: 'missing', next_step: 'rerun_autonomous_refill'},
+    byCampaign.piranha || {activity: 'Piranha', status: 'missing', inventory: 0,
+      supply: 'missing', next_step: 'rerun_autonomous_refill'},
+  ].map(report =>
+    `activity=${report.activity}; status=${report.status}; inventory=${report.inventory}; `
+    + `supply=${report.supply}; next=${report.next_step}; detail=${report.error || report.validation}`
+  ).join(' | ');
+  throw new Error('KOL launch autonomy audit blocked | ' + readable);
 }
 return [{json: summary}];
 '@

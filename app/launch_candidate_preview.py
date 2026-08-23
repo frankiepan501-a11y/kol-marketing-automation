@@ -1173,7 +1173,7 @@ async def replay_candidates_targeted(
 
 
 async def _build_unmatched_evidence_author_sample(
-    *, campaign_id: str, limit: int,
+    *, campaign_id: str, limit: int, offset: int = 0,
 ) -> tuple[dict, dict, list[dict], list[dict]]:
     if campaign_id != DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID:
         raise ValueError("当前竞品作者补池灰度只允许 Dave 活动")
@@ -1192,16 +1192,17 @@ async def _build_unmatched_evidence_author_sample(
         ),
         contacts,
         limit=limit,
+        offset=offset,
     )
     return sample, activity_ctx, kols, editors
 
 
 async def preview_unmatched_evidence_authors(
-    *, campaign_id: str, limit: int = 20,
+    *, campaign_id: str, limit: int = 20, offset: int = 0,
 ) -> dict:
     """Dave P0：从竞品帖子反查未入两张主表作者；只读且不生成外联产物。"""
     sample, activity_ctx, kols, editors = await _build_unmatched_evidence_author_sample(
-        campaign_id=campaign_id, limit=limit,
+        campaign_id=campaign_id, limit=limit, offset=offset,
     )
     return {
         **sample,

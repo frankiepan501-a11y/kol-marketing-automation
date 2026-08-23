@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from urllib.parse import urlparse
 
@@ -254,28 +255,44 @@ async def audit_controlled_import_progress(campaign_id: str) -> dict:
     activity = await launch_evidence.get_activity(campaign_id)
     product_id = preview._activity_product_id(activity.get("fields") or {})
     kols, _ = await preview._load_evidence_identity_contacts()
+    participants = await feishu.fetch_all_records(
+        config.T_LAUNCH_PARTICIPANT,
+        field_names=["参与记录ID", "审核结论", "参与状态", "关联KOL", "关联邮件草稿"],
+    )
+    drafts = await feishu.fetch_all_records(
+        config.T_DRAFT,
+        field_names=["邮件草稿ID", "邮件草稿状态", "发送状态", "关联KOL"],
+    )
+    marker_re = re.compile(
+        rf"\[CONTROLLED_IMPORT\]\s*campaign={re.escape(campaign_id)};\s*"
+        r"author_key=([^;]+);"
+    )
     results = []
-    for handle, author_key in sorted(DAVE_LOCKED_AUTHORS.items()):
-        candidate = {
-            "author_key": author_key, "platform": "YouTube", "handle": handle,
-            "profile_url": f"https://youtube.com/@{handle}",
-        }
-        master = _controlled_master(candidate, kols, campaign_id)
-        if not master:
+    for master in kols:
+        match = marker_re.search(ext((master.get("fields") or {}).get("迁移备注")))
+        if not match:
             continue
+        author_key = match.group(1).strip()
+        handle = author_key.split("|handle:", 1)[-1] if "|handle:" in author_key else author_key
         kol_id = master.get("record_id")
-        participants = await _participants_by_unique_key_strong(
-            participant_key(campaign_id, product_id, kol_id),
-        ) if product_id else []
-        drafts = await _drafts_for_kol(kol_id)
+        unique_key = participant_key(campaign_id, product_id, kol_id) if product_id else ""
+        matched_participants = [
+            row for row in participants
+            if ext((row.get("fields") or {}).get("参与记录ID")) == unique_key
+        ]
+        matched_drafts = [
+            row for row in drafts
+            if kol_id in preview._link_ids((row.get("fields") or {}).get("关联KOL"))
+        ]
         results.append({
             "handle": handle, "kol_id": kol_id,
-            "participant_ids": [row.get("record_id") for row in participants],
-            "participant_count": len(participants),
+            "participant_ids": [row.get("record_id") for row in matched_participants],
+            "participant_count": len(matched_participants),
             "review_statuses": [
-                ext((row.get("fields") or {}).get("审核结论")) for row in participants
+                ext((row.get("fields") or {}).get("审核结论"))
+                for row in matched_participants
             ],
-            "draft_count": len(drafts),
+            "draft_count": len(matched_drafts),
         })
     return {
         "campaign_id": campaign_id, "durable_audit": True,
@@ -478,3 +495,69 @@ async def run_controlled_import(
             activity=current_activity, product_id=product_id,
             ranking_version=ranking_version,
         )
+
+
+async def run_continuation_import(
+    *, campaign_id: str, source_job_id: str, offset: int = 17,
+    sample_limit: int = 20, import_limit: int = 3, commit: bool = False,
+) -> dict:
+    """从当前活动证据服务端续取一页，只把本轮确定通过者写成待审核记录。"""
+    if campaign_id != DAVE_CAMPAIGN_ID:
+        raise ControlledImportError("当前证据续供只允许Dave灰度活动")
+    if not str(source_job_id or "").startswith("launchruntime-"):
+        raise ControlledImportError("证据续供缺少当前后台任务ID")
+    offset = max(0, int(offset))
+    sample_limit = max(1, min(int(sample_limit), 20))
+    import_limit = max(1, min(int(import_limit), 3))
+    sample, _, _, _ = await preview._build_unmatched_evidence_author_sample(
+        campaign_id=campaign_id, limit=sample_limit, offset=offset,
+    )
+    enrichment = await preview.enrich_unmatched_evidence_authors(
+        campaign_id=campaign_id, limit=sample_limit,
+        seed_candidates=sample.get("candidates") or [],
+        source_job_id=source_job_id,
+        _include_verified_email=True, _reattach_server_evidence=True,
+    )
+    eligible = [
+        candidate for candidate in enrichment.get("candidates") or []
+        if candidate.get("eligible_for_master_write")
+        and not candidate.get("write_block_reasons")
+    ]
+    selected = eligible[:import_limit]
+    activity = await launch_evidence.get_activity(campaign_id)
+    activity_fields = activity.get("fields") or {}
+    product_id = preview._activity_product_id(activity_fields)
+    ranking_version = ext(activity_fields.get("证据排序版本"))
+    if not product_id or not ranking_version:
+        raise ControlledImportError("活动缺少产品或排序版本")
+    if ranking_version != str(enrichment.get("ranking_version") or ""):
+        raise ControlledImportError("活动排序版本与续供写前闸版本不一致")
+    base_result = {
+        "campaign_id": campaign_id, "source_job_id": source_job_id,
+        "offset": offset, "sample_size": len(sample.get("candidates") or []),
+        "eligible": len(eligible), "planned": len(selected),
+        "selected_handles": [_handle(candidate) for candidate in selected],
+        "blocked": len(enrichment.get("candidates") or []) - len(eligible),
+        "writes": 0, "drafts_created": 0, "emails_sent": 0,
+    }
+    if not commit or not selected:
+        return {
+            **base_result, "read_only": not commit,
+            "guard": "只使用当前活动服务端证据；候选仍先进入待审核且不建草稿、不发邮件",
+        }
+
+    lock = _IMPORT_LOCKS.setdefault(campaign_id, asyncio.Lock())
+    async with lock:
+        current_activity = await launch_evidence.get_activity(campaign_id)
+        current_fields = current_activity.get("fields") or {}
+        if (
+            preview._activity_product_id(current_fields) != product_id
+            or ext(current_fields.get("证据排序版本")) != ranking_version
+        ):
+            raise ControlledImportError("活动配置在续供写入前发生变化，请重新执行")
+        committed = await _commit_selected(
+            campaign_id=campaign_id, source_job_id=source_job_id,
+            selected=selected, activity=current_activity, product_id=product_id,
+            ranking_version=ranking_version,
+        )
+    return {**base_result, **committed, "continuation_offset": offset}
