@@ -86,6 +86,15 @@ def _check_ban_phrases(body: str) -> list:
     return hits
 
 
+def _allows_new_cold_outreach(fields: dict) -> bool:
+    """空路由兼容旧数据；显式待核对/沿用线程/禁开发都不得进入常规冷开发。"""
+    route = ext((fields or {}).get("触达路由状态"))
+    if "[CONTROLLED_IMPORT]" in ext((fields or {}).get("迁移备注")):
+        # 飞书单选可能静默丢值；带受控标记的空路由必须失败关闭。
+        return route == "可新开发"
+    return route in {"", "可新开发"}
+
+
 SIGNATURE_POOL = {
     "FUNLAB": ["Tom from FUNLAB Team", "Mia @ FUNLAB Outreach", "Alex / FUNLAB Partnership"],
     "POWKONG": ["Lisa @ POWKONG Team", "Ryan from POWKONG", "Jamie / POWKONG Partnership"],
@@ -298,6 +307,8 @@ async def filter_kols(task_fields: dict, product_rid: str = "", brand: str = "",
     for rec in items:
         f = rec.get("fields", {})
         rid = rec["record_id"]
+        if not _allows_new_cold_outreach(f):
+            skipped_status += 1; continue
         coop = ext(f.get("合作状态"))
         # Layer 1 (品牌感知):
         if coop in EXCLUDE_HARD:

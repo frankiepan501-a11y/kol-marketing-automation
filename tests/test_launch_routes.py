@@ -16,6 +16,230 @@ class FakeRequest:
 
 
 class LaunchRouteTests(unittest.TestCase):
+    def test_evidence_author_import_defaults_to_background_dry_run(self):
+        seeds = [
+            {"platform": "YouTube", "handle": "MekelKasanova", "creator_id": "",
+             "author_key": "youtube|handle:mekelkasanova",
+             "profile_url": "https://youtube.com/@MekelKasanova"},
+            {"platform": "YouTube", "handle": "Itsdadmode", "creator_id": "",
+             "author_key": "youtube|handle:itsdadmode",
+             "profile_url": "https://youtube.com/@Itsdadmode"},
+            {"platform": "YouTube", "handle": "professorshario", "creator_id": "",
+             "author_key": "youtube|handle:professorshario",
+             "profile_url": "https://youtube.com/@professorshario"},
+        ]
+
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.launch_evidence_author_import, "run_controlled_import",
+                new=AsyncMock(return_value={
+                    "read_only": True, "writes": 0, "drafts_created": 0,
+                    "emails_sent": 0,
+                }),
+            ) as run:
+                accepted = await main.launch_evidence_author_import_route(
+                    FakeRequest({
+                        "campaign_id": main.launch_evidence_author_import.DAVE_CAMPAIGN_ID,
+                        "source_job_id": (
+                            main.launch_evidence_author_import.DAVE_VERIFIED_SOURCE_JOB_ID
+                        ),
+                        "seed_candidates": seeds,
+                    }), authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+                status = await main.get_launch_runtime_job(
+                    accepted["job_id"], authorization="Bearer secret",
+                )
+            main._launch_runtime_jobs.clear()
+            return status, run
+
+        status, run = asyncio.run(exercise())
+
+        self.assertEqual("success", status["status"])
+        self.assertTrue(status["result"]["read_only"])
+        run.assert_awaited_once_with(
+            campaign_id=main.launch_evidence_author_import.DAVE_CAMPAIGN_ID,
+            seed_candidates=seeds,
+            source_job_id=main.launch_evidence_author_import.DAVE_VERIFIED_SOURCE_JOB_ID,
+            expected_handles=["itsdadmode", "mekelkasanova", "professorshario"],
+            commit=False,
+        )
+
+    def test_evidence_author_import_commit_requires_exact_confirmation(self):
+        seeds = [
+            {"platform": "YouTube", "handle": "MekelKasanova", "creator_id": "",
+             "author_key": "youtube|handle:mekelkasanova",
+             "profile_url": "https://youtube.com/@MekelKasanova"},
+            {"platform": "YouTube", "handle": "Itsdadmode", "creator_id": "",
+             "author_key": "youtube|handle:itsdadmode",
+             "profile_url": "https://youtube.com/@Itsdadmode"},
+            {"platform": "YouTube", "handle": "professorshario", "creator_id": "",
+             "author_key": "youtube|handle:professorshario",
+             "profile_url": "https://youtube.com/@professorshario"},
+        ]
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+            main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+        ), patch.object(
+            main.config, "LAUNCH_PARTICIPATION_WRITE_ENABLED", True,
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.launch_evidence_author_import_route(
+                    FakeRequest({
+                        "campaign_id": main.launch_evidence_author_import.DAVE_CAMPAIGN_ID,
+                        "source_job_id": (
+                            main.launch_evidence_author_import.DAVE_VERIFIED_SOURCE_JOB_ID
+                        ),
+                        "seed_candidates": seeds, "dry_run": False,
+                    }), authorization="Bearer secret",
+                ))
+
+        self.assertEqual(400, ctx.exception.status_code)
+
+    def test_evidence_author_import_rejects_handle_with_another_channel_identity(self):
+        seeds = [
+            {"platform": "YouTube", "handle": "MekelKasanova", "creator_id": "UC-other",
+             "author_key": "youtube|handle:mekelkasanova",
+             "profile_url": "https://youtube.com/@MekelKasanova"},
+            {"platform": "YouTube", "handle": "Itsdadmode", "creator_id": "",
+             "author_key": "youtube|handle:itsdadmode",
+             "profile_url": "https://youtube.com/@Itsdadmode"},
+            {"platform": "YouTube", "handle": "professorshario", "creator_id": "",
+             "author_key": "youtube|handle:professorshario",
+             "profile_url": "https://youtube.com/@professorshario"},
+        ]
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.launch_evidence_author_import_route(
+                    FakeRequest({
+                        "campaign_id": main.launch_evidence_author_import.DAVE_CAMPAIGN_ID,
+                        "source_job_id": (
+                            main.launch_evidence_author_import.DAVE_VERIFIED_SOURCE_JOB_ID
+                        ),
+                        "seed_candidates": seeds,
+                    }), authorization="Bearer secret",
+                ))
+
+        self.assertEqual(422, ctx.exception.status_code)
+
+    def test_committed_evidence_import_persists_running_and_completion(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            result = {
+                "imported": 3, "master_writes": 3, "participation_writes": 3,
+                "drafts_created": 0, "emails_sent": 0,
+                "results": [{"handle": "mekelkasanova", "kol_id": "kol1"}],
+            }
+            with patch.object(
+                main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+            ), patch.object(
+                main.launch_runtime, "persist_runtime_job", new=AsyncMock(),
+            ) as persist, patch.object(
+                main.launch_evidence_author_import, "run_controlled_import",
+                new=AsyncMock(return_value=result),
+            ):
+                accepted = await main._start_launch_runtime_job(
+                    campaign_id=main.launch_evidence_author_import.DAVE_CAMPAIGN_ID,
+                    mode="evidence_author_import", seed_candidates=[],
+                    source_job_id="source", expected_handles=[],
+                    controlled_import_commit=True,
+                )
+                await asyncio.sleep(0)
+            main._launch_runtime_jobs.clear()
+            return accepted, persist
+
+        accepted, persist = asyncio.run(exercise())
+
+        self.assertEqual(main.launch_evidence_author_import.DAVE_CAMPAIGN_ID,
+                         accepted["campaign_id"])
+        self.assertEqual(
+            ["running", "success"],
+            [call.kwargs["status"] for call in persist.await_args_list],
+        )
+        self.assertEqual(0, persist.await_args_list[-1].kwargs["result"]["emails_sent"])
+
+    def test_interrupted_evidence_import_status_recovers_durable_progress(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            durable = {
+                "job_id": "launchruntime-interrupted", "status": "running",
+                "campaign_id": main.launch_evidence_author_import.DAVE_CAMPAIGN_ID,
+                "mode": "evidence_author_import", "started_ts": 123,
+            }
+            audit = {
+                "durable_audit": True, "imported": 2,
+                "participation_records": 1, "draft_count": 0,
+                "drafts_created": 0, "emails_sent": 0,
+            }
+            recovered = {
+                **durable, "status": "error", "error": "service_restarted_before_job_completion",
+                "result": audit,
+            }
+            with patch.object(
+                main.config, "INTERNAL_TOKEN", "secret",
+            ), patch.object(
+                main.launch_runtime, "load_runtime_job", new=AsyncMock(return_value=durable),
+            ), patch.object(
+                main.launch_evidence_author_import, "audit_controlled_import_progress",
+                new=AsyncMock(return_value=audit),
+            ) as audit_call, patch.object(
+                main.launch_runtime, "persist_runtime_job",
+                new=AsyncMock(return_value=recovered),
+            ) as persist:
+                status = await main.get_launch_runtime_job(
+                    "launchruntime-interrupted",
+                    campaign_id=main.launch_evidence_author_import.DAVE_CAMPAIGN_ID,
+                    authorization="Bearer secret",
+                )
+            return status, audit_call, persist
+
+        status, audit_call, persist = asyncio.run(exercise())
+
+        self.assertEqual("error", status["status"])
+        self.assertEqual(2, status["result"]["imported"])
+        audit_call.assert_awaited_once()
+        self.assertEqual("error", persist.await_args.kwargs["status"])
+
+    def test_latest_running_import_uses_live_memory_without_false_restart_error(self):
+        async def exercise():
+            job_id = "launchruntime-live"
+            campaign_id = main.launch_evidence_author_import.DAVE_CAMPAIGN_ID
+            main._launch_runtime_jobs.clear()
+            now = main.time.time()
+            main._launch_runtime_jobs[job_id] = {
+                "job_id": job_id, "status": "running", "campaign_id": campaign_id,
+                "mode": "evidence_author_import", "started_ts": now,
+                "request_key": "evidence_author_import|campaign|commit=1",
+                "seed_candidates": [{"email": "must-not-be-returned@example.com"}],
+            }
+            durable = {
+                "job_id": job_id, "status": "running", "campaign_id": campaign_id,
+                "mode": "evidence_author_import", "started_ts": now,
+            }
+            with patch.object(
+                main.config, "INTERNAL_TOKEN", "secret",
+            ), patch.object(
+                main.launch_runtime, "load_runtime_job", new=AsyncMock(return_value=durable),
+            ), patch.object(
+                main.launch_evidence_author_import, "audit_controlled_import_progress",
+                new=AsyncMock(),
+            ) as audit, patch.object(
+                main.launch_runtime, "persist_runtime_job", new=AsyncMock(),
+            ) as persist:
+                status = await main.get_launch_runtime_job(
+                    "latest", campaign_id=campaign_id, authorization="Bearer secret",
+                )
+            main._launch_runtime_jobs.clear()
+            return status, audit, persist
+
+        status, audit, persist = asyncio.run(exercise())
+
+        self.assertEqual("running", status["status"])
+        self.assertEqual("launchruntime-live", status["job_id"])
+        self.assertNotIn("seed_candidates", status)
+        audit.assert_not_awaited()
+        persist.assert_not_awaited()
+
     def test_keyword_pilot_defaults_to_read_only_and_caps_preview_at_four(self):
         result = {"read_only": True, "writes": 0, "would_create": 4}
         with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(

@@ -12,8 +12,10 @@ Zeabur 云端跑 (D3=c). 反爬命中率 < 80% → 切回本地 daemon.
 import asyncio
 import html as html_lib
 import json
+import os
 import re
 import time
+from collections import Counter
 import httpx
 from . import config, feishu, deepseek
 from .feishu import ext
@@ -110,6 +112,24 @@ YOUTUBE_COUNTRY_CODES = {
     "australia": "AU", "澳大利亚": "AU",
 }
 
+X_API = "https://api.x.com/2"
+X_TARGET_LANGUAGES = {"en", "de", "es"}
+X_COUNTRY_PATTERNS = {
+    "US": ("united states", "united states of america", "usa", "u.s.a.", "u.s."),
+    "UK": ("united kingdom", "great britain", "uk", "u.k."),
+    "DE": ("germany", "deutschland"),
+    "ES": ("spain", "españa"),
+    "FR": ("france",),
+    "IT": ("italy", "italia"),
+    "NL": ("netherlands", "the netherlands"),
+    "PT": ("portugal",),
+    "SE": ("sweden",),
+    "CA": ("canada",),
+    "MX": ("mexico", "méxico"),
+    "BR": ("brazil", "brasil"),
+    "AU": ("australia",),
+}
+
 
 def _balanced_json_object(source: str, start: int) -> str:
     """从 start 的左花括号读取一个完整 JSON 对象。"""
@@ -154,6 +174,19 @@ def _youtube_text(value) -> str:
             str(item.get("text") or "") for item in runs if isinstance(item, dict)
         ).strip()
     return ""
+
+
+def _parse_public_count(value: str) -> int:
+    """把公开页面的 19.3K / 1.2M 等数量转成整数；无法确认则返回0。"""
+    text = str(value or "").strip().upper().replace(",", "")
+    match = re.search(r"(\d+(?:\.\d+)?)\s*([KMB]?)", text)
+    if not match:
+        return 0
+    multiplier = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+    try:
+        return int(float(match.group(1)) * multiplier[match.group(2)])
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def parse_youtube_about_page(source: str) -> dict:
@@ -205,6 +238,7 @@ def parse_youtube_about_page(source: str) -> dict:
         "canonical_url": canonical_url,
         "channel_id": channel_id,
         "subscriber_count_text": subscribers,
+        "followers": _parse_public_count(subscribers),
     }
 
 
@@ -225,6 +259,125 @@ async def fetch_youtube_public_profile(channel_id_or_handle: str) -> dict:
                 **parse_youtube_about_page(response.text),
                 "http_status": response.status_code,
                 "source_url": str(response.url),
+            }
+    except Exception as exc:
+        return {"retrieved": False, "error": type(exc).__name__}
+
+
+def _x_handle(value: str) -> str:
+    text = str(value or "").strip()
+    match = re.search(r"(?:x|twitter)\.com/(@?[^/?#]+)", text, re.IGNORECASE)
+    if match:
+        text = match.group(1)
+    return text.lstrip("@").strip()
+
+
+def _x_country(location: str) -> str:
+    """只认简介地点中明示的国家；城市、州和时区不做国家猜测。"""
+    normalized = re.sub(r"\s+", " ", str(location or "").casefold()).strip()
+    if not normalized:
+        return ""
+    pieces = {
+        normalized,
+        *(part.strip(" .") for part in re.split(r"[,/|·]", normalized) if part.strip()),
+    }
+    for code, labels in X_COUNTRY_PATTERNS.items():
+        for label in labels:
+            if label in pieces or re.search(rf"(?<!\w){re.escape(label)}(?!\w)", normalized):
+                return code
+    return ""
+
+
+def parse_x_public_profile(user: dict, recent_posts: list[dict] | None = None) -> dict:
+    """标准化X API公开字段；资料没有明示就保持为空。"""
+    posts = [item for item in (recent_posts or []) if isinstance(item, dict)]
+    description = str((user or {}).get("description") or "").strip()
+    emails = []
+    for match in re.findall(
+        r"(?i)(?<![\w.+-])([\w.+-]+@[\w.-]+\.[a-z]{2,})(?![\w.-])",
+        description,
+    ):
+        cleaned, _ = feishu.clean_email(match)
+        if cleaned and cleaned not in emails:
+            emails.append(cleaned)
+    all_languages = [
+        str(item.get("lang") or "").strip().lower()
+        for item in posts if str(item.get("lang") or "").strip()
+    ]
+    languages = Counter(
+        language for language in all_languages if language in X_TARGET_LANGUAGES
+    )
+    language = ""
+    if languages:
+        ranked = languages.most_common()
+        # 目标语言必须在全部有语言标记的近期帖子里占严格多数；不能先丢掉
+        # 日语/法语等非目标帖子，再把仅剩的一条英语误判成账号主语言。
+        if ranked[0][1] > len(all_languages) / 2:
+            language = ranked[0][0]
+    username = str((user or {}).get("username") or "").strip()
+    metrics = (user or {}).get("public_metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    return {
+        "retrieved": bool((user or {}).get("id") and username),
+        "description": description,
+        "country_raw": str((user or {}).get("location") or "").strip(),
+        "country": _x_country((user or {}).get("location") or ""),
+        "language": language,
+        "emails": emails,
+        "email": emails[0] if emails else "",
+        "canonical_url": f"https://x.com/{username}" if username else "",
+        "creator_id": str((user or {}).get("id") or "").strip(),
+        "handle": username,
+        "followers": int(metrics.get("followers_count") or 0),
+        "website_url": str((user or {}).get("url") or "").strip(),
+        "recent_posts": [
+            {"text": str(item.get("text") or "").strip(),
+             "lang": str(item.get("lang") or "").strip().lower(),
+             "created_at": str(item.get("created_at") or "").strip()}
+            for item in posts
+        ],
+    }
+
+
+async def fetch_x_public_profile(handle_or_url: str) -> dict:
+    """用现有X API凭据读取公开资料与近期原创帖；不使用登录态。"""
+    handle = _x_handle(handle_or_url)
+    token = os.environ.get("X_BEARER_TOKEN") or os.environ.get("TWITTER_BEARER_TOKEN")
+    if not handle:
+        return {"retrieved": False, "error": "missing_x_handle"}
+    if not token:
+        return {"retrieved": False, "error": "missing_x_bearer_token"}
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cli:
+            response = await cli.get(
+                f"{X_API}/users/by/username/{handle}",
+                params={"user.fields": (
+                    "id,name,username,description,location,url,public_metrics,"
+                    "entities,verified,verified_type"
+                )},
+                headers=headers,
+            )
+            if response.status_code != 200:
+                return {"retrieved": False, "http_status": response.status_code}
+            user = (response.json() or {}).get("data") or {}
+            posts = []
+            user_id = str(user.get("id") or "")
+            if user_id:
+                post_response = await cli.get(
+                    f"{X_API}/users/{user_id}/tweets",
+                    params={
+                        "max_results": 10, "exclude": "retweets,replies",
+                        "tweet.fields": "id,text,lang,created_at",
+                    },
+                    headers=headers,
+                )
+                if post_response.status_code == 200:
+                    posts = (post_response.json() or {}).get("data") or []
+            return {
+                **parse_x_public_profile(user, posts),
+                "http_status": response.status_code,
+                "source_url": f"{X_API}/users/by/username/{handle}",
             }
     except Exception as exc:
         return {"retrieved": False, "error": type(exc).__name__}
@@ -515,6 +668,16 @@ def touch_route_for_status(status: str) -> str:
     return "待核对"
 
 
+def touch_route_for_refresh(fields: dict) -> str:
+    """刷新成功或失败都不得解除受控导入对象的人工审核锁。"""
+    if (
+        "[CONTROLLED_IMPORT]" in ext((fields or {}).get("迁移备注"))
+        and ext((fields or {}).get("触达路由状态")) == "待核对"
+    ):
+        return "待核对"
+    return touch_route_for_status(ext((fields or {}).get("合作状态")))
+
+
 def _derive_ecosystems(text: str, explicit) -> list[str]:
     selected = [value for value in (explicit or []) if value in VALID_ECOSYSTEMS]
     lowered = (text or "").lower()
@@ -614,6 +777,7 @@ def plan_profile_update(fields: dict, recent_videos: list[dict], classification:
     if classification.get("type") not in {"", "KOL"}:
         readiness = "缺资料"
 
+    route = touch_route_for_refresh(fields)
     update = {
         "标签版本": "v2",
         "近期视频标题": "\n".join(titles[:10]),
@@ -623,7 +787,7 @@ def plan_profile_update(fields: dict, recent_videos: list[dict], classification:
         "近90天发布数": posts_90d,
         "资料可用状态": readiness,
         "资料核实时间": verified_at,
-        "触达路由状态": touch_route_for_status(ext(fields.get("合作状态"))),
+        "触达路由状态": route,
     }
     if latest:
         update["最近发布日"] = latest
@@ -660,7 +824,7 @@ async def relabel_one_kol(record: dict, *, dry_run: bool = False,
         update_fields = {
             "标签版本": "待手工校验", "资料可用状态": "缺资料",
             "资料核实时间": now_ms,
-            "触达路由状态": touch_route_for_status(ext(f.get("合作状态"))),
+            "触达路由状态": touch_route_for_refresh(f),
         }
         write_error = await _persist_profile_update(rid, update_fields, dry_run=dry_run)
         return _profile_result(
@@ -676,7 +840,7 @@ async def relabel_one_kol(record: dict, *, dry_run: bool = False,
         update_fields = {
             "标签版本": "待手工校验", "近期视频抓取时间": now_ms,
             "资料可用状态": "待刷新", "资料核实时间": now_ms,
-            "触达路由状态": touch_route_for_status(ext(f.get("合作状态"))),
+            "触达路由状态": touch_route_for_refresh(f),
         }
         write_error = await _persist_profile_update(rid, update_fields, dry_run=dry_run)
         return _profile_result(

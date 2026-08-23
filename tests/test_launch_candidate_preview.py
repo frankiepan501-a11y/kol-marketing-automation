@@ -1150,6 +1150,114 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertEqual(1, result["summary"]["eligible_for_master_write"])
         full_pool.assert_not_awaited()
 
+    def test_x_author_uses_public_profile_and_recent_post_language_before_same_gate(self):
+        seed = [{
+            "author_key": "x|handle:reviewer", "name": "X Reviewer",
+            "platform": "X", "creator_id": "42", "handle": "reviewer",
+            "profile_url": "https://x.com/reviewer", "evidence_posts": [],
+        }]
+        ctx = {
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "verified_background_sample", "ranking_version": "evidence-v4",
+            "target_countries": {"DE"}, "target_languages": {"de"},
+        }
+        profile = {
+            "retrieved": True, "country": "DE", "country_raw": "Berlin, Germany",
+            "language": "de", "email": "xreview@example.com",
+            "description": "Switch gaming hardware reviews",
+            "canonical_url": "https://x.com/reviewer", "followers": 12000,
+            "recent_posts": [{"text": "Nintendo Switch controller test", "lang": "de"}],
+        }
+        with patch.object(
+            preview, "_load_verified_activity_shell", new=AsyncMock(return_value=ctx),
+        ), patch.object(
+            preview, "_load_evidence_identity_contacts", new=AsyncMock(return_value=([], [])),
+        ), patch.object(
+            preview.relabel, "fetch_x_public_profile", new=AsyncMock(return_value=profile),
+        ):
+            result = asyncio.run(preview.enrich_unmatched_evidence_authors(
+                campaign_id=preview.DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID,
+                seed_candidates=seed, source_job_id="launchruntime-verified",
+            ))
+
+        candidate = result["candidates"][0]
+        self.assertTrue(candidate["eligible_for_master_write"])
+        self.assertEqual("x_public_profile_location", candidate["country_source"])
+        self.assertEqual("x_recent_posts_lang", candidate["language_source"])
+        self.assertEqual("x_public_profile_description", candidate["email_source"])
+        self.assertEqual(12000, candidate["followers"])
+
+    def test_source_job_id_cannot_manufacture_missing_content_relevance(self):
+        seed = [{
+            "author_key": "x|handle:unrelated", "name": "Unrelated",
+            "platform": "X", "handle": "unrelated",
+            "profile_url": "https://x.com/unrelated",
+            "evidence_posts": [{"post_title": "NYXI Switch controller review"}],
+        }]
+        ctx = {
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "verified_background_sample", "ranking_version": "evidence-v4",
+            "target_countries": {"US"}, "target_languages": {"en"},
+        }
+        profile = {
+            "retrieved": True, "country": "US", "country_raw": "United States",
+            "language": "en", "email": "public@example.com",
+            "description": "Daily cooking and travel", "canonical_url": "https://x.com/unrelated",
+            "recent_posts": [{"text": "A new pasta recipe", "lang": "en"}],
+        }
+        with patch.object(
+            preview, "_load_verified_activity_shell", new=AsyncMock(return_value=ctx),
+        ), patch.object(
+            preview, "_load_evidence_identity_contacts", new=AsyncMock(return_value=([], [])),
+        ), patch.object(
+            preview.relabel, "fetch_x_public_profile", new=AsyncMock(return_value=profile),
+        ):
+            result = asyncio.run(preview.enrich_unmatched_evidence_authors(
+                campaign_id=preview.DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID,
+                seed_candidates=seed, source_job_id="launchruntime-unverified-string",
+            ))
+
+        candidate = result["candidates"][0]
+        self.assertFalse(candidate["eligible_for_master_write"])
+        self.assertIn("semantic_fit_not_verified", candidate["write_block_reasons"])
+
+    def test_x_ambiguous_post_language_stays_unknown_without_text_guess(self):
+        seed = [{
+            "author_key": "x|handle:ambiguous", "name": "Ambiguous",
+            "platform": "X", "handle": "ambiguous",
+            "profile_url": "https://x.com/ambiguous", "evidence_posts": [],
+        }]
+        ctx = {
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "verified_background_sample", "ranking_version": "evidence-v4",
+            "target_countries": {"US"}, "target_languages": {"en"},
+        }
+        profile = {
+            "retrieved": True, "country": "US", "country_raw": "United States",
+            "language": "", "email": "public@example.com",
+            "description": "English gaming bio", "canonical_url": "https://x.com/ambiguous",
+            "recent_posts": [
+                {"text": "Nintendo Switch controller", "lang": "en"},
+                {"text": "Nintendo Switch Controller", "lang": "de"},
+            ],
+        }
+        with patch.object(
+            preview, "_load_verified_activity_shell", new=AsyncMock(return_value=ctx),
+        ), patch.object(
+            preview, "_load_evidence_identity_contacts", new=AsyncMock(return_value=([], [])),
+        ), patch.object(
+            preview.relabel, "fetch_x_public_profile", new=AsyncMock(return_value=profile),
+        ):
+            result = asyncio.run(preview.enrich_unmatched_evidence_authors(
+                campaign_id=preview.DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID,
+                seed_candidates=seed, source_job_id="launchruntime-verified",
+            ))
+
+        candidate = result["candidates"][0]
+        self.assertEqual("", candidate["language"])
+        self.assertEqual("", candidate["language_source"])
+        self.assertIn("language_outside_target_or_unknown", candidate["write_block_reasons"])
+
 
 if __name__ == "__main__":
     unittest.main()

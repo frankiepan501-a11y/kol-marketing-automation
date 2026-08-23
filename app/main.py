@@ -8,7 +8,7 @@ import uuid
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_participation, launch_outcomes, launch_outreach, launch_runtime
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_evidence_author_import, launch_participation, launch_outcomes, launch_outreach, launch_runtime
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
@@ -2654,14 +2654,19 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                                     review_target: int = 20,
                                     sample_limit: int = 20,
                                     seed_candidates: list[dict] | None = None,
-                                    source_job_id: str = "") -> dict:
+                                    source_job_id: str = "",
+                                    controlled_import_commit: bool = False,
+                                    expected_handles: list[str] | None = None) -> dict:
     read_only_modes = {"evidence_author_pilot", "evidence_author_enrichment"}
-    if mode not in read_only_modes and not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
+    is_read_only = mode in read_only_modes or (
+        mode == "evidence_author_import" and not controlled_import_commit
+    )
+    if not is_read_only and not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise HTTPException(status_code=403, detail="活动队列写入开关未开启")
     _prune_launch_runtime_jobs()
     # Zeabur 重启后旧进程里的后台协程已经不存在，不能把活动表里残留的
     # running 记录继续当成活任务。当前生产为单实例，真实并发只以内存任务表判定。
-    request_key = f"{mode}|{campaign_id}"
+    request_key = f"{mode}|{campaign_id}|commit={int(controlled_import_commit)}"
     for job_id, job in _launch_runtime_jobs.items():
         if job.get("status") == "running" and job.get("request_key") == request_key:
             return {"ok": True, "accepted": True, "already_running": True,
@@ -2673,8 +2678,13 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
         "started_at": datetime_now_string(), "request_key": request_key,
         "campaign_id": campaign_id, "mode": mode,
         "seed_candidates": seed_candidates, "source_job_id": source_job_id,
+        "controlled_import_commit": controlled_import_commit,
+        "expected_handles": expected_handles or [],
     }
-    if mode == "autonomous":
+    durable_job = mode == "autonomous" or (
+        mode == "evidence_author_import" and controlled_import_commit
+    )
+    if durable_job:
         await launch_runtime.persist_runtime_job(
             campaign_id=campaign_id, job_id=job_id, mode=mode,
             status="running", started_ts=started_ts,
@@ -2706,13 +2716,21 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                     seed_candidates=_launch_runtime_jobs[job_id].get("seed_candidates"),
                     source_job_id=_launch_runtime_jobs[job_id].get("source_job_id", ""),
                 )
+            elif mode == "evidence_author_import":
+                result = await launch_evidence_author_import.run_controlled_import(
+                    campaign_id=campaign_id,
+                    seed_candidates=_launch_runtime_jobs[job_id].get("seed_candidates") or [],
+                    source_job_id=_launch_runtime_jobs[job_id].get("source_job_id", ""),
+                    expected_handles=_launch_runtime_jobs[job_id].get("expected_handles") or [],
+                    commit=bool(_launch_runtime_jobs[job_id].get("controlled_import_commit")),
+                )
             else:
                 result = await launch_runtime.run_campaign(
                     campaign_id=campaign_id, pool_target=pool_target,
                     queue_limit=queue_limit,
                 )
             job_status = launch_runtime.runtime_job_status(result)
-            if mode == "autonomous":
+            if durable_job:
                 await launch_runtime.persist_runtime_job(
                     campaign_id=campaign_id, job_id=job_id, mode=mode,
                     status=job_status, result=result, started_ts=started_ts,
@@ -2730,14 +2748,26 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                 )
         except Exception as exc:
             tr = _tb.format_exc()[-1000:]
+            audit_result = None
+            if mode == "evidence_author_import" and controlled_import_commit:
+                try:
+                    audit_result = await (
+                        launch_evidence_author_import.audit_controlled_import_progress(
+                            campaign_id,
+                        )
+                    )
+                except Exception:
+                    audit_result = None
             _launch_runtime_jobs[job_id].update(
                 status="error", finished_at=datetime_now_string(), error=str(exc)[:500],
+                **({"result": audit_result} if audit_result is not None else {}),
             )
-            if mode == "autonomous":
+            if durable_job:
                 try:
                     await launch_runtime.persist_runtime_job(
                         campaign_id=campaign_id, job_id=job_id, mode=mode,
-                        status="error", error=str(exc), started_ts=started_ts,
+                        status="error", error=str(exc), result=audit_result,
+                        started_ts=started_ts,
                     )
                 except Exception:
                     pass
@@ -2745,7 +2775,7 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
 
     asyncio.create_task(_job())
     return {"ok": True, "accepted": True, "already_running": False,
-            "job_id": job_id, "status": "running"}
+            "job_id": job_id, "campaign_id": campaign_id, "status": "running"}
 
 
 @app.post("/launch/runtime/start")
@@ -2908,6 +2938,54 @@ async def launch_evidence_author_enrichment(
     )
 
 
+@app.post("/launch/runtime/evidence-author-import")
+async def launch_evidence_author_import_route(
+    request: Request, authorization: str = Header(default=""),
+):
+    """三名Dave灰度作者受控入库；默认只预演，真实写入仍禁止建草稿/发信。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    campaign_id = _launch_required(payload, "campaign_id")
+    if campaign_id != launch_evidence_author_import.DAVE_CAMPAIGN_ID:
+        raise HTTPException(status_code=422, detail="当前受控导入只允许Dave灰度活动")
+    if str(payload.get("source_job_id") or "") != (
+        launch_evidence_author_import.DAVE_VERIFIED_SOURCE_JOB_ID
+    ):
+        raise HTTPException(status_code=422, detail="必须引用已验证的Dave写前闸任务")
+    seeds = payload.get("seed_candidates")
+    if not isinstance(seeds, list) or len(seeds) != 3:
+        raise HTTPException(status_code=422, detail="受控导入必须提供锁定的3名作者样本")
+    try:
+        handles = {
+            launch_evidence_author_import.validate_locked_seed(candidate)
+            for candidate in seeds if isinstance(candidate, dict)
+        }
+    except launch_evidence_author_import.ControlledImportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if handles != launch_evidence_author_import.DAVE_EXPECTED_HANDLES:
+        raise HTTPException(status_code=422, detail="锁定作者必须是P0通过的三名Dave候选")
+    dry_run = payload.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        raise HTTPException(status_code=422, detail="dry_run必须是JSON布尔值")
+    if not dry_run:
+        if not (
+            config.LAUNCH_ACTIVITY_QUEUE_ENABLED
+            and config.LAUNCH_PARTICIPATION_WRITE_ENABLED
+        ):
+            raise HTTPException(status_code=403, detail="活动参与记录写入开关未开启")
+        if payload.get("confirm") != "IMPORT_3_DAVE_AUTHORS_NO_EMAIL":
+            raise HTTPException(
+                status_code=400,
+                detail="真实导入需明确确认IMPORT_3_DAVE_AUTHORS_NO_EMAIL",
+            )
+    return await _start_launch_runtime_job(
+        campaign_id=campaign_id, mode="evidence_author_import",
+        seed_candidates=seeds,
+        source_job_id=launch_evidence_author_import.DAVE_VERIFIED_SOURCE_JOB_ID,
+        expected_handles=sorted(handles), controlled_import_commit=not dry_run,
+    )
+
+
 @app.post("/launch/runtime/queue")
 async def launch_runtime_queue(request: Request, authorization: str = Header(default="")):
     """只为现有已审活动参与人生成草稿；不重跑全池预览、不发送。"""
@@ -2935,16 +3013,38 @@ async def get_launch_runtime_job(job_id: str, campaign_id: str = "",
                                  authorization: str = Header(default="")):
     _check_auth(authorization)
     _prune_launch_runtime_jobs()
+    memory_job = None
     if job_id == "latest" and campaign_id:
         job = await launch_runtime.load_runtime_job(campaign_id)
+        if job:
+            memory_job = _launch_runtime_jobs.get(job.get("job_id"))
+            if memory_job:
+                job = memory_job
     else:
-        job = _launch_runtime_jobs.get(job_id)
+        memory_job = _launch_runtime_jobs.get(job_id)
+        job = memory_job
         if not job and campaign_id:
             job = await launch_runtime.load_runtime_job(campaign_id, job_id=job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found or expired")
-    public = {key: value for key, value in job.items() if key not in {"request_key", "started_ts"}}
-    return {"ok": True, "job_id": job_id, **public}
+    if (
+        not memory_job and campaign_id and job.get("status") == "running"
+        and job.get("mode") == "evidence_author_import"
+    ):
+        audit_result = await launch_evidence_author_import.audit_controlled_import_progress(
+            campaign_id,
+        )
+        job = await launch_runtime.persist_runtime_job(
+            campaign_id=campaign_id, job_id=job.get("job_id") or job_id,
+            mode="evidence_author_import", status="error", result=audit_result,
+            error="service_restarted_before_job_completion",
+            started_ts=job.get("started_ts"),
+        )
+    public = {
+        key: value for key, value in job.items()
+        if key not in {"request_key", "started_ts", "seed_candidates", "expected_handles"}
+    }
+    return {"ok": True, "job_id": public.pop("job_id", job_id), **public}
 
 
 @app.post("/launch/email/test-raw")

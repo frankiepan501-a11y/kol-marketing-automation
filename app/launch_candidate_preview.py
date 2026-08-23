@@ -200,6 +200,7 @@ async def _load_evidence_identity_contacts() -> tuple[list[dict], list[dict]]:
     kol_fields = [
         "账号名", "邮箱", "合作状态", "主平台", "国家", "语言",
         "YouTube频道ID", "主链接", "触达路由状态", "上稿标题", "上稿日期",
+        "迁移备注",
     ]
     editor_fields = list(dict.fromkeys(EDITOR_FIELDS + ["作者主页URL", "主链接"]))
     return tuple(await asyncio.gather(
@@ -1225,8 +1226,10 @@ async def preview_unmatched_evidence_authors(
 async def enrich_unmatched_evidence_authors(
     *, campaign_id: str, limit: int = 20,
     seed_candidates: list[dict] | None = None, source_job_id: str = "",
+    _include_verified_email: bool = False,
 ) -> dict:
     """对只读样本补公开资料并执行写前硬闸；仍保持零业务写入。"""
+    trusted_evidence_posts = seed_candidates is None
     if seed_candidates is not None:
         if not source_job_id.startswith("launchruntime-"):
             raise ValueError("复用样本必须提供已完成的后台 source_job_id")
@@ -1256,22 +1259,37 @@ async def enrich_unmatched_evidence_authors(
                     relabel.fetch_youtube_public_profile(identity),
                     relabel.fetch_recent_videos(identity, n=10),
                 )
+        elif platform in {"x", "twitter"}:
+            x_identity = handle or str(candidate.get("profile_url") or "")
+            if x_identity:
+                async with semaphore:
+                    profile = await relabel.fetch_x_public_profile(x_identity)
+                videos = [
+                    {"title": str(post.get("text") or ""),
+                     "language": str(post.get("lang") or "")}
+                    for post in profile.get("recent_posts") or []
+                ]
 
         recent_titles = [str(video.get("title") or "") for video in videos]
         evidence_titles = [
             str(post.get("post_title") or "")
             for post in candidate.get("evidence_posts") or []
-        ]
+        ] if trusted_evidence_posts else []
         content_text = "\n".join([
             str(profile.get("description") or ""), *recent_titles, *evidence_titles,
         ]).strip()
-        semantic_source = "public_profile_and_recent_titles"
-        if source_job_id:
-            # source_job_id 对应上一轮已成功完成的 NYXI 帖子→作者样本；该样本本身
-            # 就是作者真实发布过游戏配件内容的证据，不应因复用时省略帖子正文而丢失。
-            content_text = (content_text + "\ngaming accessory").strip()
-            semantic_source = "verified_nyxi_evidence_author_sample"
-        language, language_source = _detect_target_language(content_text)
+        # source_job_id 仅作运行追踪，不能替代当前公开内容证据。即使复用旧样本，
+        # 也必须由主页、近期内容或随样本提供的真实竞品帖子正文通过语义闸。
+        semantic_source = (
+            "public_profile_recent_content_and_verified_evidence_posts"
+            if trusted_evidence_posts else "public_profile_and_recent_content"
+        )
+        language = str(profile.get("language") or "").strip().lower()
+        language_source = "x_recent_posts_lang" if language else ""
+        # X API已经给每条近期帖返回语言。并列、非目标语言占多数或没有帖子时，
+        # 必须保持未知；不能再用简介中的少量英语词把账号猜成目标语言。
+        if not language and platform not in {"x", "twitter"}:
+            language, language_source = _detect_target_language(content_text)
         email, _ = feishu.clean_email(str(profile.get("email") or ""))
         gate_profile = {
             "platform": platform,
@@ -1309,7 +1327,15 @@ async def enrich_unmatched_evidence_authors(
             next_action = "eligible_for_controlled_master_import"
         else:
             next_action = "exclude_or_wait_for_missing_public_evidence"
-        return {
+        public_profile_source = (
+            "x_public_profile_location" if platform in {"x", "twitter"}
+            else "youtube_public_about"
+        )
+        email_source = (
+            "x_public_profile_description" if platform in {"x", "twitter"}
+            else "youtube_public_description"
+        )
+        result = {
             **candidate,
             "public_profile_retrieved": bool(profile.get("retrieved")),
             "public_profile_url": str(
@@ -1317,13 +1343,14 @@ async def enrich_unmatched_evidence_authors(
             ),
             "country": str(profile.get("country") or ""),
             "country_raw": str(profile.get("country_raw") or ""),
-            "country_source": "youtube_public_about" if profile.get("country") else "",
+            "country_source": public_profile_source if profile.get("country") else "",
             "language": language,
             "language_source": language_source,
             "semantic_source": semantic_source,
             "email_verified": bool(email),
             "email_masked": _masked_email(email),
-            "email_source": "youtube_public_description" if email else "",
+            "email_source": email_source if email else "",
+            "followers": int(profile.get("followers") or candidate.get("followers") or 0),
             "recent_video_titles": recent_titles,
             "existing_email_owners": duplicate_owners,
             "existing_identity_owners": identity_owners,
@@ -1333,6 +1360,9 @@ async def enrich_unmatched_evidence_authors(
             "write_block_reasons": reasons,
             "next_action": next_action,
         }
+        if _include_verified_email:
+            result["_verified_email"] = email
+        return result
 
     enriched = await asyncio.gather(*(enrich(candidate) for candidate in sample["candidates"]))
     reasons = Counter(

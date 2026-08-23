@@ -10,6 +10,47 @@ NOW_MS = 1_777_000_000_000
 
 
 class RelabelProfileTests(unittest.TestCase):
+    def test_x_profile_parser_uses_explicit_location_post_language_and_public_email(self):
+        result = relabel.parse_x_public_profile({
+            "id": "42", "name": "Reviewer", "username": "reviewer",
+            "description": "Switch hardware reviews. Business: hello@example.com",
+            "location": "Berlin, Germany", "url": "https://example.com",
+            "public_metrics": {"followers_count": 12345},
+        }, [
+            {"id": "1", "text": "Controller review", "lang": "de"},
+            {"id": "2", "text": "Switch setup", "lang": "de"},
+            {"id": "3", "text": "Gaming news", "lang": "en"},
+        ])
+
+        self.assertTrue(result["retrieved"])
+        self.assertEqual("DE", result["country"])
+        self.assertEqual("de", result["language"])
+        self.assertEqual("hello@example.com", result["email"])
+        self.assertEqual(12345, result["followers"])
+
+    def test_x_profile_parser_keeps_ambiguous_location_and_tied_language_unknown(self):
+        result = relabel.parse_x_public_profile({
+            "id": "43", "name": "Reviewer", "username": "reviewer",
+            "description": "Gaming every day", "location": "Bay Area",
+        }, [
+            {"id": "1", "text": "One", "lang": "en"},
+            {"id": "2", "text": "Zwei", "lang": "de"},
+        ])
+
+        self.assertEqual("", result["country"])
+        self.assertEqual("", result["language"])
+        self.assertEqual("", result["email"])
+
+    def test_x_profile_parser_does_not_ignore_non_target_language_majority(self):
+        result = relabel.parse_x_public_profile({
+            "id": "44", "username": "reviewer", "location": "United States",
+        }, [
+            *({"id": str(index), "text": "投稿", "lang": "ja"} for index in range(9)),
+            {"id": "10", "text": "Controller", "lang": "en"},
+        ])
+
+        self.assertEqual("", result["language"])
+
     def test_youtube_about_parser_reads_only_public_country_and_email(self):
         html = r'''<script>{"aboutChannelRenderer":{"metadata":{
         "aboutChannelViewModel":{"description":"For business: creator@example.com",
@@ -22,6 +63,13 @@ class RelabelProfileTests(unittest.TestCase):
         self.assertEqual("CA", result["country"])
         self.assertEqual("creator@example.com", result["email"])
         self.assertEqual("UC123", result["channel_id"])
+        self.assertEqual(19300, result["followers"])
+
+    def test_public_count_parser_supports_plain_and_abbreviated_counts(self):
+        self.assertEqual(19300, relabel._parse_public_count("19.3K subscribers"))
+        self.assertEqual(1_200_000, relabel._parse_public_count("1.2M subscribers"))
+        self.assertEqual(12345, relabel._parse_public_count("12,345 subscribers"))
+        self.assertEqual(0, relabel._parse_public_count("Subscribers hidden"))
 
     def test_youtube_about_parser_keeps_unknown_country_and_missing_email_blocked(self):
         html = r'''{"aboutChannelViewModel":{"description":"Gaming videos weekly",
@@ -120,6 +168,48 @@ class RelabelProfileTests(unittest.TestCase):
 
         self.assertEqual("人工核实有效", update["资料可用状态"])
         self.assertEqual(manual_at, update["资料核实时间"])
+
+    def test_controlled_import_route_stays_pending_during_profile_refresh(self):
+        fields = {
+            "合作状态": "未建联", "触达路由状态": "待核对",
+            "迁移备注": "[CONTROLLED_IMPORT] campaign=c1",
+        }
+        videos = [{"title": "Switch controller review", "published_at": NOW_MS - DAY_MS}]
+
+        update = relabel.plan_profile_update(
+            fields, videos,
+            {"type": "KOL", "styles": ["游戏"], "ip_tags": ["Switch"]},
+            now_ms=NOW_MS,
+        )
+
+        self.assertEqual("待核对", update["触达路由状态"])
+
+    def test_controlled_import_route_stays_pending_when_channel_id_is_missing(self):
+        record = {"record_id": "kol1", "fields": {
+            "账号名": "Controlled", "合作状态": "未建联", "主链接": None,
+            "触达路由状态": "待核对", "迁移备注": "[CONTROLLED_IMPORT] campaign=c1",
+        }}
+
+        result = asyncio.run(relabel.relabel_one_kol(record, dry_run=True, now_ms=NOW_MS))
+
+        self.assertEqual("no_channel_id", result["intended_status"])
+        self.assertEqual("待核对", result["planned_fields"]["触达路由状态"])
+
+    def test_controlled_import_route_stays_pending_when_scrape_fails(self):
+        record = {"record_id": "kol1", "fields": {
+            "账号名": "Controlled", "合作状态": "未建联",
+            "主链接": {"link": "https://youtube.com/channel/UC123"},
+            "触达路由状态": "待核对", "迁移备注": "[CONTROLLED_IMPORT] campaign=c1",
+        }}
+        with patch.object(
+            relabel, "fetch_recent_videos", new=AsyncMock(return_value=[]),
+        ):
+            result = asyncio.run(relabel.relabel_one_kol(
+                record, dry_run=True, now_ms=NOW_MS,
+            ))
+
+        self.assertEqual("scrape_fail", result["intended_status"])
+        self.assertEqual("待核对", result["planned_fields"]["触达路由状态"])
 
     def test_deterministic_fallback_builds_nintendo_profile_without_model(self):
         result = relabel.deterministic_profile_classification(

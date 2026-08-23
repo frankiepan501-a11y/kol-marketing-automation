@@ -1051,6 +1051,27 @@ def _runtime_result_summary(result: dict | None) -> dict:
                 item.get("participant_id") for item in errors if item.get("participant_id")
             ],
         }
+    for key in (
+        "read_only", "planned", "imported", "writes", "master_writes",
+        "participation_writes", "participation_records", "drafts_created",
+        "draft_count", "emails_sent", "guard", "durable_audit",
+    ):
+        if key in result:
+            summary[key] = result.get(key)
+    if result.get("blocked"):
+        summary["blocked"] = [
+            {"handle": row.get("handle"), "reasons": row.get("reasons") or []}
+            for row in result.get("blocked") or []
+        ]
+    if result.get("results"):
+        summary["results"] = [
+            {key: row.get(key) for key in (
+                "handle", "kol_id", "participant_id", "participant_ids",
+                "participant_count", "review_status", "review_statuses",
+                "master_action", "participant_action", "draft_count",
+            ) if key in row}
+            for row in result.get("results") or []
+        ]
     return summary
 
 
@@ -1093,7 +1114,7 @@ async def persist_runtime_job(*, campaign_id: str, job_id: str, mode: str,
         "started_ts": int(started_ts or (previous or {}).get("started_ts") or now_ts),
         "updated_ts": now_ts,
     }
-    if status in {"success", "degraded"}:
+    if result is not None and status in {"success", "degraded", "error"}:
         payload["result"] = _runtime_result_summary(result)
     if error:
         payload["error"] = str(error)[:300]
