@@ -22,3 +22,5 @@
 - Production push/deploy remains intentionally blocked until Frankie visually confirms the sample in the Feishu client.
 - Frankie rejected the first sample wording as too technical. Reworked the card into plain operational Chinese: action-first title and steps, translated source labels, explicit approve/edit/reject/tracking instructions, and a concrete “去审核这 N 封邮件” button. Internal terms such as SLA/source codes/queue are no longer shown.
 - Two-axis review found no hard standards violation. Fixed both actionable review points: shared the repeated review steps, changed “回复” to the broader “邮件草稿/发送”, and renamed the fixed-view button to “打开待审核邮件列表” so it does not promise an exact count the view cannot guarantee.
+- Final standards/spec re-review reports no remaining findings. Seven SLA wording/routing tests pass; full suite remains 24/25 with only the unchanged baseline `test_zeabur_watchdog.py` failure.
+- Sent revised Frankie-only card `om_x100b679b11eb5cb0dd3a030a605f80a`. Read-back confirms interactive type, expected title/content, and queue URL. No draft writes, email sends, group sends, production push, or deployment occurred.
