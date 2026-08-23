@@ -1275,14 +1275,35 @@ async def _reattach_verified_activity_evidence(
             value for value in stable_keys
             if value.startswith(f"{seed_platform}|url:")
         }
+        creator_aliases = {
+            value for value in stable_keys
+            if value.startswith(f"{seed_platform}|creator:")
+        }
         expected_handle_alias = f"{seed_platform}|handle:{seed_handle}"
         expected_url_alias = f"{seed_platform}|url:{seed_url}".casefold()
+        verified_url_alias = f"{seed_platform}|url:{verified_url}".casefold()
+        verified_channel_id = (
+            next(iter(creator_aliases)).split("|creator:", 1)[1]
+            if len(creator_aliases) == 1 else ""
+        )
+        channel_url_matches_creator = bool(
+            verified_channel_id
+            and verified_url.endswith(f"/channel/{verified_channel_id}")
+        )
+        profile_identity_matches = bool(
+            url_aliases == {expected_url_alias}
+            or (
+                url_aliases == {verified_url_alias}
+                and channel_url_matches_creator
+            )
+        )
         if (
             verified_platform != seed_platform
             or not seed_handle or verified_handle != seed_handle
-            or not seed_url or verified_url != seed_url
+            or not seed_url or not verified_url
             or handle_aliases != {expected_handle_alias}
-            or url_aliases != {expected_url_alias}
+            or len(creator_aliases) > 1
+            or not profile_identity_matches
         ):
             raise ValueError(f"当前活动证据身份与锁定样本不一致: {author_key}")
         # 身份字段继续使用经过锁定校验的 seed；只有证据相关字段来自服务端快照。
@@ -1404,6 +1425,18 @@ async def enrich_unmatched_evidence_authors(
         identity_owners = _identity_owners(candidate, kols, editors)
         already_published_target = _contains_target_product_content(content_text)
         reasons = list(gate["reason_codes"])
+        if trusted_evidence_posts and platform == "youtube":
+            evidence_creator_ids = {
+                value.split("|creator:", 1)[1]
+                for value in candidate.get("stable_identity_keys") or []
+                if str(value).casefold().startswith("youtube|creator:")
+            }
+            live_channel_id = str(profile.get("channel_id") or "").strip().casefold()
+            if evidence_creator_ids and (
+                len(evidence_creator_ids) != 1
+                or live_channel_id not in {str(value).casefold() for value in evidence_creator_ids}
+            ):
+                reasons.append("public_profile_identity_mismatch")
         if identity_owners:
             reasons.append("creator_identity_already_in_kol_or_media_master")
         if duplicate_owners:

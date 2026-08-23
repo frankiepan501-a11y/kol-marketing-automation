@@ -1232,8 +1232,8 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
             "competitor_evidence_applied": True,
             "competitor_posts": [{"record_id": "post1", "fields": {
                 "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
-                "KOL账号Handle": "seedcreator",
-                "KOL主页URL": "https://youtube.com/@seedcreator",
+                "KOL平台ID": "UC-seed", "KOL账号Handle": "seedcreator",
+                "KOL主页URL": "https://youtube.com/channel/UC-seed",
                 "帖子URL": "https://youtube.com/watch?v=verified",
                 "帖子标题": "Verified NYXI Switch controller review",
                 "曝光量": 1000,
@@ -1247,6 +1247,7 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
             "language": "en", "email": "seed@example.com",
             "description": "Public creator profile",
             "canonical_url": "https://youtube.com/@seedcreator",
+            "channel_id": "UC-seed",
         }
         with patch.object(
             preview, "_load_activity_context", new=AsyncMock(return_value=ctx),
@@ -1273,6 +1274,50 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertEqual(
             "Verified NYXI Switch controller review",
             candidate["evidence_posts"][0]["post_title"],
+        )
+
+    def test_private_import_path_blocks_live_handle_to_channel_mismatch(self):
+        seed = [{
+            "author_key": "youtube|handle:seedcreator", "name": "Seed Creator",
+            "platform": "YouTube", "creator_id": "", "handle": "SeedCreator",
+            "profile_url": "https://youtube.com/@seedcreator",
+        }]
+        ctx = {
+            "competitor_evidence_applied": True,
+            "competitor_posts": [{"record_id": "post1", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL平台ID": "UC-evidence", "KOL账号Handle": "seedcreator",
+                "KOL主页URL": "https://youtube.com/channel/UC-evidence",
+                "帖子URL": "https://youtube.com/watch?v=verified",
+                "帖子标题": "NYXI Switch controller review",
+            }}],
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "activity_node_snapshot", "ranking_version": "evidence-v4",
+            "target_countries": {"US"}, "target_languages": {"en"},
+        }
+        profile = {
+            "retrieved": True, "country": "US", "country_raw": "United States",
+            "language": "en", "email": "seed@example.com",
+            "description": "Gaming controller review", "channel_id": "UC-other",
+        }
+        with patch.object(
+            preview, "_load_activity_context", new=AsyncMock(return_value=ctx),
+        ), patch.object(
+            preview, "_load_evidence_identity_contacts", new=AsyncMock(return_value=([], [])),
+        ), patch.object(
+            preview.relabel, "fetch_youtube_public_profile", new=AsyncMock(return_value=profile),
+        ), patch.object(
+            preview.relabel, "fetch_recent_videos", new=AsyncMock(return_value=[]),
+        ):
+            result = asyncio.run(preview.enrich_unmatched_evidence_authors(
+                campaign_id=preview.DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID,
+                seed_candidates=seed, source_job_id="launchruntime-verified",
+                _reattach_server_evidence=True,
+            ))
+
+        self.assertIn(
+            "public_profile_identity_mismatch",
+            result["candidates"][0]["write_block_reasons"],
         )
 
     def test_private_import_path_blocks_server_evidence_identity_mismatch(self):
