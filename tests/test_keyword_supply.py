@@ -7,17 +7,91 @@ from app import keyword_supply
 
 
 class KeywordSupplyBrazilTests(unittest.TestCase):
+    def test_piranha_exhausted_seeds_use_traceable_seven_layer_deterministic_pool(self):
+        old_words = []
+        for groups in (
+            keyword_supply._CAMPAIGN_KEYWORDS["piranha"],
+            keyword_supply._CAMPAIGN_FALLBACK_KEYWORDS["piranha"],
+        ):
+            old_words.extend(groups.get("en", []))
+        used = [{"fields": {
+            "任务名": "[活动补池:campaign1] YT KOL - " + word,
+            "关键词列表": word, "爬虫类型": "KOL-YouTube",
+            "任务状态": "3-已完成", "筛选-语言": ["en"],
+        }} for word in old_words]
+        activity = {"fields": {
+            "活动目标语言": ["en"], "竞品证据模式": "不使用",
+            "竞品分析状态": "不适用", "竞品品牌": "NYXI",
+        }}
+        product = {"fields": {
+            "产品英文名": "POWKONG Piranha Plant 2 Dock",
+            "品类": "底座", "适配IP": ["Super Mario", "Piranha Plant"],
+            "适配主机": ["Switch 2"],
+        }}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=used),
+        ), patch.object(
+            keyword_supply.deepseek, "chat_json", new=AsyncMock(),
+        ) as generate, patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(return_value="task1"),
+        ) as create_record:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=300, max_tasks=6, dry_run=False,
+            ))
+
+        self.assertEqual(6, result["created"])
+        self.assertEqual("seven_layer_deterministic", result["keyword_source"])
+        self.assertEqual(6, len({item["source"] for item in result["keywords"]}))
+        self.assertTrue(all(len(item["axes"]) >= 3 for item in result["keywords"]))
+        self.assertTrue(all("nyxi" not in item["keyword"] for item in result["keywords"]))
+        self.assertTrue(all(
+            "[词源:" in call.args[1]["任务名"]
+            for call in create_record.await_args_list
+        ))
+        generate.assert_not_awaited()
+
+    def test_piranha_competitor_layer_is_only_enabled_by_activity_evidence_mode(self):
+        base_fields = {
+            "活动目标语言": ["en"], "竞品品牌": "OtherBrand",
+        }
+        product_fields = {
+            "产品英文名": "POWKONG Piranha Plant 2 Dock",
+            "品类": "底座", "适配IP": ["Super Mario"], "适配主机": ["Switch 2"],
+        }
+        disabled = keyword_supply._piranha_seven_layer_candidates(
+            activity_fields={**base_fields, "竞品证据模式": "不使用",
+                             "竞品分析状态": "不适用"},
+            product_fields=product_fields, languages=["en"],
+            existing_keywords=set(), limit=20,
+        )
+        enabled = keyword_supply._piranha_seven_layer_candidates(
+            activity_fields={**base_fields, "竞品证据模式": keyword_supply.launch_evidence.MODE_REUSE,
+                             "竞品分析状态": "已就绪"},
+            product_fields=product_fields, languages=["en"],
+            existing_keywords=set(), limit=20,
+        )
+
+        self.assertNotIn("competitor", {item["source"] for item in disabled})
+        self.assertIn("competitor", {item["source"] for item in enabled})
+
     def test_piranha_uses_curated_fallback_when_dynamic_generation_is_unavailable(self):
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+        fixed = list(keyword_supply._CAMPAIGN_KEYWORDS["piranha"]["en"])
+        seven_layer = keyword_supply._piranha_seven_layer_candidates(
+            activity_fields=activity["fields"], product_fields=product["fields"],
+            languages=["en"], existing_keywords=set(fixed), limit=100,
+        )
         used = [
             {"fields": {
                 "任务名": "[活动补池:campaign1] YT KOL - " + word,
                 "关键词列表": word, "爬虫类型": "KOL-YouTube",
                 "任务状态": "3-已完成", "筛选-语言": ["en"],
             }}
-            for word in keyword_supply._CAMPAIGN_KEYWORDS["piranha"]["en"]
+            for word in fixed + [item["keyword"] for item in seven_layer]
         ]
-        activity = {"fields": {"活动目标语言": ["en"]}}
-        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
 
         with patch.object(
             keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=used),
@@ -40,16 +114,21 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         self.assertEqual(5, create_record.await_count)
 
     def test_campaign_supply_generates_more_targeted_keywords_after_seed_list_is_exhausted(self):
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+        fixed = list(keyword_supply._CAMPAIGN_KEYWORDS["piranha"]["en"])
+        seven_layer = keyword_supply._piranha_seven_layer_candidates(
+            activity_fields=activity["fields"], product_fields=product["fields"],
+            languages=["en"], existing_keywords=set(fixed), limit=100,
+        )
         used = [
             {"fields": {
                 "任务名": "[活动补池:campaign1] YT KOL - " + word,
                 "关键词列表": word, "爬虫类型": "KOL-YouTube",
                 "任务状态": "3-已完成", "筛选-语言": ["en"],
             }}
-            for word in keyword_supply._CAMPAIGN_KEYWORDS["piranha"]["en"]
+            for word in fixed + [item["keyword"] for item in seven_layer]
         ]
-        activity = {"fields": {"活动目标语言": ["en"]}}
-        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
 
         with patch.object(
             keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=used),

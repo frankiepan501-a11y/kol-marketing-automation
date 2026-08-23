@@ -94,7 +94,7 @@ _CAMPAIGN_KEYWORDS = {
     },
 }
 
-# 食人花活动的首批固定词耗尽后，优先由 DeepSeek 生成更长尾的词；
+# 食人花活动的首批固定词和确定性七层词耗尽后，才由 DeepSeek 生成更长尾的词；
 # 外部模型欠费/不可用时，用这组经过品类约束的词继续建发现任务，避免补池停摆。
 # 这些词只覆盖 Nintendo / Mario 收藏、游戏房、主机硬件评测四类目标受众。
 _CAMPAIGN_FALLBACK_KEYWORDS = {
@@ -200,6 +200,114 @@ def _discovery_item(*, language: str, keyword: str, source: str,
         )),
         "reason": reason, "evidence_mode": evidence_mode,
     }
+
+
+_PIRANHA_SEVEN_LAYER_TERMS = {
+    "en": {
+        "ip": ["piranha plant", "super mario", "mario"],
+        "platform": ["nintendo switch 2", "nintendo switch"],
+        "category": ["gaming dock", "switch dock", "gaming accessory"],
+        "problem": ["organized gaming desk", "game room display", "charging setup"],
+        "format": ["review", "unboxing", "setup tour", "collection showcase"],
+        "adjacent": ["nintendo collector", "mario fan", "retro gamer"],
+    },
+    "de": {
+        "ip": ["piranha plant", "super mario", "mario"],
+        "platform": ["nintendo switch 2", "nintendo switch"],
+        "category": ["gaming dock", "switch dock", "nintendo zubehör"],
+        "problem": ["ordentlicher gaming tisch", "spielzimmer vitrine", "lade setup"],
+        "format": ["test deutsch", "unboxing deutsch", "setup tour deutsch", "sammlung deutsch"],
+        "adjacent": ["nintendo sammler", "mario fan", "retro gamer deutsch"],
+    },
+    "es": {
+        "ip": ["piranha plant", "super mario", "mario"],
+        "platform": ["nintendo switch 2", "nintendo switch"],
+        "category": ["dock gamer", "base switch", "accesorios nintendo"],
+        "problem": ["escritorio gamer ordenado", "vitrina gamer", "setup de carga"],
+        "format": ["reseña español", "unboxing español", "tour setup español", "colección español"],
+        "adjacent": ["coleccionista nintendo", "fan de mario", "gamer retro español"],
+    },
+}
+
+
+def _piranha_seven_layer_candidates(*, activity_fields: dict, product_fields: dict,
+                                     languages: list[str], existing_keywords: set[str],
+                                     limit: int = 100) -> list[dict]:
+    """按活动配置编译七层可追溯词；竞品层默认关闭，绝不绑定某个品牌。"""
+    mode = ext(activity_fields.get("竞品证据模式")).strip()
+    evidence_status = ext(activity_fields.get("竞品分析状态")).strip()
+    competitor = _english_phrase(ext(activity_fields.get("竞品品牌")))
+    competitor_enabled = bool(
+        competitor
+        and mode in {launch_evidence.MODE_NEW, launch_evidence.MODE_REUSE}
+        and evidence_status == "已就绪"
+    )
+    product_ip = ext(product_fields.get("适配IP")).strip() or "Piranha Plant"
+    product_platform = ext(product_fields.get("适配主机")).strip() or "Switch 2"
+    product_category = ext(product_fields.get("品类")).strip() or "gaming dock"
+    product_anchor = f"{product_ip}/{product_platform}/{product_category}"
+    out: list[dict] = []
+    seen = set(existing_keywords)
+    max_items = max(0, min(int(limit), 100))
+    for language in languages:
+        terms = _PIRANHA_SEVEN_LAYER_TERMS.get(language)
+        if not terms:
+            continue
+        sources: list[tuple[str, list[str], str]] = []
+        if competitor_enabled:
+            sources.append(("competitor", [
+                f"{competitor} {terms['platform'][0]} {terms['format'][0]}",
+                f"{competitor} {terms['category'][0]} {terms['format'][1]}",
+            ], "本活动已选择且已就绪的竞品证据层"))
+        sources.extend([
+            ("ip_theme", [
+                f"{ip_name} {terms['adjacent'][index % len(terms['adjacent'])]} {terms['format'][index % len(terms['format'])]}"
+                for index, ip_name in enumerate(terms["ip"])
+            ], "产品/IP层"),
+            ("platform_ecosystem", [
+                f"{platform} {terms['category'][index % len(terms['category'])]} {terms['format'][index % len(terms['format'])]}"
+                for index, platform in enumerate(terms["platform"])
+            ], "主机生态层"),
+            ("category_function", [
+                f"{category} {terms['platform'][index % len(terms['platform'])]} {terms['format'][(index + 1) % len(terms['format'])]}"
+                for index, category in enumerate(terms["category"])
+            ], "品类/功能层"),
+            ("user_problem", [
+                f"{problem} {terms['platform'][index % len(terms['platform'])]} {terms['format'][(index + 2) % len(terms['format'])]}"
+                for index, problem in enumerate(terms["problem"])
+            ], "用户问题层"),
+            ("content_format", [
+                f"{terms['ip'][index % len(terms['ip'])]} {terms['category'][index % len(terms['category'])]} {content_format}"
+                for index, content_format in enumerate(terms["format"])
+            ], "内容形态层"),
+            ("adjacent_audience", [
+                f"{audience} {terms['problem'][index % len(terms['problem'])]} {terms['format'][(index + 1) % len(terms['format'])]}"
+                for index, audience in enumerate(terms["adjacent"])
+            ], "邻近受众层"),
+        ])
+        # 先每层取一条，再取各层第二条；避免一个来源先占满整批。
+        max_variants = max((len(words) for _, words, _ in sources), default=0)
+        for variant_index in range(max_variants):
+            for source, words, reason in sources:
+                if variant_index >= len(words):
+                    continue
+                item = _discovery_item(
+                    language=language, keyword=words[variant_index], source=source,
+                    reason=f"{reason}（产品锚点：{product_anchor}）",
+                    axes=[source, product_anchor, "creator_content"],
+                    evidence_mode=mode,
+                )
+                if not item or item["keyword"] in seen:
+                    continue
+                seen.add(item["keyword"])
+                out.append(item)
+                if len(out) >= max_items:
+                    return out
+    return out
+
+
+def _candidate_keyword(item) -> str:
+    return str(item.get("keyword") if isinstance(item, dict) else item[1]).strip().lower()
 
 
 def _dave_structured_candidates(*, activity_fields: dict, product_fields: dict,
@@ -478,7 +586,7 @@ def _campaign_discovery_quality(
 
 def _append_curated_candidates(
     *, theme: str, languages: list[str], existing_keywords: set[str],
-    candidates: list[tuple[str, str]], need: int,
+    candidates: list, need: int,
 ) -> tuple[int, int]:
     added = 0
     positions = {lang: 0 for lang in languages}
@@ -490,7 +598,7 @@ def _append_curated_candidates(
                 word = words[positions[lang]].strip().lower()
                 positions[lang] += 1
                 if word in existing_keywords or any(
-                    existing == word for _, existing in candidates
+                    _candidate_keyword(existing) == word for existing in candidates
                 ):
                     continue
                 candidates.append((lang, word))
@@ -665,7 +773,9 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         for lang in languages:
             for word in _CAMPAIGN_KEYWORDS[theme].get(lang, []):
                 normalized = word.strip().lower()
-                if normalized in existing_keywords or any(x[1] == normalized for x in candidates):
+                if normalized in existing_keywords or any(
+                    _candidate_keyword(item) == normalized for item in candidates
+                ):
                     continue
                 candidates.append((lang, normalized))
                 need -= 1
@@ -676,8 +786,24 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         if not progressed:
             break
 
+    seven_layer_added = 0
+    if theme == "piranha" and not structured_pilot and need:
+        seven_layer = _piranha_seven_layer_candidates(
+            activity_fields=fields, product_fields=product_fields,
+            languages=languages, existing_keywords=(
+                existing_keywords | {_candidate_keyword(item) for item in candidates}
+            ), limit=need,
+        )
+        candidates.extend(seven_layer)
+        seven_layer_added = len(seven_layer)
+        need -= seven_layer_added
+
     keyword_source = f"structured_{pilot_version}" if structured_pilot and candidates else (
-        "deterministic" if candidates else "none"
+        "seven_layer_deterministic"
+        if seven_layer_added and seven_layer_added == len(candidates)
+        else "mixed_seven_layer_deterministic"
+        if seven_layer_added
+        else "deterministic" if candidates else "none"
     )
     generation_error = ""
     generation_warning = ""
@@ -710,7 +836,9 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
                     word = str(item or "").strip().lower()
                 if lang not in languages or not (2 <= len(word) <= 80):
                     continue
-                if word in existing_keywords or any(existing == word for _, existing in candidates):
+                if word in existing_keywords or any(
+                    _candidate_keyword(existing) == word for existing in candidates
+                ):
                     continue
                 market = next((m for m in MARKETS if m["lang"] == lang), {"lang": lang})
                 if not _is_localized(word, market):
@@ -767,7 +895,10 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         try:
             task_name = (
                 f"{pilot_prefix}[词源:{source}] YT KOL - {word}"
-                if structured_pilot else f"{prefix} YT KOL - {word}"
+                if structured_pilot else
+                f"{prefix}[词源:{source}] YT KOL - {word}"
+                if isinstance(item, dict) else
+                f"{prefix} YT KOL - {word}"
             )
             await feishu.create_record(T_CRAWLER, {
                 "任务名": task_name,
