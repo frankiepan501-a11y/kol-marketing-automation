@@ -2652,7 +2652,9 @@ def _prune_launch_runtime_jobs() -> None:
 async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                                     pool_target: int = 100, queue_limit: int = 120,
                                     review_target: int = 20,
-                                    sample_limit: int = 20) -> dict:
+                                    sample_limit: int = 20,
+                                    seed_candidates: list[dict] | None = None,
+                                    source_job_id: str = "") -> dict:
     read_only_modes = {"evidence_author_pilot", "evidence_author_enrichment"}
     if mode not in read_only_modes and not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise HTTPException(status_code=403, detail="活动队列写入开关未开启")
@@ -2670,6 +2672,7 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
         "status": "running", "started_ts": started_ts,
         "started_at": datetime_now_string(), "request_key": request_key,
         "campaign_id": campaign_id, "mode": mode,
+        "seed_candidates": seed_candidates, "source_job_id": source_job_id,
     }
     if mode == "autonomous":
         await launch_runtime.persist_runtime_job(
@@ -2700,6 +2703,8 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
             elif mode == "evidence_author_enrichment":
                 result = await launch_candidate_preview.enrich_unmatched_evidence_authors(
                     campaign_id=campaign_id, limit=sample_limit,
+                    seed_candidates=_launch_runtime_jobs[job_id].get("seed_candidates"),
+                    source_job_id=_launch_runtime_jobs[job_id].get("source_job_id", ""),
                 )
             else:
                 result = await launch_runtime.run_campaign(
@@ -2883,10 +2888,23 @@ async def launch_evidence_author_enrichment(
     campaign_id = _launch_required(payload, "campaign_id")
     if campaign_id != keyword_supply.DAVE_KEYWORD_PILOT_CAMPAIGN_ID:
         raise HTTPException(status_code=422, detail="当前作者补全灰度只允许 Dave 活动")
+    seed_candidates = payload.get("seed_candidates")
+    if seed_candidates is not None:
+        if not isinstance(seed_candidates, list) or not 1 <= len(seed_candidates) <= 20:
+            raise HTTPException(status_code=422, detail="seed_candidates 必须是 1～20 条数组")
+        for candidate in seed_candidates:
+            if not isinstance(candidate, dict) or not candidate.get("platform") or not (
+                candidate.get("creator_id") or candidate.get("handle") or candidate.get("profile_url")
+            ):
+                raise HTTPException(status_code=422, detail="复用样本缺少平台或作者身份")
+        if not str(payload.get("source_job_id") or "").startswith("launchruntime-"):
+            raise HTTPException(status_code=422, detail="复用样本缺少 source_job_id")
     return await _start_launch_runtime_job(
         campaign_id=campaign_id,
         mode="evidence_author_enrichment",
         sample_limit=max(1, min(20, int(payload.get("limit") or 20))),
+        seed_candidates=seed_candidates,
+        source_job_id=str(payload.get("source_job_id") or ""),
     )
 
 

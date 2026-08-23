@@ -174,6 +174,43 @@ class LaunchRouteTests(unittest.TestCase):
         enrich.assert_awaited_once_with(
             campaign_id=main.keyword_supply.DAVE_KEYWORD_PILOT_CAMPAIGN_ID,
             limit=20,
+            seed_candidates=None,
+            source_job_id="",
+        )
+
+    def test_evidence_author_enrichment_accepts_verified_seed_sample(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.launch_candidate_preview, "enrich_unmatched_evidence_authors",
+                new=AsyncMock(return_value={
+                    "read_only": True, "writes": 0, "drafts_created": 0,
+                    "emails_sent": 0,
+                }),
+            ) as enrich:
+                accepted = await main.launch_evidence_author_enrichment(
+                    FakeRequest({
+                        "campaign_id": main.keyword_supply.DAVE_KEYWORD_PILOT_CAMPAIGN_ID,
+                        "source_job_id": "launchruntime-verified",
+                        "seed_candidates": [{
+                            "name": "Creator", "platform": "YouTube", "creator_id": "UC1",
+                        }],
+                    }), authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+            main._launch_runtime_jobs.clear()
+            return accepted, enrich
+
+        accepted, enrich = asyncio.run(exercise())
+
+        self.assertTrue(accepted["accepted"])
+        enrich.assert_awaited_once_with(
+            campaign_id=main.keyword_supply.DAVE_KEYWORD_PILOT_CAMPAIGN_ID,
+            limit=20,
+            seed_candidates=[{
+                "name": "Creator", "platform": "YouTube", "creator_id": "UC1",
+            }],
+            source_job_id="launchruntime-verified",
         )
 
     def test_outcome_reconcile_defaults_to_dry_run(self):

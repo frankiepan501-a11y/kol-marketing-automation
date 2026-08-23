@@ -225,6 +225,55 @@ def _email_owner_index(kols: list[dict], editors: list[dict]) -> dict[str, list[
     return owners
 
 
+def _identity_owners(candidate: dict, kols: list[dict], editors: list[dict]) -> list[dict]:
+    """对复用的只读样本再次做 creator/url/handle 主表查重。"""
+    pseudo_post = {"record_id": "seed", "fields": {
+        "平台": candidate.get("platform") or "",
+        "KOL平台ID": candidate.get("creator_id") or "",
+        "KOL账号Handle": candidate.get("handle") or "",
+        "KOL主页URL": candidate.get("profile_url") or "",
+    }}
+    owners = []
+    for object_type, records in (("KOL", kols), ("媒体人", editors)):
+        for record in records:
+            path = launch_competitor_evidence.match_post_identity(record, pseudo_post)
+            if not path:
+                continue
+            fields = record.get("fields") or {}
+            owners.append({
+                "object_type": object_type,
+                "record_id": record.get("record_id", ""),
+                "name": ext(fields.get("账号名")) or ext(fields.get("媒体人姓名")),
+                "cooperation_status": ext(fields.get("合作状态")),
+                "identity_path": path,
+            })
+    return owners
+
+
+async def _load_verified_activity_shell(campaign_id: str) -> dict:
+    """复用已算样本时只校验活动壳，不重复读取 2,988 条锁定帖子。"""
+    activity = await launch_evidence.get_activity(campaign_id)
+    fields = activity.get("fields") or {}
+    exact = bool(
+        activity.get("record_id") == "recvsFoRmeGj4Y"
+        and _activity_product_id(fields) == "recvkJOoCsNb1s"
+        and ext(fields.get("竞品证据模式")) == launch_evidence.MODE_REUSE
+        and ext(fields.get("竞品分析状态")) == "已就绪"
+        and ext(fields.get("竞品品牌")).upper() == "NYXI"
+        and ext(fields.get("证据排序版本")) == "evidence-v4"
+    )
+    if not exact:
+        raise ValueError("Dave 活动或 NYXI 证据版本已变化，禁止复用旧样本")
+    return {
+        "evidence_mode": ext(fields.get("竞品证据模式")),
+        "evidence_status": ext(fields.get("竞品分析状态")),
+        "evidence_source": "verified_background_sample",
+        "ranking_version": ext(fields.get("证据排序版本")),
+        "target_countries": _parse_multiselect(fields.get("活动目标国家")),
+        "target_languages": _parse_multiselect(fields.get("活动目标语言")),
+    }
+
+
 def _canonical_id(product: dict) -> str:
     fields = product.get("fields") or {}
     return ext(fields.get("活动主记录ID")).strip() or product.get("record_id", "")
@@ -1175,11 +1224,22 @@ async def preview_unmatched_evidence_authors(
 
 async def enrich_unmatched_evidence_authors(
     *, campaign_id: str, limit: int = 20,
+    seed_candidates: list[dict] | None = None, source_job_id: str = "",
 ) -> dict:
     """对只读样本补公开资料并执行写前硬闸；仍保持零业务写入。"""
-    sample, activity_ctx, kols, editors = await _build_unmatched_evidence_author_sample(
-        campaign_id=campaign_id, limit=limit,
-    )
+    if seed_candidates is not None:
+        if not source_job_id.startswith("launchruntime-"):
+            raise ValueError("复用样本必须提供已完成的后台 source_job_id")
+        activity_ctx = await _load_verified_activity_shell(campaign_id)
+        kols, editors = await _load_evidence_identity_contacts()
+        sample = {
+            "unmatched_authors": None,
+            "candidates": list(seed_candidates)[:max(1, min(int(limit), 20))],
+        }
+    else:
+        sample, activity_ctx, kols, editors = await _build_unmatched_evidence_author_sample(
+            campaign_id=campaign_id, limit=limit,
+        )
     email_owners = _email_owner_index(kols, editors)
     semaphore = asyncio.Semaphore(4)
 
@@ -1226,15 +1286,18 @@ async def enrich_unmatched_evidence_authors(
             semantic_cues=DAVE_EVIDENCE_AUTHOR_SEMANTIC_CUES,
         )
         duplicate_owners = email_owners.get(email, []) if email else []
+        identity_owners = _identity_owners(candidate, kols, editors)
         already_published_target = _contains_target_product_content(content_text)
         reasons = list(gate["reason_codes"])
+        if identity_owners:
+            reasons.append("creator_identity_already_in_kol_or_media_master")
         if duplicate_owners:
             reasons.append("email_already_in_kol_or_media_master")
         if already_published_target:
             reasons.append("target_product_already_published_or_reviewed")
         reasons = list(dict.fromkeys(reasons))
         eligible = not reasons
-        if duplicate_owners or already_published_target:
+        if identity_owners or duplicate_owners or already_published_target:
             next_action = "reconcile_existing_relationship"
         elif eligible:
             next_action = "eligible_for_controlled_master_import"
@@ -1256,6 +1319,7 @@ async def enrich_unmatched_evidence_authors(
             "email_source": "youtube_public_description" if email else "",
             "recent_video_titles": recent_titles,
             "existing_email_owners": duplicate_owners,
+            "existing_identity_owners": identity_owners,
             "target_product_already_published": already_published_target,
             "promotion_status": "passed_all_prewrite_gates" if eligible else "blocked",
             "eligible_for_master_write": eligible,
@@ -1276,6 +1340,7 @@ async def enrich_unmatched_evidence_authors(
         "participation_writes": 0,
         "campaign_id": campaign_id,
         "source_route": "competitor_post_to_author_to_public_profile",
+        "source_job_id": source_job_id,
         "evidence_mode": activity_ctx["evidence_mode"],
         "evidence_status": activity_ctx["evidence_status"],
         "evidence_source": activity_ctx["evidence_source"],
@@ -1296,6 +1361,9 @@ async def enrich_unmatched_evidence_authors(
             "public_email_verified": sum(candidate["email_verified"] for candidate in enriched),
             "duplicate_email_identity": sum(
                 bool(candidate["existing_email_owners"]) for candidate in enriched
+            ),
+            "duplicate_creator_identity": sum(
+                bool(candidate["existing_identity_owners"]) for candidate in enriched
             ),
             "target_product_already_published": sum(
                 candidate["target_product_already_published"] for candidate in enriched

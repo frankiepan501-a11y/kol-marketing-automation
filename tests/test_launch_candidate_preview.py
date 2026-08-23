@@ -1114,6 +1114,42 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertTrue(result["candidates"][0]["eligible_for_master_write"])
         self.assertEqual("eligible_for_controlled_master_import", result["candidates"][0]["next_action"])
 
+    def test_enrichment_can_reuse_completed_read_only_sample_without_revalidating_all_posts(self):
+        seed = [{
+            "author_key": "youtube|creator:UC3", "name": "Seed Creator",
+            "platform": "YouTube", "creator_id": "UC3", "handle": "seedcreator",
+            "profile_url": "https://youtube.com/@seedcreator", "evidence_posts": [],
+        }]
+        ctx = {
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "verified_background_sample", "ranking_version": "evidence-v4",
+            "target_countries": {"US"}, "target_languages": {"en"},
+        }
+        with patch.object(
+            preview, "_load_verified_activity_shell", new=AsyncMock(return_value=ctx),
+        ), patch.object(
+            preview, "_load_evidence_identity_contacts", new=AsyncMock(return_value=([], [])),
+        ), patch.object(
+            preview, "_build_unmatched_evidence_author_sample", new=AsyncMock(),
+        ) as full_pool, patch.object(
+            preview.relabel, "fetch_youtube_public_profile", new=AsyncMock(return_value={
+                "retrieved": True, "country": "US", "country_raw": "United States",
+                "email": "seed@example.com", "description": "The gaming hardware review channel",
+            }),
+        ), patch.object(
+            preview.relabel, "fetch_recent_videos", new=AsyncMock(return_value=[
+                {"title": "New Switch controller review with gameplay"},
+            ]),
+        ):
+            result = asyncio.run(preview.enrich_unmatched_evidence_authors(
+                campaign_id=preview.DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID,
+                seed_candidates=seed, source_job_id="launchruntime-verified",
+            ))
+
+        self.assertEqual("launchruntime-verified", result["source_job_id"])
+        self.assertEqual(1, result["summary"]["eligible_for_master_write"])
+        full_pool.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()
