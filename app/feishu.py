@@ -693,7 +693,8 @@ async def resolve_notify_targets(role: str) -> list:
     """统一草稿通知 targets 决策 (2026-05-17 A9 抽 helper, 消除 draft_router/sla_check 重复).
 
     role:
-      - "reviewer": 待审草稿主审 → 独立站运营专员 + Frankie CC (含去重)
+      - "reviewer": 待审草稿主审 → 独立站运营专员 + Frankie CC (兼容旧调用)
+      - "frankie": 仅 Frankie (SLA 48h 异常汇总等创始人例外)
       - "needs_rewrite": 需人改 → NOTIFY_USERS 全员 (Frankie 必收防质量异常漏看)
       - "ship_main": 寄样确认主审 → 独立站运营专员
       - "ship_cc": 寄样 CC → Frankie + 吴晓丹
@@ -707,6 +708,9 @@ async def resolve_notify_targets(role: str) -> list:
     if role == "ship_cc":
         return [u for u in config.NOTIFY_USERS
                 if u[0].startswith("潘") or "晓丹" in u[0]]
+
+    if role == "frankie":
+        return [u for u in config.NOTIFY_USERS if u[0].startswith("潘")]
 
     # reviewer / ship_main 都用职务实时查
     by_title = await fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)

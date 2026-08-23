@@ -197,6 +197,12 @@ NOTIFY_USERS = [(p.split(":", 1)[0], p.split(":", 1)[1]) for p in NOTIFY_USERS_S
 # 2026-05-15: draft_router._notify_human_review + sla_check L1 都用此职务实时查在职名单
 KOL_REVIEWER_JOB_TITLE = env("KOL_REVIEWER_JOB_TITLE", "独立站运营专员")
 
+# KOL SLA 汇总卡 (2026-08-23): P1 每次 SLA cron 发负责人私聊；P2 仅北京时间指定小时发每日汇总。
+# 视图使用“在途草稿”，卡片中的最老记录另带 record_id 直达链接。
+KOL_SLA_P2_DIGEST_HOUR = int(env("KOL_SLA_P2_DIGEST_HOUR", "12") or 12)
+KOL_SLA_TIMEZONE = env("KOL_SLA_TIMEZONE", "Asia/Shanghai")
+KOL_DRAFT_QUEUE_VIEW_ID = env("KOL_DRAFT_QUEUE_VIEW_ID", "vewMC2JoMf")
+
 # 服务鉴权 (n8n 调用 webhook 时 Header: Authorization: Bearer <INTERNAL_TOKEN>)
 INTERNAL_TOKEN = env("INTERNAL_TOKEN", required=True)
 

@@ -21,7 +21,10 @@ V1 寄样链路 SLA (扫"寄样订单号 != 空"的草稿):
   AND 草稿「低ROI60d标记」未打
   → 草稿表"低ROI60d标记"=True + 主表「维护标签」加"低ROI候选" + 飞书卡片提示
 """
+import datetime as dt
 import re, time
+from collections import Counter
+from zoneinfo import ZoneInfo
 from . import config, feishu, draft_router, reply_drafter, brand_line_state
 from .feishu import ext, xrid
 
@@ -32,6 +35,20 @@ SLA_DAYS_NO_CONTENT = 30         # 层 3: 30 天无内容产出软标
 SLA_DAYS_LOW_ROI = 60            # 层 4: 60 天累计订单<3 软标
 LOW_ROI_ORDER_THRESHOLD = 3
 SLA_DAYS_SOFT_NUDGE = 12         # P4: 暖信发出 +12d 仍无上稿 → 软关怀 nudge (非催稿, 在 L3 30d 之前)
+SLA_HOURS_FRANKIE_EXCEPTION = 48
+P1_DRAFT_SOURCES = frozenset({
+    "reply", "affiliate_quote", "ship_confirm", "tracking_followup",
+})
+SOURCE_LABELS = {
+    "reply": "KOL 回复",
+    "affiliate_quote": "商务报价",
+    "ship_confirm": "寄样确认",
+    "tracking_followup": "运单跟进",
+    "cold": "首次开发信",
+    "followup": "常规跟进",
+    "secondary_outreach": "二次触达",
+    "warm_recap": "寄样暖信",
+}
 
 # 层 1c (2026-05-22 B): 已发货 → 已签收 自动推进 (按物流渠道时效假定送达)
 #   背景: KOL 很少主动回"收到", 否则 L2(+7d 催稿)/L4(+60d) 永远卡在"已签收"前不触发.
@@ -66,220 +83,260 @@ async def _mark_escalated(record_id: str):
     await feishu.update_record(config.T_DRAFT, record_id, {"SLA已升级": True})
 
 
-# ===== 层 1: 所有待审 24h 升级 (2026-05-15 扩大: 不再只扫寄样类) =====
-async def _layer1_review_overdue(now_ms: int) -> dict:
-    """
-    扫所有「邮件草稿状态=待审」且生成 ≥24h 的草稿.
-    旧版只扫「寄样阶段=待发货」→ reply 类待审 (千万粉丝 KOL 回复) 永远兜不到.
-    新版按草稿类型分支:
-      - 寄样类 (寄样阶段=待发货): 用 _build_ship_confirm_card escalation=True + ship_confirm_targets
-      - 非寄样 (reply/cold/followup): 用通用红色超时升级卡 + 独立站运营专员
-    """
-    cutoff_ms = now_ms - SLA_HOURS_REVIEW * 3600 * 1000
+# ===== 层 1: 待审草稿汇总提醒 (2026-08-23 去逐条卡片风暴) =====
+def _draft_source(rec: dict) -> str:
+    f = rec.get("fields") or {}
+    source = (ext(f.get("邮件草稿来源")) or "").strip()
+    if not source and ext(f.get("寄样阶段")) == "待发货":
+        return "ship_confirm"
+    return source or "(空来源)"
 
-    # 2026-05-17 A4: 加 field_names 减 payload (47 字段 → 13 字段)
-    items = await feishu.search_records(config.T_DRAFT, [
+
+def _draft_age_hours(rec: dict, now_ms: int) -> int:
+    try:
+        generated = int((rec.get("fields") or {}).get("生成时间") or 0)
+    except (TypeError, ValueError):
+        generated = 0
+    if not generated:
+        return SLA_HOURS_REVIEW
+    return max(0, int((now_ms - generated) / 3600 / 1000))
+
+
+def _queue_url() -> str:
+    base = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_DRAFT}"
+    view_id = (getattr(config, "KOL_DRAFT_QUEUE_VIEW_ID", "") or "").strip()
+    return f"{base}&view={view_id}" if view_id else base
+
+
+def _record_url(record_id: str) -> str:
+    return f"{_queue_url()}&record={record_id}"
+
+
+def _source_summary(items: list) -> str:
+    counts = Counter(_draft_source(rec) for rec in items)
+    parts = []
+    for source, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0])):
+        label = SOURCE_LABELS.get(source, source)
+        parts.append(f"{label} `{source}` {count} 条")
+    return "｜".join(parts) if parts else "无"
+
+
+def _top_record_lines(items: list, now_ms: int, limit: int = 5) -> str:
+    ordered = sorted(items, key=lambda rec: (-_draft_age_hours(rec, now_ms), rec.get("record_id", "")))
+    lines = []
+    for rec in ordered[:limit]:
+        rid = rec.get("record_id") or ""
+        f = rec.get("fields") or {}
+        subject = (ext(f.get("邮件主题")) or "无主题").replace("\n", " ")[:55]
+        source = _draft_source(rec)
+        age = _draft_age_hours(rec, now_ms)
+        lines.append(f"- [{SOURCE_LABELS.get(source, source)}｜{age}h｜{subject}]({_record_url(rid)})")
+    remaining = len(items) - len(lines)
+    if remaining > 0:
+        lines.append(f"- 其余 {remaining} 条请在待审队列按「生成时间」从早到晚处理")
+    return "\n".join(lines)
+
+
+def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str) -> dict:
+    """Build an actionable queue-management card; this card never approves or sends email itself."""
+    oldest = max((_draft_age_hours(rec, now_ms) for rec in items), default=0)
+    if audience == "frankie":
+        title = f"SLA 48h 异常汇总 · {len(items)} 条"
+        owner = "独立站运营专员"
+        deadline = "今日确认负责人清空异常"
+        intro = (
+            "这些草稿已经超过 48 小时仍未处理。**你无需逐条审批**；"
+            "请只确认运营负责人今天清空，遇到高预算、客户风险或规则外承诺再升级给你。"
+        )
+        header_template = "orange"
+    elif level == "P2":
+        title = f"SLA 日常草稿汇总 · {len(items)} 条"
+        owner = "独立站运营专员"
+        deadline = "24 小时内处理"
+        intro = (
+            "这是低风险外联草稿的每日汇总。先处理 P1 回复与商务事项，再按生成时间处理本队列。"
+        )
+        header_template = "yellow"
+    else:
+        title = f"SLA 待审草稿汇总 · {len(items)} 条"
+        owner = "独立站运营专员"
+        deadline = "4 小时内处理"
+        intro = (
+            "这些记录涉及 KOL 回复、商务报价、寄样确认或运单跟进。"
+            "请核对对方原邮件与草稿：正确则通过；不合适则否决或退回重生；需小改则改正文后通过。"
+        )
+        header_template = "orange"
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": header_template,
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "elements": [
+            {"tag": "div", "fields": [
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**负责人**: {owner}"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**截止**: {deadline}"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**待处理**: {len(items)} 条"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**最久等待**: {oldest} 小时"}},
+            ]},
+            {"tag": "div", "text": {"tag": "lark_md", "content": intro}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**来源分布**\n{_source_summary(items)}"}},
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content":
+                "**系统已检查**\n"
+                "- 仅统计草稿状态仍为「待审」；运单跟进另含「待修改」\n"
+                "- 已按生成时间计算 24h / 48h 超时\n"
+                "- 本卡只做提醒，不会修改草稿，也不会发送邮件\n"
+                "- 点「通过」后会进入真实邮件发送队列，不能盲点"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content":
+                f"**最老记录（可直接打开）**\n{_top_record_lines(items, now_ms)}"}},
+            {"tag": "action", "actions": [
+                {"tag": "button", "text": {"tag": "plain_text", "content": "打开在途草稿队列"},
+                 "url": _queue_url(), "type": "primary"},
+            ]},
+            {"tag": "note", "elements": [
+                {"tag": "plain_text", "content": "处理结果保留在草稿表；汇总卡无需回复或重复转发。"},
+            ]},
+        ],
+    }
+
+
+def _is_p2_digest_hour(now_ms: int) -> bool:
+    try:
+        timezone = ZoneInfo(config.KOL_SLA_TIMEZONE)
+    except Exception:
+        timezone = ZoneInfo("Asia/Shanghai")
+    local_hour = dt.datetime.fromtimestamp(now_ms / 1000, tz=timezone).hour
+    return local_hour == int(config.KOL_SLA_P2_DIGEST_HOUR)
+
+
+async def _send_digest(targets: list, card: dict, *, level: str) -> dict:
+    sent = 0
+    failed = 0
+    errors = []
+    message_ids = []
+    for name, oid in targets:
+        if not oid:
+            continue
+        try:
+            message_id = await feishu.send_card_message("open_id", oid, card, biz="KOL", level=level)
+            sent += 1
+            if message_id:
+                message_ids.append(message_id)
+        except Exception as e:
+            failed += 1
+            errors.append(f"{name}: {str(e)[:120]}")
+            print(f"[sla_check digest] notify {name} fail: {e}")
+    return {"sent": sent, "failed": failed, "errors": errors, "message_ids": message_ids}
+
+
+async def collect_sla_overdue_drafts(now_ms: int) -> dict:
+    """Read-only collection and classification used by production and the Frankie-only preflight."""
+    field_names = [
+        "邮件主题", "邮件草稿来源", "邮件草稿状态", "对象类型", "AI评分",
+        "生成时间", "寄样阶段", "审批意见", "SLA已升级",
+    ]
+    waiting_review = await feishu.search_records(config.T_DRAFT, [
         {"field_name": "邮件草稿状态", "operator": "is", "value": ["待审"]},
-    ], field_names=[
-        "邮件主题", "邮件草稿来源", "对象类型", "AI评分", "AI评分理由",
-        "生成时间", "寄样阶段", "国家/地区", "收件地址 full", "关联产品",
-        "审批意见", "SLA已升级",
-    ])
-
-    escalated = 0
-    skipped = 0
-    not_yet = 0
-    base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_DRAFT}"
-
-    for rec in items:
-        f = rec["fields"]
-        rid = rec["record_id"]
-
-        gen_time = int(f.get("生成时间") or 0)
-        if gen_time > cutoff_ms:
-            not_yet += 1
-            continue
-
-        if await _is_already_escalated(rec):
-            skipped += 1
-            continue
-
-        is_ship_confirm = ext(f.get("寄样阶段")) == "待发货"
-
-        if is_ship_confirm:
-            meta = {
-                "country": ext(f.get("国家/地区")),
-                "address": ext(f.get("收件地址 full")),
-                "product_name": "the product",
-            }
-            prod_rid = xrid(f.get("关联产品"))
-            if prod_rid:
-                try:
-                    prod = await feishu.get_record(config.T_PRODUCT, prod_rid)
-                    meta["product_name"] = ext(prod["fields"].get("产品英文名")) or ext(prod["fields"].get("产品名")) or "the product"
-                except Exception:
-                    pass
-
-            score = int(f.get("AI评分") or 0)
-            summary = (ext(f.get("AI评分理由")) or "(无)")[:100]
-            card = draft_router._build_ship_confirm_card(rid, rec, score, summary, meta, base_url, escalation=True)
-            main, cc = await draft_router._ship_confirm_targets()
-            personal_targets = main + cc
-        else:
-            # 非寄样类待审 24h+ → 通用红色超时升级卡
-            source = ext(f.get("邮件草稿来源")) or "cold"
-            contact_type = ext(f.get("对象类型")) or "KOL"
-            subject = ext(f.get("邮件主题"))[:100]
-            score = int(f.get("AI评分") or 0)
-            summary = (ext(f.get("AI评分理由")) or "(无)")[:200]
-            age_hours = int((now_ms - gen_time) / 3600 / 1000) if gen_time else 24
-            card = {
-                "header": {
-                    "template": "red",
-                    "title": {"tag": "plain_text",
-                              "content": f"🚨 [SLA 超时] {source} 草稿待审 {age_hours}h — {contact_type}"},
-                },
-                "elements": [
-                    {"tag": "div", "fields": [
-                        {"is_short": True, "text": {"tag": "lark_md", "content": f"**AI 评分**: {score}/10"}},
-                        {"is_short": True, "text": {"tag": "lark_md", "content": f"**已等待**: {age_hours} 小时"}},
-                    ]},
-                    {"tag": "div", "text": {"tag": "lark_md", "content": f"**主题**: {subject}"}},
-                    {"tag": "div", "text": {"tag": "lark_md", "content": f"**评分总评**: {summary}"}},
-                    {"tag": "hr"},
-                    {"tag": "div", "text": {"tag": "lark_md",
-                        "content": "**请立即审核**: 大 KOL 回复或商务承诺类草稿超时未审会流失转化机会"}},
-                    {"tag": "action", "actions": [
-                        {"tag": "button", "text": {"tag": "plain_text", "content": "打开KOL·媒体人邮件草稿"},
-                         "url": base_url, "type": "primary"},
-                    ]},
-                ],
-            }
-            # 2026-05-17 A9: 改用 feishu.resolve_notify_targets helper
-            personal_targets = await feishu.resolve_notify_targets("reviewer")
-
-        success = 0
-        fail = 0
-        errors = []
-        group_msg_id = ""
-        try:
-            group_msg_id = await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
-            success += 1
-        except Exception as e:
-            fail += 1
-            errors.append(f"群: {str(e)[:80]}")
-            print(f"[sla_check L1] notify chat fail: {e}")
-        for name, oid in personal_targets:
-            try:
-                await feishu.send_card_message("open_id", oid, card)
-                success += 1
-            except Exception as e:
-                fail += 1
-                errors.append(f"{name}: {str(e)[:80]}")
-                print(f"[sla_check L1] notify {name} fail: {e}")
-        await feishu.mark_card_receipt(rid, success, fail, errors, group_msg_id=group_msg_id)
-
-        try:
-            await _mark_escalated(rid)
-        except Exception as e:
-            print(f"[sla_check L1] mark fail: {e}")
-        escalated += 1
-
-    return {"layer": 1, "checked": len(items), "escalated": escalated,
-            "skipped": skipped, "not_yet": not_yet}
-
-
-# ===== 层 1b: tracking_followup 第 2 封"待修改" 24h 兜底 (2026-05-21 P0-B) =====
-async def _layer1b_tracking_followup_overdue(now_ms: int) -> dict:
-    """24h 兜底: 第 1 封 ship_confirm 发出后, auto_send 自动建第 2 条 tracking_followup
-    草稿状态=待修改 等运营回填运单号. 如果运营不回表 24h, 这条永远不发,
-    KOL 拿不到运单号 → 黑洞. L1 只扫"待审"扫不到"待修改", 这层补.
-
-    5/14 thunderstashgaming/Thao 大 KOL 之前就是踩了这个黑洞 (虽然运营最终手填了,
-    但没有兜底 push 提醒, 完全靠运营记忆力). 现加这层主动 push."""
-    cutoff_ms = now_ms - SLA_HOURS_REVIEW * 3600 * 1000  # 24h
-
-    items = await feishu.search_records(config.T_DRAFT, [
+    ], field_names=field_names)
+    waiting_tracking = await feishu.search_records(config.T_DRAFT, [
         {"field_name": "邮件草稿状态", "operator": "is", "value": ["待修改"]},
         {"field_name": "邮件草稿来源", "operator": "is", "value": ["tracking_followup"]},
-    ], field_names=["邮件主题", "生成时间", "对象类型",
-                    "关联KOL", "关联媒体人", "审批意见"])
+    ], field_names=field_names)
 
-    pushed, skipped, not_yet = 0, 0, 0
-    base_url = f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_DRAFT}"
+    all_items = waiting_review + [
+        rec for rec in waiting_tracking
+        if rec.get("record_id") not in {row.get("record_id") for row in waiting_review}
+    ]
+    overdue = [rec for rec in all_items if _draft_age_hours(rec, now_ms) >= SLA_HOURS_REVIEW]
+    p1_items = [rec for rec in overdue if _draft_source(rec) in P1_DRAFT_SOURCES]
+    p2_items = [rec for rec in overdue if _draft_source(rec) not in P1_DRAFT_SOURCES]
+    p1_over_48h = [
+        rec for rec in p1_items
+        if _draft_age_hours(rec, now_ms) >= SLA_HOURS_FRANKIE_EXCEPTION
+    ]
+    return {
+        "all": all_items,
+        "overdue": overdue,
+        "p1": p1_items,
+        "p2": p2_items,
+        "p1_over_48h": p1_over_48h,
+    }
 
-    for rec in items:
-        f = rec["fields"]
-        rid = rec["record_id"]
-        gen_time = int(f.get("生成时间") or 0)
-        if gen_time > cutoff_ms:
-            not_yet += 1; continue
 
-        note = ext(f.get("审批意见")) or ""
-        if "[TRACK-FOLLOWUP-PUSH]" in note:
-            skipped += 1; continue
+async def _layer1_review_overdue(now_ms: int) -> dict:
+    """Send at most one reviewer P1 digest, one Frankie 48h digest, and one daily reviewer P2 digest."""
+    collected = await collect_sla_overdue_drafts(now_ms)
+    all_items = collected["all"]
+    overdue = collected["overdue"]
+    p1_items = collected["p1"]
+    p2_items = collected["p2"]
+    p1_over_48h = collected["p1_over_48h"]
 
-        age_hours = int((now_ms - gen_time) / 3600 / 1000) if gen_time else 24
-        subject = ext(f.get("邮件主题"))[:100]
+    reviewer_targets = await feishu.resolve_notify_targets("ship_main")
+    reviewer_delivery = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
+    frankie_delivery = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
+    p2_delivery = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
 
-        # 2026-05-31 统一字段: 加 KOL 信息块 (compact 模式)
-        _is_ed = bool(feishu.xrid(f.get("关联媒体人")))
-        _crid = feishu.xrid(f.get("关联媒体人")) if _is_ed else feishu.xrid(f.get("关联KOL"))
-        _ctype = "媒体人" if _is_ed else "KOL"
-        _ci = await feishu.resolve_contact_info(_crid, _ctype) if _crid else {}
+    if p1_items:
+        reviewer_delivery = await _send_digest(
+            reviewer_targets,
+            build_sla_digest_card(p1_items, now_ms, audience="reviewer", level="P1"),
+            level="P1",
+        )
+    if p1_over_48h:
+        frankie_delivery = await _send_digest(
+            await feishu.resolve_notify_targets("frankie"),
+            build_sla_digest_card(p1_over_48h, now_ms, audience="frankie", level="P1"),
+            level="P1",
+        )
+    if p2_items and _is_p2_digest_hour(now_ms):
+        p2_delivery = await _send_digest(
+            reviewer_targets,
+            build_sla_digest_card(p2_items, now_ms, audience="reviewer", level="P2"),
+            level="P2",
+        )
 
-        card = {
-            "header": {"template": "orange",
-                "title": {"tag": "plain_text",
-                    "content": f"📦 [兜底提醒] 第 2 封运单号待填 {age_hours}h"}},
-            "elements": [
-                feishu.build_contact_info_block(contact_info=_ci, contact_type=_ctype, compact=True),
-                {"tag": "div", "text": {"tag": "lark_md",
-                    "content": f"**KOL 已收到第 1 封寄样确认邮件**, 系统已建好第 2 条 tracking_followup "
-                               f"跟进草稿, 等运营回填运单号 — 已等 **{age_hours} 小时**.\n\n"
-                               f"请打开草稿表, 在「运单号」「物流商」字段填值, 把「邮件草稿状态」改为 **通过** → 自动发出.\n\n"
-                               f"⚠️ 不要手动改邮件正文字段 (5/15 已有错位事故)"}},
-                {"tag": "div", "text": {"tag": "lark_md", "content": f"**主题**: {subject}"}},
-                {"tag": "action", "actions": [
-                    {"tag": "button", "text": {"tag": "plain_text", "content": "打开草稿表填运单号"},
-                     "url": base_url, "type": "primary"},
-                ]},
-            ],
-        }
-        # 修复(2026-06-08): 原误写 resolve_notify_targets("ship_confirm") — 该 role 未定义会抛
-        # ValueError 致整个 L1b 通知失败。对齐 L1 ship 块: ship_main(运营专员) + ship_cc(Frankie+吴晓丹)。
-        _main, _cc = await draft_router._ship_confirm_targets()
-        personal_targets = _main + _cc
-
-        success, fail, errors, group_msg_id = 0, 0, [], ""
-        try:
-            group_msg_id = await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
-            success += 1
-        except Exception as e:
-            fail += 1; errors.append(f"群: {str(e)[:80]}")
-            print(f"[sla_check L1b] notify chat fail: {e}")
-        for name, oid in personal_targets:
+    newly_marked = 0
+    delivered_items = []
+    if reviewer_delivery["sent"]:
+        delivered_items.extend(p1_items)
+    if p2_delivery["sent"]:
+        delivered_items.extend(p2_items)
+    if delivered_items:
+        seen_delivered = set()
+        for rec in delivered_items:
+            rid = rec.get("record_id") or ""
+            if not rid or rid in seen_delivered:
+                continue
+            seen_delivered.add(rid)
+            if (rec.get("fields") or {}).get("SLA已升级"):
+                continue
             try:
-                await feishu.send_card_message("open_id", oid, card)
-                success += 1
+                await _mark_escalated(rid)
+                newly_marked += 1
             except Exception as e:
-                fail += 1; errors.append(f"{name}: {str(e)[:80]}")
-                print(f"[sla_check L1b] notify {name} fail: {e}")
-        try:
-            await feishu.mark_card_receipt(rid, success, fail, errors, group_msg_id=group_msg_id)
-        except Exception:
-            pass
+                print(f"[sla_check digest] mark escalated fail: {e}")
 
-        try:
-            new_note = (note + f" [TRACK-FOLLOWUP-PUSH@{int(time.time())}]")[:500]
-            await feishu.update_record(config.T_DRAFT, rid, {"审批意见": new_note})
-        except Exception as e:
-            print(f"[sla_check L1b] mark fail: {e}")
-
-        pushed += 1
-
-    return {"layer": "1b", "checked": len(items), "pushed": pushed,
-            "skipped": skipped, "not_yet": not_yet}
+    return {
+        "layer": 1,
+        "checked": len(all_items),
+        "not_yet": len(all_items) - len(overdue),
+        "p1_overdue": len(p1_items),
+        "p1_over_48h": len(p1_over_48h),
+        "p2_overdue": len(p2_items),
+        "reviewer_digest_sent": int(reviewer_delivery["sent"] > 0),
+        "frankie_digest_sent": int(frankie_delivery["sent"] > 0),
+        "p2_digest_sent": int(p2_delivery["sent"] > 0),
+        "newly_marked": newly_marked,
+        "delivery_failures": (
+            reviewer_delivery["failed"] + frankie_delivery["failed"] + p2_delivery["failed"]
+        ),
+        "reviewer_message_ids": reviewer_delivery["message_ids"],
+        "frankie_message_ids": frankie_delivery["message_ids"],
+        "p2_message_ids": p2_delivery["message_ids"],
+    }
 
 
 # ===== 层 2: +7d 已签收无回应 → 自动生 CONTENT_REMINDER =====
@@ -800,17 +857,16 @@ async def _layer_soft_nudge(now_ms: int) -> dict:
             "skipped": skipped, "not_yet": not_yet}
 
 
-async def run() -> dict:
-    """4 层 SLA 全跑一遍 (n8n cron 每日 09:30 BJ 调用)"""
-    now_ms = int(time.time() * 1000)
+async def run(now_ms: int = None) -> dict:
+    """SLA layers. Production omits now_ms; tests may pin it for deterministic routing."""
+    now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
     results = {}
     # 2026-05-22: L1c(自动签收) + L2(content reminder 催稿) 暂时下线 — 寄样后流程重设计中.
     # 催稿放错了位置: 正确应是 已签收 → "确认收到 + brief recap" 暖信 (合一, 含卖点/追踪链接/
     # 优惠码/#ad/建议角度, 过人审), 真催稿降级成更晚更软的关怀. 见 memory kol-ship-flow-redesign.
-    # A(auto_send 发出即推进已发货) + C(ship_recon 对账) 保留; L1/L1b/L3/L4 继续正常跑.
+    # A(auto_send 发出即推进已发货) + C(ship_recon 对账) 保留; L1/L3/L4 继续正常跑.
     # P4 软关怀 nudge (2026-05-29): 暖信(P3)发出 +12d 无上稿 → 软关怀(非催稿), 在 L3 30d 之前.
-    for layer_fn in (_layer1_review_overdue, _layer1b_tracking_followup_overdue,
-                      _layer_soft_nudge,
+    for layer_fn in (_layer1_review_overdue, _layer_soft_nudge,
                       _layer3_no_content_30d, _layer4_low_roi_60d):
         try:
             r = await layer_fn(now_ms)
