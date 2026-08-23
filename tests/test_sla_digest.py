@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import json
 import os
 import tempfile
 import unittest
@@ -156,16 +157,21 @@ class SlaDigestTests(unittest.TestCase):
 
         reviewer_text = str(sent[0]["card"])
         self.assertIn("独立站运营专员", reviewer_text)
-        self.assertIn("4 小时内处理", reviewer_text)
-        self.assertIn("系统已检查", reviewer_text)
+        self.assertIn("有 4 封重要合作邮件待审核", reviewer_text)
+        self.assertIn("现在需要你做什么", reviewer_text)
+        self.assertIn("今天 4 小时内", reviewer_text)
         self.assertIn("先补齐运单号和物流商", reviewer_text)
+        self.assertIn("点「通过」后，邮件会进入真实发送流程", reviewer_text)
+        self.assertIn("去审核这 4 封邮件", reviewer_text)
         self.assertIn("record=rec_quote", reviewer_text)
         self.assertIn("record=rec_reply", reviewer_text)
         self.assertNotIn("record=rec_cold", reviewer_text)
+        for jargon in ["SLA", "`reply`", "`affiliate_quote`", "系统已检查", "在途草稿队列"]:
+            self.assertNotIn(jargon, reviewer_text)
 
         frankie_text = str(sent[1]["card"])
-        self.assertIn("无需逐条审批", frankie_text)
-        self.assertIn("超过 48 小时", frankie_text)
+        self.assertIn("你不用逐封审核", frankie_text)
+        self.assertIn("超过 48 小时没处理", frankie_text)
         self.assertIn("record=rec_quote", frankie_text)
 
         layer = result["layer_1"]
@@ -180,9 +186,9 @@ class SlaDigestTests(unittest.TestCase):
         sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = False
         noon_ms = at_local(2026, 8, 23, 12)
         rows = [
-            draft("rec_cold", "cold", 30, noon_ms),
-            draft("rec_followup", "followup", 36, noon_ms),
-            draft("rec_secondary", "secondary_outreach", 50, noon_ms),
+            draft("rec_a", "cold", 30, noon_ms),
+            draft("rec_b", "followup", 36, noon_ms),
+            draft("rec_c", "secondary_outreach", 50, noon_ms),
         ]
         sent, updated = self._install_fakes(rows)
 
@@ -192,17 +198,20 @@ class SlaDigestTests(unittest.TestCase):
         self.assertEqual(sent[0]["receive_id"], "ou_ops")
         self.assertEqual(sent[0]["level"], "P2")
         card_text = str(sent[0]["card"])
-        self.assertIn("24 小时内处理", card_text)
-        self.assertIn("cold", card_text)
-        self.assertIn("followup", card_text)
-        self.assertIn("secondary_outreach", card_text)
+        self.assertIn("有 3 封日常合作邮件待审核", card_text)
+        self.assertIn("明天前", card_text)
+        self.assertIn("首次合作邀请", card_text)
+        self.assertIn("未回复跟进", card_text)
+        self.assertIn("二次联系", card_text)
+        for jargon in ["cold", "followup", "secondary_outreach", "SLA", "P2"]:
+            self.assertNotIn(jargon, card_text)
         self.assertEqual(result["layer_1"]["p2_digest_sent"], 1)
         self.assertEqual(
             updated,
             [
-                ("rec_cold", {"SLA已升级": True, "卡片发送时间": noon_ms}),
-                ("rec_followup", {"卡片发送时间": noon_ms}),
-                ("rec_secondary", {"卡片发送时间": noon_ms}),
+                ("rec_a", {"SLA已升级": True, "卡片发送时间": noon_ms}),
+                ("rec_b", {"卡片发送时间": noon_ms}),
+                ("rec_c", {"卡片发送时间": noon_ms}),
             ],
         )
 
@@ -239,6 +248,25 @@ class SlaDigestTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0]["receive_id"], "ou_frankie")
         self.assertEqual(result["layer_1"]["reviewer_digest_sent"], 1)
+
+    def test_card_uses_plain_operational_language_and_one_clear_action(self):
+        now_ms = at_local(2026, 8, 23, 18)
+        rows = [
+            draft("rec_a", "reply", 29, now_ms),
+            draft("rec_b", "affiliate_quote", 31, now_ms),
+        ]
+
+        card = sla_check.build_sla_digest_card(rows, now_ms, audience="reviewer", level="P1")
+        payload = json.dumps(card, ensure_ascii=False)
+
+        self.assertIn("先看对方原邮件", payload)
+        self.assertIn("没问题点「通过」", payload)
+        self.assertIn("需要修改就先改正文", payload)
+        self.assertIn("不适合回复就点「否决」或「退回重做」", payload)
+        self.assertIn("系统已自动排除处理完的邮件", payload)
+        self.assertEqual(payload.count("去审核这 2 封邮件"), 1)
+        for jargon in ["SLA", "超时", "队列", "reply", "affiliate_quote", "幂等", "元数据"]:
+            self.assertNotIn(jargon, payload)
 
     def test_p2_digest_is_silent_outside_the_daily_hour(self):
         sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = False

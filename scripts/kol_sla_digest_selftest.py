@@ -43,8 +43,8 @@ def fixture(now_ms):
 def validate_card(card, records):
     payload = json.dumps(card, ensure_ascii=False)
     required = [
-        "负责人", "截止", "系统已检查", "不会发送邮件", "真实邮件发送队列",
-        "打开在途草稿队列",
+        "谁来处理", "请在", "现在需要你做什么", "真实发送流程",
+        "先看对方原邮件", "去审核这",
     ]
     missing = [text for text in required if text not in payload]
     urls = []
@@ -110,7 +110,7 @@ async def send_frankie_sample(card):
     sample["elements"].insert(0, {
         "tag": "div",
         "text": {"tag": "lark_md", "content":
-            "⚠️ **这是上线前样卡**：只验证排版、数量和链接；不会修改草稿，也不会发送邮件。"},
+            "⚠️ **这是新版文案样卡**：请重点看运营是否一眼知道要做什么。只发给 Frankie，不会修改草稿或发送邮件。"},
     })
     targets = await feishu.resolve_notify_targets("frankie")
     if len(targets) != 1:

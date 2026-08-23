@@ -20,3 +20,4 @@
 - Re-ran the production read-only preflight after review fixes: P1=25, P2=2, P1 over 48h=0; exact view and top-five record targets are reachable; no writes, email sends, or group sends.
 - Sent exactly one Frankie-only live sample card: `om_x100b679b655d64a0c318f10608ed503`. Message read-back confirms `interactive` type, expected title, content, and queue URL. No draft writes, email sends, or group sends occurred.
 - Production push/deploy remains intentionally blocked until Frankie visually confirms the sample in the Feishu client.
+- Frankie rejected the first sample wording as too technical. Reworked the card into plain operational Chinese: action-first title and steps, translated source labels, explicit approve/edit/reject/tracking instructions, and a concrete “去审核这 N 封邮件” button. Internal terms such as SLA/source codes/queue are no longer shown.

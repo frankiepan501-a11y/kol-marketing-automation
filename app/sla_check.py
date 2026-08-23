@@ -41,14 +41,15 @@ P1_DRAFT_SOURCES = frozenset({
     "reply", "affiliate_quote", "ship_confirm", "tracking_followup",
 })
 SOURCE_LABELS = {
-    "reply": "KOL 回复",
-    "affiliate_quote": "商务报价",
-    "ship_confirm": "寄样确认",
-    "tracking_followup": "运单跟进",
-    "cold": "首次开发信",
-    "followup": "常规跟进",
-    "secondary_outreach": "二次触达",
-    "warm_recap": "寄样暖信",
+    "reply": "KOL 来信",
+    "affiliate_quote": "报价/付费合作",
+    "ship_confirm": "寄样确认邮件",
+    "tracking_followup": "待补运单信息",
+    "cold": "首次合作邀请",
+    "followup": "未回复跟进",
+    "secondary_outreach": "二次联系",
+    "warm_recap": "寄样后关怀",
+    "(空来源)": "其他合作邮件",
 }
 
 # 层 1c (2026-05-22 B): 已发货 → 已签收 自动推进 (按物流渠道时效假定送达)
@@ -169,8 +170,8 @@ def _source_summary(items: list) -> str:
     parts = []
     for source, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0])):
         label = SOURCE_LABELS.get(source, source)
-        parts.append(f"{label} `{source}` {count} 条")
-    return "｜".join(parts) if parts else "无"
+        parts.append(f"{label} {count} 封")
+    return "｜".join(parts) if parts else "暂无"
 
 
 def _top_record_lines(items: list, now_ms: int, limit: int = 5) -> str:
@@ -182,10 +183,10 @@ def _top_record_lines(items: list, now_ms: int, limit: int = 5) -> str:
         subject = (ext(f.get("邮件主题")) or "无主题").replace("\n", " ")[:55]
         source = _draft_source(rec)
         age = _draft_age_hours(rec, now_ms)
-        lines.append(f"- [{SOURCE_LABELS.get(source, source)}｜{age}h｜{subject}]({_record_url(rid)})")
+        lines.append(f"- [{SOURCE_LABELS.get(source, '其他合作邮件')}｜已等 {age} 小时｜{subject}]({_record_url(rid)})")
     remaining = len(items) - len(lines)
     if remaining > 0:
-        lines.append(f"- 其余 {remaining} 条请在待审队列按「生成时间」从早到晚处理")
+        lines.append(f"- 还有 {remaining} 封，请打开页面后按「生成时间」从早到晚处理")
     return "\n".join(lines)
 
 
@@ -193,38 +194,43 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
     """Build an actionable queue-management card; this card never approves or sends email itself."""
     oldest = max((_draft_age_hours(rec, now_ms) for rec in items), default=0)
     if audience == "frankie":
-        title = f"SLA 48h 异常汇总 · {len(items)} 条"
+        title = f"有 {len(items)} 封重要邮件超过 48 小时没处理"
+        owner_label = "需要谁处理"
         owner = "独立站运营专员"
-        deadline = "今日确认负责人清空异常"
-        intro = (
-            "这些草稿已经超过 48 小时仍未处理。**你无需逐条审批**；"
-            "请只确认运营负责人今天清空，遇到高预算、客户风险或规则外承诺再升级给你。"
+        deadline_label = "你今天要做"
+        deadline = "确认负责人处理完"
+        action_text = (
+            "**你不用逐封审核。**请确认独立站运营专员今天处理完这些邮件。"
+            "只有涉及高额付费、客户风险或特殊承诺时，才需要你决定。"
         )
         header_template = "orange"
     elif level == "P2":
-        title = f"SLA 日常草稿汇总 · {len(items)} 条"
+        title = f"有 {len(items)} 封日常合作邮件待审核"
+        owner_label = "谁来处理"
         owner = "独立站运营专员"
-        deadline = "24 小时内处理"
-        intro = (
-            "这是低风险外联草稿的每日汇总。先处理 P1 回复与商务事项，再按生成时间处理本队列。"
+        deadline_label = "请在"
+        deadline = "明天前处理完"
+        action_text = (
+            "1. 点下面按钮打开待审核邮件。\n"
+            "2. 先看对方原邮件，再检查系统生成的回复。\n"
+            "3. 没问题点「通过」；需要修改就先改正文；不适合回复就点「否决」或「退回重做」。"
         )
         header_template = "yellow"
     else:
-        title = f"SLA 待审草稿汇总 · {len(items)} 条"
+        title = f"有 {len(items)} 封重要合作邮件待审核"
+        owner_label = "谁来处理"
         owner = "独立站运营专员"
-        deadline = "4 小时内处理"
-        intro = (
-            "这些记录涉及 KOL 回复、商务报价、寄样确认或运单跟进。"
-            "回复/报价/寄样确认：核对原邮件和草稿，正确则通过；不合适则否决或退回重生。"
-            "**运单跟进：必须先补齐运单号和物流商，再检查正文并通过，不能直接点通过。**"
+        deadline_label = "请在"
+        deadline = "今天 4 小时内处理"
+        action_text = (
+            "1. 点下面按钮打开待审核邮件。\n"
+            "2. 先看对方原邮件，再检查系统生成的回复。\n"
+            "3. 没问题点「通过」；需要修改就先改正文；不适合回复就点「否决」或「退回重做」。\n"
+            "4. **看到“待补运单信息”时，先补齐运单号和物流商，再检查正文并点「通过」。**"
         )
         header_template = "orange"
 
-    metadata_line = (
-        "- 系统仅记录本次提醒所需的元数据（已提醒、提醒时间），不改正文、审批状态或寄样状态，也不会发送邮件"
-        if level == "P2"
-        else "- 本卡不会修改任何草稿字段，也不会发送邮件"
-    )
+    filter_note = "系统已自动排除处理完的邮件；这里只显示等待超过 24 小时、仍需要审核的邮件。"
 
     return {
         "config": {"wide_screen_mode": True},
@@ -234,28 +240,25 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
         },
         "elements": [
             {"tag": "div", "fields": [
-                {"is_short": True, "text": {"tag": "lark_md", "content": f"**负责人**: {owner}"}},
-                {"is_short": True, "text": {"tag": "lark_md", "content": f"**截止**: {deadline}"}},
-                {"is_short": True, "text": {"tag": "lark_md", "content": f"**待处理**: {len(items)} 条"}},
-                {"is_short": True, "text": {"tag": "lark_md", "content": f"**最久等待**: {oldest} 小时"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**{owner_label}**：{owner}"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**{deadline_label}**：{deadline}"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**一共**：{len(items)} 封"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**最久一封**：已等 {oldest} 小时"}},
             ]},
-            {"tag": "div", "text": {"tag": "lark_md", "content": intro}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**来源分布**\n{_source_summary(items)}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**现在需要你做什么**\n{action_text}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**本次有哪些邮件**\n{_source_summary(items)}"}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content":
-                "**系统已检查**\n"
-                "- 仅统计草稿状态仍为「待审」；运单跟进另含「待修改」\n"
-                "- 已按生成时间计算 24h / 48h 超时\n"
-                f"{metadata_line}\n"
-                "- 点「通过」后会进入真实邮件发送队列，不能盲点"}},
+                f"{filter_note}\n\n"
+                "⚠️ **注意：点「通过」后，邮件会进入真实发送流程。请先看完原邮件和回复内容。**"}},
             {"tag": "div", "text": {"tag": "lark_md", "content":
-                f"**最老记录（可直接打开）**\n{_top_record_lines(items, now_ms)}"}},
+                f"**建议先处理这 {min(5, len(items))} 封（等待最久）**\n{_top_record_lines(items, now_ms)}"}},
             {"tag": "action", "actions": [
-                {"tag": "button", "text": {"tag": "plain_text", "content": "打开在途草稿队列"},
+                {"tag": "button", "text": {"tag": "plain_text", "content": f"去审核这 {len(items)} 封邮件"},
                  "url": _queue_url(), "type": "primary"},
             ]},
             {"tag": "note", "elements": [
-                {"tag": "plain_text", "content": "处理结果保留在草稿表；汇总卡无需回复或重复转发。"},
+                {"tag": "plain_text", "content": "这张卡只提醒你有哪些邮件要处理；实际审核在邮件草稿表完成。处理后不用回复这张卡。"},
             ]},
         ],
     }
