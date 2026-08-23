@@ -249,7 +249,7 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content":
                 f"{filter_note}\n\n"
-                "⚠️ **注意：点「通过」后，邮件会进入真实发送流程。请先看完原邮件和回复内容。**"}},
+                "⚠️ **注意：点「通过」后，邮件会进入真实发送流程。请先看完相关邮件和邮件草稿。**"}},
             {"tag": "div", "text": {"tag": "lark_md", "content":
                 f"**建议先处理这 {min(5, len(items))} 封（等待最久）**\n{_top_record_lines(items, now_ms)}"}},
             {"tag": "action", "actions": [

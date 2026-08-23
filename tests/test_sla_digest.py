@@ -264,6 +264,7 @@ class SlaDigestTests(unittest.TestCase):
         self.assertIn("需要修改就先改正文", payload)
         self.assertIn("不适合发送就点「否决」或「退回重做」", payload)
         self.assertIn("系统已自动排除处理完的邮件", payload)
+        self.assertIn("请先看完相关邮件和邮件草稿", payload)
         self.assertEqual(payload.count("打开待审核邮件列表"), 1)
         for jargon in ["SLA", "超时", "队列", "reply", "affiliate_quote", "幂等", "元数据"]:
             self.assertNotIn(jargon, payload)
