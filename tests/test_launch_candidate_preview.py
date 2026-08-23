@@ -1221,6 +1221,118 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertFalse(candidate["eligible_for_master_write"])
         self.assertIn("semantic_fit_not_verified", candidate["write_block_reasons"])
 
+    def test_private_import_path_reattaches_only_current_activity_evidence(self):
+        seed = [{
+            "author_key": "youtube|handle:seedcreator", "name": "Seed Creator",
+            "platform": "YouTube", "creator_id": "", "handle": "SeedCreator",
+            "profile_url": "https://www.youtube.com/@SeedCreator",
+            "evidence_posts": [{"post_title": "client supplied text is ignored"}],
+        }]
+        ctx = {
+            "competitor_evidence_applied": True,
+            "competitor_posts": [{"record_id": "post1", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL账号Handle": "seedcreator",
+                "KOL主页URL": "https://youtube.com/@seedcreator",
+                "帖子URL": "https://youtube.com/watch?v=verified",
+                "帖子标题": "Verified NYXI Switch controller review",
+                "曝光量": 1000,
+            }}],
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "activity_node_snapshot", "ranking_version": "evidence-v4",
+            "target_countries": {"US"}, "target_languages": {"en"},
+        }
+        profile = {
+            "retrieved": True, "country": "US", "country_raw": "United States",
+            "language": "en", "email": "seed@example.com",
+            "description": "Public creator profile",
+            "canonical_url": "https://youtube.com/@seedcreator",
+        }
+        with patch.object(
+            preview, "_load_activity_context", new=AsyncMock(return_value=ctx),
+        ), patch.object(
+            preview, "_load_evidence_identity_contacts", new=AsyncMock(return_value=([], [])),
+        ), patch.object(
+            preview.relabel, "fetch_youtube_public_profile", new=AsyncMock(return_value=profile),
+        ), patch.object(
+            preview.relabel, "fetch_recent_videos", new=AsyncMock(return_value=[]),
+        ):
+            result = asyncio.run(preview.enrich_unmatched_evidence_authors(
+                campaign_id=preview.DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID,
+                seed_candidates=seed, source_job_id="launchruntime-verified",
+                _reattach_server_evidence=True,
+            ))
+
+        candidate = result["candidates"][0]
+        self.assertTrue(candidate["eligible_for_master_write"])
+        self.assertEqual(["post1"], candidate["matched_post_ids"])
+        self.assertEqual(
+            "public_profile_recent_content_and_verified_evidence_posts",
+            candidate["semantic_source"],
+        )
+        self.assertEqual(
+            "Verified NYXI Switch controller review",
+            candidate["evidence_posts"][0]["post_title"],
+        )
+
+    def test_private_import_path_blocks_server_evidence_identity_mismatch(self):
+        seed = [{
+            "author_key": "youtube|handle:seedcreator", "name": "Seed Creator",
+            "platform": "YouTube", "creator_id": "", "handle": "SeedCreator",
+            "profile_url": "https://youtube.com/@seedcreator",
+        }]
+        ctx = {
+            "competitor_evidence_applied": True,
+            "competitor_posts": [{"record_id": "post1", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL账号Handle": "seedcreator",
+                "KOL主页URL": "https://youtube.com/@different-profile",
+                "帖子URL": "https://youtube.com/watch?v=verified",
+                "帖子标题": "NYXI Switch controller review",
+            }}],
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "activity_node_snapshot", "ranking_version": "evidence-v4",
+            "target_countries": {"US"}, "target_languages": {"en"},
+        }
+        with patch.object(
+            preview, "_load_activity_context", new=AsyncMock(return_value=ctx),
+        ):
+            with self.assertRaisesRegex(ValueError, "身份与锁定样本不一致"):
+                asyncio.run(preview.enrich_unmatched_evidence_authors(
+                    campaign_id=preview.DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID,
+                    seed_candidates=seed, source_job_id="launchruntime-verified",
+                    _reattach_server_evidence=True,
+                ))
+
+    def test_private_import_path_rejects_activity_relation_fallback(self):
+        seed = [{
+            "author_key": "youtube|handle:seedcreator", "name": "Seed Creator",
+            "platform": "YouTube", "creator_id": "", "handle": "SeedCreator",
+            "profile_url": "https://youtube.com/@seedcreator",
+        }]
+        ctx = {
+            "competitor_evidence_applied": True,
+            "competitor_posts": [{"record_id": "post1", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL账号Handle": "seedcreator",
+                "KOL主页URL": "https://youtube.com/@seedcreator",
+                "帖子URL": "https://youtube.com/watch?v=relation-only",
+                "帖子标题": "NYXI Switch controller review",
+            }}],
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "activity_relation", "ranking_version": "evidence-v4",
+            "target_countries": {"US"}, "target_languages": {"en"},
+        }
+        with patch.object(
+            preview, "_load_activity_context", new=AsyncMock(return_value=ctx),
+        ):
+            with self.assertRaisesRegex(ValueError, "活动节点快照"):
+                asyncio.run(preview.enrich_unmatched_evidence_authors(
+                    campaign_id=preview.DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID,
+                    seed_candidates=seed, source_job_id="launchruntime-verified",
+                    _reattach_server_evidence=True,
+                ))
+
     def test_x_ambiguous_post_language_stays_unknown_without_text_guess(self):
         seed = [{
             "author_key": "x|handle:ambiguous", "name": "Ambiguous",

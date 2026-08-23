@@ -374,6 +374,36 @@ class LaunchCompetitorEvidenceTests(unittest.TestCase):
             candidate["evidence_posts"][0]["post_url"],
         )
 
+    def test_verified_author_key_rebuilds_evidence_from_server_index(self):
+        posts = [
+            {"record_id": "post1", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL账号Handle": "CreatorOne",
+                "KOL主页URL": "https://www.youtube.com/@CreatorOne",
+                "帖子URL": "https://youtube.com/watch?v=one",
+                "帖子标题": "NYXI Switch controller review", "曝光量": 1000,
+            }},
+            {"record_id": "post2", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL账号Handle": "creatorone",
+                "KOL主页URL": "https://youtube.com/@creatorone",
+                "帖子URL": "https://youtube.com/watch?v=two",
+                "帖子标题": "Second NYXI gamepad test", "曝光量": 2000,
+            }},
+        ]
+        index = evidence.build_evidence_index(posts)
+
+        candidate = evidence.candidate_for_verified_author_key(
+            index, "youtube|handle:creatorone",
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(["post1", "post2"], candidate["matched_post_ids"])
+        self.assertEqual(2, candidate["post_count"])
+        self.assertIsNone(evidence.candidate_for_verified_author_key(
+            index, "youtube|handle:client-invented",
+        ))
+
     def test_timestamp_accepts_seconds_and_iso_strings(self):
         self.assertEqual(1_700_000_000_000, evidence._timestamp(1_700_000_000))
         self.assertEqual(

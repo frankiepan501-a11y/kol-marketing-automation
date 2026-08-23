@@ -1223,21 +1223,112 @@ async def preview_unmatched_evidence_authors(
     }
 
 
+async def _reattach_verified_activity_evidence(
+    *, campaign_id: str, seed_candidates: list[dict],
+) -> tuple[list[dict], dict]:
+    """按锁定作者键从当前活动快照回接证据；不信任请求里的帖子正文。"""
+    activity_ctx = await _load_activity_context(campaign_id, "KOL")
+    if not activity_ctx.get("competitor_evidence_applied"):
+        raise ValueError(
+            activity_ctx.get("evidence_error")
+            or "Dave 活动竞品证据未就绪，无法回接作者证据"
+        )
+    if (
+        activity_ctx.get("evidence_source") != "activity_node_snapshot"
+        or activity_ctx.get("ranking_version") != "evidence-v4"
+    ):
+        raise ValueError("Dave受控导入只接受当前锁定的活动节点快照 evidence-v4")
+    index = launch_competitor_evidence.build_evidence_index(
+        activity_ctx["competitor_posts"],
+    )
+    attached = []
+    for seed in seed_candidates:
+        author_key = str(seed.get("author_key") or "").strip().casefold()
+        verified = launch_competitor_evidence.candidate_for_verified_author_key(
+            index, author_key,
+        )
+        if not verified:
+            raise ValueError(f"当前活动快照找不到锁定作者证据: {author_key or 'unknown'}")
+        seed_platform = str(seed.get("platform") or "").strip().casefold()
+        verified_platform = str(verified.get("platform") or "").strip().casefold()
+        seed_handle = launch_competitor_evidence.normalize_handle(
+            str(seed.get("handle") or ""),
+        )
+        verified_handle = launch_competitor_evidence.normalize_handle(
+            str(verified.get("handle") or ""),
+        )
+        seed_url = launch_competitor_evidence.normalize_url(
+            str(seed.get("profile_url") or ""),
+        )
+        verified_url = launch_competitor_evidence.normalize_url(
+            str(verified.get("profile_url") or ""),
+        )
+        stable_keys = {
+            str(value or "").strip().casefold()
+            for value in verified.get("stable_identity_keys") or []
+        }
+        handle_aliases = {
+            value for value in stable_keys
+            if value.startswith(f"{seed_platform}|handle:")
+        }
+        url_aliases = {
+            value for value in stable_keys
+            if value.startswith(f"{seed_platform}|url:")
+        }
+        expected_handle_alias = f"{seed_platform}|handle:{seed_handle}"
+        expected_url_alias = f"{seed_platform}|url:{seed_url}".casefold()
+        if (
+            verified_platform != seed_platform
+            or not seed_handle or verified_handle != seed_handle
+            or not seed_url or verified_url != seed_url
+            or handle_aliases != {expected_handle_alias}
+            or url_aliases != {expected_url_alias}
+        ):
+            raise ValueError(f"当前活动证据身份与锁定样本不一致: {author_key}")
+        # 身份字段继续使用经过锁定校验的 seed；只有证据相关字段来自服务端快照。
+        attached.append({
+            **seed,
+            "stable_identity_keys": verified.get("stable_identity_keys") or [],
+            "post_count": verified.get("post_count") or 0,
+            "first_published_at": verified.get("first_published_at") or 0,
+            "last_published_at": verified.get("last_published_at") or 0,
+            "long_term_span_days": verified.get("long_term_span_days") or 0,
+            "long_term": bool(verified.get("long_term")),
+            "high_performance": bool(verified.get("high_performance")),
+            "evidence_level": verified.get("evidence_level") or "C",
+            "evidence_posts": verified.get("evidence_posts") or [],
+            "evidence_posts_truncated": bool(verified.get("evidence_posts_truncated")),
+            "matched_post_ids": verified.get("matched_post_ids") or [],
+            "primary_evidence_url": verified.get("primary_evidence_url") or "",
+            "primary_evidence_title": verified.get("primary_evidence_title") or "",
+        })
+    return attached, activity_ctx
+
+
 async def enrich_unmatched_evidence_authors(
     *, campaign_id: str, limit: int = 20,
     seed_candidates: list[dict] | None = None, source_job_id: str = "",
     _include_verified_email: bool = False,
+    _reattach_server_evidence: bool = False,
 ) -> dict:
     """对只读样本补公开资料并执行写前硬闸；仍保持零业务写入。"""
     trusted_evidence_posts = seed_candidates is None
     if seed_candidates is not None:
         if not source_job_id.startswith("launchruntime-"):
             raise ValueError("复用样本必须提供已完成的后台 source_job_id")
-        activity_ctx = await _load_verified_activity_shell(campaign_id)
+        if _reattach_server_evidence:
+            verified_seeds, activity_ctx = await _reattach_verified_activity_evidence(
+                campaign_id=campaign_id,
+                seed_candidates=list(seed_candidates)[:max(1, min(int(limit), 20))],
+            )
+            trusted_evidence_posts = True
+        else:
+            activity_ctx = await _load_verified_activity_shell(campaign_id)
+            verified_seeds = list(seed_candidates)[:max(1, min(int(limit), 20))]
         kols, editors = await _load_evidence_identity_contacts()
         sample = {
             "unmatched_authors": None,
-            "candidates": list(seed_candidates)[:max(1, min(int(limit), 20))],
+            "candidates": verified_seeds,
         }
     else:
         sample, activity_ctx, kols, editors = await _build_unmatched_evidence_author_sample(

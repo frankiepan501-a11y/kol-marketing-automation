@@ -424,7 +424,7 @@ async def run_controlled_import(
     enrichment = await preview.enrich_unmatched_evidence_authors(
         campaign_id=campaign_id, limit=len(seed_candidates),
         seed_candidates=seed_candidates, source_job_id=source_job_id,
-        _include_verified_email=True,
+        _include_verified_email=True, _reattach_server_evidence=True,
     )
     by_handle = {_handle(candidate): candidate for candidate in enrichment.get("candidates") or []}
     missing = sorted(expected - set(by_handle))

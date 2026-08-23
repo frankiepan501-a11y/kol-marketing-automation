@@ -455,6 +455,33 @@ def _author_candidate(author_key: str, posts: list[dict], index: dict) -> dict:
     }
 
 
+def candidate_for_verified_author_key(index: dict, author_key: str) -> dict | None:
+    """用服务端已验证帖子索引还原一个指定作者，拒绝客户端自带证据。"""
+    key = str(author_key or "").strip().casefold()
+    if not key:
+        return None
+    canonical_keys = {
+        index["author_by_post"].get(post.get("record_id", ""), "")
+        for post in index["valid_posts"]
+        if key in {alias.casefold() for alias in _post_author_aliases(post)}
+    }
+    canonical_keys.discard("")
+    if len(canonical_keys) != 1:
+        return None
+    canonical_key = next(iter(canonical_keys))
+    posts = [
+        post for post in index["valid_posts"]
+        if index["author_by_post"].get(post.get("record_id", ""), "") == canonical_key
+    ]
+    if not posts:
+        return None
+    candidate = _author_candidate(key, posts, index)
+    candidate["matched_post_ids"] = [
+        post.get("record_id", "") for post in posts if post.get("record_id")
+    ][:100]
+    return candidate
+
+
 def rank_unmatched_author_candidates(
     index: dict, contacts: list[dict], *, limit: int = 20,
 ) -> dict:

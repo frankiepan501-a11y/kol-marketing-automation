@@ -25,9 +25,10 @@ class LaunchEvidenceAuthorImportTests(unittest.TestCase):
             "campaign_id": importer.DAVE_CAMPAIGN_ID,
             "ranking_version": "evidence-v4", "candidates": [candidate],
         }
+        enrich = AsyncMock(return_value=enrichment)
         with patch.object(
             importer.preview, "enrich_unmatched_evidence_authors",
-            new=AsyncMock(return_value=enrichment),
+            new=enrich,
         ), patch.object(
             importer.launch_evidence, "get_activity",
             new=AsyncMock(return_value={"record_id": "activity1", "fields": {
@@ -47,6 +48,7 @@ class LaunchEvidenceAuthorImportTests(unittest.TestCase):
         self.assertTrue(result["read_only"])
         self.assertEqual(0, result["writes"])
         self.assertEqual(1, result["planned"])
+        self.assertTrue(enrich.await_args.kwargs["_reattach_server_evidence"])
         create.assert_not_awaited()
 
     def test_commit_creates_pending_participant_without_draft_and_is_replay_safe(self):
