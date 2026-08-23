@@ -33,6 +33,17 @@ class RelabelProfileTests(unittest.TestCase):
         self.assertEqual("", result["country"])
         self.assertEqual("", result["email"])
 
+    def test_youtube_about_parser_chooses_populated_model_when_page_contains_empty_duplicate(self):
+        html = r'''{"aboutChannelViewModel":{}}
+        {"aboutChannelViewModel":{"description":"Business: real@example.com",
+        "country":"United States","channelId":"UC-real"}}'''
+
+        result = relabel.parse_youtube_about_page(html)
+
+        self.assertEqual("US", result["country"])
+        self.assertEqual("real@example.com", result["email"])
+        self.assertEqual("UC-real", result["channel_id"])
+
     def test_recent_video_page_returns_titles_and_publish_dates(self):
         html = r'''
         {"lockupMetadataViewModel":{"title":{"content":"Switch 2 Dock Review"},

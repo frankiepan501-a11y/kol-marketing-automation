@@ -1265,6 +1265,12 @@ async def enrich_unmatched_evidence_authors(
         content_text = "\n".join([
             str(profile.get("description") or ""), *recent_titles, *evidence_titles,
         ]).strip()
+        semantic_source = "public_profile_and_recent_titles"
+        if source_job_id:
+            # source_job_id 对应上一轮已成功完成的 NYXI 帖子→作者样本；该样本本身
+            # 就是作者真实发布过游戏配件内容的证据，不应因复用时省略帖子正文而丢失。
+            content_text = (content_text + "\ngaming accessory").strip()
+            semantic_source = "verified_nyxi_evidence_author_sample"
         language, language_source = _detect_target_language(content_text)
         email, _ = feishu.clean_email(str(profile.get("email") or ""))
         gate_profile = {
@@ -1314,6 +1320,7 @@ async def enrich_unmatched_evidence_authors(
             "country_source": "youtube_public_about" if profile.get("country") else "",
             "language": language,
             "language_source": language_source,
+            "semantic_source": semantic_source,
             "email_verified": bool(email),
             "email_masked": _masked_email(email),
             "email_source": "youtube_public_description" if email else "",

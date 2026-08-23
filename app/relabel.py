@@ -159,16 +159,27 @@ def _youtube_text(value) -> str:
 def parse_youtube_about_page(source: str) -> dict:
     """从公开 YouTube About 页读取可验证资料；缺失项保持为空，不猜测。"""
     marker = '"aboutChannelViewModel"'
-    marker_index = (source or "").find(marker)
-    model = {}
-    if marker_index >= 0:
+    models = []
+    cursor = 0
+    while True:
+        marker_index = (source or "").find(marker, cursor)
+        if marker_index < 0:
+            break
         object_start = (source or "").find("{", marker_index + len(marker))
         raw = _balanced_json_object(source or "", object_start)
         if raw:
             try:
-                model = json.loads(raw)
+                value = json.loads(raw)
+                if isinstance(value, dict):
+                    models.append(value)
             except json.JSONDecodeError:
-                model = {}
+                pass
+            cursor = object_start + len(raw)
+        else:
+            cursor = marker_index + len(marker)
+    model = max(models, key=lambda value: sum(bool(_youtube_text(value.get(name))) for name in (
+        "description", "country", "canonicalChannelUrl", "channelId", "subscriberCountText",
+    )), default={})
 
     description = _youtube_text(model.get("description"))
     country_raw = _youtube_text(model.get("country"))
