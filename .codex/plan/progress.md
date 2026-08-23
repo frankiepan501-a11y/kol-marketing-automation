@@ -468,3 +468,11 @@
 - P0准确性回归进一步修复两项：飞书关联字段的`[{id: ...}]`形态纳入主表已匹配排除；身份匹配用标准化URL、运营展示保留原始可点击URL。实时样本与旧统计重新对齐为1137名未匹配作者。
 - Dave语义闸不再接受单独的`Nintendo/Switch/controller`宽词；改为`Dave the Diver / Switch controller / gamepad / gaming hardware/accessory / handheld gaming`等产品级短语，避免Nintendo新闻或泛游戏频道仅凭一个宽词过闸。
 - P0聚焦回归88项通过；全仓525项中524项通过，唯一失败仍为既有`test_zeabur_watchdog`旧日期窗口fixture，与本次KOL改动无关。
+- P0随后补齐作者公开主页富化：YouTube About页提取国家、频道语言和公开商务邮箱；作者身份同时与9072条KOL主表、302条媒体人主表及邮箱做全局预检，并单独检查是否已经评测/上稿戴夫产品。
+- 首次全证据重算任务`launchruntime-e3a7e9e16c0e`遇飞书`1254607 Data not ready`时被误包装成“帖子不存在”；直接API回查确认记录真实存在。第二次全量重算`launchruntime-994d44c5d080`因逐条重试2988条证据耗时过长，停止把完成态样本回读与全池证据重算绑在一起。
+- 已改为复用完成态只读证据任务`launchruntime-e692563a5c8c`的20名锁定样本，同时重新校验活动、产品、竞品模式、证据状态、排名版本、9072条KOL、302条媒体人和邮箱；避免运营点击一次预检就重跑近3000条证据。
+- 首次复用样本任务`launchruntime-f7332345271b`快速完成，但YouTube页面存在多个`aboutChannelViewModel`，解析器取到空壳模型导致国家/邮箱全丢。现已改为选择字段最完整的模型；真实主页抽检`NEED 4 NINTENDO`和`Mekel Kasanova`均成功读出国家与公开邮箱。
+- 最终生产任务`launchruntime-c84194113d49`于2026-08-23成功：样本20、公开主页可读17、公开邮箱6；全局邮箱重复1、戴夫已评测1；3名通过全部预写入条件，分别为`Mekel Kasanova`（US/en）、`Alec Hansen`（US/en）、`Professor Shario`（DE/de）。
+- `NEED 4 NINTENDO`被正确路由为历史关系归并：国家CA不在本次目标市场、公开邮箱已属于KOL主表`recvhwpbze5cv2`、且已评测戴夫，禁止重复新开发。其余对象主要因目标国家未知/不符、无公开有效邮箱、语言未知/不符或X平台公开资料尚未补全而被拦。
+- 本轮严格保持`read_only=true / writes=0 / participation_writes=0 / drafts_created=0 / emails_sent=0`。3名通过者只进入“可受控导入”结论，尚未写主表或活动参与记录，避免在写闸验收时意外触发自治发信。
+- 代码提交：`4899747`（公开资料补全与写前闸）、`1c5c23f`（复用完成态证据样本）、`d00c0db`（YouTube多模型解析修复）。聚焦回归108项＋3个子样例通过；全仓554项通过，唯一失败仍是既有Zeabur watchdog旧日期fixture。
