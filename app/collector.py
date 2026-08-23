@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -16,6 +17,7 @@ from .constants import (
 )
 from .core import (
     display_datetime,
+    backfill_window,
     incremental_window,
     is_youtube_video_id,
     parse_datetime,
@@ -444,6 +446,227 @@ class IncrementalCollector:
                     if page_number == 10:
                         raise ApiError("youtube", "incremental_page_cap", f"query exceeded 10 pages: {query}")
         return evidence, calls
+
+    def _collect_window(
+        self,
+        *,
+        config: dict[str, Any],
+        config_record_id: str,
+        brand: str,
+        platform: str,
+        now: datetime,
+        start: datetime,
+        end: datetime,
+        commit: bool,
+        job_id: str,
+        refresh_existing_ids: bool,
+    ) -> dict[str, Any]:
+        """Collect one explicit window; shared by incremental and history flows.
+
+        Historical windows only refresh IDs found in that window. This keeps a
+        7-day backfill bounded even when a brand already has thousands of rows.
+        """
+        evidence, search_calls = self._search(config, start, end)
+        all_rows = self.feishu.list_records(
+            BASE_TOKEN, TABLES["competitor_posts"], field_names=POST_READ_FIELDS
+        )
+        current_ids = {
+            _text(row.get("帖子ID"))
+            for row in all_rows
+            if refresh_existing_ids and is_youtube_identity(row, brand=brand)
+        }
+        requested_ids = sorted(current_ids | set(evidence))
+        existing = index_rows_by_unique_key(
+            all_rows, target_keys={post_unique_key(video_id) for video_id in requested_ids}
+        )
+        existing_by_post_id = index_youtube_rows_by_post_id(
+            all_rows, target_ids=set(requested_ids)
+        )
+        videos = self.youtube.videos(requested_ids)
+        found_ids = {str(video.get("id") or "") for video in videos}
+        channel_ids = sorted(
+            {
+                str(video.get("snippet", {}).get("channelId") or "")
+                for video in videos
+                if isinstance(video.get("snippet"), dict)
+                and video.get("snippet", {}).get("channelId")
+            }
+        )
+        channels = {str(item.get("id") or ""): item for item in self.youtube.channels(channel_ids)}
+        batch_id = f"ytbackfill-{now.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        normalized: list[dict[str, Any]] = []
+        for video in videos:
+            snippet = video.get("snippet") if isinstance(video.get("snippet"), dict) else {}
+            channel_id = str(snippet.get("channelId") or "")
+            video_id = str(video.get("id") or "")
+            normalized.append(
+                normalize_video(
+                    video,
+                    channels.get(channel_id),
+                    config=config,
+                    evidence=evidence.get(video_id, {"sources": [], "queries": [], "windows": []}),
+                    batch_id=batch_id,
+                    captured_at=now,
+                    config_record_id=config_record_id,
+                )
+            )
+
+        new_rows = [
+            row
+            for row in normalized
+            if row["唯一键"] not in existing
+            and str(row.get("帖子ID") or "") not in existing_by_post_id
+        ]
+        updates: list[tuple[str, dict[str, Any]]] = []
+        for row in normalized:
+            old = existing.get(row["唯一键"]) or existing_by_post_id.get(
+                str(row.get("帖子ID") or "")
+            )
+            if not old:
+                continue
+            change = build_update(old, row)
+            change.update(repair_interrupted_insert_fields(old, row, brand=brand))
+            if change:
+                updates.append((str(old["_record_id"]), change))
+        new_channels = {
+            str(row.get("KOL平台ID") or "")
+            for row in new_rows
+            if row.get("KOL平台ID") and row.get("相关性") != "无关"
+        }
+
+        if commit:
+            base_rows = [
+                {name: value for name, value in row.items() if name not in POST_SINGLE_SELECT_FIELDS}
+                for row in new_rows
+            ]
+            select_rows = [
+                {name: value for name, value in row.items() if name in POST_SINGLE_SELECT_FIELDS}
+                for row in new_rows
+            ]
+            created_ids = self.feishu.batch_create(
+                BASE_TOKEN, TABLES["competitor_posts"], base_rows
+            )
+            self.feishu.batch_update(
+                BASE_TOKEN,
+                TABLES["competitor_posts"],
+                [
+                    (record_id, select_fields)
+                    for record_id, select_fields in zip(created_ids, select_rows)
+                    if select_fields
+                ],
+            )
+            base_updates: list[tuple[str, dict[str, Any]]] = []
+            select_updates: list[tuple[str, dict[str, Any]]] = []
+            for record_id, fields in updates:
+                base = {name: value for name, value in fields.items() if name not in POST_SINGLE_SELECT_FIELDS}
+                selects = {name: value for name, value in fields.items() if name in POST_SINGLE_SELECT_FIELDS}
+                if base:
+                    base_updates.append((record_id, base))
+                if selects:
+                    select_updates.append((record_id, selects))
+            self.feishu.batch_update(BASE_TOKEN, TABLES["competitor_posts"], base_updates)
+            self.feishu.batch_update(BASE_TOKEN, TABLES["competitor_posts"], select_updates)
+
+        return {
+            "ok": True,
+            "status": "completed",
+            "mode": "commit" if commit else "preview",
+            "batch_id": batch_id,
+            "window_start": rfc3339(start),
+            "window_end": rfc3339(end),
+            "search_calls": search_calls,
+            "searched_new_ids": len(evidence),
+            "refreshed_video_ids": len(found_ids),
+            "unavailable_video_ids": len(set(requested_ids) - found_ids),
+            "new_posts": len(new_rows),
+            "updated_existing": len(updates),
+            "candidate_new_kols": len(new_channels),
+            "kol_master_writes": 0,
+            "outbound_messages": 0,
+        }
+
+    def backfill(
+        self,
+        *,
+        now: datetime,
+        commit: bool,
+        window_days: int = 7,
+        force: bool = False,
+        job_id: str = "",
+        config_record_id: str | None = None,
+        brand: str | None = None,
+        platform: str = DEFAULT_PLATFORM,
+    ) -> dict[str, Any]:
+        """Collect the next newest-to-oldest history window for one config."""
+        config = self._config(config_record_id=config_record_id, brand=brand, platform=platform)
+        config_record_id = str(config.get("_record_id") or config_record_id or "")
+        brand = _text(config.get("竞品品牌"))
+        platform = _text(config.get("平台")) or platform
+        start, end, history_start, done, progress = backfill_window(
+            config, now, window_days=window_days
+        )
+        if done:
+            return {
+                "ok": True,
+                "status": "completed",
+                "mode": "commit" if commit else "preview",
+                "reason": "history_complete",
+                "history_complete": True,
+                "window_start": rfc3339(start),
+                "window_end": rfc3339(end),
+                "next_end": rfc3339(history_start),
+                "new_posts": 0,
+                "updated_existing": 0,
+                "candidate_new_kols": 0,
+                "kol_master_writes": 0,
+                "outbound_messages": 0,
+            }
+        result = self._collect_window(
+            config=config,
+            config_record_id=config_record_id,
+            brand=brand,
+            platform=platform,
+            now=now,
+            start=start,
+            end=end,
+            commit=commit,
+            job_id=job_id or "backfill-direct",
+            refresh_existing_ids=False,
+        )
+        next_end = start
+        history_complete = next_end <= history_start
+        if commit:
+            progress_fields = {
+                "version": "yt-backfill-v1",
+                "brand": brand,
+                "platform": platform,
+                "status": "complete" if history_complete else "ready",
+                "history_start": rfc3339(history_start),
+                "last_window_start": rfc3339(start),
+                "last_window_end": rfc3339(end),
+                "next_end": rfc3339(next_end),
+                "last_job_id": job_id or result.get("batch_id"),
+                "last_new_posts": result.get("new_posts", 0),
+                "last_updated": rfc3339(now),
+            }
+            self.mark_success(
+                config_record_id,
+                {
+                    "运行状态": "正常",
+                    "YouTube历史进度": json.dumps(progress_fields, ensure_ascii=False, separators=(",", ":")),
+                    "错误摘要": "",
+                },
+            )
+        result.update(
+            {
+                "reason": "history_backfill",
+                "history_start": rfc3339(history_start),
+                "next_end": rfc3339(next_end),
+                "history_complete": history_complete,
+                "waterline_advanced": False,
+            }
+        )
+        return result
 
     def run(
         self,

@@ -16,6 +16,7 @@ from app.collector import (
 from app.core import (
     BEIJING,
     active_launch_events,
+    backfill_window,
     incremental_window,
     query_groups,
     schedule_decision,
@@ -51,6 +52,21 @@ class FakeJobTests(unittest.TestCase):
                 "ytinc-abc", {"YouTube历史进度": "云端增量完成；job=ytinc-abcd；x"}
             )
         )
+
+    def test_durable_assert_recovers_completed_backfill_json(self):
+        from app.job_status import durable_job_snapshot
+
+        snapshot = durable_job_snapshot(
+            "ytbackfill-abc",
+            {
+                "YouTube历史进度": (
+                    '{"version":"yt-backfill-v1","last_job_id":"ytbackfill-abc",'
+                    '"status":"ready","next_end":"2026-08-16T00:00:00Z"}'
+                )
+            },
+        )
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["operation"], "backfill")
 
     def test_durable_assert_aggregates_multi_brand_config_rows(self):
         from app.job_status import durable_job_snapshot_many
@@ -119,6 +135,31 @@ class ScheduleTests(unittest.TestCase):
 
 
 class IncrementalTests(unittest.TestCase):
+    def test_backfill_window_moves_backward_from_now(self):
+        now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+        start, end, history_start, done, progress = backfill_window(
+            {"历史回溯起始日期": "2026-08-01T00:00:00Z"}, now, window_days=7
+        )
+        self.assertEqual(end, now)
+        self.assertEqual(start, datetime(2026, 8, 16, 12, tzinfo=timezone.utc))
+        self.assertEqual(history_start, datetime(2026, 8, 1, tzinfo=timezone.utc))
+        self.assertFalse(done)
+        self.assertEqual(progress, {})
+
+    def test_backfill_window_uses_cursor_and_stops_at_history_start(self):
+        now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+        config = {
+            "历史回溯起始日期": "2026-08-01T00:00:00Z",
+            "YouTube历史进度": '{"version":"yt-backfill-v1","next_end":"2026-08-05T00:00:00Z"}',
+        }
+        start, end, _, done, _ = backfill_window(config, now, window_days=7)
+        self.assertEqual(end, datetime(2026, 8, 5, tzinfo=timezone.utc))
+        self.assertEqual(start, datetime(2026, 8, 1, tzinfo=timezone.utc))
+        self.assertFalse(done)
+        config["YouTube历史进度"] = '{"version":"yt-backfill-v1","next_end":"2026-08-01T00:00:00Z"}'
+        _, _, _, done, _ = backfill_window(config, now, window_days=7)
+        self.assertTrue(done)
+
     def test_window_overlaps_last_success_by_48_hours(self):
         now = datetime(2026, 8, 12, 1, 30, tzinfo=timezone.utc)
         start, end = incremental_window(

@@ -40,6 +40,14 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("replay_video", main)
         self.assertIn('@app.get("/status")', main)
 
+    def test_reverse_history_backfill_endpoint_is_available(self):
+        main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('@app.post("/backfill")', main)
+        self.assertIn("window_days", main)
+        collector = (ROOT / "app" / "collector.py").read_text(encoding="utf-8")
+        self.assertIn("waterline_advanced", collector)
+        self.assertIn("refresh_existing_ids=False", collector)
+
     def test_assert_endpoint_distinguishes_all_job_states(self):
         from app.job_status import finished_status
 

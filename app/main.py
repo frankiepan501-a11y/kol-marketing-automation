@@ -39,6 +39,15 @@ class RunRequest(BaseModel):
     force: bool = False
 
 
+class BackfillRequest(BaseModel):
+    brand: str | None = None
+    platform: Literal["YouTube"] = DEFAULT_PLATFORM
+    config_record_id: str | None = None
+    mode: Literal["preview", "commit"] = "preview"
+    window_days: int = 7
+    force: bool = False
+
+
 class ReplayRequest(BaseModel):
     mode: Literal["preview", "commit"] = "preview"
     brand: str | None = None
@@ -121,6 +130,66 @@ def _execute(job_id: str, request: RunRequest) -> None:
         _lock.release()
 
 
+def _execute_backfill(job_id: str, request: BackfillRequest) -> None:
+    started = datetime.now(timezone.utc)
+    _jobs[job_id] = {
+        "job_id": job_id,
+        "status": "running",
+        "mode": request.mode,
+        "operation": "backfill",
+        "started_at": started.isoformat(),
+    }
+    collector: IncrementalCollector | None = None
+    try:
+        collector = IncrementalCollector(FeishuClient(), YouTubeClient())
+        result = collector.backfill(
+            now=started,
+            commit=request.mode == "commit",
+            window_days=request.window_days,
+            force=request.force,
+            job_id=job_id,
+            config_record_id=request.config_record_id,
+            brand=request.brand,
+            platform=request.platform,
+        )
+        _jobs[job_id] = {
+            "job_id": job_id,
+            "status": result.get("status", "completed"),
+            "operation": "backfill",
+            "started_at": started.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            **result,
+        }
+        logger.info(
+            "backfill complete id=%s mode=%s brand=%s window=%s/%s new=%s next=%s",
+            job_id,
+            request.mode,
+            request.brand or request.config_record_id or "auto",
+            result.get("window_start"),
+            result.get("window_end"),
+            result.get("new_posts", 0),
+            result.get("next_end", ""),
+        )
+    except Exception as error:
+        logger.exception("backfill failed id=%s type=%s", job_id, type(error).__name__)
+        if request.mode == "commit" and collector is not None and request.config_record_id:
+            try:
+                collector.mark_failure(error, config_record_id=request.config_record_id, job_id=job_id)
+            except Exception:
+                logger.exception("failed to record backfill failure id=%s", job_id)
+        _jobs[job_id] = {
+            "job_id": job_id,
+            "status": "failed",
+            "mode": request.mode,
+            "operation": "backfill",
+            "started_at": started.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "error_type": type(error).__name__,
+        }
+    finally:
+        _lock.release()
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "version": BUILD_VERSION, "commit_enabled": COMMIT_ENABLED}
@@ -187,6 +256,35 @@ def run(
         "job_id": job_id,
         "status_url": f"/runs/{job_id}",
         "mode": request.mode,
+    }
+
+
+@app.post("/backfill")
+def backfill(
+    request: BackfillRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Queue one bounded newest-to-oldest YouTube history window."""
+    _authorized(authorization)
+    if not request.brand and not request.config_record_id:
+        raise HTTPException(status_code=422, detail="brand or config_record_id is required")
+    if request.window_days < 1 or request.window_days > 31:
+        raise HTTPException(status_code=422, detail="window_days must be between 1 and 31")
+    if request.mode == "commit" and not COMMIT_ENABLED:
+        raise HTTPException(status_code=409, detail="commit mode is disabled")
+    if not _lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="a collection job is already running")
+    job_id = f"ytbackfill-{uuid.uuid4().hex[:12]}"
+    thread = threading.Thread(target=_execute_backfill, args=(job_id, request), daemon=True)
+    thread.start()
+    return {
+        "ok": True,
+        "accepted": True,
+        "job_id": job_id,
+        "status_url": f"/runs/{job_id}",
+        "mode": request.mode,
+        "operation": "backfill",
+        "window_days": request.window_days,
     }
 
 

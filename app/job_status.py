@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -24,6 +25,25 @@ def durable_job_snapshot(
 ) -> dict[str, Any] | None:
     """Recover one job's terminal state from Feishu after a service restart."""
     summary = str(config.get("YouTube历史进度") or "")
+    try:
+        parsed = json.loads(summary)
+    except (TypeError, ValueError):
+        parsed = None
+    if (
+        isinstance(parsed, dict)
+        and parsed.get("version") == "yt-backfill-v1"
+        and parsed.get("last_job_id") == job_id
+    ):
+        return {
+            "job_id": job_id,
+            "status": "completed",
+            "ok": True,
+            "durable": True,
+            "operation": "backfill",
+            "summary": summary,
+            "history_complete": parsed.get("status") == "complete",
+            "next_end": parsed.get("next_end"),
+        }
     if f"job={job_id}；" not in summary:
         return None
     common = {"job_id": job_id, "durable": True, "summary": summary}
