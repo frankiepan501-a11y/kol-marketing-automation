@@ -65,3 +65,20 @@
 - 第一性原理复核：如果系统只是自动生成词、仍需 Frankie 逐轮批准，就是把人工补词换成 AI 补词的伪自动化；真正完成要靠产出反馈自动保留、扩展、冷却和切换来源。
 - YouTube daemon会把`抓取关键词: ...`写入每条新增KOL的`迁移备注`；本轮再把`[词源:competitor/ip_theme/platform/...]`写入爬虫任务名，就能在不新增表/字段的前提下追溯“词源→关键词→新增KOL→有效邮箱”。
 - 当前全仓唯一失败`test_run_once_alerts_any_project_service_failed_deployment`在本分支未改动的Zeabur watchdog模块上独立复现；本次不扩范围修复。
+
+## 2026-08-23 剩余P1执行边界
+
+- 飞书KOL结构化业务数据继续以KOL营销管理库为唯一落点；不写Obsidian或本地知识卡。
+- KOL Base读写按聪哥分身2号项目路径；写前必须读当前字段结构，不能依赖旧字段名或旧表ID。
+- 竞品公开证据只影响优先级，不替代国家、语言、语义、非官方身份、邮箱、双主表重复与目标产品历史硬闸。
+- “受控导入”与“活动可发送”必须是两个状态：本P1允许创建主表/参与记录，但不得创建草稿或调用发送器；P1验收后再由既有人工审核/活动规则决定是否放行。
+- X公开资料若无法从公开页面稳定取得国家或商务邮箱，必须保留未知并继续拦截，不能从显示名、时区或帖子语言硬猜国家。
+- 当前Zeabur生产表配置已回读：Base=`KINabIENjak8fRsB6AHcIDALntc`，KOL主表=`tblMMhnj2hEbhF6y`，媒体人主表=`tblinUWFZHtmXZbC`，活动参与记录=`tblt0zD4hDb7sFqn`，邮件草稿=`tblpWteXNX34vds4`，产品表=`tblate6wgHYWmD6s`。后续只按这些当前值读取字段和回读，不使用旧memory表ID。
+- Windows PowerShell下再次验证`rg app/launch_*.py`会把通配符当非法路径；后续只用`rg <pattern> app -g 'launch_*.py'`，不重复旧调用。
+- 代码回读确认：统一草稿队列只接收“参与状态=已入围、审核结论=通过、进入方式=新开发、活动分池=新开发池、且未关联草稿”的参与记录；受控导入写成“待审核＋无草稿关联”即可由确定性规则阻断自动发信，写后仍须再次回读。
+- X现有官方采集模块已使用`X_BEARER_TOKEN/TWITTER_BEARER_TOKEN`和X API v2，可复用用户资料字段`description/location/url/public_metrics`及帖子`lang`，不需要新增第三方抓取依赖；邮箱只从公开简介/公开落地页提取，国家和语言不可靠时保持未知。
+- 飞书新Base v3字段读取在当前bot身份缺`base:field:read`，但同一任务使用既有user身份已正常读到真实schema；这是身份/范围差异，不是需要Frankie新增权限。
+- 受控导入后台摘要必须由飞书事实表复核：本轮独立扫描4,731条邮件草稿，3名作者命中0，确认“任务报告草稿0”不是自我证明。
+- `source_job_id`只能追踪请求，不能证明作者有竞品合作内容；受控导入必须从当前活动已校验的证据快照重新连接帖子。调用方自带`evidence_posts`不得参与语义闸。
+- YouTube的`/@handle`与`/channel/UC...`只有在历史别名唯一且实时About页频道ID一致时才能归并；仅凭URL长得相似或handle文本相同不够。
+- X公开资料富化必须把所有近期帖语言计入分母；只统计en/de/es会把少量英语误判为主语言。城市、州、网站域名和时区继续不得用于猜国家。
