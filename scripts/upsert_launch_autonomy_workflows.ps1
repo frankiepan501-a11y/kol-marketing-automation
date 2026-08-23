@@ -95,8 +95,7 @@ function Upsert-Workflow([string]$Name, $Nodes, $Connections, $Settings, $Existi
             Merge-MissingProperties $desiredNode $currentNode
         })
         $payloadNodes = @(
-            @($current.nodes | Where-Object { $_.name -notin $managedNames })
-            + $mergedManagedNodes
+            @($current.nodes | Where-Object { $_.name -notin $managedNames }) + @($mergedManagedNodes)
         )
         foreach ($property in $current.connections.PSObject.Properties) {
             $payloadConnections[$property.Name] = $property.Value
