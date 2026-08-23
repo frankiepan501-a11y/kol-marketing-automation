@@ -1276,6 +1276,59 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
             candidate["evidence_posts"][0]["post_title"],
         )
 
+    def test_private_import_accepts_verified_joy_con_review_evidence(self):
+        """NYXI手柄评测不应因标题使用Joy-Cons而被误判为语义不相关。"""
+        seed = [{
+            "author_key": "youtube|handle:mekelkasanova", "name": "Mekel Kasanova",
+            "platform": "YouTube", "creator_id": "", "handle": "MekelKasanova",
+            "profile_url": "https://www.youtube.com/@MekelKasanova",
+            "evidence_posts": [],
+        }]
+        ctx = {
+            "competitor_evidence_applied": True,
+            "competitor_posts": [{"record_id": "post1", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL平台ID": "UCLLAKtxpwPMXfaEtNBw0yMg",
+                "KOL账号Handle": "MekelKasanova",
+                "KOL主页URL": (
+                    "https://youtube.com/channel/UCLLAKtxpwPMXfaEtNBw0yMg"
+                ),
+                "帖子URL": "https://youtube.com/watch?v=verified",
+                "帖子标题": (
+                    "I Bought The New Nintendo Switch 2 Joy-Cons Everyone Is Talking About"
+                ),
+                "曝光量": 10204,
+            }}],
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "activity_node_snapshot", "ranking_version": "evidence-v4",
+            "target_countries": {"US"}, "target_languages": {"en"},
+        }
+        profile = {
+            "retrieved": True, "country": "US", "country_raw": "United States",
+            "language": "en", "email": "creator@example.com",
+            "description": "Game and tech reviews",
+            "canonical_url": "https://youtube.com/@MekelKasanova",
+            "channel_id": "UCLLAKtxpwPMXfaEtNBw0yMg",
+        }
+        with patch.object(
+            preview, "_load_activity_context", new=AsyncMock(return_value=ctx),
+        ), patch.object(
+            preview, "_load_evidence_identity_contacts", new=AsyncMock(return_value=([], [])),
+        ), patch.object(
+            preview.relabel, "fetch_youtube_public_profile", new=AsyncMock(return_value=profile),
+        ), patch.object(
+            preview.relabel, "fetch_recent_videos", new=AsyncMock(return_value=[]),
+        ):
+            result = asyncio.run(preview.enrich_unmatched_evidence_authors(
+                campaign_id=preview.DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID,
+                seed_candidates=seed, source_job_id="launchruntime-verified",
+                _reattach_server_evidence=True,
+            ))
+
+        candidate = result["candidates"][0]
+        self.assertTrue(candidate["eligible_for_master_write"])
+        self.assertNotIn("semantic_fit_not_verified", candidate["write_block_reasons"])
+
     def test_private_import_path_blocks_live_handle_to_channel_mismatch(self):
         seed = [{
             "author_key": "youtube|handle:seedcreator", "name": "Seed Creator",

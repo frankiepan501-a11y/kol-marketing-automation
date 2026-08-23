@@ -81,6 +81,9 @@ DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID = "launch-20260915-funlab-dave-ys11-5"
 DAVE_EVIDENCE_AUTHOR_SEMANTIC_CUES = {
     "dave the diver", "switch controller", "switch 2 controller", "gamepad",
     "gaming hardware", "gaming accessory", "handheld gaming",
+    # 竞品手柄评测常直接写产品形态而不写完整“Switch controller”。
+    # 这些仍是明确的手柄类信号，不接受泛“gaming / Nintendo”宽词。
+    "joy-con", "joycon", "pro controller", "controller review",
 }
 LANGUAGE_WORD_CUES = {
     "en": {
