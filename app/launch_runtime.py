@@ -1146,9 +1146,13 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                 campaign_id=campaign_id, review_target=review_target,
                 preview=review_preview, operator_only=True,
             )
+            new_review_count = (
+                int(review_pool.get("created") or 0)
+                + int(evidence_continuation.get("participation_writes") or 0)
+            )
             review_notification = await _notify_operator_review(
                 campaign_id=campaign_id, activity=activity,
-                created=int(review_pool.get("created") or 0),
+                created=new_review_count,
             )
 
         result = {

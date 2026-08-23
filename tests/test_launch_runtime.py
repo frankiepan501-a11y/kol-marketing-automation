@@ -619,7 +619,7 @@ class LaunchRuntimeTests(unittest.TestCase):
             new=AsyncMock(return_value={"created": 1}),
         ) as review, patch.object(
             launch_runtime, "_notify_operator_review", new=AsyncMock(return_value={"sent": 1}),
-        ):
+        ) as notify_review:
             result = asyncio.run(launch_runtime.autonomous_refill(
                 campaign_id=campaign_id, buffer_days=2,
                 runtime_job_id="launchruntime-current-job",
@@ -642,6 +642,9 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(3, discover.await_args.kwargs["approved_candidates"])
         review.assert_awaited_once()
         self.assertTrue(review.await_args.kwargs["operator_only"])
+        notify_review.assert_awaited_once_with(
+            campaign_id=campaign_id, activity=activity, created=4,
+        )
         self.assertEqual(12, result["inventory_after"])
         self.assertEqual("ready_inventory_created", result["business_outcome"])
         self.assertTrue(result["made_supply_progress"])
