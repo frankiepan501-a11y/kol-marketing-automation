@@ -18,3 +18,5 @@
 - Target suite now has 6 passing tests, including an atomic date-level P2 claim independent of queue membership. All 25 test files were rerun individually: 24 passed; only the pre-existing `test_zeabur_watchdog.py` baseline failure remains.
 - Both standards and spec re-reviews report no remaining findings after the card wording and P2 idempotency fixes.
 - Re-ran the production read-only preflight after review fixes: P1=25, P2=2, P1 over 48h=0; exact view and top-five record targets are reachable; no writes, email sends, or group sends.
+- Sent exactly one Frankie-only live sample card: `om_x100b679b655d64a0c318f10608ed503`. Message read-back confirms `interactive` type, expected title, content, and queue URL. No draft writes, email sends, or group sends occurred.
+- Production push/deploy remains intentionally blocked until Frankie visually confirms the sample in the Feishu client.
