@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
+from datetime import datetime
 from urllib.parse import urlsplit, urlunsplit
 
 from .feishu import ext, ext_url
@@ -22,14 +23,20 @@ NYXI_OFFICIAL_HANDLES = {"nyxigaming", "nyxi_official"}
 
 def _ids(value) -> set[str]:
     if isinstance(value, dict):
-        return set(value.get("link_record_ids") or value.get("record_ids") or [])
+        direct_id = value.get("id") or value.get("record_id")
+        return set(value.get("link_record_ids") or value.get("record_ids") or (
+            [direct_id] if direct_id else []
+        ))
     if isinstance(value, list):
         out = set()
         for item in value:
             if isinstance(item, str):
                 out.add(item)
             elif isinstance(item, dict):
-                out.update(item.get("link_record_ids") or item.get("record_ids") or [])
+                direct_id = item.get("id") or item.get("record_id")
+                out.update(item.get("link_record_ids") or item.get("record_ids") or (
+                    [direct_id] if direct_id else []
+                ))
         return out
     return set()
 
@@ -45,6 +52,9 @@ def _first(fields: dict, names: tuple[str, ...]) -> str:
 def _first_url(fields: dict, names: tuple[str, ...]) -> str:
     for name in names:
         value = ext_url(fields.get(name)).strip()
+        markdown = re.fullmatch(r"\[[^]]*\]\((https?://[^)]+)\)", value)
+        if markdown:
+            value = markdown.group(1)
         if value:
             return value
     return ""
@@ -61,9 +71,15 @@ def normalize_url(value: str) -> str:
     raw = (value or "").strip()
     if not raw:
         return ""
+    markdown = re.fullmatch(r"\[[^]]*\]\((https?://[^)]+)\)", raw)
+    if markdown:
+        raw = markdown.group(1)
     if not re.match(r"^https?://", raw, re.I):
         raw = "https://" + raw
-    parts = urlsplit(raw)
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return ""
     host = parts.netloc.lower().removeprefix("www.")
     path = re.sub(r"/+", "/", parts.path).rstrip("/").lower()
     return urlunsplit(("https", host, path, "", ""))
@@ -80,9 +96,17 @@ def _number(value) -> float | None:
 
 def _timestamp(value) -> int:
     try:
-        return int(value or 0)
+        parsed = int(value or 0)
+        return parsed * 1000 if 0 < parsed < 100_000_000_000 else parsed
     except (TypeError, ValueError):
-        return 0
+        text = ext(value).strip()
+        if not text:
+            return 0
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return int(parsed.timestamp() * 1000)
+        except ValueError:
+            return 0
 
 
 def is_nyxi_official_post(fields: dict) -> bool:
@@ -325,6 +349,158 @@ def summarize_evidence_coverage(index: dict, contacts: list[dict]) -> dict:
         "matched_contacts": matched_contacts,
         "matched_authors": len(matched_authors),
         "unmatched_authors": len(all_authors - matched_authors),
+    }
+
+
+def _matched_author_keys(index: dict, contacts: list[dict]) -> set[str]:
+    matched_authors = set()
+    for contact in contacts:
+        for post, _ in _indexed_matches(contact, index):
+            author_key = index["author_by_post"].get(post.get("record_id", ""), "")
+            if author_key:
+                matched_authors.add(author_key)
+    return matched_authors
+
+
+def _author_candidate(author_key: str, posts: list[dict], index: dict) -> dict:
+    evidence_posts = []
+    aliases = set()
+    for post in posts:
+        fields = post.get("fields") or {}
+        aliases.update(_post_author_aliases(post))
+        metric_name, metric_value = _metric(fields)
+        group = _group_key(fields)
+        threshold = index["thresholds"].get(group)
+        evidence_posts.append({
+            "post_id": post.get("record_id", ""),
+            "post_url": _first_url(fields, ("帖子URL", "内容链接", "视频链接")),
+            "post_title": _first(fields, ("帖子标题", "内容标题", "视频标题")),
+            "published_at": _timestamp(fields.get("发布时间")),
+            "metric_name": metric_name,
+            "metric_value": metric_value,
+            "p75_group": group,
+            "p75_sample": index["samples"].get(group, 0),
+            "p75_threshold": threshold,
+            "is_high_performance": bool(
+                metric_value is not None and threshold is not None
+                and metric_value >= threshold
+            ),
+            "evidence_basis": evidence_basis(fields),
+        })
+    evidence_posts.sort(key=lambda row: (
+        -float(row["metric_value"] or 0), -row["published_at"], row["post_id"],
+    ))
+    timestamps = sorted(
+        row["published_at"] for row in evidence_posts if row["published_at"] > 0
+    )
+    span_days = ((timestamps[-1] - timestamps[0]) // DAY_MS) if len(timestamps) >= 2 else 0
+    long_term = len(evidence_posts) >= 2 and span_days >= LONG_TERM_DAYS
+    high_performance = any(row["is_high_performance"] for row in evidence_posts)
+    if long_term and high_performance:
+        evidence_level = "A"
+    elif long_term or high_performance:
+        evidence_level = "B"
+    else:
+        evidence_level = "C"
+
+    source_fields = posts[0].get("fields") or {}
+    for post in posts:
+        fields = post.get("fields") or {}
+        if _creator_id(fields, contact=False) or _profile_url(fields, contact=False):
+            source_fields = fields
+            break
+    return {
+        "author_key": author_key,
+        "stable_identity_keys": sorted(aliases),
+        "platform": ext(source_fields.get("平台")),
+        "creator_id": _creator_id(source_fields, contact=False),
+        "handle": _handle(source_fields, contact=False),
+        "name": _first(source_fields, ("KOL账号名", "作者名称", "账号名")),
+        # 身份匹配使用标准化 URL；展示给运营时保留原始大小写，避免改坏可点击链接。
+        "profile_url": _first_url(source_fields, (
+            "KOL主页URL", "作者主页", "主页URL", "账号主页", "频道链接",
+        )),
+        "post_count": len(evidence_posts),
+        "first_published_at": timestamps[0] if timestamps else 0,
+        "last_published_at": timestamps[-1] if timestamps else 0,
+        "long_term_span_days": span_days,
+        "long_term": long_term,
+        "high_performance": high_performance,
+        "evidence_level": evidence_level,
+        # 人工查看只需代表证据；避免长期合作作者把后台响应放大到网关超时。
+        "evidence_posts": evidence_posts[:5],
+        "evidence_posts_truncated": len(evidence_posts) > 5,
+        "primary_evidence_url": evidence_posts[0]["post_url"] if evidence_posts else "",
+        "primary_evidence_title": evidence_posts[0]["post_title"] if evidence_posts else "",
+        "promotion_status": "needs_profile_enrichment",
+        "eligible_for_master_write": False,
+        "write_block_reasons": [
+            "country_not_verified", "language_not_verified",
+            "semantic_fit_not_verified", "email_not_verified",
+        ],
+    }
+
+
+def rank_unmatched_author_candidates(
+    index: dict, contacts: list[dict], *, limit: int = 20,
+) -> dict:
+    """从竞品帖子反推出尚未进入主库的作者；结果只读且默认禁止写入。"""
+    limit = max(1, min(int(limit), 100))
+    matched_authors = _matched_author_keys(index, contacts)
+    posts_by_author: dict[str, list[dict]] = defaultdict(list)
+    for post in index["valid_posts"]:
+        author_key = index["author_by_post"].get(post.get("record_id", ""), "")
+        if author_key and author_key not in matched_authors:
+            posts_by_author[author_key].append(post)
+    candidates = [
+        _author_candidate(author_key, posts, index)
+        for author_key, posts in posts_by_author.items()
+    ]
+    level_order = {"A": 0, "B": 1, "C": 2}
+    candidates.sort(key=lambda row: (
+        level_order.get(row["evidence_level"], 9),
+        -row["post_count"],
+        -max((float(post["metric_value"] or 0) for post in row["evidence_posts"]), default=0),
+        -row["last_published_at"], row["author_key"],
+    ))
+    return {
+        "read_only": True,
+        "writes": 0,
+        "drafts_created": 0,
+        "emails_sent": 0,
+        "unmatched_authors": len(candidates),
+        "sample_size": min(limit, len(candidates)),
+        "candidates": candidates[:limit],
+    }
+
+
+def author_prewrite_gate(
+    profile: dict, *, target_countries: set[str], target_languages: set[str],
+    semantic_cues: set[str],
+) -> dict:
+    """作者进入 KOL 主表前的确定性硬闸；资料缺失一律不放行。"""
+    reasons = []
+    platform = str(profile.get("platform") or "").strip().lower()
+    country = str(profile.get("country") or "").strip().upper()
+    language = str(profile.get("language") or "").strip().lower()
+    email = str(profile.get("email") or "").strip().lower()
+    content = str(profile.get("content_text") or "").casefold()
+    if platform not in {"youtube", "x", "tiktok", "instagram"}:
+        reasons.append("unsupported_platform")
+    if profile.get("is_official"):
+        reasons.append("official_or_brand_channel")
+    if not country or country not in {value.upper() for value in target_countries}:
+        reasons.append("country_outside_target_or_unknown")
+    if not language or language not in {value.lower() for value in target_languages}:
+        reasons.append("language_outside_target_or_unknown")
+    if not content or not any(cue.casefold() in content for cue in semantic_cues if cue):
+        reasons.append("semantic_fit_not_verified")
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        reasons.append("missing_valid_email")
+    return {
+        "passed": not reasons,
+        "reason_codes": reasons,
+        "eligible_for_master_write": not reasons,
     }
 
 

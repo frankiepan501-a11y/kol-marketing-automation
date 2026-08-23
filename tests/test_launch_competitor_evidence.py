@@ -209,6 +209,19 @@ class LaunchCompetitorEvidenceTests(unittest.TestCase):
             result["stable_identity_keys"],
         )
 
+    def test_profile_url_identity_accepts_lark_cli_markdown_link(self):
+        contact = {"record_id": "kol1", "fields": {
+            "主平台": "YouTube", "主链接": "[主页](https://youtube.com/@creatorone)",
+        }}
+        post = {"record_id": "post1", "fields": {
+            "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+            "KOL主页URL": "[主页](https://youtube.com/@creatorone)", "曝光量": 100,
+        }}
+
+        result = evidence.rank_contact_evidence(contact, [post], base_score=80)
+
+        self.assertEqual(["profile_url"], result["identity_paths"])
+
     def test_coverage_merges_partial_aliases_for_same_author(self):
         posts = [
             {"record_id": "post1", "fields": {
@@ -226,6 +239,133 @@ class LaunchCompetitorEvidenceTests(unittest.TestCase):
         )
 
         self.assertEqual(1, coverage["distinct_authors"])
+
+    def test_unmatched_author_sample_is_ranked_and_never_write_ready(self):
+        posts = []
+        for index, views in enumerate([100, 200, 300, 400, 500, 600, 700, 800], start=1):
+            posts.append({"record_id": f"pool{index}", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL平台ID": f"UC-pool-{index}", "KOL账号Handle": f"pool-{index}",
+                "KOL主页URL": f"https://youtube.com/@pool-{index}",
+                "曝光量": views, "发布时间": 1_700_000_000_000 + index * 1000,
+            }})
+        posts.extend([
+            {"record_id": "strong-old", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL平台ID": "UC-strong", "KOL账号Handle": "strong",
+                "KOL账号名": "Strong Creator",
+                "KOL主页URL": "https://youtube.com/@strong", "曝光量": 100,
+                "发布时间": 1_690_000_000_000,
+                "帖子URL": "https://youtube.com/watch?v=old",
+            }},
+            {"record_id": "strong-new", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL平台ID": "UC-strong", "KOL账号Handle": "strong",
+                "KOL账号名": "Strong Creator",
+                "KOL主页URL": "https://youtube.com/@strong", "曝光量": 900,
+                "发布时间": 1_700_000_000_000,
+                "帖子URL": "https://youtube.com/watch?v=new",
+            }},
+            {"record_id": "matched", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL平台ID": "UC-matched", "KOL账号Handle": "matched",
+                "KOL主页URL": "https://youtube.com/@matched", "曝光量": 9999,
+            }},
+            {"record_id": "official", "fields": {
+                "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+                "KOL平台ID": "UCIY4yC2qUCPcM7ws-xTARYg", "KOL账号Handle": "nyxigaming",
+                "曝光量": 99999,
+            }},
+        ])
+        contacts = [{"record_id": "kol1", "fields": {
+            "主平台": "YouTube", "YouTube频道ID": "UC-matched",
+            "主链接": "https://youtube.com/@matched",
+        }}]
+
+        result = evidence.rank_unmatched_author_candidates(
+            evidence.build_evidence_index(posts), contacts, limit=20,
+        )
+
+        self.assertEqual(9, result["unmatched_authors"])
+        self.assertEqual("UC-strong", result["candidates"][0]["creator_id"])
+        self.assertEqual("A", result["candidates"][0]["evidence_level"])
+        self.assertEqual(2, result["candidates"][0]["post_count"])
+        self.assertEqual("https://youtube.com/@strong", result["candidates"][0]["profile_url"])
+        self.assertEqual("needs_profile_enrichment", result["candidates"][0]["promotion_status"])
+        self.assertFalse(result["candidates"][0]["eligible_for_master_write"])
+        self.assertNotIn("UC-matched", {row["creator_id"] for row in result["candidates"]})
+        self.assertNotIn(
+            "UCIY4yC2qUCPcM7ws-xTARYg",
+            {row["creator_id"] for row in result["candidates"]},
+        )
+
+    def test_author_prewrite_gate_fails_closed_until_every_business_gate_passes(self):
+        incomplete = evidence.author_prewrite_gate(
+            {
+                "platform": "YouTube", "country": "US", "language": "en",
+                "email": "", "content_text": "Nintendo Switch controller review",
+                "is_official": False,
+            },
+            target_countries={"US", "DE", "ES"}, target_languages={"en", "de", "es"},
+            semantic_cues={"nintendo", "switch", "controller", "dave the diver"},
+        )
+        passed = evidence.author_prewrite_gate(
+            {
+                "platform": "YouTube", "country": "US", "language": "en",
+                "email": "creator@example.com",
+                "content_text": "Dave the Diver Nintendo Switch controller review",
+                "is_official": False,
+            },
+            target_countries={"US", "DE", "ES"}, target_languages={"en", "de", "es"},
+            semantic_cues={"nintendo", "switch", "controller", "dave the diver"},
+        )
+
+        self.assertFalse(incomplete["passed"])
+        self.assertIn("missing_valid_email", incomplete["reason_codes"])
+        self.assertTrue(passed["passed"])
+        self.assertEqual([], passed["reason_codes"])
+
+    def test_relation_ids_accept_lark_cli_direct_id_shape(self):
+        posts = [{"record_id": "post1", "fields": {
+            "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+            "KOL平台ID": "UC-linked", "KOL账号Handle": "linked",
+            "关联KOL": [{"id": "kol1", "text": "Linked Creator"}],
+        }}]
+
+        result = evidence.rank_unmatched_author_candidates(
+            evidence.build_evidence_index(posts),
+            [{"record_id": "kol1", "fields": {"主平台": "YouTube"}}],
+            limit=20,
+        )
+
+        self.assertEqual(0, result["unmatched_authors"])
+        self.assertEqual([], result["candidates"])
+
+    def test_markdown_urls_are_returned_as_clickable_raw_urls(self):
+        posts = [{"record_id": "post1", "fields": {
+            "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+            "KOL平台ID": "UC-new", "KOL账号Handle": "new",
+            "KOL主页URL": "[主页](https://youtube.com/@NewCreator)",
+            "帖子URL": "[证据](https://youtube.com/watch?v=AbC123)",
+        }}]
+
+        result = evidence.rank_unmatched_author_candidates(
+            evidence.build_evidence_index(posts), [], limit=20,
+        )
+
+        candidate = result["candidates"][0]
+        self.assertEqual("https://youtube.com/@NewCreator", candidate["profile_url"])
+        self.assertEqual(
+            "https://youtube.com/watch?v=AbC123",
+            candidate["evidence_posts"][0]["post_url"],
+        )
+
+    def test_timestamp_accepts_seconds_and_iso_strings(self):
+        self.assertEqual(1_700_000_000_000, evidence._timestamp(1_700_000_000))
+        self.assertEqual(
+            1_700_000_000_000,
+            evidence._timestamp("2023-11-14T22:13:20+00:00"),
+        )
 
 
 if __name__ == "__main__":

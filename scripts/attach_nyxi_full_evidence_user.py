@@ -16,6 +16,12 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app import launch_competitor_evidence
+
 
 BASE_TOKEN = "KINabIENjak8fRsB6AHcIDALntc"
 POST_TABLE = "tblCDbvLtnLzdxEp"
@@ -381,7 +387,7 @@ def activity_fields_match(actual: dict, expected: dict) -> bool:
     )
 
 
-def run(*, commit: bool) -> dict:
+def run(*, commit: bool, sample_limit: int = 0) -> dict:
     posts = list_records(POST_TABLE, POST_FIELDS)
     nyxi = [row for row in posts if first(row["fields"].get("竞品品牌")).strip().upper() == "NYXI"]
     official = [row for row in nyxi if is_official(row["fields"])]
@@ -431,6 +437,12 @@ def run(*, commit: bool) -> dict:
         "target_config_version": TARGET_CONFIG_VERSION,
         "target_ranking_version": TARGET_RANKING_VERSION,
     })
+    if sample_limit:
+        sample = launch_competitor_evidence.rank_unmatched_author_candidates(
+            launch_competitor_evidence.build_evidence_index(partner),
+            kols, limit=sample_limit,
+        )
+        result["unmatched_author_sample"] = sample
     if not commit:
         return result
     if activity.get("record_id") != ACTIVITY_RECORD or first(fields.get("活动ID")) != CAMPAIGN_ID:
@@ -520,10 +532,24 @@ def run(*, commit: bool) -> dict:
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", action="store_true")
+    parser.add_argument("--sample-limit", type=int, default=0)
+    parser.add_argument("--compact", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(run(commit=args.commit), ensure_ascii=False, indent=2))
+    result = run(commit=args.commit, sample_limit=max(0, min(args.sample_limit, 100)))
+    if args.compact and result.get("unmatched_author_sample"):
+        sample = result["unmatched_author_sample"]
+        sample["candidates"] = [{
+            key: row.get(key) for key in (
+                "creator_id", "handle", "name", "platform", "profile_url", "post_count",
+                "evidence_level", "high_performance", "primary_evidence_url",
+                "primary_evidence_title", "promotion_status", "eligible_for_master_write",
+            )
+        } for row in sample["candidates"]]
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

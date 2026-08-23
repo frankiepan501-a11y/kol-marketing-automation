@@ -75,6 +75,11 @@ NON_TARGET_AUDIENCE_CUES = {
     "league of legends", "英雄联盟", "call of duty", "warcraft", "魔兽世界",
     "movie", "movies", "cinema", "电影", "影视",
 }
+DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID = "launch-20260915-funlab-dave-ys11-5"
+DAVE_EVIDENCE_AUTHOR_SEMANTIC_CUES = {
+    "dave the diver", "switch controller", "switch 2 controller", "gamepad",
+    "gaming hardware", "gaming accessory", "handheld gaming",
+}
 
 # 这里只拦“近期内容反复指向活动范围外地区”的强信号。单条标题可能只是
 # 评测某个海外版本，不能据此改写达人国家；重复出现才进入人工冻结。
@@ -1035,6 +1040,48 @@ async def replay_candidates_targeted(
             "by_decision": dict(counts), "by_source": source_summary,
         },
         "candidates": candidates,
+    }
+
+
+async def preview_unmatched_evidence_authors(
+    *, campaign_id: str, limit: int = 20,
+) -> dict:
+    """Dave P0：从竞品帖子反查未入主库作者；只读且不生成任何外联产物。"""
+    if campaign_id != DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID:
+        raise ValueError("当前竞品作者补池灰度只允许 Dave 活动")
+    limit = max(1, min(int(limit), 20))
+    activity_ctx = await _load_activity_context(campaign_id, "KOL")
+    if not activity_ctx.get("competitor_evidence_applied"):
+        raise ValueError(
+            activity_ctx.get("evidence_error")
+            or "Dave 活动竞品证据未就绪，无法执行作者反查"
+        )
+    contacts = await feishu.fetch_all_records(
+        config.T_KOL,
+        field_names=["账号名", "主平台", "YouTube频道ID", "主链接"],
+        page_size=500,
+    )
+    sample = launch_competitor_evidence.rank_unmatched_author_candidates(
+        launch_competitor_evidence.build_evidence_index(
+            activity_ctx["competitor_posts"],
+        ),
+        contacts,
+        limit=limit,
+    )
+    return {
+        **sample,
+        "campaign_id": campaign_id,
+        "evidence_mode": activity_ctx["evidence_mode"],
+        "evidence_status": activity_ctx["evidence_status"],
+        "evidence_source": activity_ctx["evidence_source"],
+        "ranking_version": activity_ctx["ranking_version"],
+        "target_countries": sorted(activity_ctx["target_countries"] or []),
+        "target_languages": sorted(activity_ctx["target_languages"] or []),
+        "semantic_cues": sorted(DAVE_EVIDENCE_AUTHOR_SEMANTIC_CUES),
+        "promotion_gate": (
+            "国家+语言+内容相关性+非官方身份+有效邮箱全部通过后，"
+            "才允许写入 KOL 主表"
+        ),
     }
 
 

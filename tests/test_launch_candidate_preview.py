@@ -990,6 +990,48 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertEqual("blocked_base_filter", result["candidates"][1]["decision"])
         self.assertEqual("competitor", result["candidates"][0]["keyword_source"])
 
+    def test_unmatched_evidence_author_pilot_is_read_only_and_dave_scoped(self):
+        posts = [{"record_id": "post1", "fields": {
+            "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+            "KOL平台ID": "UC-new", "KOL账号Handle": "new-creator",
+            "KOL主页URL": "https://youtube.com/@new-creator",
+            "帖子URL": "https://youtube.com/watch?v=post1", "曝光量": 1000,
+        }}]
+        activity_ctx = {
+            "competitor_evidence_applied": True, "competitor_posts": posts,
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "activity_node_snapshot", "ranking_version": "evidence-v4",
+            "target_countries": {"US", "DE", "ES"},
+            "target_languages": {"en", "de", "es"},
+        }
+        with patch.object(
+            preview, "_load_activity_context", new=AsyncMock(return_value=activity_ctx),
+        ), patch.object(
+            preview.feishu, "fetch_all_records", new=AsyncMock(return_value=[]),
+        ) as fetch, patch.object(
+            preview.feishu, "create_record", new=AsyncMock(),
+        ) as create_mock, patch.object(
+            preview.feishu, "update_record", new=AsyncMock(),
+        ) as update_mock:
+            result = asyncio.run(preview.preview_unmatched_evidence_authors(
+                campaign_id="launch-20260915-funlab-dave-ys11-5", limit=20,
+            ))
+
+        self.assertTrue(result["read_only"])
+        self.assertEqual(0, result["writes"])
+        self.assertEqual(1, result["sample_size"])
+        self.assertFalse(result["candidates"][0]["eligible_for_master_write"])
+        self.assertNotIn("nintendo", result["semantic_cues"])
+        self.assertIn("switch controller", result["semantic_cues"])
+        self.assertEqual(["账号名", "主平台", "YouTube频道ID", "主链接"], fetch.await_args.kwargs["field_names"])
+        create_mock.assert_not_awaited()
+        update_mock.assert_not_awaited()
+
+        with self.assertRaises(ValueError):
+            asyncio.run(preview.preview_unmatched_evidence_authors(
+                campaign_id="other-campaign", limit=20,
+            ))
+
 
 if __name__ == "__main__":
     unittest.main()
