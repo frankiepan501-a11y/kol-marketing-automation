@@ -140,8 +140,13 @@ def _execute_backfill(job_id: str, request: BackfillRequest) -> None:
         "started_at": started.isoformat(),
     }
     collector: IncrementalCollector | None = None
+    resolved_config_record_id = request.config_record_id
     try:
         collector = IncrementalCollector(FeishuClient(), YouTubeClient())
+        if request.mode == "commit" and not resolved_config_record_id:
+            resolved_config_record_id = str(
+                collector._config(brand=request.brand, platform=request.platform).get("_record_id") or ""
+            )
         result = collector.backfill(
             now=started,
             commit=request.mode == "commit",
@@ -172,9 +177,9 @@ def _execute_backfill(job_id: str, request: BackfillRequest) -> None:
         )
     except Exception as error:
         logger.exception("backfill failed id=%s type=%s", job_id, type(error).__name__)
-        if request.mode == "commit" and collector is not None and request.config_record_id:
+        if request.mode == "commit" and collector is not None and resolved_config_record_id:
             try:
-                collector.mark_failure(error, config_record_id=request.config_record_id, job_id=job_id)
+                collector.mark_failure(error, config_record_id=resolved_config_record_id, job_id=job_id)
             except Exception:
                 logger.exception("failed to record backfill failure id=%s", job_id)
         _jobs[job_id] = {
@@ -185,6 +190,7 @@ def _execute_backfill(job_id: str, request: BackfillRequest) -> None:
             "started_at": started.isoformat(),
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "error_type": type(error).__name__,
+            "error_message": str(error)[:500],
         }
     finally:
         _lock.release()
