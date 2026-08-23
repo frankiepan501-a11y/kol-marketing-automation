@@ -404,20 +404,21 @@ const summary = {
   piranha: byCampaign.piranha || null,
 };
 if (missing.length || failed.length) {
-  const readable = [
-    byCampaign.dave || {activity: 'Dave', status: 'missing', inventory: 0,
-      updated_at: 'missing', quota_remaining: 0, supply: 'missing', supply_parts: {},
-      next_step: 'rerun_autonomous_refill'},
-    byCampaign.piranha || {activity: 'Piranha', status: 'missing', inventory: 0,
-      updated_at: 'missing', quota_remaining: 0, supply: 'missing', supply_parts: {},
-      next_step: 'rerun_autonomous_refill'},
-  ].map(report =>
-    `activity=${report.activity}; latest=${report.updated_at}; status=${report.status}; `
-    + `inventory=${report.inventory}; quota=${report.quota_remaining}; supply=${report.supply}; `
-    + `parts=${JSON.stringify(report.supply_parts || {})}; next=${report.next_step}; `
-    + `detail=${report.error || report.validation}`
-  ).join(' | ');
-  throw new Error('KOL launch autonomy audit blocked | ' + readable);
+  const missingReports = missing.map(name => ({
+    activity: name === 'dave' ? 'Dave' : 'Piranha', status: 'missing', inventory: 0,
+    updated_at: 'missing', quota_remaining: 0, supply: 'missing', supply_parts: {},
+    next_step: 'rerun_autonomous_refill', error: 'campaign_result_missing',
+  }));
+  const blockedReports = [...failed, ...missingReports];
+  const readable = blockedReports.map(report => {
+    const parts = report.supply_parts || {};
+    const compactParts = `d${Number(parts.drafts || 0)}/a${Number(parts.approved || 0)}`
+      + `/x${Number(parts.discovery || 0)}/r${Number(parts.review || 0)}`;
+    return `${report.activity} blocked: latest=${report.updated_at}, status=${report.status}, `
+      + `inventory=${report.inventory}, quota=${report.quota_remaining}, supply=${report.supply}, `
+      + `parts=${compactParts}, next=${report.next_step}`;
+  }).join(' | ');
+  throw new Error(readable);
 }
 return [{json: summary}];
 '@

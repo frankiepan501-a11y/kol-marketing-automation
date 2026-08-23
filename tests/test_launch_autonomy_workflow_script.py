@@ -71,13 +71,16 @@ class LaunchAutonomyWorkflowScriptTests(unittest.TestCase):
         self.assertIn("replace(/([+-]\\d{2})(\\d{2})$/", script)
         self.assertIn("activity: 'Dave'", script)
         self.assertIn("activity: 'Piranha'", script)
-        self.assertIn("`activity=${report.activity}", script)
+        self.assertIn("`${report.activity} blocked:", script)
         self.assertIn("inventory=", script)
         self.assertIn("latest=", script)
         self.assertIn("quota=", script)
         self.assertIn("parts=", script)
         self.assertIn("supply=", script)
         self.assertIn("next=", script)
+        self.assertIn("const blockedReports = [...failed, ...missingReports]", script)
+        self.assertIn("parts=${compactParts}", script)
+        self.assertNotIn("KOL launch autonomy audit blocked |", script)
         self.assertNotIn("JSON.stringify(summary).slice(0, 5000)", script)
 
     def test_upsert_preserves_unmanaged_remote_nodes_and_restores_active_state(self):
