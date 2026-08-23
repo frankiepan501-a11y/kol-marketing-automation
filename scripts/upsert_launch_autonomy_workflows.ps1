@@ -253,7 +253,7 @@ function parseServiceTimestamp(value) {
   return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
 }
 const result = data.result || {};
-const updated = parseServiceTimestamp(data.updated_ts || data.started_ts);
+const updated = parseServiceTimestamp(data.updated_ts || data.started_ts || data.started_at);
 const age = updated ? Math.max(0, Math.floor(Date.now() / 1000) - updated) : 999999999;
 let ok = true;
 let validation = 'business_result_ok';
@@ -296,7 +296,7 @@ if (data.status === 'running' && age <= 70 * 60) {
 const parts = result.supply_progress_breakdown || {};
 return [{json: {
   campaign: 'dave', activity: 'Dave', ok, validation, error,
-  updated_at: data.updated_ts || data.started_ts || 'missing',
+  updated_at: data.updated_ts || data.started_ts || data.started_at || 'missing',
   age_seconds: age, status: data.status || 'missing',
   inventory: Number(result.inventory_after || 0),
   quota_remaining: Number((result.quota || {}).remaining || 0),
@@ -327,7 +327,7 @@ function parseServiceTimestamp(value) {
   const parsed = Date.parse(normalized);
   return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
 }
-const updated = parseServiceTimestamp(data.updated_ts || data.started_ts);
+const updated = parseServiceTimestamp(data.updated_ts || data.started_ts || data.started_at);
 const age = updated ? Math.max(0, Math.floor(Date.now() / 1000) - updated) : 999999999;
 let ok = true;
 let validation = 'business_result_ok';
@@ -337,7 +337,7 @@ if (data.status === 'running' && age <= 45 * 60) {
   validation = 'running_within_expected_window';
   return [{json: {
     campaign: 'piranha', activity: 'Piranha', ok, validation, error,
-    updated_at: data.updated_ts || data.started_ts || 'missing',
+    updated_at: data.updated_ts || data.started_ts || data.started_at || 'missing',
     age_seconds: age, status: data.status, inventory: 0, quota_remaining: 0,
     supply: 'background_running', supply_parts: {},
     next_step: 'wait_for_background_job', data,
@@ -376,7 +376,7 @@ if (data.status !== 'success' || age > 35 * 60) {
 const parts = result.supply_progress_breakdown || {};
 return [{json: {
   campaign: 'piranha', activity: 'Piranha', ok, validation, error,
-  updated_at: data.updated_ts || data.started_ts || 'missing',
+  updated_at: data.updated_ts || data.started_ts || data.started_at || 'missing',
   age_seconds: age, status: data.status || 'missing',
   inventory: Number(result.inventory_after || 0),
   quota_remaining: Number((result.quota || {}).remaining || 0),

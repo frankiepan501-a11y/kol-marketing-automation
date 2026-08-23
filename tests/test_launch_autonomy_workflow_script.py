@@ -67,6 +67,7 @@ class LaunchAutonomyWorkflowScriptTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("parseServiceTimestamp", script)
+        self.assertGreaterEqual(script.count("data.started_at"), 5)
         self.assertIn("replace(/([+-]\\d{2})(\\d{2})$/", script)
         self.assertIn("activity: 'Dave'", script)
         self.assertIn("activity: 'Piranha'", script)

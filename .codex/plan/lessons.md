@@ -63,3 +63,18 @@
 
 - [x] 未记录任何API key、token、邮箱正文或KOL个人资料。
 - [x] 只保存可复用规则、聚合事实和证据入口。
+
+# 2026-08-24 后台任务部署与审计时间兼容
+
+## Candidate Lessons
+
+| Symptom | Cause | Prevention | Promote to |
+|---|---|---|---|
+| 已接受的后台补池任务长时间显示running，部署后却永远不结束 | 后台任务保存在服务进程内；同仓库push会触发Zeabur重启并杀掉旧进程 | 生产后台任务启动后冻结同服务仓库push；先等任务终态并保存结果，再选择没有活动任务运行的窗口部署 | project docs / deployment SOP |
+| 任务真实运行中，15分钟审计却报“缺少时间/状态过期” | 持久记录使用`updated_ts/started_ts`，当前进程状态接口使用`started_at`，审计只兼容前两种 | 审计时间统一接受`updated_ts → started_ts → started_at`，并用“运行中接口样本＋完成态接口样本”各做一次回归 | project docs / n8n audit SOP |
+| PowerShell更新脚本在PUT前数组拼接失败 | 跨行表达式的数组加法被PowerShell解析为独立语句 | 构建节点/连接数组时先显式包成`@(...)`或中间变量；更新前保证失败发生在PUT之前，避免半更新 | project docs |
+
+## Secret/Privacy Review
+
+- [x] 未记录任何API key、token、邮箱地址、邮件正文或KOL个人资料。
+- [x] 只记录可复用的部署与审计规则。
