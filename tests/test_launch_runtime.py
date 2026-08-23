@@ -14,6 +14,92 @@ def _certificate():
 
 
 class LaunchRuntimeTests(unittest.TestCase):
+    def test_pending_review_reconcile_auto_passes_only_deterministic_candidate(self):
+        participant = {"record_id": "part1", "fields": {
+            "参与状态": "已入围", "审核结论": "待补资料",
+            "关联KOL": {"link_record_ids": ["kol1"]},
+            "关联邮件草稿": [], "排序快照历史": "[]",
+        }}
+        candidate = {
+            "contact_id": "kol1", "decision": "eligible_new_cold",
+            "base_filter_passed": True, "review_decision": "通过",
+            "review_route": "系统建议通过", "review_instruction": "系统检查通过",
+            "score": 91, "final_priority": 91, "evidence_level": "无加分",
+            "country": "US", "language": "en", "platform": "YouTube",
+            "profile_url": "https://youtube.com/@one", "content_summary": "controller review",
+        }
+
+        with patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[participant]),
+        ), patch.object(
+            launch_runtime.launch_participation, "_update_and_confirm",
+            new=AsyncMock(return_value={"record_id": "part1"}),
+        ) as update:
+            result = asyncio.run(launch_runtime.reconcile_pending_participant_reviews(
+                campaign_id="campaign1", ranking_version="v1",
+                preview={"candidates": [candidate], "profile_refresh_candidates": []},
+            ))
+
+        self.assertEqual(1, result["auto_passed"])
+        self.assertEqual(0, result["actionable_pending"])
+        fields = update.await_args.args[2]
+        self.assertEqual("通过", fields["审核结论"])
+        self.assertEqual("系统建议通过", fields["系统审核分流"])
+        self.assertNotIn("关联邮件草稿", fields)
+
+    def test_pending_review_reconcile_keeps_actionable_ambiguity_for_operator(self):
+        participant = {"record_id": "part1", "fields": {
+            "参与状态": "已入围", "审核结论": "待审核",
+            "关联KOL": {"link_record_ids": ["kol1"]},
+            "关联邮件草稿": [], "排序快照历史": "[]",
+        }}
+        candidate = {
+            "contact_id": "kol1", "decision": "eligible_new_cold",
+            "base_filter_passed": True, "review_decision": "待审核",
+            "review_route": "KOL运营审核",
+            "review_instruction": "只需确认辅助语言=de和近3个月内容",
+            "base_filter_reason_codes": ["辅助语言待确认"],
+            "score": 82, "final_priority": 82, "evidence_level": "无加分",
+            "country": "DE", "language": "de", "platform": "YouTube",
+            "profile_url": "https://youtube.com/@one", "content_summary": "game hardware",
+        }
+
+        with patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[participant]),
+        ), patch.object(
+            launch_runtime.launch_participation, "_update_and_confirm",
+            new=AsyncMock(return_value={"record_id": "part1"}),
+        ) as update:
+            result = asyncio.run(launch_runtime.reconcile_pending_participant_reviews(
+                campaign_id="campaign1", ranking_version="v1",
+                preview={"candidates": [candidate], "profile_refresh_candidates": []},
+            ))
+
+        self.assertEqual(0, result["auto_passed"])
+        self.assertEqual(1, result["actionable_pending"])
+        fields = update.await_args.args[2]
+        self.assertEqual("待审核", fields["审核结论"])
+        self.assertEqual("KOL运营审核", fields["系统审核分流"])
+        self.assertEqual(["辅助语言待确认"], fields["审核原因代码"])
+
+    def test_pending_review_contacts_are_prioritized_for_profile_refresh(self):
+        participants = [
+            {"record_id": "p1", "fields": {
+                "参与状态": "已入围", "审核结论": "待补资料",
+                "关联KOL": {"link_record_ids": ["pending1"]},
+            }},
+            {"record_id": "p2", "fields": {
+                "参与状态": "已入围", "审核结论": "通过",
+                "关联KOL": {"link_record_ids": ["approved1"]},
+            }},
+        ]
+
+        ids = launch_runtime._pending_review_contact_ids(
+            participants, preview_refresh_ids=["other1", "pending1"], limit=10,
+        )
+
+        self.assertEqual(["pending1", "other1"], ids)
+
     def test_manual_approval_commits_only_controlled_import_route_only_hold(self):
         participant = {"record_id": "part1", "fields": {
             "活动ID": "campaign1", "参与状态": "已入围", "审核结论": "通过",
@@ -483,7 +569,8 @@ class LaunchRuntimeTests(unittest.TestCase):
             "summary": {"eligible_new_cold": 3}, "profile_refresh_candidate_ids": [],
         }
         inventories = [
-            {"ready": 0, "pending_review": 0},
+            {"ready": 0, "pending_review": 1,
+             "pending_contact_ids": ["pending1"]},
             {"ready": 8, "pending_review": 0},
             {"ready": 12, "pending_review": 0},
         ]
@@ -512,8 +599,12 @@ class LaunchRuntimeTests(unittest.TestCase):
             new=AsyncMock(side_effect=[{"queued": 8}, {"queued": 4}]),
         ), patch.object(
             launch_runtime.relabel, "run_profile_records",
-            new=AsyncMock(return_value={"processed": 2, "writes": 2}),
+            new=AsyncMock(return_value={"processed": 3, "writes": 3}),
         ) as refresh, patch.object(
+            launch_runtime, "reconcile_pending_participant_reviews",
+            new=AsyncMock(return_value={"checked": 1, "updated": 1,
+                                        "auto_passed": 1, "actionable_pending": 0}),
+        ) as reconcile, patch.object(
             launch_runtime.keyword_supply, "ensure_campaign_supply",
             new=AsyncMock(return_value={"ok": True, "created": 3}),
         ) as discover, patch.object(
@@ -528,7 +619,10 @@ class LaunchRuntimeTests(unittest.TestCase):
 
         self.assertEqual("expand", result["action"])
         self.assertEqual(214, result["target_ready_inventory"])
-        refresh.assert_awaited_once_with(["k1", "k2"], dry_run=False, limit=2)
+        refresh.assert_awaited_once_with(
+            ["pending1", "k1", "k2"], dry_run=False, limit=3,
+        )
+        reconcile.assert_awaited_once()
         self.assertEqual(2, append_auto.await_count)
         self.assertTrue(all(call.kwargs["allow_parallel_review"] for call in append_auto.await_args_list))
         discover.assert_awaited_once()

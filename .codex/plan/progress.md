@@ -509,3 +509,7 @@
 - 改用本机1.0.64实际支持的重复`--record-id`与`--field-id`后，生产逐条事实回读完成：3条参与记录均为已入围/通过/新开发/新开发池/无草稿；对应3条主表均为未建联/待核对/资料有效，且带当前Dave活动的`[CONTROLLED_IMPORT]`与`no_auto_email=true`标记。
 - 15.1最小实现完成：`queue_approved`在生成草稿前新增人工审核路由提交；只有全局预检的唯一原因等于“触达路由状态=待核对”且没有历史草稿证据才写`可新开发`，写后强制读回。已有线程、近期触达、同产品历史、重复身份等任何其他决定都不改路由。
 - 聚焦回归通过：136项＋3个子样例，覆盖运行器、单人/活动队列预检、候选预览、路由入口与受控导入；新增两项测试分别证明可提交与必须保持拦截。
+- 15.1生产闭环完成：Zeabur deployment `6a8b4462ba5938b757235444`精确运行commit `2c9c8d23a8810a434985b7d18df94b47a380ea06`，`/health=ok`。队列任务`launchruntime-9ea7bb502835`最终success，`route_reconcile.updated=3 / queued=3`；新草稿为`recvt9gDXrsNrN / recvt9gEClBdNo / recvt9gECl2I2X`。同一回放明确保留`existing_pipeline_same_thread=2`和`hold_active_or_recent=1`，没有放宽全局防重复规则。
+- 飞书生产逐条回读：Alec Hansen、Mekel Kasanova、Professor Shario主表`触达路由状态=可新开发`且仍为未建联；3份草稿均为`邮件草稿状态=自动通过 / 审核路径=自动通过 / 发送状态未发`，关联到Dave产品`recvkJOoCsNb1s`。真实发送继续只由既有统一发送中心按额度和活动锁处理。
+- 15.2红测与最小实现完成：新增待审联系人刷新优先级、活动参与记录重算、确定项自动通过、边界项继续运营审核的3类回归。自治补池不再只刷新KOL主表；刷新后会把最新主页、内容、国家语言、证据和明确审核指令写回现有参与记录，自动通过项随后进入原`queue_approved`，不新建第二发送器。
+- 15.2聚焦验证：`launch_runtime / launch_candidate_preview / launch_participation`共107项通过，`py_compile`通过，`git diff --check`只有既有Windows换行提示。待部署后分别触发Dave与食人花自治任务并回读自动通过、仍需运营判断及草稿产出数量。

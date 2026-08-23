@@ -148,6 +148,105 @@ async def _participants(campaign_id: str) -> list[dict]:
     }])
 
 
+def _pending_review_contact_ids(participants: list[dict], *,
+                                preview_refresh_ids: list[str] | None = None,
+                                limit: int = 100) -> list[str]:
+    """待补资料参与人优先刷新；不把已审通过/排除对象重复送去抓取。"""
+    pending = []
+    for row in participants:
+        fields = row.get("fields") or {}
+        if (
+            ext(fields.get("参与状态")) not in {"锁定准备中", "已入围"}
+            or ext(fields.get("审核结论")) not in {"待审核", "待补资料"}
+        ):
+            continue
+        linked = _ids(fields.get("关联KOL"))
+        if len(linked) == 1:
+            pending.append(linked[0])
+    merged = list(dict.fromkeys(pending + list(preview_refresh_ids or [])))
+    return merged[:max(0, min(int(limit), 100))]
+
+
+async def reconcile_pending_participant_reviews(*, campaign_id: str,
+                                                ranking_version: str,
+                                                preview: dict) -> dict:
+    """把主表最新画像写回活动待审行；确定项自动通过，边界项保留给运营。"""
+    participants = await _participants(campaign_id)
+    candidate_by_id = {
+        candidate.get("contact_id"): candidate
+        for candidate in (
+            list(preview.get("profile_refresh_candidates") or [])
+            + list(preview.get("candidates") or [])
+        )
+        if candidate.get("contact_id")
+    }
+    result = {
+        "campaign_id": campaign_id, "checked": 0, "updated": 0,
+        "auto_passed": 0, "actionable_pending": 0, "missing_snapshot": 0,
+        "details": [],
+    }
+    for row in participants:
+        fields = row.get("fields") or {}
+        if (
+            ext(fields.get("参与状态")) not in {"锁定准备中", "已入围"}
+            or ext(fields.get("审核结论")) not in {"待审核", "待补资料"}
+        ):
+            continue
+        result["checked"] += 1
+        participant_id = row.get("record_id", "")
+        linked = _ids(fields.get("关联KOL"))
+        if len(linked) != 1 or _ids(fields.get("关联邮件草稿")):
+            result["details"].append({
+                "participant_id": participant_id,
+                "result": "unsafe_participant_shape_skipped",
+            })
+            continue
+        contact_id = linked[0]
+        candidate = candidate_by_id.get(contact_id)
+        if not candidate:
+            result["missing_snapshot"] += 1
+            result["details"].append({
+                "participant_id": participant_id, "contact_id": contact_id,
+                "result": "latest_snapshot_missing",
+            })
+            continue
+
+        deterministic_pass = bool(
+            candidate.get("decision") == "eligible_new_cold"
+            and candidate.get("base_filter_passed") is True
+            and candidate.get("review_route") == "系统建议通过"
+            and candidate.get("review_decision") == "通过"
+        )
+        ranking_fields = launch_participation._ranking_fields(
+            candidate, ranking_version,
+        )
+        ranking_fields["审核结论"] = "通过" if deterministic_pass else (
+            "待补资料"
+            if candidate.get("review_decision") == "待补资料"
+            else "待审核"
+        )
+        ranking_fields["审核原因代码"] = list(dict.fromkeys(
+            str(code).strip()
+            for code in (candidate.get("base_filter_reason_codes") or [])
+            if str(code).strip()
+        ))
+        ranking_fields["排序快照历史"] = launch_participation._with_snapshot(
+            fields, candidate, ranking_version,
+        )
+        await launch_participation._update_and_confirm(
+            config.T_LAUNCH_PARTICIPANT, participant_id, ranking_fields,
+        )
+        result["updated"] += 1
+        key = "auto_passed" if deterministic_pass else "actionable_pending"
+        result[key] += 1
+        result["details"].append({
+            "participant_id": participant_id, "contact_id": contact_id,
+            "result": "auto_passed" if deterministic_pass else "operator_actionable",
+            "review_instruction": ext(ranking_fields.get("系统审核说明"))[:240],
+        })
+    return result
+
+
 async def append_auto_approved(*, campaign_id: str, pool_target: int,
                                preview: dict | None = None,
                                allow_parallel_review: bool = False) -> dict:
@@ -802,6 +901,9 @@ async def _campaign_ready_inventory(campaign_id: str) -> dict:
             ext((row.get("fields") or {}).get("审核结论")) in {"待审核", "待补资料"}
             for row in active
         ),
+        "pending_contact_ids": _pending_review_contact_ids(
+            active, preview_refresh_ids=[], limit=100,
+        ),
     }
 
 
@@ -946,13 +1048,20 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
         inventory_after_master = await _campaign_ready_inventory(campaign_id)
 
         refresh_result = {"processed": 0, "writes": 0}
+        pending_review_reconcile = {
+            "checked": 0, "updated": 0, "auto_passed": 0,
+            "actionable_pending": 0, "missing_snapshot": 0,
+        }
         second_append = {"created": 0}
         second_queue = {"queued": 0}
         latest_preview = preview
         if inventory_after_master["ready"] < target_ready:
-            refresh_ids = list(dict.fromkeys(
-                preview.get("profile_refresh_candidate_ids") or []
-            ))[:max(0, min(int(profile_refresh_limit), 100))]
+            refresh_ids = _pending_review_contact_ids(
+                [], preview_refresh_ids=(
+                    list(inventory_before.get("pending_contact_ids") or [])
+                    + list(preview.get("profile_refresh_candidate_ids") or [])
+                ), limit=profile_refresh_limit,
+            )
             if refresh_ids:
                 refresh_result = await relabel.run_profile_records(
                     refresh_ids, dry_run=False, limit=len(refresh_ids),
@@ -969,6 +1078,13 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                     ),
                     preview=latest_preview, allow_parallel_review=True,
                 )
+            if inventory_before.get("pending_contact_ids"):
+                pending_review_reconcile = await reconcile_pending_participant_reviews(
+                    campaign_id=campaign_id,
+                    ranking_version=ext(activity_fields.get("证据排序版本")),
+                    preview=latest_preview,
+                )
+            if refresh_ids or pending_review_reconcile.get("auto_passed"):
                 second_queue = await queue_approved(
                     campaign_id=campaign_id, limit=queue_limit,
                 )
@@ -1008,6 +1124,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             "inventory_after": inventory_after["ready"],
             "append": first_append, "queue": first_queue,
             "profile_refresh": refresh_result,
+            "pending_review_reconcile": pending_review_reconcile,
             "append_after_refresh": second_append,
             "queue_after_refresh": second_queue,
             "discovery": discovery, "review_pool": review_pool,
