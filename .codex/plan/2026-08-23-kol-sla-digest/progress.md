@@ -24,3 +24,8 @@
 - Two-axis review found no hard standards violation. Fixed both actionable review points: shared the repeated review steps, changed “回复” to the broader “邮件草稿/发送”, and renamed the fixed-view button to “打开待审核邮件列表” so it does not promise an exact count the view cannot guarantee.
 - Final standards/spec re-review reports no remaining findings. Seven SLA wording/routing tests pass; full suite remains 24/25 with only the unchanged baseline `test_zeabur_watchdog.py` failure.
 - Sent revised Frankie-only card `om_x100b679b11eb5cb0dd3a030a605f80a`. Read-back confirms interactive type, expected title/content, and queue URL. No draft writes, email sends, group sends, production push, or deployment occurred.
+- Frankie approved the revised sample and authorized production release.
+- Pushed the seven reviewed SLA commits to `master`; later remote commit `1c5c23f` is a descendant of approved commit `2c281b0`, so the final running version contains this repair plus the non-conflicting later KOL change.
+- Created only `KOL_SLA_CARD_FRANKIE_ONLY=0` with Zeabur's single-variable mutation, then redeployed. No other environment variables were overwritten.
+- Zeabur deployment `6a8af953ba5938b7572345d2` is `RUNNING`, commit `1c5c23f`, and `https://kol-auto.zeabur.app/health` returns `status=ok`.
+- n8n workflow `j6RR1iVdM413KsW7` remains active; its latest three pre-release scheduled executions all succeeded. No extra manual production SLA run was triggered, avoiding an unnecessary operations card. The next scheduled run is the first live routing observation point.

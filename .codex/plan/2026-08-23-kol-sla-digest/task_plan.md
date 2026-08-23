@@ -28,5 +28,5 @@ Replace per-draft KOL SLA card floods with role-based digest cards that reduce F
 | Implement P1/P2/48h digest routing | complete | Six targeted tests pass |
 | Add card self-test and run regressions | complete | Fixture/live target checks pass; 24/25 test files pass and the only failure matches baseline |
 | Send Frankie-only sample | complete | Revised card `om_x100b679b11eb5cb0dd3a030a605f80a` read back with expected plain-language interactive payload and URL |
-| Frankie approval and production deploy | blocked on revised visual sample approval | Deployment verified by version/execution output |
-| Documentation and closeout | pending | Handoff, plan, lesson, and final priorities recorded |
+| Frankie approval and production deploy | complete | Revised sample approved; deployment `6a8af953ba5938b7572345d2` is RUNNING and includes the approved commits |
+| Documentation and closeout | complete | Handoff, plan, lesson, deployment evidence, and remaining observation point recorded |
