@@ -222,6 +222,20 @@ class LaunchCompetitorEvidenceTests(unittest.TestCase):
 
         self.assertEqual(["profile_url"], result["identity_paths"])
 
+    def test_media_master_profile_url_is_inferred_without_platform_field(self):
+        media = {"record_id": "editor1", "fields": {
+            "媒体人姓名": "Creator One",
+            "作者主页URL": "https://youtube.com/@creatorone",
+        }}
+        post = {"record_id": "post1", "fields": {
+            "竞品品牌": "NYXI", "平台": "YouTube", "内容类型": "评测",
+            "KOL主页URL": "https://youtube.com/@creatorone", "曝光量": 100,
+        }}
+
+        result = evidence.rank_contact_evidence(media, [post], base_score=80)
+
+        self.assertEqual(["profile_url"], result["identity_paths"])
+
     def test_coverage_merges_partial_aliases_for_same_author(self):
         posts = [
             {"record_id": "post1", "fields": {

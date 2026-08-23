@@ -178,7 +178,21 @@ def _p75_thresholds(posts: list[dict]) -> tuple[dict[str, float], dict[str, int]
 
 
 def _platform(fields: dict) -> str:
-    return _first(fields, ("主平台", "平台")).lower()
+    platform = _first(fields, ("主平台", "平台")).lower()
+    if platform:
+        return platform
+    url = _first_url(fields, (
+        "主链接", "作者主页URL", "主页URL", "账号主页", "主页链接", "频道链接",
+    )).lower()
+    if "youtube.com" in url or "youtu.be" in url:
+        return "youtube"
+    if "tiktok.com" in url:
+        return "tiktok"
+    if "instagram.com" in url:
+        return "instagram"
+    if "twitter.com" in url or "x.com" in url:
+        return "x"
+    return ""
 
 
 def _creator_id(fields: dict, *, contact: bool) -> str:
@@ -192,7 +206,7 @@ def _creator_id(fields: dict, *, contact: bool) -> str:
 
 def _profile_url(fields: dict, *, contact: bool) -> str:
     names = (
-        ("主链接", "主页URL", "账号主页", "主页链接", "频道链接")
+        ("主链接", "作者主页URL", "主页URL", "账号主页", "主页链接", "频道链接")
         if contact else
         ("KOL主页URL", "作者主页", "主页URL", "账号主页", "频道链接")
     )
@@ -201,7 +215,7 @@ def _profile_url(fields: dict, *, contact: bool) -> str:
 
 def _handle(fields: dict, *, contact: bool) -> str:
     names = (
-        ("账号Handle", "Handle", "账号名")
+        ("账号Handle", "Handle", "账号名", "媒体人姓名")
         if contact else
         ("KOL账号Handle", "KOL账号名", "作者Handle", "Handle", "作者账号")
     )

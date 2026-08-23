@@ -10,6 +10,29 @@ NOW_MS = 1_777_000_000_000
 
 
 class RelabelProfileTests(unittest.TestCase):
+    def test_youtube_about_parser_reads_only_public_country_and_email(self):
+        html = r'''<script>{"aboutChannelRenderer":{"metadata":{
+        "aboutChannelViewModel":{"description":"For business: creator@example.com",
+        "country":"加拿大","canonicalChannelUrl":"https://www.youtube.com/@Creator",
+        "channelId":"UC123","subscriberCountText":"19.3K subscribers"}}}}</script>'''
+
+        result = relabel.parse_youtube_about_page(html)
+
+        self.assertTrue(result["retrieved"])
+        self.assertEqual("CA", result["country"])
+        self.assertEqual("creator@example.com", result["email"])
+        self.assertEqual("UC123", result["channel_id"])
+
+    def test_youtube_about_parser_keeps_unknown_country_and_missing_email_blocked(self):
+        html = r'''{"aboutChannelViewModel":{"description":"Gaming videos weekly",
+        "country":"Unknownland","channelId":"UC999"}}'''
+
+        result = relabel.parse_youtube_about_page(html)
+
+        self.assertTrue(result["retrieved"])
+        self.assertEqual("", result["country"])
+        self.assertEqual("", result["email"])
+
     def test_recent_video_page_returns_titles_and_publish_dates(self):
         html = r'''
         {"lockupMetadataViewModel":{"title":{"content":"Switch 2 Dock Review"},

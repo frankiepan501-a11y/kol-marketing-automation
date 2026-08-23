@@ -1007,7 +1007,7 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         with patch.object(
             preview, "_load_activity_context", new=AsyncMock(return_value=activity_ctx),
         ), patch.object(
-            preview.feishu, "fetch_all_records", new=AsyncMock(return_value=[]),
+            preview.feishu, "fetch_all_records", new=AsyncMock(side_effect=[[], []]),
         ) as fetch, patch.object(
             preview.feishu, "create_record", new=AsyncMock(),
         ) as create_mock, patch.object(
@@ -1021,9 +1021,12 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertEqual(0, result["writes"])
         self.assertEqual(1, result["sample_size"])
         self.assertFalse(result["candidates"][0]["eligible_for_master_write"])
+        self.assertEqual("competitor_post_to_author", result["source_route"])
         self.assertNotIn("nintendo", result["semantic_cues"])
         self.assertIn("switch controller", result["semantic_cues"])
-        self.assertEqual(["账号名", "主平台", "YouTube频道ID", "主链接"], fetch.await_args.kwargs["field_names"])
+        self.assertEqual(2, fetch.await_count)
+        self.assertEqual(preview.config.T_KOL, fetch.await_args_list[0].args[0])
+        self.assertEqual(preview.config.T_EDITOR, fetch.await_args_list[1].args[0])
         create_mock.assert_not_awaited()
         update_mock.assert_not_awaited()
 
@@ -1031,6 +1034,85 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
             asyncio.run(preview.preview_unmatched_evidence_authors(
                 campaign_id="other-campaign", limit=20,
             ))
+
+    def test_enrichment_blocks_existing_email_and_already_published_target(self):
+        candidate = {
+            "author_key": "youtube|creator:UC1", "platform": "YouTube",
+            "creator_id": "UC1", "handle": "creator", "profile_url": "https://youtube.com/@creator",
+            "evidence_posts": [{"post_title": "NYXI Switch controller review"}],
+            "eligible_for_master_write": False, "write_block_reasons": ["country_not_verified"],
+        }
+        sample = {"unmatched_authors": 1, "candidates": [candidate]}
+        ctx = {
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "activity_node_snapshot", "ranking_version": "evidence-v4",
+            "target_countries": {"US"}, "target_languages": {"en"},
+        }
+        kols = [{"record_id": "kol-old", "fields": {
+            "账号名": "Old Creator", "邮箱": "creator@example.com", "合作状态": "洽谈中",
+        }}]
+        profile = {
+            "retrieved": True, "country": "US", "country_raw": "United States",
+            "email": "creator@example.com", "description": "Gaming review channel",
+            "canonical_url": "https://youtube.com/@creator",
+        }
+        videos = [{"title": "FUNLAB Dave the Diver controller review"}]
+        with patch.object(
+            preview, "_build_unmatched_evidence_author_sample",
+            new=AsyncMock(return_value=(sample, ctx, kols, [])),
+        ), patch.object(
+            preview.relabel, "fetch_youtube_public_profile", new=AsyncMock(return_value=profile),
+        ), patch.object(
+            preview.relabel, "fetch_recent_videos", new=AsyncMock(return_value=videos),
+        ), patch.object(
+            preview.feishu, "create_record", new=AsyncMock(),
+        ) as create_mock:
+            result = asyncio.run(preview.enrich_unmatched_evidence_authors(
+                campaign_id=preview.DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID,
+            ))
+
+        self.assertTrue(result["read_only"])
+        self.assertEqual(0, result["writes"])
+        self.assertEqual(1, result["summary"]["duplicate_email_identity"])
+        self.assertEqual(1, result["summary"]["target_product_already_published"])
+        self.assertFalse(result["candidates"][0]["eligible_for_master_write"])
+        self.assertEqual("reconcile_existing_relationship", result["candidates"][0]["next_action"])
+        create_mock.assert_not_awaited()
+
+    def test_enrichment_passes_only_when_all_public_gates_pass(self):
+        candidate = {
+            "author_key": "youtube|creator:UC2", "platform": "YouTube",
+            "creator_id": "UC2", "handle": "newcreator", "profile_url": "",
+            "evidence_posts": [{"post_title": "NYXI Switch controller review"}],
+            "eligible_for_master_write": False, "write_block_reasons": [],
+        }
+        sample = {"unmatched_authors": 1, "candidates": [candidate]}
+        ctx = {
+            "evidence_mode": "引用历史证据", "evidence_status": "已就绪",
+            "evidence_source": "activity_node_snapshot", "ranking_version": "evidence-v4",
+            "target_countries": {"US"}, "target_languages": {"en"},
+        }
+        profile = {
+            "retrieved": True, "country": "US", "country_raw": "United States",
+            "email": "new@example.com", "description": "The best gaming hardware review channel",
+            "canonical_url": "https://youtube.com/@newcreator",
+        }
+        videos = [{"title": "New Switch controller review with pro gameplay"}]
+        with patch.object(
+            preview, "_build_unmatched_evidence_author_sample",
+            new=AsyncMock(return_value=(sample, ctx, [], [])),
+        ), patch.object(
+            preview.relabel, "fetch_youtube_public_profile", new=AsyncMock(return_value=profile),
+        ), patch.object(
+            preview.relabel, "fetch_recent_videos", new=AsyncMock(return_value=videos),
+        ):
+            result = asyncio.run(preview.enrich_unmatched_evidence_authors(
+                campaign_id=preview.DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID,
+            ))
+
+        self.assertEqual(1, result["summary"]["eligible_for_master_write"])
+        self.assertTrue(result["candidates"][0]["eligible_for_master_write"])
+        self.assertEqual("eligible_for_controlled_master_import", result["candidates"][0]["next_action"])
 
 
 if __name__ == "__main__":

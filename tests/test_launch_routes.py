@@ -140,6 +140,42 @@ class LaunchRouteTests(unittest.TestCase):
             limit=20,
         )
 
+    def test_evidence_author_enrichment_runs_in_background_without_write_switch(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            result = {
+                "read_only": True, "writes": 0, "drafts_created": 0,
+                "emails_sent": 0, "summary": {"sample_size": 20},
+            }
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", False,
+            ), patch.object(
+                main.launch_candidate_preview, "enrich_unmatched_evidence_authors",
+                new=AsyncMock(return_value=result),
+            ) as enrich:
+                accepted = await main.launch_evidence_author_enrichment(
+                    FakeRequest({
+                        "campaign_id": main.keyword_supply.DAVE_KEYWORD_PILOT_CAMPAIGN_ID,
+                        "limit": 99,
+                    }),
+                    authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+                status = await main.get_launch_runtime_job(
+                    accepted["job_id"], authorization="Bearer secret",
+                )
+            main._launch_runtime_jobs.clear()
+            return status, enrich
+
+        status, enrich = asyncio.run(exercise())
+
+        self.assertEqual("success", status["status"])
+        self.assertEqual(0, status["result"]["writes"])
+        enrich.assert_awaited_once_with(
+            campaign_id=main.keyword_supply.DAVE_KEYWORD_PILOT_CAMPAIGN_ID,
+            limit=20,
+        )
+
     def test_outcome_reconcile_defaults_to_dry_run(self):
         result = {"campaign_id": "c1", "dry_run": True, "updates_planned": 1}
         with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(

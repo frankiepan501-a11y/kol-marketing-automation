@@ -91,6 +91,134 @@ def _decode_json_text(value: str) -> str:
         return html_lib.unescape(value)
 
 
+YOUTUBE_COUNTRY_CODES = {
+    "united states": "US", "美国": "US",
+    "united kingdom": "UK", "英国": "UK",
+    "germany": "DE", "德国": "DE",
+    "spain": "ES", "西班牙": "ES",
+    "france": "FR", "法国": "FR",
+    "italy": "IT", "意大利": "IT",
+    "netherlands": "NL", "荷兰": "NL",
+    "portugal": "PT", "葡萄牙": "PT",
+    "sweden": "SE", "瑞典": "SE",
+    "canada": "CA", "加拿大": "CA",
+    "thailand": "TH", "泰国": "TH",
+    "malaysia": "MY", "马来西亚": "MY",
+    "singapore": "SG", "新加坡": "SG",
+    "mexico": "MX", "墨西哥": "MX",
+    "brazil": "BR", "巴西": "BR",
+    "australia": "AU", "澳大利亚": "AU",
+}
+
+
+def _balanced_json_object(source: str, start: int) -> str:
+    """从 start 的左花括号读取一个完整 JSON 对象。"""
+    if start < 0 or start >= len(source) or source[start] != "{":
+        return ""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(source)):
+        char = source[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    return ""
+
+
+def _youtube_text(value) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+    if isinstance(value.get("content"), str):
+        return value["content"].strip()
+    if isinstance(value.get("simpleText"), str):
+        return value["simpleText"].strip()
+    runs = value.get("runs") or []
+    if isinstance(runs, list):
+        return "".join(
+            str(item.get("text") or "") for item in runs if isinstance(item, dict)
+        ).strip()
+    return ""
+
+
+def parse_youtube_about_page(source: str) -> dict:
+    """从公开 YouTube About 页读取可验证资料；缺失项保持为空，不猜测。"""
+    marker = '"aboutChannelViewModel"'
+    marker_index = (source or "").find(marker)
+    model = {}
+    if marker_index >= 0:
+        object_start = (source or "").find("{", marker_index + len(marker))
+        raw = _balanced_json_object(source or "", object_start)
+        if raw:
+            try:
+                model = json.loads(raw)
+            except json.JSONDecodeError:
+                model = {}
+
+    description = _youtube_text(model.get("description"))
+    country_raw = _youtube_text(model.get("country"))
+    emails = []
+    for match in re.findall(
+        r"(?i)(?<![\w.+-])([\w.+-]+@[\w.-]+\.[a-z]{2,})(?![\w.-])",
+        description,
+    ):
+        cleaned, _ = feishu.clean_email(match)
+        if cleaned and cleaned not in emails:
+            emails.append(cleaned)
+    country = YOUTUBE_COUNTRY_CODES.get(country_raw.casefold(), "")
+    canonical_url = _youtube_text(model.get("canonicalChannelUrl"))
+    channel_id = _youtube_text(model.get("channelId"))
+    subscribers = _youtube_text(model.get("subscriberCountText"))
+    return {
+        "retrieved": bool(model),
+        "description": description,
+        "country_raw": country_raw,
+        "country": country,
+        "emails": emails,
+        "email": emails[0] if emails else "",
+        "canonical_url": canonical_url,
+        "channel_id": channel_id,
+        "subscriber_count_text": subscribers,
+    }
+
+
+async def fetch_youtube_public_profile(channel_id_or_handle: str) -> dict:
+    """读取公开 About 页；只返回页面明示信息，不调用登录态或猜测模型。"""
+    if channel_id_or_handle.startswith("@"):
+        url = f"https://www.youtube.com/{channel_id_or_handle}/about"
+    else:
+        url = f"https://www.youtube.com/channel/{channel_id_or_handle}/about"
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0, follow_redirects=True, headers=HEADERS_YT,
+        ) as cli:
+            response = await cli.get(url)
+            if response.status_code != 200:
+                return {"retrieved": False, "http_status": response.status_code}
+            return {
+                **parse_youtube_about_page(response.text),
+                "http_status": response.status_code,
+                "source_url": str(response.url),
+            }
+    except Exception as exc:
+        return {"retrieved": False, "error": type(exc).__name__}
+
+
 def _published_at_ms(text: str, *, now_ms: int) -> int:
     normalized = (text or "").strip().lower()
     if normalized == "yesterday":

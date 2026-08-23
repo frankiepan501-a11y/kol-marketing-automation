@@ -2653,7 +2653,8 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                                     pool_target: int = 100, queue_limit: int = 120,
                                     review_target: int = 20,
                                     sample_limit: int = 20) -> dict:
-    if mode != "evidence_author_pilot" and not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
+    read_only_modes = {"evidence_author_pilot", "evidence_author_enrichment"}
+    if mode not in read_only_modes and not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise HTTPException(status_code=403, detail="活动队列写入开关未开启")
     _prune_launch_runtime_jobs()
     # Zeabur 重启后旧进程里的后台协程已经不存在，不能把活动表里残留的
@@ -2694,6 +2695,10 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                 )
             elif mode == "evidence_author_pilot":
                 result = await launch_candidate_preview.preview_unmatched_evidence_authors(
+                    campaign_id=campaign_id, limit=sample_limit,
+                )
+            elif mode == "evidence_author_enrichment":
+                result = await launch_candidate_preview.enrich_unmatched_evidence_authors(
                     campaign_id=campaign_id, limit=sample_limit,
                 )
             else:
@@ -2864,6 +2869,23 @@ async def launch_evidence_author_pilot(
     return await _start_launch_runtime_job(
         campaign_id=campaign_id,
         mode="evidence_author_pilot",
+        sample_limit=max(1, min(20, int(payload.get("limit") or 20))),
+    )
+
+
+@app.post("/launch/runtime/evidence-author-enrichment")
+async def launch_evidence_author_enrichment(
+    request: Request, authorization: str = Header(default=""),
+):
+    """后台补全竞品作者公开资料并执行写前硬闸；零主表、零草稿、零邮件。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    campaign_id = _launch_required(payload, "campaign_id")
+    if campaign_id != keyword_supply.DAVE_KEYWORD_PILOT_CAMPAIGN_ID:
+        raise HTTPException(status_code=422, detail="当前作者补全灰度只允许 Dave 活动")
+    return await _start_launch_runtime_job(
+        campaign_id=campaign_id,
+        mode="evidence_author_enrichment",
         sample_limit=max(1, min(20, int(payload.get("limit") or 20))),
     )
 

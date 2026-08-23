@@ -14,7 +14,9 @@ import time
 from collections import Counter, defaultdict
 from datetime import datetime
 
-from . import config, dispatch, feishu, launch_competitor_evidence, launch_evidence
+from . import (
+    config, dispatch, feishu, launch_competitor_evidence, launch_evidence, relabel,
+)
 from .feishu import ext
 from .scoring import _parse_multiselect, score_editor, score_kol
 
@@ -80,6 +82,20 @@ DAVE_EVIDENCE_AUTHOR_SEMANTIC_CUES = {
     "dave the diver", "switch controller", "switch 2 controller", "gamepad",
     "gaming hardware", "gaming accessory", "handheld gaming",
 }
+LANGUAGE_WORD_CUES = {
+    "en": {
+        "the", "and", "with", "for", "this", "review", "gaming", "game",
+        "controller", "switch", "console", "new", "best", "you", "your",
+    },
+    "de": {
+        "der", "die", "das", "und", "für", "mit", "ein", "eine", "spiel",
+        "spiele", "test", "controller", "konsole", "neu", "beste",
+    },
+    "es": {
+        "el", "la", "los", "las", "y", "para", "con", "del", "una",
+        "juego", "juegos", "mando", "consola", "nuevo", "mejor", "análisis",
+    },
+}
 
 # 这里只拦“近期内容反复指向活动范围外地区”的强信号。单条标题可能只是
 # 评测某个海外版本，不能据此改写达人国家；重复出现才进入人工冻结。
@@ -126,7 +142,7 @@ def market_consistency_check(fields: dict, *, target_countries: set[str] | None)
     return {"passed": True, "decision": "market_consistent", "reasons": []}
 EDITOR_FIELDS = [
     "媒体人姓名", "所属媒体", "主要媒体", "邮箱", "合作状态", "国家", "语言",
-    "媒体类型", "媒体集团", "报道品类", "邮箱验真状态",
+    "媒体类型", "媒体集团", "报道品类", "邮箱验真状态", "作者主页URL", "主链接",
 ]
 DRAFT_FIELDS = [
     "关联KOL", "关联媒体人", "关联产品", "收件邮箱", "发送邮箱",
@@ -147,6 +163,66 @@ def _link_ids(value) -> set[str]:
                 out.update(item.get("link_record_ids") or item.get("record_ids") or [])
         return out
     return set()
+
+
+def _detect_target_language(text: str) -> tuple[str, str]:
+    """只在词面证据足够明确时返回活动语言；不确定就留空。"""
+    words = re.findall(r"[a-záéíóúüñäöß]+", (text or "").casefold())
+    scores = {
+        language: sum(word in cues for word in words)
+        for language, cues in LANGUAGE_WORD_CUES.items()
+    }
+    ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    if not ordered or ordered[0][1] < 3:
+        return "", "insufficient_public_text"
+    if len(ordered) > 1 and ordered[0][1] <= ordered[1][1]:
+        return "", "ambiguous_public_text"
+    return ordered[0][0], "public_description_and_recent_titles"
+
+
+def _contains_target_product_content(text: str) -> bool:
+    normalized = (text or "").casefold()
+    return (
+        "dave the diver" in normalized
+        and any(cue in normalized for cue in {"funlab", "controller", "gamepad", "手柄"})
+    )
+
+
+def _masked_email(email: str) -> str:
+    local, sep, domain = (email or "").partition("@")
+    if not sep:
+        return ""
+    return f"{local[:2]}***@{domain}"
+
+
+async def _load_evidence_identity_contacts() -> tuple[list[dict], list[dict]]:
+    """竞品作者查重必须同时覆盖 KOL 主表和媒体人主表。"""
+    kol_fields = [
+        "账号名", "邮箱", "合作状态", "主平台", "国家", "语言",
+        "YouTube频道ID", "主链接", "触达路由状态", "上稿标题", "上稿日期",
+    ]
+    editor_fields = list(dict.fromkeys(EDITOR_FIELDS + ["作者主页URL", "主链接"]))
+    return tuple(await asyncio.gather(
+        feishu.fetch_all_records(config.T_KOL, field_names=kol_fields, page_size=500),
+        feishu.fetch_all_records(config.T_EDITOR, field_names=editor_fields, page_size=500),
+    ))
+
+
+def _email_owner_index(kols: list[dict], editors: list[dict]) -> dict[str, list[dict]]:
+    owners: dict[str, list[dict]] = defaultdict(list)
+    for object_type, records in (("KOL", kols), ("媒体人", editors)):
+        for record in records:
+            fields = record.get("fields") or {}
+            email, _ = feishu.clean_email(ext(fields.get("邮箱")))
+            if not email:
+                continue
+            owners[email].append({
+                "object_type": object_type,
+                "record_id": record.get("record_id", ""),
+                "name": ext(fields.get("账号名")) or ext(fields.get("媒体人姓名")),
+                "cooperation_status": ext(fields.get("合作状态")),
+            })
+    return owners
 
 
 def _canonical_id(product: dict) -> str:
@@ -1043,10 +1119,9 @@ async def replay_candidates_targeted(
     }
 
 
-async def preview_unmatched_evidence_authors(
-    *, campaign_id: str, limit: int = 20,
-) -> dict:
-    """Dave P0：从竞品帖子反查未入主库作者；只读且不生成任何外联产物。"""
+async def _build_unmatched_evidence_author_sample(
+    *, campaign_id: str, limit: int,
+) -> tuple[dict, dict, list[dict], list[dict]]:
     if campaign_id != DAVE_EVIDENCE_AUTHOR_PILOT_CAMPAIGN_ID:
         raise ValueError("当前竞品作者补池灰度只允许 Dave 活动")
     limit = max(1, min(int(limit), 20))
@@ -1056,17 +1131,24 @@ async def preview_unmatched_evidence_authors(
             activity_ctx.get("evidence_error")
             or "Dave 活动竞品证据未就绪，无法执行作者反查"
         )
-    contacts = await feishu.fetch_all_records(
-        config.T_KOL,
-        field_names=["账号名", "主平台", "YouTube频道ID", "主链接"],
-        page_size=500,
-    )
+    kols, editors = await _load_evidence_identity_contacts()
+    contacts = [*kols, *editors]
     sample = launch_competitor_evidence.rank_unmatched_author_candidates(
         launch_competitor_evidence.build_evidence_index(
             activity_ctx["competitor_posts"],
         ),
         contacts,
         limit=limit,
+    )
+    return sample, activity_ctx, kols, editors
+
+
+async def preview_unmatched_evidence_authors(
+    *, campaign_id: str, limit: int = 20,
+) -> dict:
+    """Dave P0：从竞品帖子反查未入两张主表作者；只读且不生成外联产物。"""
+    sample, activity_ctx, kols, editors = await _build_unmatched_evidence_author_sample(
+        campaign_id=campaign_id, limit=limit,
     )
     return {
         **sample,
@@ -1077,10 +1159,155 @@ async def preview_unmatched_evidence_authors(
         "ranking_version": activity_ctx["ranking_version"],
         "target_countries": sorted(activity_ctx["target_countries"] or []),
         "target_languages": sorted(activity_ctx["target_languages"] or []),
+        "identity_scope": {
+            "kol_master_records": len(kols),
+            "media_master_records": len(editors),
+            "matched_by": ["creator_id", "profile_url", "handle"],
+        },
+        "source_route": "competitor_post_to_author",
         "semantic_cues": sorted(DAVE_EVIDENCE_AUTHOR_SEMANTIC_CUES),
         "promotion_gate": (
             "国家+语言+内容相关性+非官方身份+有效邮箱全部通过后，"
             "才允许写入 KOL 主表"
+        ),
+    }
+
+
+async def enrich_unmatched_evidence_authors(
+    *, campaign_id: str, limit: int = 20,
+) -> dict:
+    """对只读样本补公开资料并执行写前硬闸；仍保持零业务写入。"""
+    sample, activity_ctx, kols, editors = await _build_unmatched_evidence_author_sample(
+        campaign_id=campaign_id, limit=limit,
+    )
+    email_owners = _email_owner_index(kols, editors)
+    semaphore = asyncio.Semaphore(4)
+
+    async def enrich(candidate: dict) -> dict:
+        platform = str(candidate.get("platform") or "").strip().lower()
+        creator_id = str(candidate.get("creator_id") or "").strip()
+        handle = str(candidate.get("handle") or "").strip()
+        identity = creator_id or (f"@{handle}" if handle else "")
+        profile = {"retrieved": False}
+        videos = []
+        if platform == "youtube" and identity:
+            async with semaphore:
+                profile, videos = await asyncio.gather(
+                    relabel.fetch_youtube_public_profile(identity),
+                    relabel.fetch_recent_videos(identity, n=10),
+                )
+
+        recent_titles = [str(video.get("title") or "") for video in videos]
+        evidence_titles = [
+            str(post.get("post_title") or "")
+            for post in candidate.get("evidence_posts") or []
+        ]
+        content_text = "\n".join([
+            str(profile.get("description") or ""), *recent_titles, *evidence_titles,
+        ]).strip()
+        language, language_source = _detect_target_language(content_text)
+        email, _ = feishu.clean_email(str(profile.get("email") or ""))
+        gate_profile = {
+            "platform": platform,
+            "country": str(profile.get("country") or ""),
+            "language": language,
+            "email": email,
+            "content_text": content_text,
+            "is_official": (
+                creator_id in launch_competitor_evidence.NYXI_OFFICIAL_CREATOR_IDS
+                or launch_competitor_evidence.normalize_handle(handle)
+                in launch_competitor_evidence.NYXI_OFFICIAL_HANDLES
+            ),
+        }
+        gate = launch_competitor_evidence.author_prewrite_gate(
+            gate_profile,
+            target_countries=set(activity_ctx["target_countries"] or []),
+            target_languages=set(activity_ctx["target_languages"] or []),
+            semantic_cues=DAVE_EVIDENCE_AUTHOR_SEMANTIC_CUES,
+        )
+        duplicate_owners = email_owners.get(email, []) if email else []
+        already_published_target = _contains_target_product_content(content_text)
+        reasons = list(gate["reason_codes"])
+        if duplicate_owners:
+            reasons.append("email_already_in_kol_or_media_master")
+        if already_published_target:
+            reasons.append("target_product_already_published_or_reviewed")
+        reasons = list(dict.fromkeys(reasons))
+        eligible = not reasons
+        if duplicate_owners or already_published_target:
+            next_action = "reconcile_existing_relationship"
+        elif eligible:
+            next_action = "eligible_for_controlled_master_import"
+        else:
+            next_action = "exclude_or_wait_for_missing_public_evidence"
+        return {
+            **candidate,
+            "public_profile_retrieved": bool(profile.get("retrieved")),
+            "public_profile_url": str(
+                profile.get("canonical_url") or candidate.get("profile_url") or ""
+            ),
+            "country": str(profile.get("country") or ""),
+            "country_raw": str(profile.get("country_raw") or ""),
+            "country_source": "youtube_public_about" if profile.get("country") else "",
+            "language": language,
+            "language_source": language_source,
+            "email_verified": bool(email),
+            "email_masked": _masked_email(email),
+            "email_source": "youtube_public_description" if email else "",
+            "recent_video_titles": recent_titles,
+            "existing_email_owners": duplicate_owners,
+            "target_product_already_published": already_published_target,
+            "promotion_status": "passed_all_prewrite_gates" if eligible else "blocked",
+            "eligible_for_master_write": eligible,
+            "write_block_reasons": reasons,
+            "next_action": next_action,
+        }
+
+    enriched = await asyncio.gather(*(enrich(candidate) for candidate in sample["candidates"]))
+    reasons = Counter(
+        reason for candidate in enriched for reason in candidate["write_block_reasons"]
+    )
+    eligible = [candidate for candidate in enriched if candidate["eligible_for_master_write"]]
+    return {
+        "read_only": True,
+        "writes": 0,
+        "drafts_created": 0,
+        "emails_sent": 0,
+        "participation_writes": 0,
+        "campaign_id": campaign_id,
+        "source_route": "competitor_post_to_author_to_public_profile",
+        "evidence_mode": activity_ctx["evidence_mode"],
+        "evidence_status": activity_ctx["evidence_status"],
+        "evidence_source": activity_ctx["evidence_source"],
+        "ranking_version": activity_ctx["ranking_version"],
+        "target_countries": sorted(activity_ctx["target_countries"] or []),
+        "target_languages": sorted(activity_ctx["target_languages"] or []),
+        "identity_scope": {
+            "kol_master_records": len(kols),
+            "media_master_records": len(editors),
+            "email_reconciliation": True,
+        },
+        "summary": {
+            "unmatched_authors": sample["unmatched_authors"],
+            "sample_size": len(enriched),
+            "public_profile_retrieved": sum(
+                candidate["public_profile_retrieved"] for candidate in enriched
+            ),
+            "public_email_verified": sum(candidate["email_verified"] for candidate in enriched),
+            "duplicate_email_identity": sum(
+                bool(candidate["existing_email_owners"]) for candidate in enriched
+            ),
+            "target_product_already_published": sum(
+                candidate["target_product_already_published"] for candidate in enriched
+            ),
+            "eligible_for_master_write": len(eligible),
+            "block_reasons": dict(reasons),
+        },
+        "candidates": enriched,
+        "eligible_candidates": eligible,
+        "production_guard": (
+            "本次仅做公开资料补全与写前回读；不创建主表记录、活动参与记录、"
+            "邮件草稿，也不发送邮件。"
         ),
     }
 
