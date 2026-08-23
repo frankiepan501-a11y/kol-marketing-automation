@@ -731,6 +731,24 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertTrue(result["made_supply_progress"])
         self.assertEqual(4, result["supply_progress_breakdown"]["active_discovery_tasks"])
 
+    def test_partial_evidence_continuation_is_degraded_even_with_review_progress(self):
+        result = launch_runtime._with_business_outcome({
+            "action": "expand", "quota": {"remaining": 100},
+            "inventory_after": 0,
+            "evidence_continuation": {
+                "partial_failure": True, "participation_writes": 1,
+                "incomplete_controlled_imports": 1,
+            },
+        })
+
+        self.assertEqual("evidence_continuation_failed", result["business_outcome"])
+        self.assertEqual("degraded", launch_runtime.runtime_job_status(result))
+        summary = launch_runtime._runtime_result_summary(result)
+        self.assertTrue(summary["evidence_continuation"]["partial_failure"])
+        self.assertEqual(
+            1, summary["evidence_continuation"]["incomplete_controlled_imports"],
+        )
+
     def test_runtime_summary_keeps_discovery_quality_gate_for_audit(self):
         summary = launch_runtime._runtime_result_summary({
             "action": "expand", "quota": {"remaining": 107}, "inventory_after": 0,

@@ -1228,8 +1228,14 @@ def _with_business_outcome(result: dict) -> dict:
         inventory_after = 0
 
     outcome_errors = len((result.get("outcome_reconcile") or {}).get("errors") or [])
+    evidence_continuation_failed = bool(
+        (result.get("evidence_continuation") or {}).get("partial_failure")
+        or (result.get("evidence_continuation") or {}).get("error")
+    )
     if outcome_errors:
         outcome = "outcome_reconcile_failed"
+    elif evidence_continuation_failed:
+        outcome = "evidence_continuation_failed"
     elif result.get("stopped") or result.get("action") == "stop":
         outcome = "stopped"
     elif result.get("held") or result.get("action") == "hold":
@@ -1261,7 +1267,9 @@ def _with_business_outcome(result: dict) -> dict:
 
 def runtime_job_status(result: dict | None) -> str:
     result = result or {}
-    if result.get("business_outcome") in {"supply_blocked", "outcome_reconcile_failed"}:
+    if result.get("business_outcome") in {
+        "supply_blocked", "outcome_reconcile_failed", "evidence_continuation_failed",
+    }:
         return "degraded"
     if (result.get("outcome_reconcile") or {}).get("errors"):
         return "degraded"
@@ -1315,6 +1323,7 @@ def _runtime_result_summary(result: dict | None) -> dict:
                     "actionable_pending", "missing_snapshot", "created", "queued",
                     "skipped", "errors", "offset", "next_offset", "sample_size",
                     "eligible", "planned", "participation_writes",
+                    "partial_failure", "incomplete_controlled_imports",
                 ) if name in section
             }
     for key in (

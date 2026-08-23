@@ -415,6 +415,125 @@ class LaunchEvidenceAuthorImportTests(unittest.TestCase):
         )
         commit.assert_not_awaited()
 
+    def test_continuation_import_recovers_committed_reviews_after_partial_failure(self):
+        eligible = []
+        for index in range(3):
+            candidate = self._candidate()
+            candidate.update({
+                "handle": f"nextcreator{index}",
+                "author_key": f"youtube|handle:nextcreator{index}",
+            })
+            eligible.append(candidate)
+        sample = {
+            "candidates": [{"author_key": f"server-only-{i}"} for i in range(20)],
+            "unmatched_authors": 100,
+        }
+        activity = {"record_id": "activity1", "fields": {
+            "活动ID": importer.DAVE_CAMPAIGN_ID, "产品主记录ID": "product1",
+            "证据排序版本": "evidence-v4",
+        }}
+        durable = {
+            "results": [{
+                "author_key": "youtube|handle:nextcreator0",
+                "source_job_id": "launchruntime-current-job",
+                "handle": "nextcreator0", "kol_id": "kol1",
+                "participant_ids": ["participant1"], "participant_count": 1,
+                "review_statuses": ["待审核"], "draft_count": 0,
+                "participant_source_job_ids": ["launchruntime-current-job"],
+            }, {
+                "author_key": "youtube|handle:nextcreator1",
+                "source_job_id": "launchruntime-current-job",
+                "handle": "nextcreator1", "kol_id": "kol2",
+                "participant_ids": [], "participant_count": 0,
+                "review_statuses": [], "draft_count": 0,
+                "participant_source_job_ids": [],
+            }, {
+                "author_key": "youtube|handle:nextcreator2",
+                "source_job_id": "launchruntime-other-job",
+                "handle": "nextcreator2", "kol_id": "kol3",
+                "participant_ids": ["participant3"], "participant_count": 1,
+                "review_statuses": ["待审核"], "draft_count": 0,
+                "participant_source_job_ids": ["launchruntime-other-job"],
+            }],
+        }
+        with patch.object(
+            importer.preview, "_build_unmatched_evidence_author_sample",
+            new=AsyncMock(return_value=(sample, {"ranking_version": "evidence-v4"}, [], [])),
+        ), patch.object(
+            importer.preview, "enrich_unmatched_evidence_authors",
+            new=AsyncMock(return_value={
+                "ranking_version": "evidence-v4", "candidates": eligible,
+            }),
+        ), patch.object(
+            importer.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            importer, "_commit_selected",
+            new=AsyncMock(side_effect=importer.ControlledImportError("third candidate failed")),
+        ), patch.object(
+            importer, "audit_controlled_import_progress", new=AsyncMock(return_value=durable),
+        ) as audit:
+            result = asyncio.run(importer.run_continuation_import(
+                campaign_id=importer.DAVE_CAMPAIGN_ID, offset=17,
+                sample_limit=20, import_limit=3, commit=True,
+                source_job_id="launchruntime-current-job",
+            ))
+
+        self.assertTrue(result["partial_failure"])
+        self.assertEqual(1, result["participation_writes"])
+        self.assertEqual(1, result["imported"])
+        self.assertEqual(1, result["incomplete_controlled_imports"])
+        self.assertEqual(17, result["next_offset"])
+        self.assertEqual(["third candidate failed"], result["errors"])
+        audit.assert_awaited_once_with(importer.DAVE_CAMPAIGN_ID)
+
+    def test_durable_audit_reads_participant_source_job_from_fact_record(self):
+        campaign_id = importer.DAVE_CAMPAIGN_ID
+        source_job_id = "launchruntime-current-job"
+        author_key = "youtube|handle:nextcreator"
+        master = {
+            "record_id": "kol1",
+            "fields": {
+                "迁移备注": (
+                    importer.controlled_marker(campaign_id, author_key)
+                    + f"; source_job={source_job_id}"
+                ),
+            },
+        }
+        participant = {
+            "record_id": "participant1",
+            "fields": {
+                "参与记录ID": "unique1", "审核结论": "待审核",
+                "关联KOL": ["kol1"], "关联邮件草稿": [],
+                "竞品证据摘要": (
+                    f"NYXI公开帖子作者；source_job={source_job_id}；证据帖子=1条"
+                ),
+            },
+        }
+
+        async def fetch_records(table_id, **_kwargs):
+            if table_id == importer.config.T_LAUNCH_PARTICIPANT:
+                return [participant]
+            if table_id == importer.config.T_DRAFT:
+                return []
+            raise AssertionError(table_id)
+
+        with patch.object(
+            importer.launch_evidence, "get_activity",
+            new=AsyncMock(return_value={"fields": {"产品主记录ID": "product1"}}),
+        ), patch.object(
+            importer.preview, "_load_evidence_identity_contacts",
+            new=AsyncMock(return_value=([master], [])),
+        ), patch.object(
+            importer.feishu, "fetch_all_records", new=AsyncMock(side_effect=fetch_records),
+        ), patch.object(importer, "participant_key", return_value="unique1"):
+            result = asyncio.run(importer.audit_controlled_import_progress(campaign_id))
+
+        self.assertEqual(1, result["participation_records"])
+        self.assertEqual(source_job_id, result["results"][0]["source_job_id"])
+        self.assertEqual(
+            [source_job_id], result["results"][0]["participant_source_job_ids"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

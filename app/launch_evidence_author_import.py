@@ -242,6 +242,7 @@ async def _participants_by_unique_key_strong(unique_key: str) -> list[dict]:
         config.T_LAUNCH_PARTICIPANT,
         field_names=[
             "参与记录ID", "审核结论", "参与状态", "关联KOL", "关联邮件草稿",
+            "竞品证据摘要",
         ],
     )
     return [
@@ -257,7 +258,10 @@ async def audit_controlled_import_progress(campaign_id: str) -> dict:
     kols, _ = await preview._load_evidence_identity_contacts()
     participants = await feishu.fetch_all_records(
         config.T_LAUNCH_PARTICIPANT,
-        field_names=["参与记录ID", "审核结论", "参与状态", "关联KOL", "关联邮件草稿"],
+        field_names=[
+            "参与记录ID", "审核结论", "参与状态", "关联KOL", "关联邮件草稿",
+            "竞品证据摘要",
+        ],
     )
     drafts = await feishu.fetch_all_records(
         config.T_DRAFT,
@@ -269,10 +273,13 @@ async def audit_controlled_import_progress(campaign_id: str) -> dict:
     )
     results = []
     for master in kols:
-        match = marker_re.search(ext((master.get("fields") or {}).get("迁移备注")))
+        note = ext((master.get("fields") or {}).get("迁移备注"))
+        match = marker_re.search(note)
         if not match:
             continue
         author_key = match.group(1).strip()
+        source_match = re.search(r"(?:^|;\s*)source_job=([^;\s]+)", note)
+        source_job_id = source_match.group(1).strip() if source_match else ""
         handle = author_key.split("|handle:", 1)[-1] if "|handle:" in author_key else author_key
         kol_id = master.get("record_id")
         unique_key = participant_key(campaign_id, product_id, kol_id) if product_id else ""
@@ -284,7 +291,17 @@ async def audit_controlled_import_progress(campaign_id: str) -> dict:
             row for row in drafts
             if kol_id in preview._link_ids((row.get("fields") or {}).get("关联KOL"))
         ]
+        participant_source_job_ids = []
+        for row in matched_participants:
+            evidence_summary = ext((row.get("fields") or {}).get("竞品证据摘要"))
+            participant_source = re.search(
+                r"source_job=([^；;\s]+)", evidence_summary,
+            )
+            participant_source_job_ids.append(
+                participant_source.group(1).strip() if participant_source else ""
+            )
         results.append({
+            "author_key": author_key, "source_job_id": source_job_id,
             "handle": handle, "kol_id": kol_id,
             "participant_ids": [row.get("record_id") for row in matched_participants],
             "participant_count": len(matched_participants),
@@ -292,6 +309,7 @@ async def audit_controlled_import_progress(campaign_id: str) -> dict:
                 ext((row.get("fields") or {}).get("审核结论"))
                 for row in matched_participants
             ],
+            "participant_source_job_ids": participant_source_job_ids,
             "draft_count": len(matched_drafts),
         })
     return {
@@ -564,9 +582,71 @@ async def run_continuation_import(
             or ext(current_fields.get("证据排序版本")) != ranking_version
         ):
             raise ControlledImportError("活动配置在续供写入前发生变化，请重新执行")
-        committed = await _commit_selected(
-            campaign_id=campaign_id, source_job_id=source_job_id,
-            selected=selected, activity=current_activity, product_id=product_id,
-            ranking_version=ranking_version,
-        )
+        try:
+            committed = await _commit_selected(
+                campaign_id=campaign_id, source_job_id=source_job_id,
+                selected=selected, activity=current_activity, product_id=product_id,
+                ranking_version=ranking_version,
+            )
+        except Exception as exc:
+            # A batch can fail after earlier candidates were durably written. Rebuild
+            # that completed subset from the fact tables so those reviewers are still
+            # notified; never infer success from in-memory loop progress.
+            durable = await audit_controlled_import_progress(campaign_id)
+            selected_author_keys = {
+                str(candidate.get("author_key") or "").strip().casefold()
+                for candidate in selected
+            }
+            selected_rows = [
+                row for row in durable.get("results") or []
+                if str(row.get("author_key") or "").strip().casefold()
+                in selected_author_keys
+                and (
+                    str(row.get("source_job_id") or "") == source_job_id
+                    or source_job_id in (row.get("participant_source_job_ids") or [])
+                )
+            ]
+            recovered = [
+                row for row in selected_rows
+                if int(row.get("participant_count") or 0) == 1
+                and row.get("review_statuses") == ["待审核"]
+                and row.get("participant_source_job_ids") == [source_job_id]
+                and int(row.get("draft_count") or 0) == 0
+            ]
+            if not recovered:
+                raise
+            committed = {
+                "read_only": False,
+                "campaign_id": campaign_id,
+                "source_job_id": source_job_id,
+                "planned": len(selected),
+                "imported": len(recovered),
+                "writes": len(selected_rows) + len(recovered),
+                "master_writes": len(selected_rows),
+                "participation_writes": len(recovered),
+                "incomplete_controlled_imports": (
+                    len(selected_rows) - len(recovered)
+                ),
+                "drafts_created": 0,
+                "emails_sent": 0,
+                "results": [
+                    {
+                        "handle": row.get("handle"),
+                        "kol_id": row.get("kol_id"),
+                        "participant_id": (row.get("participant_ids") or [None])[0],
+                        "master_action": "created",
+                        "participant_action": "created",
+                        "review_status": "待审核",
+                        "draft_count": 0,
+                    }
+                    for row in recovered
+                ],
+                "partial_failure": True,
+                "errors": [str(exc)[:240]],
+                "guard": "已从事实表恢复异常前完成的待审核记录；无草稿、无邮件",
+            }
+            # A partial batch must be rescanned from the safe campaign floor. Some
+            # untouched candidates may sit before the nominal next page, while a
+            # master-only row has already disappeared from the unmatched pool.
+            base_result["next_offset"] = 17
     return {**base_result, **committed, "continuation_offset": offset}
