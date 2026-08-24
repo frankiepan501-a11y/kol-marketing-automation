@@ -93,3 +93,18 @@
 
 - [x] 未记录测试邮箱、真实KOL邮箱、邮件正文、token或其他敏感信息。
 - [x] 只记录模板与发送闸门的可复用预防规则。
+
+# 2026-08-24 Zeabur单变量修改事故与恢复
+
+## Candidate Lessons
+
+| Symptom | Cause | Prevention | Promote to |
+|---|---|---|---|
+| 只想设置一个测试开关，却导致KOL服务大量环境变量消失 | Zeabur `updateEnvironmentVariable`是整组替换，不是单变量更新 | 单变量只用`createSingleEnvironmentVariable`、`updateSingleEnvironmentVariable`或`deleteSingleEnvironmentVariable`；写前写后核对变量总数、关键项和真实定时业务执行 | global AGENTS / Zeabur SOP |
+| 服务恢复后旧内部授权仍可能不安全 | 旧值曾出现在内部诊断输出，即使未对外发送也不能继续信任 | 立即轮换；完整GET每条n8n工作流，仅改目标请求头后完整PUT；验证全部调用节点一致且active状态不变 | n8n / Zeabur SOP |
+| n8n执行success可能只证明定时器调用成功 | HTTP成功不等于服务业务状态健康 | 同时回读服务health、业务status、dry-run/paused状态、无401，以及部署后的下一次自然定时execution | production verification checklist |
+
+## Secret/Privacy Review
+
+- [x] 未记录任何旧/新令牌、API key、邮箱或邮件正文。
+- [x] 修复脚本只从环境读取敏感值，日志只输出数量、布尔值和资源ID。
