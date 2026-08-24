@@ -38,6 +38,7 @@ class LaunchRuntimeError(RuntimeError):
 
 _LOCKS: dict[str, asyncio.Lock] = {}
 _JOB_NOTE_LOCKS: dict[str, asyncio.Lock] = {}
+_ZERO_MODEL_CANDIDATE_PREVIEW_TIMEOUT_SECONDS = 120
 LAUNCH_QUEUE_TEMPLATE_VERSION = "launch-queue-v1"
 RUNTIME_JOB_PREFIX = "[AUTONOMY_JOB]"
 CAMPAIGN_REVIEW_VIEWS = {
@@ -223,9 +224,26 @@ async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
     )
     inventory = await _campaign_ready_inventory(campaign_id)
     report("candidate_preview")
-    preview = await launch_candidate_preview.preview_candidates(
-        "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
-    )
+    candidate_preview_timed_out = False
+    try:
+        preview = await asyncio.wait_for(
+            launch_candidate_preview.preview_candidates(
+                "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
+            ),
+            timeout=_ZERO_MODEL_CANDIDATE_PREVIEW_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        candidate_preview_timed_out = True
+        preview = {
+            "candidates": [], "profile_refresh_candidate_ids": [],
+            "summary": {
+                "status": "timeout",
+                "timeout_seconds": _ZERO_MODEL_CANDIDATE_PREVIEW_TIMEOUT_SECONDS,
+            },
+        }
+        report("candidate_preview_timeout", {
+            "timeout_seconds": _ZERO_MODEL_CANDIDATE_PREVIEW_TIMEOUT_SECONDS,
+        })
 
     refresh_ids = list(dict.fromkeys(
         preview.get("profile_refresh_candidate_ids") or []
@@ -295,6 +313,8 @@ async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
     )
     discovery_shortfall = int(discovery.get("shortfall_tasks") or 0)
     degraded_reasons = []
+    if candidate_preview_timed_out:
+        degraded_reasons.append("candidate_preview_timeout")
     if profile_errors:
         degraded_reasons.append("profile_refresh_error")
     if draft_errors:
@@ -310,6 +330,10 @@ async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
         "brand": brand, "metrics": metrics, "quota": quota,
         "target_ready_inventory": target_ready,
         "inventory_before": int(inventory.get("ready") or 0),
+        "candidate_preview": {
+            "timed_out": candidate_preview_timed_out,
+            "timeout_seconds": _ZERO_MODEL_CANDIDATE_PREVIEW_TIMEOUT_SECONDS,
+        },
         "preview_summary": preview.get("summary") or {},
         "eligible_template_candidates": len(eligible),
         "profile_refresh": profile_refresh,

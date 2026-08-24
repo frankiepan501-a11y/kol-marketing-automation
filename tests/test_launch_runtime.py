@@ -363,6 +363,61 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual("degraded", launch_runtime.runtime_job_status(result))
         self.assertIn("fixed_keywords_shortfall", result["readiness"]["reasons"])
 
+    def test_zero_model_preview_degrades_after_candidate_preview_timeout(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "运行模式": "正式运行", "状态": "正式执行中",
+        }}
+        product = {"record_id": "product1", "fields": {
+            "品牌": "FUNLAB", "产品英文名": "FUNLAB Dave Controller",
+            "官网链接": {"link": "https://funlabswitch.com/products/dave"},
+        }}
+        stages = []
+
+        async def slow_preview(*_args, **_kwargs):
+            await asyncio.sleep(1)
+            return {"candidates": [], "summary": {}}
+
+        with patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "campaign_metrics",
+            new=AsyncMock(return_value={"action": "expand", "participants": 0}),
+        ), patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(return_value=product),
+        ), patch.object(
+            launch_runtime, "_brand_quota_snapshot",
+            new=AsyncMock(return_value={"remaining": 100}),
+        ), patch.object(
+            launch_runtime, "_campaign_ready_inventory",
+            new=AsyncMock(return_value={"ready": 0}),
+        ), patch.object(
+            launch_runtime, "_ZERO_MODEL_CANDIDATE_PREVIEW_TIMEOUT_SECONDS", 0.01,
+        ), patch.object(
+            launch_runtime.launch_candidate_preview, "preview_candidates",
+            new=AsyncMock(side_effect=slow_preview),
+        ), patch.object(
+            launch_runtime.keyword_supply, "ensure_campaign_supply",
+            new=AsyncMock(return_value={
+                "ok": True, "model_calls": 0, "shortfall_tasks": 0,
+            }),
+        ) as keywords:
+            result = asyncio.run(launch_runtime.preview_zero_model_refill(
+                campaign_id="campaign1",
+                progress_callback=lambda stage, detail: stages.append((stage, detail)),
+            ))
+
+        self.assertEqual("preview_degraded", result["business_outcome"])
+        self.assertIn("candidate_preview_timeout", result["readiness"]["reasons"])
+        self.assertTrue(result["candidate_preview"]["timed_out"])
+        self.assertEqual(0.01, result["candidate_preview"]["timeout_seconds"])
+        self.assertIn(("candidate_preview_timeout", {"timeout_seconds": 0.01}), stages)
+        self.assertEqual(0, result["model_calls"])
+        self.assertEqual(0, result["writes"])
+        self.assertEqual(0, result["drafts_created"])
+        self.assertEqual(0, result["emails_sent"])
+        self.assertFalse(keywords.await_args.kwargs["allow_ai"])
+
     def test_zero_model_preview_reports_degraded_when_profile_scrape_fails(self):
         activity = {"record_id": "a1", "fields": {
             "活动ID": "campaign1", "产品主记录ID": "product1",
