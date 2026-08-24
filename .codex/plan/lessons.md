@@ -78,3 +78,18 @@
 
 - [x] 未记录任何API key、token、邮箱地址、邮件正文或KOL个人资料。
 - [x] 只记录可复用的部署与审计规则。
+
+# 2026-08-24 固定英文模板与Raw证书
+
+## Candidate Lessons
+
+| Symptom | Cause | Prevention | Promote to |
+|---|---|---|---|
+| 英文开发信出现品牌重复和中文品类 | 签名已经包含品牌，模板又追加品牌；结构化中文字段未经语言映射直接插值 | 固定英文模板先做品类映射并检查整封语言；签名视为完整身份句，不重复拼品牌 | project docs / KOL email SOP |
+| raw测试通过后活动发送仍被锁 | 活动只保存一张Raw验证证书，测试`kol-cold-template-v1`覆盖了生产`launch-queue-v1`证书 | 测试结束前恢复生产模板证书；P1改为按模板版本分别保存和校验 | project docs / schema change |
+| 恢复15封后仍可能被人工再触发 | 只看“计划剩余量”而没先回读日报和Zoho事实 | 生产补发前先对账活动日报、Zoho唯一收件人与message_id；已完成就不再手动触发 | project docs / production send checklist |
+
+## Secret/Privacy Review
+
+- [x] 未记录测试邮箱、真实KOL邮箱、邮件正文、token或其他敏感信息。
+- [x] 只记录模板与发送闸门的可复用预防规则。

@@ -485,6 +485,19 @@
 - 2026-08-24 01:28北京时间，Frankie确认三名Dave证据作者均已人工审核通过。飞书逐条回读确认Alec Hansen、Mekel Kasanova、Professor Shario均为`参与状态=已入围 / 审核结论=通过`；三条`关联邮件草稿`仍为空，说明审核动作没有绕过草稿生成与统一发送中心。下一处理点为现有Dave小时级自治任务（02:00）生成活动草稿，随后由10分钟发送中心按活动安全闸和FUNLAB滚动24小时额度处理。
 - 本次人工在表格直接修改`审核结论`时，`审核人/审核时间`没有自动写入；不阻塞当前三人进入队列，但属于后续P2审计留痕改进项。
 
+## 2026-08-24 固定英文模板上线与 Dave 15 封恢复
+
+- 首次测试邮箱真实渲染发现两处P0内容问题：`I'm Tom from FUNLAB Team from FUNLAB`品牌重复，以及中文品类`手柄`混入英文正文。真实批量发送开关未在该问题未修复时放行。
+- `app/enrich.py`增加中文品类到英文品类的确定性映射，未知值安全回退`gaming accessory`；签名不再重复追加品牌；英文模板校验拒绝除达人名外的CJK字符和重复品牌介绍。`tests/test_enrich_model_guard.py`补齐对应回归。
+- commit `15e438e` 已推送至`master`；聚焦测试27项通过，`py_compile`通过，`git diff --check`除Windows换行提示外通过。
+- dry-run deployment `6a8bf512f0c2fe61c934ed7b`运行后，`coldtpl-15e438e-20260824a`通过：测试邮箱仅1个message_id，raw长度960、预期837，生产草稿写入0；Gmail真实渲染确认英文、产品身份、产品特性、链接、CTA和签名完整。
+- 清除`EMAIL_DRY_RUN_TO`后deployment `6a8bf624f0c2fe61c934edef`正常；状态接口确认`dry_run_active=false`。日报回读Dave当日从6封增至21封，原定恢复15封已完成，因此没有手动补触发。
+- 最近30封Zoho发件扫描中有19封真实活动邮件，19个唯一收件人、重复组0、message_id缺失0；另2封为测试邮箱验证，不计生产日报。
+- 精确cold模板测试曾覆盖活动唯一Raw证书，15:50发送任务`autosend-53dc206f7da2`因此正确拦下3封并报告`Raw验证证书`失败，没有误发。随后重新开启dry-run，用`launchq-restore-15e438e-20260824a`验证活动实际使用的`launch-queue-v1`，raw 484/361、生产草稿写入0，证书恢复为通过。
+- 最终只删除`EMAIL_DRY_RUN_TO`并部署`6a8bf95ff0c2fe61c934ef75`；健康检查正常，发送中心未暂停且`dry_run_active=false`。
+- 16:00自然定时execution `1001940`完成任务`autosend-f33f538eda2b`：发送3、失败0、待下轮82、锁验证失败0；发送后Zoho raw核验3/3通过、告警0、错误0。该批属于恢复后的正常持续放量，不是重复补发。
+- 最终只读日报`launchreport-1f5d056d5aa5`成功且`validation.ok=true / notified=false / business_writes=0`：Dave今日24封、累计176封、今日回复3、可发送库存0；FUNLAB滚动24小时29/120，剩余91。食人花今日0封、累计18封、可发送库存0，仍是供给阻塞而非邮箱额度阻塞。
+
 ## 2026-08-24 Dave＋食人花实时进度审计与交接
 
 - 本轮为只读审计；没有修改生产表、n8n、Zeabur配置，没有生成/发送邮件或主动发送业务飞书消息。一次定向只读回放失败进入服务通用异常处理，可能产生1条内部异常告警；未产生业务表写入。
