@@ -14,6 +14,39 @@ def _certificate():
 
 
 class LaunchRuntimeTests(unittest.TestCase):
+    def test_queue_approved_passes_one_shared_model_budget_to_all_queue_entries(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+        }}
+        product = {"record_id": "product1", "fields": {
+            "品牌": "FUNLAB", "派单模式": "活动专用",
+        }}
+        participant = {"record_id": "part1", "fields": {
+            "参与状态": "已入围", "审核结论": "通过", "进入方式": "新开发",
+            "活动分池": "新开发池", "关联邮件草稿": [],
+        }}
+        with patch.object(
+            launch_runtime.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(return_value=product),
+        ), patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[participant]),
+        ), patch.object(
+            launch_runtime, "reconcile_approved_controlled_import_routes",
+            new=AsyncMock(return_value={"updated": 0}),
+        ), patch.object(
+            launch_runtime, "_queue_one",
+            new=AsyncMock(return_value={"participant_id": "part1", "draft_id": "draft1"}),
+        ) as queue_one:
+            result = asyncio.run(launch_runtime.queue_approved(campaign_id="campaign1"))
+
+        self.assertEqual(1, result["queued"])
+        self.assertIsNotNone(queue_one.await_args.kwargs["model_budget"])
+        self.assertIsInstance(queue_one.await_args.kwargs["generation_lock"], asyncio.Lock)
+        self.assertIn("run_calls", result["model_budget"])
+
     def test_zero_model_launch_date_uses_controlled_campaign_mapping_only(self):
         known = launch_runtime._launch_date_labels(
             "launch-20260915-powkong-piranha-v2",
@@ -219,6 +252,19 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual([], valid["errors"])
         self.assertFalse(invalid["passed"])
         self.assertIn("unresolved_placeholder", invalid["errors"])
+
+    def test_launch_template_validator_rejects_sku_price_and_generic_placeholder(self):
+        kol = {"fields": {"账号名": "Creator One", "国家": "US", "语言": "en"}}
+        product = {"fields": {
+            "产品英文名": "Piranha Plant 2 Dock",
+            "官网链接": {"link": "https://example.com/plant"},
+        }}
+        safe = launch_runtime._deterministic_fallback_draft(kol, product, "POWKONG")
+        for unsafe in ("FF01A-07", "PK02A-03", "20% discount", "[CREATOR]"):
+            checked = launch_runtime.validate_deterministic_launch_draft({
+                **safe, "body": safe["body"] + f"<p>{unsafe}</p>",
+            })
+            self.assertFalse(checked["passed"], unsafe)
 
     def test_zero_model_refill_preview_has_no_model_calls_or_writes(self):
         activity = {"record_id": "a1", "fields": {

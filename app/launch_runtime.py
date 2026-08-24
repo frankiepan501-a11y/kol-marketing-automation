@@ -149,11 +149,24 @@ def validate_deterministic_launch_draft(draft: dict) -> dict:
         errors.append("invalid_subject")
     if len(re.sub(r"\s+", " ", plain_body).strip()) < 80:
         errors.append("body_too_short")
-    if re.search(r"\[(?:TBD|待填|CARRIER[^\]]*)\]|<%=|\{\{[^}]+\}\}", body, re.I):
+    if re.search(
+        r"\[(?:TBD|待填|CARRIER|TRACKING|ETA|ADDRESS|PRICE|QUANTITY|"
+        r"CREATOR|KOL|NAME|PRODUCT|LINK|URL|XXX)[^\]]*\]|<%=|\{\{",
+        body, re.I,
+    ):
         errors.append("unresolved_placeholder")
-    if re.search(r"\b(?:YM\d{2,4}|SKU[-_]?[A-Z]{1,3}\d+)\b|内部(?:代号|\s*SKU)",
+    if re.search(
+        r"\b(?:YM\d{2,4}[A-Z0-9-]*|PK\d{2}[A-Z]?(?:-\d+)?|"
+        r"FF\d{2}[A-Z]?(?:-\d+)?|FL-[A-Z0-9-]+|SKU[-_]?[A-Z0-9-]+)\b|"
+        r"内部(?:代号|\s*SKU)",
                  subject + "\n" + body, re.I):
         errors.append("internal_sku_leak")
+    if re.search(
+        r"(?:\$\s*\d|USD\s*\d|\b\d+(?:\.\d+)?\s*%\s*"
+        r"(?:discount|off|commission|royalty|promo|coupon))",
+        subject + "\n" + body, re.I,
+    ):
+        errors.append("price_or_commission")
     links = re.findall(r'href="([^"]+)"', body, re.I)
     if not links or any(not link.startswith("https://") for link in links):
         errors.append("invalid_or_missing_link")
@@ -798,7 +811,7 @@ async def reconcile_approved_controlled_import_routes(
 
 
 async def _queue_one(*, activity: dict, participant: dict, product: dict,
-                     brand: str) -> dict:
+                     brand: str, model_budget, generation_lock: asyncio.Lock) -> dict:
     af = activity.get("fields") or {}
     pf = participant.get("fields") or {}
     campaign_id = ext(af.get("活动ID"))
@@ -835,25 +848,48 @@ async def _queue_one(*, activity: dict, participant: dict, product: dict,
 
     score = float(pf.get("基础评分快照") or 0)
     signature = "Tom from FUNLAB Team" if brand == "FUNLAB" else "Lisa @ POWKONG Team"
-    generated = await enrich.gen_draft(
-        kol, product, brand, signature,
-        {"活动名单": {"score": score, "reason": "活动名单和全局重复触达预检已通过"}},
-        score,
-    )
-    if generated.get("error") and "402 Payment Required" in str(generated.get("error")):
-        generated = _deterministic_fallback_draft(kol, product, brand)
-    if generated.get("error") or generated.get("skip"):
+    breakdown = {
+        "活动名单": {"score": score, "reason": "活动名单和全局重复触达预检已通过"},
+    }
+    async with generation_lock:
+        generated = await enrich.generate_controlled_draft(
+            kol, product, brand, signature, breakdown, score,
+            model_budget=model_budget, task_id=campaign_id,
+            template_factory=lambda: _deterministic_fallback_draft(
+                kol, product, brand, launch_dates=_launch_date_labels(campaign_id),
+            ),
+        )
+    if generated.get("error") or generated.get("skip") or generated.get("model_skip_reason"):
         return {
             "participant_id": participant_id,
-            "skipped": str(generated.get("error") or generated.get("skip")),
+            "skipped": str(
+                generated.get("error") or generated.get("skip")
+                or generated.get("model_skip_reason")
+            ),
         }
+    if generated.get("generation_mode") == "ai" and not (
+        generated.get("output_validation") or {}
+    ).get("passed", False):
+        return {"participant_id": participant_id, "skipped": "model_output_validation_failed"}
+    if generated.get("deterministic_fallback"):
+        validation = validate_deterministic_launch_draft(generated)
+        if not validation["passed"]:
+            return {
+                "participant_id": participant_id,
+                "skipped": "launch_template_validation_failed:" + ",".join(validation["errors"]),
+            }
     subject = str(generated.get("subject") or "").strip()
     body = str(generated.get("body") or "").strip()
     if not subject or len(re.sub(r"<[^>]+>", "", body)) < 50:
         return {"participant_id": participant_id, "skipped": "generated_body_invalid"}
+    generation_marker = (
+        f"template:{LAUNCH_QUEUE_TEMPLATE_VERSION}"
+        if generated.get("deterministic_fallback")
+        else "generation:ai-exception"
+    )
     body += (
         '<span style="display:none;font-size:0;color:transparent">'
-        f"launch-queue:{queue_key};template:{LAUNCH_QUEUE_TEMPLATE_VERSION}</span>"
+        f"launch-queue:{queue_key};{generation_marker}</span>"
     )
     now_ms = int(time.time() * 1000)
     fields = {
@@ -894,13 +930,23 @@ async def _queue_one(*, activity: dict, participant: dict, product: dict,
     if generated.get("deterministic_fallback"):
         await feishu.update_record(config.T_DRAFT, draft_id, {
             "邮件草稿状态": "自动通过", "审核路径": "自动通过",
-            "AI评分理由": "[fallback-template] DeepSeek 402；使用无价格、无虚构内容的受控活动模板",
+            "AI评分理由": (
+                f"[{LAUNCH_QUEUE_TEMPLATE_VERSION}] 受控活动模板；"
+                f"model_calls={generated.get('model_calls', 0)}；"
+                f"fallback={generated.get('model_fallback_reason') or 'routine'}"
+            )[:500],
         })
         return {"participant_id": participant_id, "draft_id": draft_id,
                 "reused": False, "path": "自动通过-受控备用模板"}
-    route = await draft_router.route_draft(draft_id)
+    await feishu.update_record(config.T_DRAFT, draft_id, {
+        "邮件草稿状态": "待审", "审核路径": "待人审",
+        "AI评分理由": (
+            "[hybrid-ai-exception] 模型例外草稿已通过确定性安全检查；"
+            "禁止二次 AI reviewer，固定进入人工审核"
+        )[:500],
+    })
     return {"participant_id": participant_id, "draft_id": draft_id,
-            "reused": False, "path": route.get("path"), "score": route.get("score")}
+            "reused": False, "path": "待人审", "generation_mode": "ai"}
 
 
 async def queue_approved(*, campaign_id: str, limit: int = 120) -> dict:
@@ -930,12 +976,15 @@ async def queue_approved(*, campaign_id: str, limit: int = 120) -> dict:
         and not _ids((row.get("fields") or {}).get("关联邮件草稿"))
     ][:max(1, min(int(limit), 500))]
     semaphore = asyncio.Semaphore(4)
+    generation_lock = asyncio.Lock()
+    model_budget = enrich.new_model_budget()
 
     async def one(row):
         async with semaphore:
             try:
                 return await _queue_one(
                     activity=activity, participant=row, product=product, brand=brand,
+                    model_budget=model_budget, generation_lock=generation_lock,
                 )
             except Exception as exc:
                 return {"participant_id": row.get("record_id"), "error": str(exc)[:300]}
@@ -947,6 +996,7 @@ async def queue_approved(*, campaign_id: str, limit: int = 120) -> dict:
         "queued": sum(bool(x.get("draft_id")) and not x.get("reused") for x in details),
         "reused": sum(bool(x.get("reused")) for x in details),
         "skipped_or_failed": sum(not x.get("draft_id") for x in details),
+        "model_budget": model_budget.snapshot(),
         "details": details,
     }
 

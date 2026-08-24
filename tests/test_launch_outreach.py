@@ -153,13 +153,13 @@ class LaunchOutreachTests(unittest.TestCase):
              patch.object(launch_outreach.feishu, "get_record", new=fake_get), \
              patch.object(launch_outreach.feishu, "create_record", new=fake_create), \
              patch.object(launch_outreach.feishu, "update_record", new=fake_update), \
-             patch.object(launch_outreach.enrich, "gen_draft", new=AsyncMock(return_value={
+             patch.object(launch_outreach.enrich, "generate_controlled_draft", new=AsyncMock(return_value={
                  "subject": "IndieAlpaca, dive into this",
                  "body": '<p>FUNLAB Luminex Dave THE DIVER Edition - Switch 2 Pro Controller.</p>'
                          '<p><a href="https://example.com/dave?utm_source=kol">See it</a></p>',
                  "highlights": "Dave fit", "angle": "licensed controller",
                  "utm_url": "https://example.com/dave?utm_source=kol", "utm_id": "indiealpaca",
-             })), \
+             })) as generate, \
              patch.object(launch_outreach.auto_send, "pause_state", return_value={"paused": False, "paused_brands": {}}), \
              patch.object(launch_outreach.auto_send, "send_one", new=AsyncMock(return_value={
                  "ok": True, "msg_id": "msg1", "to": "contact@indiealpa.ca", "brand": "FUNLAB",
@@ -177,6 +177,8 @@ class LaunchOutreachTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual("draft1", result["draft_id"])
+        self.assertIsNotNone(generate.await_args.kwargs["model_budget"])
+        self.assertEqual("campaign1:participant1", generate.await_args.kwargs["task_id"])
         send_mock.assert_awaited_once()
         self.assertIs(
             auto_send._LAUNCH_ACTIVITY_RELEASE,

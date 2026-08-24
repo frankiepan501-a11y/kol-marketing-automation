@@ -3219,6 +3219,7 @@ async def launch_email_test_raw(
     confirm: str = "",
     run_key: str = "",
     campaign_id: str = "",
+    template_version: str = launch_email_preflight.LAUNCH_QUEUE_TEMPLATE_VERSION,
 ):
     """只发测试邮箱并回查 sent raw；全局 dry-run 未开启时硬拒绝。"""
     _check_auth(authorization)
@@ -3230,7 +3231,7 @@ async def launch_email_test_raw(
     try:
         return await launch_email_preflight.send_and_validate(
             product_id, draft_id, brand, confirm=confirm, run_key=run_key,
-            campaign_id=campaign_id,
+            campaign_id=campaign_id, template_version=template_version,
         )
     except launch_email_preflight.RawValidationError as e:
         tr = _tb.format_exc()[-1000:]

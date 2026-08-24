@@ -10,7 +10,7 @@ import os
 import re
 import time
 
-from . import config, feishu, zoho
+from . import config, enrich, feishu, zoho
 from .feishu import ext
 
 
@@ -164,7 +164,7 @@ def validate_raw_content(*, raw_subject: str, raw_body: str, actual_to: str,
         "sender_matches_product_brand": bool(clean_expected_from and clean_actual_from == clean_expected_from),
         "subject_preserved": expected.get("subject", "") in (raw_subject or ""),
         "dry_run_subject_prefix": "[DRY-RUN" in (raw_subject or ""),
-        "body_not_truncated": len(raw_text) >= max(50, int(len(expected_text) * 0.7)),
+        "body_not_truncated": len(raw_text) >= max(50, int(len(expected_text) * 0.8)),
         "html_rendered": bool(re.search(r"<(p|div|br|a|strong)[\s>/]", raw_body or "", re.I)),
         "product_identity_present": _product_identity_present(
             raw_text, expected.get("product_identity_rules") or {}
@@ -191,6 +191,19 @@ def _find_sent(messages: list[dict], expected: dict, target: str, run_key: str) 
     return None
 
 
+def _draft_template_version(draft: dict) -> str:
+    fields = draft.get("fields") or {}
+    marker_text = "\n".join((
+        ext(fields.get("邮件正文")),
+        ext(fields.get("AI评分理由")),
+    ))
+    if f"template:{LAUNCH_QUEUE_TEMPLATE_VERSION}" in marker_text:
+        return LAUNCH_QUEUE_TEMPLATE_VERSION
+    if f"[{enrich.KOL_COLD_TEMPLATE_VERSION}]" in marker_text:
+        return enrich.KOL_COLD_TEMPLATE_VERSION
+    return ""
+
+
 async def _raw_for_message(brand: str, message: dict, sent_folder_id: str) -> str:
     message_id = str(message.get("messageId") or "")
     return await zoho.get_message_content(brand, message_id, sent_folder_id) if message_id else ""
@@ -209,11 +222,12 @@ async def _activity_for_certificate(campaign_id: str, product_id: str) -> dict:
 
 
 async def _persist_certificate(*, campaign_id: str, product_id: str, draft_id: str,
-                               brand: str, run_key: str, validation: dict) -> dict:
+                               brand: str, run_key: str, validation: dict,
+                               template_version: str) -> dict:
     activity = await _activity_for_certificate(campaign_id, product_id)
     cert = {
         "campaign_id": campaign_id, "product_id": product_id, "brand": brand,
-        "template_version": LAUNCH_QUEUE_TEMPLATE_VERSION, "passed": True,
+        "template_version": template_version, "passed": True,
         "passed_at": int(time.time() * 1000), "test_draft_id": draft_id,
         "run_key": run_key, "checks": validation.get("checks") or {},
     }
@@ -228,7 +242,8 @@ async def _persist_certificate(*, campaign_id: str, product_id: str, draft_id: s
 
 
 async def send_and_validate(product_id: str, draft_id: str, brand: str, *, confirm: str,
-                            run_key: str, campaign_id: str = "") -> dict:
+                            run_key: str, campaign_id: str = "",
+                            template_version: str = LAUNCH_QUEUE_TEMPLATE_VERSION) -> dict:
     target = require_test_mode(confirm)
     brand = (brand or "").upper()
     if brand not in config.BRAND_CONFIG:
@@ -242,19 +257,55 @@ async def send_and_validate(product_id: str, draft_id: str, brand: str, *, confi
         draft_brand = config.brand_from_text(ext((draft.get("fields") or {}).get("发送邮箱")))
         if draft_brand != brand:
             raise RuntimeError(f"草稿发件品牌={draft_brand or '未识别'}，不能作为 {brand} 测试样本")
-    else:
+        if campaign_id:
+            actual_template_version = _draft_template_version(draft)
+            if not actual_template_version:
+                raise RuntimeError("草稿缺少可验证的模板版本标记，禁止写 Raw 证书")
+            if actual_template_version != template_version:
+                raise RuntimeError(
+                    f"草稿真实模板={actual_template_version}，不能签发 {template_version} 证书"
+                )
+    elif template_version == enrich.KOL_COLD_TEMPLATE_VERSION:
+        generated = enrich._build_template_draft(
+            {"record_id": "template-test", "fields": {
+                "账号名": "Launch Test", "邮箱": "launch-test@example.invalid",
+                "国家": "US", "语言": "en",
+            }},
+            product, brand,
+            "Tom from FUNLAB Team" if brand == "FUNLAB" else "Lisa @ POWKONG Team",
+            {}, 0,
+        )
+        if not generated.get("template_validation", {}).get("passed", False):
+            raise RuntimeError(
+                "当前 cold 模板未通过发送前检查: "
+                + ",".join(generated.get("template_validation", {}).get("reasons", []))
+            )
+        draft_id = f"template:{enrich.KOL_COLD_TEMPLATE_VERSION}"
+        draft = {"record_id": draft_id, "fields": {
+            "邮件草稿来源": "cold", "关联产品": [product_id],
+            "发送邮箱": config.BRAND_CONFIG[brand]["sender_label"],
+            "邮件主题": generated["subject"], "邮件正文": generated["body"],
+        }}
+    elif template_version == LAUNCH_QUEUE_TEMPLATE_VERSION:
         # 尚无人审可发对象时，只验证活动受控备用模板；不创建生产草稿记录。
         from . import launch_runtime
         generated = launch_runtime._deterministic_fallback_draft(
             {"fields": {"账号名": "Launch Test", "国家": "US", "语言": "en"}},
             product, brand,
         )
+        validation = launch_runtime.validate_deterministic_launch_draft(generated)
+        if not validation["passed"]:
+            raise RuntimeError(
+                "活动固定模板未通过发送前检查: " + ",".join(validation["errors"])
+            )
         draft_id = f"template:{LAUNCH_QUEUE_TEMPLATE_VERSION}"
         draft = {"record_id": draft_id, "fields": {
             "邮件草稿来源": "cold", "关联产品": [product_id],
             "发送邮箱": config.BRAND_CONFIG[brand]["sender_label"],
             "邮件主题": generated["subject"], "邮件正文": generated["body"],
         }}
+    else:
+        raise RuntimeError(f"不支持的 template_version: {template_version}")
     expected = build_test_email(product, draft, brand, run_key)
     fingerprint = hashlib.sha256(
         f"{product_id}|{draft_id}|{expected['subject']}|{expected['body']}".encode("utf-8")
@@ -312,11 +363,13 @@ async def send_and_validate(product_id: str, draft_id: str, brand: str, *, confi
         certificate = await _persist_certificate(
             campaign_id=campaign_id, product_id=product_id, draft_id=draft_id,
             brand=brand, run_key=run_key, validation=validation,
+            template_version=template_version,
         )
     return {
         "ok": True, "test_only": True, "brand": brand, "product_id": product_id,
         "draft_id": draft_id, "run_key": run_key, "message_id": message_id,
         "recipient": target, "subject": hit.get("subject") or "", "reused": reused,
         "validation": validation, "production_draft_rows_written": 0,
+        "template_version": template_version,
         "certificate": certificate,
     }

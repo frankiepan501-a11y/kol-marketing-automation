@@ -7,6 +7,69 @@ from app import launch_email_preflight as preflight
 
 
 class LaunchEmailPreflightTests(unittest.TestCase):
+    def test_campaign_certificate_rejects_draft_without_matching_template_marker(self):
+        product = {"record_id": "product1", "fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller", "品牌": "FUNLAB",
+            "官网链接": {"link": "https://example.com/dave", "text": "Dave"},
+        }}
+        draft = {"record_id": "draft1", "fields": {
+            "关联产品": ["product1"], "邮件草稿来源": "cold",
+            "发送邮箱": "FUNLAB邮箱(@funlabswitch.com)",
+            "邮件主题": "Old draft", "邮件正文": "<p>Old unmarked cold draft body long enough.</p>",
+        }}
+        with patch.dict(os.environ, {"EMAIL_DRY_RUN_TO": "frankiepan501@gmail.com"}, clear=False), \
+             patch.object(preflight.feishu, "get_record", new=AsyncMock(side_effect=[product, draft])), \
+             patch.object(preflight.zoho, "send_email", new=AsyncMock()) as send_mock:
+            with self.assertRaisesRegex(RuntimeError, "模板版本标记"):
+                asyncio.run(preflight.send_and_validate(
+                    "product1", "draft1", "FUNLAB", confirm="TEST_ONLY",
+                    run_key="run-cert-1", campaign_id="campaign1",
+                    template_version="launch-queue-v1",
+                ))
+        send_mock.assert_not_awaited()
+
+    def test_template_only_preflight_can_validate_exact_current_cold_template(self):
+        product = {
+            "record_id": "product1",
+            "fields": {
+                "产品英文名": "FUNLAB Dave the Diver Controller",
+                "品牌": "FUNLAB", "品类": "controller",
+                "官网链接": {"link": "https://example.com/dave", "text": "Dave"},
+            },
+        }
+        sent_message = {
+            "messageId": "msg-template",
+            "subject": "[DRY-RUN→launch-preflight@example.invalid] "
+                       "[Launch preflight:run-template-1] Launch Test, a controller for your setup",
+            "toAddress": "frankiepan501@gmail.com",
+            "fromAddress": "partner@fireflyfunlab.com",
+        }
+        generated_body = preflight.enrich._build_template_draft(
+            {"record_id": "template-test", "fields": {
+                "账号名": "Launch Test", "邮箱": "launch-test@example.invalid",
+                "国家": "US", "语言": "en",
+            }}, product, "FUNLAB", "Tom from FUNLAB Team", {}, 0,
+        )["body"]
+        raw_body = '<div><strong>DRY-RUN MODE</strong></div>' + generated_body
+        with patch.dict(os.environ, {"EMAIL_DRY_RUN_TO": "frankiepan501@gmail.com"}, clear=False), \
+             patch.object(preflight.feishu, "get_record", new=AsyncMock(return_value=product)), \
+             patch.object(preflight.zoho, "send_email", new=AsyncMock(return_value="msg-template")) as send_mock, \
+             patch.object(preflight.zoho, "_get_folder_ids", new=AsyncMock(return_value=("drafts", "sent"))), \
+             patch.object(preflight.zoho, "get_message_content", new=AsyncMock(return_value=raw_body)), \
+             patch.object(preflight.zoho, "list_sent_messages", new=AsyncMock(side_effect=[
+                 {"messages": []}, {"messages": [sent_message]},
+             ])):
+            result = asyncio.run(preflight.send_and_validate(
+                "product1", "", "FUNLAB", confirm="TEST_ONLY", run_key="run-template-1",
+                template_version="kol-cold-template-v1",
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("template:kol-cold-template-v1", result["draft_id"])
+        self.assertEqual("kol-cold-template-v1", result["template_version"])
+        self.assertEqual(0, result["production_draft_rows_written"])
+        send_mock.assert_awaited_once()
+
     def setUp(self):
         preflight._RUN_LOCKS.clear()
         preflight._RUN_STATES.clear()

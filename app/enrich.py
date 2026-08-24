@@ -136,7 +136,11 @@ def _validate_template_draft(subject: str, body: str, links_block: str,
         reasons.append("empty_content")
     if kol_name not in combined:
         reasons.append("missing_contact_name")
-    if re.search(r"\[(?:TBD|待填|CARRIER)|<%=|\{\{", combined, re.I):
+    if re.search(
+        r"\[(?:TBD|待填|CARRIER|TRACKING|ETA|ADDRESS|PRICE|QUANTITY|"
+        r"CREATOR|KOL|NAME|PRODUCT|LINK|URL|XXX)[^\]]*\]|<%=|\{\{",
+        combined, re.I,
+    ):
         reasons.append("placeholder")
     sku_pattern = (
         r"\b(?:YM\d{2,4}[A-Z0-9-]*|PK\d{2}[A-Z]?(?:-\d+)?|"
@@ -145,7 +149,11 @@ def _validate_template_draft(subject: str, body: str, links_block: str,
     exact_internal_id = any(value.casefold() in combined.casefold() for value in internal_ids)
     if exact_internal_id or re.search(sku_pattern, combined, re.I):
         reasons.append("internal_sku")
-    if re.search(r"(?:\$\s*\d|USD\s*\d|\b\d+(?:\.\d+)?\s*%\s*(?:commission|royalty))", combined, re.I):
+    if re.search(
+        r"(?:\$\s*\d|USD\s*\d|\b\d+(?:\.\d+)?\s*%\s*"
+        r"(?:discount|off|commission|royalty|promo|coupon))",
+        combined, re.I,
+    ):
         reasons.append("price_or_commission")
     if _check_ban_phrases(body):
         reasons.append("false_specific_content_claim")
@@ -182,13 +190,47 @@ LANG_CN_TO_ISO = {
     "nl": "nl", "sv": "sv",
 }
 
+
+def kol_language(kol_record: dict) -> str:
+    """Prefer the creator's explicit language field; country is fallback only."""
+    fields = kol_record.get("fields") or {}
+    country = ext(fields.get("国家")).strip()
+    explicit = {
+        LANG_CN_TO_ISO.get(str(value).strip().lower(), str(value).strip().lower())
+        for value in _parse_multiselect(fields.get("语言"))
+        if str(value).strip()
+    }
+    supported = {value for value in explicit if value in LANG_DISPLAY}
+    if supported:
+        country_default = COUNTRY_TO_LANG.get(country)
+        if country_default in supported:
+            return country_default
+        if "en" in supported:
+            return "en"
+        return sorted(supported)[0]
+    return COUNTRY_TO_LANG.get(country, "en")
+
+
+def new_model_budget() -> EnrichModelBudget:
+    """Create one shared budget for a single production orchestration run."""
+    return EnrichModelBudget(
+        per_task=config.KOL_ENRICH_MODEL_PER_TASK,
+        per_run=config.KOL_ENRICH_MODEL_PER_RUN,
+        daily=config.KOL_ENRICH_MODEL_DAILY,
+        failure_threshold=config.KOL_ENRICH_MODEL_FAILURE_THRESHOLD,
+        state_path=config.KOL_ENRICH_MODEL_STATE_PATH,
+    )
+
 # ===== ban-phrase: 防 LLM 软幻觉(假装看过 KOL 具体作品) =====
 # 触发任一 → 重生 1 次, 仍命中 → 标记 _ban_phrase_failed 走人审通道
 BAN_PHRASE_PATTERNS = [
-    re.compile(r"\bI\s+(saw|watched|caught|loved|enjoyed)\s+(your|the)\b", re.I),
+    re.compile(r"\bI\s+(saw|watched|caught|loved|enjoyed|read)\s+(your|the)\b", re.I),
     re.compile(r"\bjust\s+(saw|watched)\b", re.I),
     re.compile(r"\b(been\s+)?following\s+your\s+(channel|content|stream)\b", re.I),
-    re.compile(r"\byour\s+(latest|recent|last|new)\s+(video|stream|episode|post|upload|clip)", re.I),
+    re.compile(
+        r"\byour\s+(latest|recent|last|new)\s+"
+        r"(video|stream|episode|post|upload|clip|review|article)", re.I,
+    ),
     re.compile(r"\byour\s+(streams?|videos?|episodes?|uploads?|clips?)\b", re.I),
     re.compile(r"\bloved\s+(how|the\s+way)\s+you\b", re.I),
     re.compile(r"\bthat\s+(video|stream|episode|post)\s+you\b", re.I),
@@ -504,6 +546,13 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
                     signature: str, breakdown: dict, total: float,
                     model_budget: EnrichModelBudget = None,
                     task_id: str = "unscoped") -> dict:
+    if model_budget is None:
+        return {
+            "error": "missing_model_budget",
+            "model_skip_reason": "missing_model_budget",
+            "generation_mode": "ai",
+            "model_calls": 0,
+        }
     k = kol_record["fields"]
     kol_name = ext(k.get("账号名"))
     kol_country = ext(k.get("国家"))
@@ -554,7 +603,7 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
     p_url = _utm.make_utm_link(p_url_raw, brand, p_name, kol_name)
     utm_id_value = _utm.kol_utm_id(kol_name)
 
-    lang = COUNTRY_TO_LANG.get(kol_country, "en")
+    lang = kol_language(kol_record)
     lang_display = LANG_DISPLAY.get(lang, "English")
 
     # 产品链接段落 (2026-06-02): 任务栏填了几个就放几个 (亚马逊 + 独立站). 每条独立 UTM.
@@ -625,24 +674,30 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
 }}"""
 
     model_calls = 0
-    if model_budget is not None:
-        allowed, reason = model_budget.reserve(task_id)
-        if not allowed:
-            return {"model_skip_reason": reason, "model_calls": model_calls}
+    allowed, reason = model_budget.reserve(task_id)
+    if not allowed:
+        return {
+            "model_skip_reason": reason,
+            "model_calls": model_calls,
+            "generation_mode": "ai",
+        }
     model_calls += 1
     try:
         r = await deepseek.chat_json(prompt, max_tokens=1000, temperature=0.4)
     except Exception as e:
-        if model_budget is not None:
-            model_budget.record_failure()
-        return {"error": f"deepseek: {str(e)[:100]}", "model_calls": model_calls}
+        model_budget.record_failure()
+        return {
+            "error": f"deepseek: {str(e)[:100]}",
+            "model_skip_reason": "model_error",
+            "generation_mode": "ai",
+            "model_calls": model_calls,
+        }
 
     body = r.get("email_body", "")
     ban_phrase_failed = False
     hits = _check_ban_phrases(body)
     if hits:
-        if model_budget is not None:
-            model_budget.record_failure()
+        model_budget.record_failure()
         # 重生 1 次, 在原 prompt 后面追加 KOL_NAME + 上次命中片段警告
         retry_prompt = (
             prompt
@@ -652,22 +707,21 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
             + "假装看过具体作品的句式。只能用基于 IP喜好/风格 的概括(如 'your retro-gaming corner' / "
             + "'Saw you're into PC gaming content')。"
         )
-        if model_budget is not None:
-            allowed, reason = model_budget.reserve(task_id)
-            if not allowed:
-                ban_phrase_failed = True
-                validation = _validate_template_draft(
-                    r.get("email_subject", ""), body, links_block, kol_name,
-                    _product_internal_ids(pf),
-                )
-                return {
-                    "subject": r.get("email_subject", ""), "body": body,
-                    "highlights": r.get("highlights", ""), "angle": r.get("angle", ""),
-                    "ban_phrase_failed": True, "utm_url": p_url, "utm_id": utm_id_value,
-                    "generation_mode": "ai", "model_calls": model_calls,
-                    "model_skip_reason": reason,
-                    "output_validation": validation,
-                }
+        allowed, reason = model_budget.reserve(task_id)
+        if not allowed:
+            ban_phrase_failed = True
+            validation = _validate_template_draft(
+                r.get("email_subject", ""), body, links_block, kol_name,
+                _product_internal_ids(pf),
+            )
+            return {
+                "subject": r.get("email_subject", ""), "body": body,
+                "highlights": r.get("highlights", ""), "angle": r.get("angle", ""),
+                "ban_phrase_failed": True, "utm_url": p_url, "utm_id": utm_id_value,
+                "generation_mode": "ai", "model_calls": model_calls,
+                "model_skip_reason": reason,
+                "output_validation": validation,
+            }
         model_calls += 1
         try:
             r = await deepseek.chat_json(retry_prompt, max_tokens=1000, temperature=0.4)
@@ -679,10 +733,11 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
             else:
                 print(f"[ban-phrase] 首生命中 {hits[:3]}, 重生后干净")
         except Exception as e:
-            if model_budget is not None:
-                model_budget.record_failure()
+            model_budget.record_failure()
             return {
                 "error": f"deepseek_retry: {str(e)[:100]}",
+                "model_skip_reason": "model_retry_error",
+                "generation_mode": "ai",
                 "model_calls": model_calls,
             }
 
@@ -700,11 +755,10 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
         r.get("email_subject", ""), body, links_block, kol_name,
         _product_internal_ids(pf),
     )
-    if model_budget is not None:
-        if output_validation["passed"] and not ban_phrase_failed:
-            model_budget.record_success()
-        else:
-            model_budget.record_failure()
+    if output_validation["passed"] and not ban_phrase_failed:
+        model_budget.record_success()
+    else:
+        model_budget.record_failure()
     return {
         "subject": r.get("email_subject", ""),
         "body": body,
@@ -717,6 +771,44 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
         "model_calls": model_calls,
         "output_validation": output_validation,
     }
+
+
+async def generate_controlled_draft(
+    kol_record: dict, product: dict, brand: str, signature: str,
+    breakdown: dict, total: float, *, model_budget: EnrichModelBudget,
+    task_id: str, template_factory=None,
+) -> dict:
+    """Single guarded entry for template/model selection across all outreach paths."""
+    lang = kol_language(kol_record)
+    use_model = _requires_model_personalization(kol_record, product, total, lang)
+    factory = template_factory or (
+        lambda: _build_template_draft(
+            kol_record, product, brand, signature, breakdown, total,
+        )
+    )
+    if use_model:
+        draft = await gen_draft(
+            kol_record, product, brand, signature, breakdown, total,
+            model_budget=model_budget, task_id=task_id,
+        )
+    else:
+        draft = factory()
+
+    if use_model and lang == "en" and (
+        "error" in draft or "model_skip_reason" in draft
+        or not draft.get("output_validation", {}).get("passed", False)
+    ):
+        fallback = factory()
+        fallback["model_calls"] = draft.get("model_calls", 0)
+        fallback["model_fallback_reason"] = (
+            draft.get("model_skip_reason") or draft.get("error")
+        )
+        fallback["generation_mode"] = "template"
+        draft = fallback
+    draft.setdefault("generation_mode", "ai" if use_model else "template")
+    draft.setdefault("model_calls", 0)
+    draft.setdefault("language", lang)
+    return draft
 
 
 # ===== 5. 单 KOL: 本地打分 + 过阈值再生草稿 =====
@@ -735,7 +827,7 @@ async def score_and_draft_one(kol_record: dict, product: dict, brand: str,
 
     # 本地打分
     total, breakdown = score_kol(k, product["fields"], expected_styles, want_platforms)
-    lang = COUNTRY_TO_LANG.get(kol_country, "en")
+    lang = kol_language(kol_record)
 
     out = {
         "kol_record_id": kol_record["record_id"],
@@ -750,27 +842,18 @@ async def score_and_draft_one(kol_record: dict, product: dict, brand: str,
     if not out["passed"]:
         return out
 
-    use_model = _requires_model_personalization(kol_record, product, total, lang)
-    if use_model:
-        draft = await gen_draft(
-            kol_record, product, brand, signature, breakdown, total,
-            model_budget=model_budget, task_id=task_id,
-        )
-    else:
-        draft = _build_template_draft(kol_record, product, brand, signature, breakdown, total)
-
-    # High-value English exceptions safely fall back to the controlled template.
-    if use_model and lang == "en" and (
-        "error" in draft or "model_skip_reason" in draft
-        or not draft.get("output_validation", {}).get("passed", False)
-    ):
-        fallback = _build_template_draft(kol_record, product, brand, signature, breakdown, total)
-        fallback["model_calls"] = draft.get("model_calls", 0)
-        fallback["model_fallback_reason"] = draft.get("model_skip_reason") or draft.get("error")
-        draft = fallback
+    draft = await generate_controlled_draft(
+        kol_record, product, brand, signature, breakdown, total,
+        model_budget=model_budget, task_id=task_id,
+    )
+    use_model = draft.get("generation_mode") == "ai"
     if "error" in draft or "skip" in draft:
         out["error"] = draft.get("error") or draft.get("skip")
         out["model_calls"] = draft.get("model_calls", 0)
+        out["generation_mode"] = draft.get("generation_mode", "template" if not use_model else "ai")
+        out["model_skip_reason"] = (
+            draft.get("model_skip_reason") or draft.get("error") or draft.get("skip")
+        )
         out["passed"] = False
         return out
     if draft.get("model_skip_reason"):
@@ -783,6 +866,8 @@ async def score_and_draft_one(kol_record: dict, product: dict, brand: str,
             draft.get("output_validation", {}).get("reasons", [])
         )
         out["model_calls"] = draft.get("model_calls", 0)
+        out["generation_mode"] = "ai"
+        out["model_skip_reason"] = "model_output_validation_failed"
         out["passed"] = False
         return out
     if draft.get("generation_mode") == "template" and not draft.get("template_validation", {}).get("passed"):
@@ -1174,13 +1259,7 @@ async def _run_unlocked() -> dict:
         return {"processed": 0, "message": "no pending KOL task"}
 
     results = []
-    model_budget = EnrichModelBudget(
-        per_task=config.KOL_ENRICH_MODEL_PER_TASK,
-        per_run=config.KOL_ENRICH_MODEL_PER_RUN,
-        daily=config.KOL_ENRICH_MODEL_DAILY,
-        failure_threshold=config.KOL_ENRICH_MODEL_FAILURE_THRESHOLD,
-        state_path=config.KOL_ENRICH_MODEL_STATE_PATH,
-    )
+    model_budget = new_model_budget()
     seen_kb = set()  # P0: 本轮(本次cron)已派的 (kol_record_id, brand), 跨任务共享防并发重复
     for t in tasks:
         try:

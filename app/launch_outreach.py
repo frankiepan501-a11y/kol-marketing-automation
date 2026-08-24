@@ -147,7 +147,7 @@ def _real_raw_validation(*, message: dict, raw_body: str, expected_to: str,
         "recipient_matches_approved_kol": actual_to == expected_to.lower(),
         "sender_matches_brand": bool(expected_from and actual_from == expected_from),
         "subject_preserved": (message.get("subject") or "").strip() == expected_subject.strip(),
-        "body_not_truncated": len(raw_text) >= max(50, int(len(expected_text) * 0.7)),
+        "body_not_truncated": len(raw_text) >= max(50, int(len(expected_text) * 0.8)),
         "html_rendered": bool(re.search(r"<(p|div|br|a|strong)[\s>/]", raw_body or "", re.I)),
         "product_identity_present": launch_email_preflight._product_identity_present(raw_text, identity_rules),
         "all_links_present": bool(links) and all(url in normalized for url in links),
@@ -308,11 +308,28 @@ async def send_one_real(*, campaign_id: str, participant_record_id: str,
             },
         }
         signature = "Tom from FUNLAB Team" if brand == "FUNLAB" else "Lisa @ POWKONG Team"
-        generated = await enrich.gen_draft(kol, product, brand, signature, breakdown, score)
-        if generated.get("error") or generated.get("skip"):
+        generated = await enrich.generate_controlled_draft(
+            kol, product, brand, signature, breakdown, score,
+            model_budget=enrich.new_model_budget(),
+            task_id=f"{campaign_id}:{participant_record_id}",
+        )
+        if generated.get("error") or generated.get("skip") or generated.get("model_skip_reason"):
             raise OutreachValidationError(
-                "开发信生成失败: " + str(generated.get("error") or generated.get("skip"))
+                "开发信生成失败: " + str(
+                    generated.get("error") or generated.get("skip")
+                    or generated.get("model_skip_reason")
+                )
             )
+        if generated.get("generation_mode") == "ai" and not (
+            generated.get("output_validation") or {}
+        ).get("passed", False):
+            raise OutreachValidationError("开发信生成失败: model_output_validation_failed")
+        if generated.get("generation_mode") == "ai":
+            raise OutreachValidationError("AI 个性化开发信必须先人工审核，禁止单人即时发送")
+        if generated.get("generation_mode") == "template" and not (
+            generated.get("template_validation") or {}
+        ).get("passed", False):
+            raise OutreachValidationError("开发信生成失败: template_validation_failed")
         subject = str(generated.get("subject") or "").strip()
         body = str(generated.get("body") or "").strip()
         if not subject or len(re.sub(r"<[^>]+>", "", body)) < 50:
@@ -330,7 +347,8 @@ async def send_one_real(*, campaign_id: str, participant_record_id: str,
             "邮件草稿ID": f"launch-{nonce}", "关联KOL": [contact_id], "关联产品": [product_id],
             "匹配度总分": score, "匹配亮点": str(generated.get("highlights") or "")[:500],
             "建议切入点": str(generated.get("angle") or "")[:200], "收件邮箱": email,
-            "邮件主题": subject[:200], "邮件正文": body, "邮件语言": "en",
+            "邮件主题": subject[:200], "邮件正文": body,
+            "邮件语言": generated.get("language") or enrich.kol_language(kol),
             "邮件草稿状态": "待审", "邮件草稿来源": "cold", "对象类型": "KOL",
             "发送邮箱": config.BRAND_CONFIG[brand]["sender_label"], "发送人署名": signature,
             "生成时间": now_ms, "建议发送时间": now_ms, "发送时区说明": "活动单人灰度立即发送",

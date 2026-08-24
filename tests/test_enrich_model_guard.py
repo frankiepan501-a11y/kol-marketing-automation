@@ -23,13 +23,16 @@ def _product():
     }
 
 
-def _kol(record_id="kol_1", country="US"):
+def _kol(record_id="kol_1", country="US", language=None):
+    if language is None:
+        language = {"DE": "de", "ES": "es"}.get(country, "en")
     return {
         "record_id": record_id,
         "fields": {
             "账号名": f"Creator {record_id}",
             "国家": country,
             "国家原文": country,
+            "语言": language,
             "粉丝数": 25000,
             "内容风格": ["gaming"],
             "IP喜好": "Switch",
@@ -59,6 +62,86 @@ class EnrichTemplateModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Creator kol_1", result["subject"])
         self.assertIn("https://example.com/controller?", result["body"])
         self.assertEqual(0, chat.await_count)
+
+    async def test_explicit_spanish_language_overrides_us_country_and_uses_model(self):
+        valid = {
+            "email_subject": "Creator kol_1, una muestra para ti",
+            "email_body": (
+                '<p>Hey Creator kol_1,</p><p>Una propuesta para tu audiencia.</p>'
+                '<p><a href="https://example.com/controller?utm_source=kol&amp;utm_medium=outreach">'
+                'Verlo</a></p><p>¿Te interesaría probarlo?</p>'
+            ),
+            "highlights": "Spanish localization",
+            "angle": "Product fit",
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("app.enrich.deepseek.chat_json", new=mock.AsyncMock(return_value=valid)) as chat:
+            budget = EnrichModelBudget(
+                per_task=2, per_run=4, daily=10, failure_threshold=2,
+                state_path=Path(tmp) / "budget.json",
+            )
+            result = await enrich.score_and_draft_one(
+                _kol(country="US", language="es"), _product(), "FUNLAB", "Mia", 0,
+                set(), set(), model_budget=budget, task_id="task_es",
+            )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual("es", result["lang"])
+        self.assertEqual("ai", result["generation_mode"])
+        self.assertEqual(1, result["model_calls"])
+        self.assertEqual(1, chat.await_count)
+
+    async def test_explicit_english_language_overrides_german_country_and_uses_template(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("app.enrich.deepseek.chat_json", new=mock.AsyncMock()) as chat:
+            budget = EnrichModelBudget(
+                per_task=2, per_run=4, daily=10, failure_threshold=2,
+                state_path=Path(tmp) / "budget.json",
+            )
+            result = await enrich.score_and_draft_one(
+                _kol(country="DE", language="en"), _product(), "FUNLAB", "Mia", 0,
+                set(), set(), model_budget=budget, task_id="task_en",
+            )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual("en", result["lang"])
+        self.assertEqual("template", result["generation_mode"])
+        self.assertEqual(0, result["model_calls"])
+        self.assertEqual(0, chat.await_count)
+
+    async def test_direct_model_generation_without_budget_fails_closed(self):
+        with mock.patch("app.enrich.deepseek.chat_json", new=mock.AsyncMock()) as chat:
+            result = await enrich.gen_draft(
+                _kol(country="DE", language="de"), _product(), "FUNLAB", "Mia", {}, 90,
+            )
+
+        self.assertEqual("missing_model_budget", result["error"])
+        self.assertEqual("missing_model_budget", result["model_skip_reason"])
+        self.assertEqual("ai", result["generation_mode"])
+        self.assertEqual(0, result["model_calls"])
+        self.assertEqual(0, chat.await_count)
+
+    async def test_high_value_english_model_failure_falls_back_as_template(self):
+        kol = _kol()
+        kol["fields"]["粉丝数"] = 1_000_000
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(enrich.config, "KOL_ENRICH_AI_SCORE_MIN", 0), \
+             mock.patch.object(enrich.config, "KOL_ENRICH_AI_MIN_FANS", 0), \
+             mock.patch("app.enrich.deepseek.chat_json", new=mock.AsyncMock(
+                 side_effect=RuntimeError("provider unavailable"),
+             )):
+            budget = EnrichModelBudget(
+                per_task=2, per_run=4, daily=10, failure_threshold=2,
+                state_path=Path(tmp) / "budget.json",
+            )
+            result = await enrich.generate_controlled_draft(
+                kol, _product(), "FUNLAB", "Mia", {}, 100,
+                model_budget=budget, task_id="high_value_en",
+            )
+
+        self.assertEqual("template", result["generation_mode"])
+        self.assertEqual("model_error", result["model_fallback_reason"])
+        self.assertTrue(result["template_validation"]["passed"])
 
     async def test_two_model_failures_open_circuit_and_third_candidate_skips_call(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -126,6 +209,15 @@ class EnrichTemplateModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result["passed"])
         self.assertIn("internal_sku", result["error"])
+
+    def test_validator_rejects_generic_placeholders_price_promises_and_fake_reviews(self):
+        link = '<p><a href="https://example.com/controller">See it</a></p>'
+        for unsafe in ("[CREATOR]", "20% discount", "I read your latest review"):
+            checked = enrich._validate_template_draft(
+                "Creator, product sample", f"<p>Hey Creator,</p><p>{unsafe}</p>{link}",
+                link, "Creator",
+            )
+            self.assertFalse(checked["passed"], unsafe)
 
 
 class EnrichModelBudgetTests(unittest.TestCase):
