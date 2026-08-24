@@ -9,8 +9,8 @@ n8n cron 每 10 分钟触发 → 扫「KOL·媒体人邮件草稿」状态=自�
 - 编辑: 合作状态 未建联→建联中
 - 跟进记录表: 新增一条
 """
-import json, re, time, asyncio, random
-from . import config, feishu, zoho, coop_status
+import re, time, asyncio, random
+from . import config, feishu, launch_raw_certificate, zoho, coop_status
 from .feishu import ext, xrid
 from .product_dispatch_mode import (
     is_proactive_product_outreach_source,
@@ -162,10 +162,9 @@ def _is_activity_queue_draft(rec: dict) -> bool:
 
 
 def _valid_raw_certificate(af: dict, *, campaign_id: str, product_id: str, brand: str) -> bool:
-    try:
-        cert = json.loads(ext(af.get("邮件Raw验证证书")) or "{}")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
+    cert = launch_raw_certificate.select(
+        ext(af.get("邮件Raw验证证书")), LAUNCH_QUEUE_TEMPLATE_VERSION,
+    )
     return bool(
         cert.get("passed") is True
         and cert.get("campaign_id") == campaign_id

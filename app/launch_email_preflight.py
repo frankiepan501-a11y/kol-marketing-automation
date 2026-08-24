@@ -5,12 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
-import json
 import os
 import re
 import time
 
-from . import config, enrich, feishu, zoho
+from . import config, enrich, feishu, launch_raw_certificate, zoho
 from .feishu import ext
 
 
@@ -21,6 +20,7 @@ PLACEHOLDER_MARKERS = (
 DEFAULT_TEST_EMAIL_ALLOWLIST = {"frankiepan501@gmail.com"}
 _RUN_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 _RUN_STATES: dict[tuple[str, str], dict] = {}
+_CERTIFICATE_LOCKS: dict[str, asyncio.Lock] = {}
 LAUNCH_QUEUE_TEMPLATE_VERSION = "launch-queue-v1"
 
 
@@ -224,21 +224,24 @@ async def _activity_for_certificate(campaign_id: str, product_id: str) -> dict:
 async def _persist_certificate(*, campaign_id: str, product_id: str, draft_id: str,
                                brand: str, run_key: str, validation: dict,
                                template_version: str) -> dict:
-    activity = await _activity_for_certificate(campaign_id, product_id)
-    cert = {
-        "campaign_id": campaign_id, "product_id": product_id, "brand": brand,
-        "template_version": template_version, "passed": True,
-        "passed_at": int(time.time() * 1000), "test_draft_id": draft_id,
-        "run_key": run_key, "checks": validation.get("checks") or {},
-    }
-    raw = json.dumps(cert, ensure_ascii=False, separators=(",", ":"))
-    await feishu.update_record(
-        config.T_LAUNCH_CAMPAIGN, activity["record_id"], {"邮件Raw验证证书": raw},
-    )
-    readback = await feishu.get_record(config.T_LAUNCH_CAMPAIGN, activity["record_id"])
-    if ext((readback.get("fields") or {}).get("邮件Raw验证证书")) != raw:
-        raise RuntimeError("Raw证书写入后回读不一致，禁止正式放行")
-    return cert
+    lock = _CERTIFICATE_LOCKS.setdefault(campaign_id, asyncio.Lock())
+    async with lock:
+        activity = await _activity_for_certificate(campaign_id, product_id)
+        cert = {
+            "campaign_id": campaign_id, "product_id": product_id, "brand": brand,
+            "template_version": template_version, "passed": True,
+            "passed_at": int(time.time() * 1000), "test_draft_id": draft_id,
+            "run_key": run_key, "checks": validation.get("checks") or {},
+        }
+        existing_raw = ext((activity.get("fields") or {}).get("邮件Raw验证证书"))
+        raw = launch_raw_certificate.merge(existing_raw, cert)
+        await feishu.update_record(
+            config.T_LAUNCH_CAMPAIGN, activity["record_id"], {"邮件Raw验证证书": raw},
+        )
+        readback = await feishu.get_record(config.T_LAUNCH_CAMPAIGN, activity["record_id"])
+        if ext((readback.get("fields") or {}).get("邮件Raw验证证书")) != raw:
+            raise RuntimeError("Raw证书写入后回读不一致，禁止正式放行")
+        return cert
 
 
 async def send_and_validate(product_id: str, draft_id: str, brand: str, *, confirm: str,
