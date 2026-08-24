@@ -76,6 +76,45 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertIsInstance(queue_one.await_args.kwargs["generation_lock"], asyncio.Lock)
         self.assertIn("run_calls", result["model_budget"])
 
+    def test_queue_approved_cancels_terminal_failure_out_of_effective_pool(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+        }}
+        product = {"record_id": "product1", "fields": {
+            "品牌": "FUNLAB", "派单模式": "活动专用",
+        }}
+        participant = {"record_id": "part1", "fields": {
+            "参与状态": "已入围", "审核结论": "通过", "进入方式": "新开发",
+            "活动分池": "新开发池", "关联邮件草稿": [],
+        }}
+        with patch.object(
+            launch_runtime.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(return_value=product),
+        ), patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[participant]),
+        ), patch.object(
+            launch_runtime, "reconcile_approved_controlled_import_routes",
+            new=AsyncMock(return_value={"updated": 0}),
+        ), patch.object(
+            launch_runtime, "_queue_one", new=AsyncMock(return_value={
+                "participant_id": "part1", "skipped": "bad_email:invalid",
+                "terminal_failure": True,
+            }),
+        ), patch.object(
+            launch_runtime.launch_participation, "_update_and_confirm",
+            new=AsyncMock(),
+        ) as cancel:
+            result = asyncio.run(launch_runtime.queue_approved(campaign_id="campaign1"))
+
+        cancel.assert_awaited_once_with(
+            launch_runtime.config.T_LAUNCH_PARTICIPANT, "part1",
+            {"参与状态": "已取消", "取消原因代码": "不再符合"},
+        )
+        self.assertEqual(1, result["terminal_cancelled"])
+
     def test_zero_model_launch_date_uses_controlled_campaign_mapping_only(self):
         known = launch_runtime._launch_date_labels(
             "launch-20260915-powkong-piranha-v2",
@@ -1077,6 +1116,7 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(200, result["effective_inventory_after"])
 
     def test_ready_inventory_reports_approved_without_draft_as_queueable(self):
+        now_ts = int(launch_runtime.time.time())
         participants = [
             {"record_id": "pending", "fields": {
                 "参与状态": "已入围", "审核结论": "待审核",
@@ -1085,6 +1125,14 @@ class LaunchRuntimeTests(unittest.TestCase):
             {"record_id": "queueable", "fields": {
                 "参与状态": "已入围", "审核结论": "通过",
                 "进入方式": "新开发", "活动分池": "新开发池",
+                "锁定批次ID": f"auto-{now_ts}",
+            }},
+            {"record_id": "expired", "fields": {
+                "参与状态": "已入围", "审核结论": "通过",
+                "进入方式": "新开发", "活动分池": "新开发池",
+                "锁定批次ID": (
+                    f"auto-{now_ts - launch_runtime.QUEUEABLE_INFLIGHT_TTL_SECONDS - 1}"
+                ),
             }},
             {"record_id": "ready", "fields": {
                 "参与状态": "已入围", "审核结论": "通过",
@@ -1265,12 +1313,17 @@ class LaunchRuntimeTests(unittest.TestCase):
                 "updated": 8, "auto_passed": 3, "actionable_pending": 5,
                 "missing_snapshot": 0,
             },
+            "queue": {
+                "queued": 0, "skipped_or_failed": 1,
+                "terminal_cancelled": 1, "terminal_cancel_errors": [],
+            },
             "queue_after_refresh": {"queued": 3},
         })
 
         self.assertEqual(8, summary["profile_refresh"]["writes"])
         self.assertEqual(3, summary["pending_review_reconcile"]["auto_passed"])
         self.assertEqual(5, summary["pending_review_reconcile"]["actionable_pending"])
+        self.assertEqual(1, summary["queue"]["terminal_cancelled"])
         self.assertEqual(3, summary["queue_after_refresh"]["queued"])
 
     def test_intentional_quality_cooldown_is_visible_without_false_failure(self):

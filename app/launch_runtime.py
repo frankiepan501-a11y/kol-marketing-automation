@@ -56,6 +56,7 @@ CAMPAIGN_LAUNCH_DATES = {
 }
 ACTIVE_PARTICIPANT_STATES = frozenset({"锁定准备中", "已入围"})
 PENDING_REVIEW_DECISIONS = frozenset({"待审核", "待补资料"})
+QUEUEABLE_INFLIGHT_TTL_SECONDS = 30 * 60
 
 
 def _non_review_active_count(active_count: int, pending_review: int) -> int:
@@ -69,6 +70,33 @@ def _effective_ready_inventory(inventory: dict | None) -> int:
     return max(0, int(inventory.get("ready") or 0)) + max(
         0, int(inventory.get("queueable_approved") or 0),
     )
+
+
+def _participant_activity_ts(row: dict) -> int:
+    """取最近锁定/审核/创建时间，统一为秒。"""
+    fields = row.get("fields") or {}
+    timestamps: list[int] = []
+    batch_match = re.search(r"-(\d{10})$", ext(fields.get("锁定批次ID")))
+    if batch_match:
+        timestamps.append(int(batch_match.group(1)))
+    for value in (fields.get("审核时间"), row.get("created_time")):
+        try:
+            timestamp = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if timestamp > 10_000_000_000:
+            timestamp //= 1000
+        if timestamp > 0:
+            timestamps.append(timestamp)
+    return max(timestamps, default=0)
+
+
+def _is_recent_queueable(row: dict, *, now_ts: int | None = None) -> bool:
+    activity_ts = _participant_activity_ts(row)
+    if not activity_ts:
+        return False
+    age = int(now_ts or time.time()) - activity_ts
+    return -300 <= age <= QUEUEABLE_INFLIGHT_TTL_SECONDS
 
 
 def new_launch_model_budget() -> EnrichModelBudget:
@@ -864,11 +892,17 @@ async def _queue_one(*, activity: dict, participant: dict, product: dict,
     )
     if precheck.get("decision") != "eligible_new_cold":
         return {
-            "participant_id": participant_id, "skipped": precheck.get("decision") or "precheck_failed",
+            "participant_id": participant_id,
+            "skipped": precheck.get("decision") or "precheck_failed",
+            "terminal_failure": True,
         }
     email, reason = feishu.clean_email(ext((kol.get("fields") or {}).get("邮箱")))
     if not email:
-        return {"participant_id": participant_id, "skipped": f"bad_email:{reason}"}
+        return {
+            "participant_id": participant_id,
+            "skipped": f"bad_email:{reason}",
+            "terminal_failure": True,
+        }
 
     score = float(pf.get("基础评分快照") or 0)
     signature = "Tom from FUNLAB Team" if brand == "FUNLAB" else "Lisa @ POWKONG Team"
@@ -992,14 +1026,14 @@ async def queue_approved(*, campaign_id: str, limit: int = 120,
         campaign_id=campaign_id, product=product, product_id=product_id,
         brand=brand, participants=rows,
     )
-    eligible = [
+    eligible = sorted([
         row for row in rows
         if ext((row.get("fields") or {}).get("参与状态")) == "已入围"
         and ext((row.get("fields") or {}).get("审核结论")) == "通过"
         and ext((row.get("fields") or {}).get("进入方式")) == "新开发"
         and ext((row.get("fields") or {}).get("活动分池")) == "新开发池"
         and not _ids((row.get("fields") or {}).get("关联邮件草稿"))
-    ][:max(1, min(int(limit), 500))]
+    ], key=_participant_activity_ts, reverse=True)[:max(1, min(int(limit), 500))]
     semaphore = asyncio.Semaphore(4)
     generation_lock = asyncio.Lock()
     model_budget = model_budget or new_launch_model_budget()
@@ -1015,12 +1049,32 @@ async def queue_approved(*, campaign_id: str, limit: int = 120,
                 return {"participant_id": row.get("record_id"), "error": str(exc)[:300]}
 
     details = await asyncio.gather(*(one(row) for row in eligible))
+    terminal_cancelled = 0
+    terminal_cancel_errors = []
+    for item in details:
+        if not item.get("terminal_failure"):
+            continue
+        participant_id = str(item.get("participant_id") or "").strip()
+        if not participant_id:
+            continue
+        try:
+            await launch_participation._update_and_confirm(
+                config.T_LAUNCH_PARTICIPANT, participant_id,
+                {"参与状态": "已取消", "取消原因代码": "不再符合"},
+            )
+            item["terminal_cancelled"] = True
+            terminal_cancelled += 1
+        except Exception as exc:
+            item["terminal_cancel_error"] = str(exc)[:200]
+            terminal_cancel_errors.append(participant_id)
     return {
         "campaign_id": campaign_id, "brand": brand, "eligible": len(eligible),
         "route_reconcile": route_reconcile,
         "queued": sum(bool(x.get("draft_id")) and not x.get("reused") for x in details),
         "reused": sum(bool(x.get("reused")) for x in details),
         "skipped_or_failed": sum(not x.get("draft_id") for x in details),
+        "terminal_cancelled": terminal_cancelled,
+        "terminal_cancel_errors": terminal_cancel_errors,
         "model_budget": model_budget.snapshot(),
         "details": details,
     }
@@ -1180,12 +1234,14 @@ async def _campaign_ready_inventory(campaign_id: str) -> dict:
         row for row in participants
         if ext((row.get("fields") or {}).get("参与状态")) in ACTIVE_PARTICIPANT_STATES
     ]
+    inventory_now_ts = int(time.time())
     queueable_approved = sum(
         ext((row.get("fields") or {}).get("参与状态")) == "已入围"
         and ext((row.get("fields") or {}).get("审核结论")) == "通过"
         and ext((row.get("fields") or {}).get("进入方式")) == "新开发"
         and ext((row.get("fields") or {}).get("活动分池")) == "新开发池"
         and not _ids((row.get("fields") or {}).get("关联邮件草稿"))
+        and _is_recent_queueable(row, now_ts=inventory_now_ts)
         for row in active
     )
     draft_ids = {
@@ -1687,8 +1743,9 @@ def _runtime_result_summary(result: dict | None) -> dict:
             ],
         }
     for key in (
-        "profile_refresh", "pending_review_reconcile", "append_after_refresh",
-        "queue_after_refresh", "review_pool", "evidence_continuation",
+        "append", "queue", "profile_refresh", "pending_review_reconcile",
+        "append_after_refresh", "queue_after_refresh", "review_pool",
+        "evidence_continuation",
     ):
         section = result.get(key)
         if isinstance(section, dict):
@@ -1699,6 +1756,8 @@ def _runtime_result_summary(result: dict | None) -> dict:
                     "skipped", "errors", "offset", "next_offset", "sample_size",
                     "eligible", "planned", "participation_writes",
                     "partial_failure", "incomplete_controlled_imports",
+                    "skipped_or_failed", "terminal_cancelled",
+                    "terminal_cancel_errors",
                 ) if name in section
             }
     for key in (
