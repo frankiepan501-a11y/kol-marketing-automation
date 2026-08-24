@@ -97,6 +97,7 @@ def test_refresh_youtube_metrics_writes_latest_and_due_snapshot(monkeypatch):
 
     result = asyncio.run(controller.refresh_youtube_metrics(
         commit=True,
+        record_id="yt",
         now=datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
     ))
 
@@ -144,6 +145,57 @@ def test_refresh_youtube_metrics_can_limit_a_commit_to_one_record(monkeypatch):
     assert result["updated"] == 1
     fetch.assert_awaited_once_with(["selected-id"])
     assert all(call.args[1] == "yt-selected" for call in update.await_args_list)
+
+
+def test_full_youtube_refresh_uses_three_bounded_batch_writes(monkeypatch):
+    first = _row("yt-1")
+    first["fields"]["平台作品ID"] = "video-1"
+    second = _row("yt-2", url="https://youtu.be/video-2")
+    second["fields"]["平台作品ID"] = "video-2"
+    monkeypatch.setattr(controller.config, "T_MEDIA_ARCHIVE_SNAPSHOT", "tbl-snapshot")
+    monkeypatch.setattr(
+        controller.feishu,
+        "fetch_all_records",
+        AsyncMock(side_effect=[[first, second], []]),
+    )
+    monkeypatch.setattr(controller, "fetch_youtube_videos", AsyncMock(return_value={
+        "video-1": {
+            "id": "video-1",
+            "snippet": {"title": "One", "publishedAt": "2026-08-20T12:00:00Z"},
+            "statistics": {"viewCount": "100", "likeCount": "5", "commentCount": "1"},
+        },
+        "video-2": {
+            "id": "video-2",
+            "snippet": {"title": "Two", "publishedAt": "2026-08-20T12:00:00Z"},
+            "statistics": {"viewCount": "200", "likeCount": "9", "commentCount": "2"},
+        },
+    }))
+    batch_update = AsyncMock(return_value={})
+    batch_create = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        controller.feishu, "batch_update_records", batch_update, raising=False,
+    )
+    monkeypatch.setattr(
+        controller.feishu, "batch_create_records", batch_create, raising=False,
+    )
+    update = AsyncMock()
+    monkeypatch.setattr(controller.feishu, "update_record", update)
+
+    result = asyncio.run(controller.refresh_youtube_metrics(
+        commit=True,
+        now=datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
+    ))
+
+    assert result["updated"] == 2
+    assert result["snapshots_created"] == 2
+    assert batch_update.await_count == 2
+    data_rows = batch_update.await_args_list[0].args[1]
+    status_rows = batch_update.await_args_list[1].args[1]
+    assert {row["record_id"] for row in data_rows} == {"yt-1", "yt-2"}
+    assert all("播放量" in row["fields"] for row in data_rows)
+    assert all(row["fields"] == {"数据抓取状态": "已更新"} for row in status_rows)
+    assert batch_create.await_count == 1
+    update.assert_not_awaited()
 
 
 def test_claim_job_builds_filename_and_marks_processing(monkeypatch):

@@ -181,6 +181,7 @@ async def refresh_youtube_metrics(commit: bool = False,
                                   record_id: str = "") -> dict:
     now_dt = now or datetime.now(timezone.utc)
     now_ms = _now_ms(now_dt)
+    target_record_id = record_id
     records = await feishu.fetch_all_records(config.T_UPLOAD_WORK, field_names=WORK_FIELDS, page_size=200)
     snapshots = []
     if config.T_MEDIA_ARCHIVE_SNAPSHOT:
@@ -193,7 +194,7 @@ async def refresh_youtube_metrics(commit: bool = False,
 
     youtube_rows: list[tuple[dict, str]] = []
     for record in records:
-        if record_id and str(record.get("record_id") or "") != record_id:
+        if target_record_id and str(record.get("record_id") or "") != target_record_id:
             continue
         fields = record.get("fields") or {}
         if media_archive.field_text(fields.get("发布平台")) != "YouTube":
@@ -211,16 +212,31 @@ async def refresh_youtube_metrics(commit: bool = False,
     missing = 0
     errors: list[dict] = []
     run_id = _run_id("youtube-metrics")
+    batch_mode = commit and not target_record_id
+    data_updates: list[dict] = []
+    status_updates: list[dict] = []
+    snapshot_rows: list[dict] = []
     for record, video_id in youtube_rows:
         record_id = str(record.get("record_id") or "")
         item = videos.get(video_id)
         if not item:
             missing += 1
             if commit:
-                await _update_status(record_id, {
-                    "数据抓取状态": "抓取失败",
-                    "数据抓取失败原因": "YouTube未返回该视频；可能已删除、设为私密或ID无效",
-                })
+                reason = "YouTube未返回该视频；可能已删除、设为私密或ID无效"
+                if batch_mode:
+                    data_updates.append({
+                        "record_id": record_id,
+                        "fields": {"数据抓取失败原因": reason},
+                    })
+                    status_updates.append({
+                        "record_id": record_id,
+                        "fields": {"数据抓取状态": "抓取失败"},
+                    })
+                else:
+                    await _update_status(record_id, {
+                        "数据抓取状态": "抓取失败",
+                        "数据抓取失败原因": reason,
+                    })
             continue
         mapped = media_archive.map_youtube_video(item)
         latest = {key: value for key, value in mapped.items() if value is not None}
@@ -249,8 +265,15 @@ async def refresh_youtube_metrics(commit: bool = False,
             latest["下次数据抓取时间"] = next_at_ms
 
         if commit:
-            await feishu.update_record(config.T_UPLOAD_WORK, record_id, latest)
-            await _update_status(record_id, {"数据抓取状态": "已更新"})
+            if batch_mode:
+                data_updates.append({"record_id": record_id, "fields": latest})
+                status_updates.append({
+                    "record_id": record_id,
+                    "fields": {"数据抓取状态": "已更新"},
+                })
+            else:
+                await feishu.update_record(config.T_UPLOAD_WORK, record_id, latest)
+                await _update_status(record_id, {"数据抓取状态": "已更新"})
             if due_day is not None and config.T_MEDIA_ARCHIVE_SNAPSHOT:
                 snapshot_fields = {
                     "快照名称": f"{video_id}-D{due_day}-{now_dt:%Y%m%d}",
@@ -265,9 +288,21 @@ async def refresh_youtube_metrics(commit: bool = False,
                     "运行ID": run_id,
                 }
                 snapshot_fields = {key: value for key, value in snapshot_fields.items() if value is not None}
-                await feishu.create_record(config.T_MEDIA_ARCHIVE_SNAPSHOT, snapshot_fields)
-                created += 1
+                if batch_mode:
+                    snapshot_rows.append(snapshot_fields)
+                else:
+                    await feishu.create_record(config.T_MEDIA_ARCHIVE_SNAPSHOT, snapshot_fields)
+                    created += 1
         updated += 1
+
+    if batch_mode:
+        if data_updates:
+            await feishu.batch_update_records(config.T_UPLOAD_WORK, data_updates)
+        if status_updates:
+            await feishu.batch_update_records(config.T_UPLOAD_WORK, status_updates)
+        if snapshot_rows:
+            await feishu.batch_create_records(config.T_MEDIA_ARCHIVE_SNAPSHOT, snapshot_rows)
+            created += len(snapshot_rows)
 
     return {
         "run_id": run_id,

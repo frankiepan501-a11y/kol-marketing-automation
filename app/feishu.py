@@ -41,7 +41,8 @@ async def token(which: str = "bitable"):
     return await _refresh_token(which)
 
 
-async def api(method: str, path: str, body=None, which: str = "bitable"):
+async def api(method: str, path: str, body=None, which: str = "bitable",
+              *, retry_transient: bool = True):
     """飞书 API 调用. 5xx 自动重试 2 次 (5s + 10s 指数退避).
 
     2026-05-21 加 5xx retry: 飞书 Bitable API 偶发 code=2200 Internal Error / 502 / 503,
@@ -61,7 +62,7 @@ async def api(method: str, path: str, body=None, which: str = "bitable"):
     # 2026-06-04: 1254607 是 Bitable 异步索引瞬态(幂等读), 偶发持续 >15s 撞穿 2 档 → 误报告警.
     # 单独拉长 1254607 重试不动 5xx/网络逻辑 (后者多为非幂等写, 不宜盲目多试).
     retry_delays = [5, 10, 20]
-    max_transient = 2  # 5xx / 网络瞬态的重试次数 (前 2 档)
+    max_transient = 2 if retry_transient else 0
     last_exc = None
     for attempt in range(len(retry_delays) + 1):  # 0=首次, 1..3=最多 3 次重试
         try:
@@ -73,7 +74,7 @@ async def api(method: str, path: str, body=None, which: str = "bitable"):
                     await asyncio.sleep(retry_delays[attempt])
                     continue
                 # 飞书 1254607 "Data not ready"(数据未就绪, 异步索引瞬态) → 比 5xx 多 1 档重试
-                if r.status_code >= 400 and attempt < len(retry_delays):
+                if retry_transient and r.status_code >= 400 and attempt < len(retry_delays):
                     try:
                         _fcode = r.json().get("code")
                     except Exception:
@@ -283,6 +284,67 @@ async def create_record(table_id: str, fields: dict):
     r = await api("POST", f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records",
                   {"fields": fields})
     return r["data"]["record"]["record_id"]
+
+
+async def batch_update_records(table_id: str, records: list[dict]) -> list[dict]:
+    """Update at most 500 Base rows per request; callers keep select phases separate."""
+    updated: list[dict] = []
+    for start in range(0, len(records), 500):
+        chunk = records[start:start + 500]
+        if not chunk:
+            continue
+        expected_ids = [str(item.get("record_id") or "") for item in chunk]
+        if any(not record_id for record_id in expected_ids):
+            raise ValueError("Feishu batch update requires a record_id for every row")
+        if len(set(expected_ids)) != len(expected_ids):
+            raise ValueError("Feishu batch update received duplicate record_ids")
+        r = await api(
+            "POST",
+            f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records/batch_update",
+            {"records": chunk},
+        )
+        if r.get("code", 0) != 0:
+            raise RuntimeError(
+                f"Feishu batch update failed for {table_id}: "
+                f"code={r.get('code')} msg={r.get('msg') or ''}"
+            )
+        response_records = (r.get("data") or {}).get("records") or []
+        returned_ids = [str(item.get("record_id") or "") for item in response_records]
+        if len(response_records) != len(chunk) or set(returned_ids) != set(expected_ids):
+            raise RuntimeError(
+                f"Feishu batch update incomplete for {table_id}: "
+                f"requested={len(chunk)} returned={len(response_records)}"
+            )
+        updated.extend(response_records)
+    return updated
+
+
+async def batch_create_records(table_id: str, fields_rows: list[dict]) -> list[dict]:
+    """Create at most 500 Base rows per request."""
+    created: list[dict] = []
+    for start in range(0, len(fields_rows), 500):
+        chunk = fields_rows[start:start + 500]
+        if not chunk:
+            continue
+        r = await api(
+            "POST",
+            f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records/batch_create",
+            {"records": [{"fields": fields} for fields in chunk]},
+            retry_transient=False,
+        )
+        if r.get("code", 0) != 0:
+            raise RuntimeError(
+                f"Feishu batch create failed for {table_id}: "
+                f"code={r.get('code')} msg={r.get('msg') or ''}"
+            )
+        response_records = (r.get("data") or {}).get("records") or []
+        if len(response_records) != len(chunk):
+            raise RuntimeError(
+                f"Feishu batch create incomplete for {table_id}: "
+                f"requested={len(chunk)} returned={len(response_records)}"
+            )
+        created.extend(response_records)
+    return created
 
 
 # ===== 飞书通知统一格式 (Phase 1, 2026-05-22) =====
