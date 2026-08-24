@@ -2,15 +2,18 @@
 
 变更:
 - 打分本地化(scoring.score_kol),不再让 DeepSeek 算分,确定性 + 省 token
-- DeepSeek 只负责生草稿(主题+正文)
+- 普通英文候选使用固定模板；仅非英文/高价值例外允许模型个性化
+- 模型调用有任务/单轮/每日预算和连续失败熔断；模板不再二次调用 AI reviewer
 - 新6维写入草稿表新字段:地区分/语言分/品类分/粉丝vs客单价分/平台分/防骚扰分
 
 n8n cron 每 5 分钟扫 T_TASK_KOL 任务状态=2-待触发 + 触发=true 的任务,
-对每个任务: 读关联产品+映射规则 → 筛 KOL 候选 → 本地打分 → 阈值过 → DeepSeek 生草稿 →
-写「KOL·媒体人邮件草稿」 → 逐条调 draft_router 自审 → 更新任务状态。
+对每个任务: 读关联产品+映射规则 → 筛 KOL 候选 → 本地打分 → 模板/受控模型例外生草稿 →
+写「KOL·媒体人邮件草稿」 → 确定性安全检查并分流 → 更新任务状态。
 """
-import re, time, asyncio, random
+import html, re, time, asyncio, random
+from collections import Counter
 from . import config, feishu, deepseek, draft_router, product_naming
+from .enrich_model_guard import EnrichModelBudget
 from .feishu import ext, xrid
 from .scoring import score_kol, _parse_multiselect
 from .product_dispatch_mode import is_regular_dispatch_allowed, product_dispatch_mode
@@ -39,6 +42,8 @@ LINK_LABELS = {
              "it": "Vedi sul nostro sito →", "nl": "Bekijk op onze site →", "sv": "Se det på vår sajt →"},
 }
 
+KOL_COLD_TEMPLATE_VERSION = "kol-cold-template-v1"
+
 
 def _build_links_block(pf, brand, p_name, kol_name, lang, _utm):
     """构建邮件产品链接段落: 任务栏填了几条(亚马逊/独立站)就生成几行 <p>👉<a>...</a></p>,
@@ -49,8 +54,122 @@ def _build_links_block(pf, brand, p_name, kol_name, lang, _utm):
         if not url:
             continue
         label = LINK_LABELS.get(kind, {}).get(lang) or LINK_LABELS.get(kind, {}).get("en", "See it →")
-        paras.append(f'<p>👉 <a href="{url}">{label}</a></p>')
+        safe_url = html.escape(url, quote=True)
+        paras.append(f'<p>👉 <a href="{safe_url}">{label}</a></p>')
     return "\n".join(paras)
+
+
+def _build_template_draft(kol_record: dict, product: dict, brand: str,
+                          signature: str, breakdown: dict, total: float) -> dict:
+    """Build the controlled English cold template without any model call."""
+    k = kol_record["fields"]
+    pf = product["fields"]
+    kol_name = ext(k.get("账号名")).strip() or "there"
+    p_name = ext(pf.get("产品英文名")).strip()
+    p_cat = ext(pf.get("品类")).strip() or "gaming accessory"
+    clean_email, email_reason = feishu.clean_email(ext(k.get("邮箱")))
+    if not clean_email:
+        return {"skip": f"无有效邮箱: {email_reason}"}
+    if not p_name:
+        return {"skip": "产品英文名为空"}
+
+    from . import utm as _utm
+    links_block = _build_links_block(pf, brand, p_name, kol_name, "en", _utm)
+    if not links_block:
+        return {"skip": "产品链接为空"}
+    primary_url = _utm.make_utm_link(feishu.product_url(pf), brand, p_name, kol_name)
+    safe_name = html.escape(kol_name, quote=True)
+    safe_product = html.escape(p_name, quote=True)
+    safe_category = html.escape(p_cat, quote=True)
+    safe_brand = html.escape(brand, quote=True)
+    safe_signature = html.escape(signature, quote=True)
+    benefits = [html.escape(ext(pf.get(key)).strip(), quote=True)
+                for key in ("卖点1", "卖点2", "卖点3") if ext(pf.get(key)).strip()]
+    benefit_text = ", ".join(benefits[:3]) or "a player-friendly design"
+    subject_name = re.sub(r"[\r\n]+", " ", kol_name).strip()
+    subject_category = re.sub(r"[\r\n]+", " ", p_cat).strip()
+    subject = f"{subject_name}, a {subject_category} for your setup"[:55]
+    body = (
+        f"<p>Hey {safe_name},</p>"
+        f"<p>I'm {safe_signature} from {safe_brand}. We're introducing the "
+        f"{safe_product}, a {safe_category} built for everyday gaming setups. "
+        f"Its main features are {benefit_text}.</p>"
+        f"{links_block}"
+        "<p>It may be a practical fit for the gaming audience you already serve. "
+        "Would you be curious to try one? We're happy to send one for an honest look, "
+        "with no posting obligation.</p>"
+        f"<p>Best,<br>{safe_signature}</p>"
+    )
+    validation = _validate_template_draft(
+        subject, body, links_block, kol_name, _product_internal_ids(pf),
+    )
+    return {
+        "subject": subject,
+        "body": body,
+        "highlights": f"Deterministic template; local match score {total:.0f}",
+        "angle": "Practical product fit",
+        "ban_phrase_failed": False,
+        "utm_url": primary_url,
+        "utm_id": _utm.kol_utm_id(kol_name),
+        "generation_mode": "template",
+        "template_version": KOL_COLD_TEMPLATE_VERSION,
+        "template_validation": validation,
+        "model_calls": 0,
+    }
+
+
+def _product_internal_ids(product_fields: dict) -> list[str]:
+    return [
+        value for value in (
+            ext(product_fields.get("老库ERP SKU")).strip(),
+            ext(product_fields.get("ERP SKU")).strip(),
+            ext(product_fields.get("品牌型号")).strip(),
+        ) if len(value) >= 4
+    ]
+
+
+def _validate_template_draft(subject: str, body: str, links_block: str,
+                             kol_name: str, internal_ids=()) -> dict:
+    reasons = []
+    combined = f"{subject}\n{body}"
+    if not subject.strip() or not body.strip():
+        reasons.append("empty_content")
+    if kol_name not in combined:
+        reasons.append("missing_contact_name")
+    if re.search(r"\[(?:TBD|待填|CARRIER)|<%=|\{\{", combined, re.I):
+        reasons.append("placeholder")
+    sku_pattern = (
+        r"\b(?:YM\d{2,4}[A-Z0-9-]*|PK\d{2}[A-Z]?(?:-\d+)?|"
+        r"FF\d{2}[A-Z]?(?:-\d+)?|FL-[A-Z0-9-]+|SKU[-_]?[A-Z0-9-]+)\b"
+    )
+    exact_internal_id = any(value.casefold() in combined.casefold() for value in internal_ids)
+    if exact_internal_id or re.search(sku_pattern, combined, re.I):
+        reasons.append("internal_sku")
+    if re.search(r"(?:\$\s*\d|USD\s*\d|\b\d+(?:\.\d+)?\s*%\s*(?:commission|royalty))", combined, re.I):
+        reasons.append("price_or_commission")
+    if _check_ban_phrases(body):
+        reasons.append("false_specific_content_claim")
+    expected_links = [html.unescape(url) for url in re.findall(r'href="([^"]+)"', links_block)]
+    body_norm = html.unescape(body)
+    if not expected_links or any(url not in body_norm for url in expected_links):
+        reasons.append("missing_product_link")
+    return {"passed": not reasons, "reasons": reasons}
+
+
+def _requires_model_personalization(kol_record: dict, product: dict,
+                                    total: float, lang: str) -> bool:
+    if not config.KOL_ENRICH_TEMPLATE_MODE:
+        return True
+    if lang != "en":
+        return True
+    fields = kol_record.get("fields") or {}
+    fans = _subscriber_count(fields.get("粉丝数"))
+    has_specific_signal = bool(ext(fields.get("IP喜好")) or ext(product["fields"].get("时效由头")))
+    return (
+        total >= config.KOL_ENRICH_AI_SCORE_MIN
+        and fans >= config.KOL_ENRICH_AI_MIN_FANS
+        and has_specific_signal
+    )
 
 # V1.5 直控筛选: 任务台「筛选-语言」中文 options → KOL/媒体人主表「语言」字段 ISO 代码
 # 双向兼容: 中文 options(运营友好) + ISO 代码(老数据/媒体人端原任务台 ISO options)
@@ -382,7 +501,9 @@ def _product_type_instruction(product_name: str, category: str) -> str:
 
 
 async def gen_draft(kol_record: dict, product: dict, brand: str,
-                    signature: str, breakdown: dict, total: float) -> dict:
+                    signature: str, breakdown: dict, total: float,
+                    model_budget: EnrichModelBudget = None,
+                    task_id: str = "unscoped") -> dict:
     k = kol_record["fields"]
     kol_name = ext(k.get("账号名"))
     kol_country = ext(k.get("国家"))
@@ -503,15 +624,25 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
   "angle": "建议切入角度(英文,1句)"
 }}"""
 
+    model_calls = 0
+    if model_budget is not None:
+        allowed, reason = model_budget.reserve(task_id)
+        if not allowed:
+            return {"model_skip_reason": reason, "model_calls": model_calls}
+    model_calls += 1
     try:
         r = await deepseek.chat_json(prompt, max_tokens=1000, temperature=0.4)
     except Exception as e:
-        return {"error": f"deepseek: {str(e)[:100]}"}
+        if model_budget is not None:
+            model_budget.record_failure()
+        return {"error": f"deepseek: {str(e)[:100]}", "model_calls": model_calls}
 
     body = r.get("email_body", "")
     ban_phrase_failed = False
     hits = _check_ban_phrases(body)
     if hits:
+        if model_budget is not None:
+            model_budget.record_failure()
         # 重生 1 次, 在原 prompt 后面追加 KOL_NAME + 上次命中片段警告
         retry_prompt = (
             prompt
@@ -521,6 +652,23 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
             + "假装看过具体作品的句式。只能用基于 IP喜好/风格 的概括(如 'your retro-gaming corner' / "
             + "'Saw you're into PC gaming content')。"
         )
+        if model_budget is not None:
+            allowed, reason = model_budget.reserve(task_id)
+            if not allowed:
+                ban_phrase_failed = True
+                validation = _validate_template_draft(
+                    r.get("email_subject", ""), body, links_block, kol_name,
+                    _product_internal_ids(pf),
+                )
+                return {
+                    "subject": r.get("email_subject", ""), "body": body,
+                    "highlights": r.get("highlights", ""), "angle": r.get("angle", ""),
+                    "ban_phrase_failed": True, "utm_url": p_url, "utm_id": utm_id_value,
+                    "generation_mode": "ai", "model_calls": model_calls,
+                    "model_skip_reason": reason,
+                    "output_validation": validation,
+                }
+        model_calls += 1
         try:
             r = await deepseek.chat_json(retry_prompt, max_tokens=1000, temperature=0.4)
             body = r.get("email_body", "")
@@ -531,19 +679,32 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
             else:
                 print(f"[ban-phrase] 首生命中 {hits[:3]}, 重生后干净")
         except Exception as e:
-            ban_phrase_failed = True
-            print(f"[ban-phrase] 重生异常: {e}, 标记需人审")
+            if model_budget is not None:
+                model_budget.record_failure()
+            return {
+                "error": f"deepseek_retry: {str(e)[:100]}",
+                "model_calls": model_calls,
+            }
 
     # 防御: 确保每条产品链接都在正文里 (DeepSeek 偶发漏/改链接). 缺则在署名前补回整段.
     if links_block:
-        link_urls = re.findall(r'href="([^"]+)"', links_block)
-        body_norm = body.replace("&amp;", "&")
+        link_urls = [html.unescape(url) for url in re.findall(r'href="([^"]+)"', links_block)]
+        body_norm = html.unescape(body)
         miss = [u for u in link_urls if u not in body_norm]
         if miss:
             print(f"[links] DeepSeek 漏链接 {len(miss)}/{len(link_urls)} → 补回 links_block")
             sig_m = re.search(r'<p>\s*--\s', body)
             body = (body[:sig_m.start()] + links_block + body[sig_m.start():]) if sig_m else (body + links_block)
 
+    output_validation = _validate_template_draft(
+        r.get("email_subject", ""), body, links_block, kol_name,
+        _product_internal_ids(pf),
+    )
+    if model_budget is not None:
+        if output_validation["passed"] and not ban_phrase_failed:
+            model_budget.record_success()
+        else:
+            model_budget.record_failure()
     return {
         "subject": r.get("email_subject", ""),
         "body": body,
@@ -552,13 +713,18 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
         "ban_phrase_failed": ban_phrase_failed,
         "utm_url": p_url,            # Phase 1: 实发产品链接 (含 UTM, 官网优先做 ROI 归因)
         "utm_id": utm_id_value,      # Phase 1: KOL UTM ID (= utm_content)
+        "generation_mode": "ai",
+        "model_calls": model_calls,
+        "output_validation": output_validation,
     }
 
 
 # ===== 5. 单 KOL: 本地打分 + 过阈值再生草稿 =====
 async def score_and_draft_one(kol_record: dict, product: dict, brand: str,
                                 signature: str, threshold: float,
-                                expected_styles: set, want_platforms: set) -> dict:
+                                expected_styles: set, want_platforms: set,
+                                model_budget: EnrichModelBudget = None,
+                                task_id: str = "unscoped") -> dict:
     k = kol_record["fields"]
     kol_name = ext(k.get("账号名"))
     # 2026-05-16: 清洗 multi-email / 异常邮箱
@@ -584,10 +750,45 @@ async def score_and_draft_one(kol_record: dict, product: dict, brand: str,
     if not out["passed"]:
         return out
 
-    # 过阈值才调 DeepSeek 生草稿
-    draft = await gen_draft(kol_record, product, brand, signature, breakdown, total)
+    use_model = _requires_model_personalization(kol_record, product, total, lang)
+    if use_model:
+        draft = await gen_draft(
+            kol_record, product, brand, signature, breakdown, total,
+            model_budget=model_budget, task_id=task_id,
+        )
+    else:
+        draft = _build_template_draft(kol_record, product, brand, signature, breakdown, total)
+
+    # High-value English exceptions safely fall back to the controlled template.
+    if use_model and lang == "en" and (
+        "error" in draft or "model_skip_reason" in draft
+        or not draft.get("output_validation", {}).get("passed", False)
+    ):
+        fallback = _build_template_draft(kol_record, product, brand, signature, breakdown, total)
+        fallback["model_calls"] = draft.get("model_calls", 0)
+        fallback["model_fallback_reason"] = draft.get("model_skip_reason") or draft.get("error")
+        draft = fallback
     if "error" in draft or "skip" in draft:
         out["error"] = draft.get("error") or draft.get("skip")
+        out["model_calls"] = draft.get("model_calls", 0)
+        out["passed"] = False
+        return out
+    if draft.get("model_skip_reason"):
+        out["model_skip_reason"] = draft["model_skip_reason"]
+        out["model_calls"] = draft.get("model_calls", 0)
+        out["passed"] = False
+        return out
+    if draft.get("generation_mode") == "ai" and not draft.get("output_validation", {}).get("passed"):
+        out["error"] = "model_output_validation_failed:" + ",".join(
+            draft.get("output_validation", {}).get("reasons", [])
+        )
+        out["model_calls"] = draft.get("model_calls", 0)
+        out["passed"] = False
+        return out
+    if draft.get("generation_mode") == "template" and not draft.get("template_validation", {}).get("passed"):
+        out["error"] = "template_validation_failed:" + ",".join(
+            draft.get("template_validation", {}).get("reasons", [])
+        )
         out["passed"] = False
         return out
     out.update({
@@ -598,6 +799,12 @@ async def score_and_draft_one(kol_record: dict, product: dict, brand: str,
         "ban_phrase_failed": draft.get("ban_phrase_failed", False),
         "utm_url": draft.get("utm_url", ""),
         "utm_id": draft.get("utm_id", ""),
+        "generation_mode": draft.get("generation_mode", "ai"),
+        "template_version": draft.get("template_version", ""),
+        "template_validation": draft.get("template_validation", {}),
+        "model_calls": draft.get("model_calls", 0),
+        "model_fallback_reason": draft.get("model_fallback_reason", ""),
+        "output_validation": draft.get("output_validation", {}),
     })
     return out
 
@@ -688,12 +895,38 @@ async def write_drafts_and_route(task_rid: str, product_rid: str, brand: str,
             "重生次数": 0,
             "UTM 链接": s.get("utm_url", ""),
         }
+        generation_mode = s.get("generation_mode")
+        if generation_mode == "template":
+            fields.update({
+                "AI评分": 10,
+                "AI评分理由": (
+                    f"[{s.get('template_version') or KOL_COLD_TEMPLATE_VERSION}] "
+                    "确定性模板已通过占位符/SKU/价格/虚构作品/链接检查；零模型审核"
+                )[:500],
+                "承诺命中": False,
+                "命中关键词": "",
+                "审核路径": "自动通过",
+                "邮件草稿状态": "自动通过",
+            })
+        elif generation_mode == "ai":
+            fields.update({
+                "AI评分": 7,
+                "AI评分理由": (
+                    "[hybrid-ai-exception] 模型例外草稿已通过确定性安全检查；"
+                    "为避免再次调用 AI reviewer，固定进入人工审核"
+                )[:500],
+                "承诺命中": False,
+                "命中关键词": "",
+                "审核路径": "待人审",
+                "邮件草稿状态": "待审",
+            })
         try:
             rid = await feishu.create_record(config.T_DRAFT, fields)
         except Exception as e:
             results.append({"kol": s["kol_name"], "error": f"write_draft: {str(e)[:100]}"})
             continue
-        # Phase 1 ROI: 第一次给 KOL 派单时, 写 UTM ID 到 KOL 主表 (idempotent)
+        # Phase 1 ROI: 第一次给 KOL 派单时, 写 UTM ID 到 KOL 主表 (idempotent).
+        # This must happen before all deterministic routing branches.
         utm_id_val = s.get("utm_id", "")
         if utm_id_val:
             try:
@@ -703,6 +936,18 @@ async def write_drafts_and_route(task_rid: str, product_rid: str, brand: str,
                     await feishu.update_record(config.T_KOL, s["kol_record_id"], {"UTM ID": utm_id_val})
             except Exception as e:
                 print(f"[enrich] write KOL UTM ID fail rid={s['kol_record_id']}: {e}")
+        if generation_mode == "template":
+            results.append({
+                "kol": s["kol_name"], "rid": rid, "score": 10,
+                "path": "自动通过", "generation_mode": "template",
+            })
+            continue
+        if generation_mode == "ai":
+            results.append({
+                "kol": s["kol_name"], "rid": rid, "score": 7,
+                "path": "待人审", "generation_mode": "ai",
+            })
+            continue
         # ban-phrase 失败 → 跳过 auto router, 强制走人审通道
         if s.get("ban_phrase_failed"):
             try:
@@ -723,7 +968,8 @@ async def write_drafts_and_route(task_rid: str, product_rid: str, brand: str,
 
 
 # ===== 7. 处理一个任务(主流程) =====
-async def enrich_task(task_record: dict, seen_kb: set = None) -> dict:
+async def enrich_task(task_record: dict, seen_kb: set = None,
+                      model_budget: EnrichModelBudget = None) -> dict:
     task_rid = task_record["record_id"]
     tf = task_record["fields"]
     task_name = ext(tf.get("任务名"))
@@ -846,25 +1092,34 @@ async def enrich_task(task_record: dict, seen_kb: set = None) -> dict:
     scored_local.sort(key=lambda x: x["total"], reverse=True)
     top_pass = [x for x in scored_local if x["total"] >= threshold][:batch_limit]
 
-    # 第二轮:DeepSeek 仅对过阈值的生草稿
-    sem = asyncio.Semaphore(5)
-    async def _gated(item):
-        async with sem:
-            kol = item["kol"]
-            return await score_and_draft_one(
-                kol, product, brand, signature, threshold,
+    # 第二轮:模板候选不调模型；模型例外串行执行，确保连续失败熔断不会并发超发。
+    scored_raw = []
+    for item in top_pass:
+        try:
+            scored_raw.append(await score_and_draft_one(
+                item["kol"], product, brand, signature, threshold,
                 mapping["expected_styles"], want_platforms,
-            )
-
-    scored_raw = await asyncio.gather(
-        *[_gated(item) for item in top_pass], return_exceptions=True,
-    )
+                model_budget=model_budget, task_id=task_rid,
+            ))
+        except Exception as exc:
+            scored_raw.append(exc)
     scored = []
     for s in scored_raw:
         if isinstance(s, Exception): continue
         if isinstance(s, dict) and not s.get("error") and not s.get("skip"):
             scored.append(s)
     passed = [s for s in scored if s.get("passed")]
+    template_ok = sum(1 for s in passed if s.get("generation_mode") == "template")
+    ai_ok = sum(1 for s in passed if s.get("generation_mode") == "ai")
+    skip_reasons = Counter()
+    for result in scored_raw:
+        if not isinstance(result, dict):
+            continue
+        reason = result.get("model_skip_reason") or result.get("model_fallback_reason")
+        if reason:
+            skip_reasons[reason] += 1
+    model_skipped = sum(skip_reasons.values())
+    model_calls = sum(s.get("model_calls", 0) for s in scored_raw if isinstance(s, dict))
 
     # 写草稿 + 调 router
     routed = await write_drafts_and_route(task_rid, prod_rid, brand, sender_alias, signature, passed)
@@ -881,14 +1136,23 @@ async def enrich_task(task_record: dict, seen_kb: set = None) -> dict:
     await feishu.update_record(config.T_TASK_KOL, task_rid, {
         "任务状态": "5-草稿待审",
         "通过阈值数": len(passed),
-        "备注": (f"映射规则{mapping['matched_rules']} / 自动通过 {auto_count} / 待人审 {human_count} / 退回 {retry_count}")[:200],
+        "备注": (
+            f"映射规则{mapping['matched_rules']} / 自动通过 {auto_count} / "
+            f"待人审 {human_count} / 退回 {retry_count} / 模型跳过 {model_skipped}"
+        )[:200],
     })
 
     return {
         "task": task_name, "task_rid": task_rid,
         "candidates": len(candidates),
         "local_pass": len(top_pass),
-        "deepseek_ok": len(scored),
+        "deepseek_ok": ai_ok,
+        "template_ok": template_ok,
+        "ai_ok": ai_ok,
+        "model_calls": model_calls,
+        "model_skipped": model_skipped,
+        "model_skip_reasons": dict(skip_reasons),
+        "model_budget": model_budget.snapshot() if model_budget else {},
         "passed": len(passed),
         "auto_pass": auto_count,
         "human_review": human_count,
@@ -910,10 +1174,17 @@ async def _run_unlocked() -> dict:
         return {"processed": 0, "message": "no pending KOL task"}
 
     results = []
+    model_budget = EnrichModelBudget(
+        per_task=config.KOL_ENRICH_MODEL_PER_TASK,
+        per_run=config.KOL_ENRICH_MODEL_PER_RUN,
+        daily=config.KOL_ENRICH_MODEL_DAILY,
+        failure_threshold=config.KOL_ENRICH_MODEL_FAILURE_THRESHOLD,
+        state_path=config.KOL_ENRICH_MODEL_STATE_PATH,
+    )
     seen_kb = set()  # P0: 本轮(本次cron)已派的 (kol_record_id, brand), 跨任务共享防并发重复
     for t in tasks:
         try:
-            r = await enrich_task(t, seen_kb=seen_kb)
+            r = await enrich_task(t, seen_kb=seen_kb, model_budget=model_budget)
             results.append(r)
         except Exception as e:
             import traceback
@@ -922,4 +1193,4 @@ async def _run_unlocked() -> dict:
                 "error": str(e)[:200],
                 "trace": traceback.format_exc()[-500:],
             })
-    return {"processed": len(results), "results": results}
+    return {"processed": len(results), "results": results, "model_budget": model_budget.snapshot()}

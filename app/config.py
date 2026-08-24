@@ -19,6 +19,22 @@ def env(k, default=None, required=False):
         return ""
     return v
 
+
+def _int_env(k, default, minimum=0):
+    try:
+        return max(minimum, int(env(k, str(default)) or default))
+    except (ValueError, TypeError):
+        _log.warning("env %s is not an integer; using default=%s", k, default)
+        return default
+
+
+def _float_env(k, default, minimum=0.0):
+    try:
+        return max(minimum, float(env(k, str(default)) or default))
+    except (ValueError, TypeError):
+        _log.warning("env %s is not numeric; using default=%s", k, default)
+        return default
+
 # 飞书 App 2号 (多维表格 + 消息)
 FEISHU_BITABLE_APP_ID = env("FEISHU_BITABLE_APP_ID", required=True)
 FEISHU_BITABLE_APP_SECRET = env("FEISHU_BITABLE_APP_SECRET", required=True)
@@ -111,6 +127,22 @@ REPLY_EXTRA_ALIASES = {
 
 # DeepSeek
 DEEPSEEK_API_KEY = env("DEEPSEEK_API_KEY", required=True)
+
+# KOL enrich hybrid mode: routine English cold drafts are deterministic templates.
+# DeepSeek is reserved for localization/high-value exceptions and bounded at three levels.
+KOL_ENRICH_TEMPLATE_MODE = (env("KOL_ENRICH_TEMPLATE_MODE", "1") or "1") != "0"
+KOL_ENRICH_MODEL_PER_TASK = _int_env("KOL_ENRICH_MODEL_PER_TASK", 2)
+KOL_ENRICH_MODEL_PER_RUN = _int_env("KOL_ENRICH_MODEL_PER_RUN", 8)
+# Soft per-container daily budget. Per-task/per-run remain hard after container restarts.
+KOL_ENRICH_MODEL_DAILY = _int_env("KOL_ENRICH_MODEL_DAILY", 20)
+KOL_ENRICH_MODEL_FAILURE_THRESHOLD = _int_env(
+    "KOL_ENRICH_MODEL_FAILURE_THRESHOLD", 2, minimum=1,
+)
+KOL_ENRICH_MODEL_STATE_PATH = env(
+    "KOL_ENRICH_MODEL_STATE_PATH", "/tmp/kol_enrich_model_budget.json"
+)
+KOL_ENRICH_AI_SCORE_MIN = _float_env("KOL_ENRICH_AI_SCORE_MIN", 100)
+KOL_ENRICH_AI_MIN_FANS = _int_env("KOL_ENRICH_AI_MIN_FANS", 500000)
 
 # 2026-06-04: DeepSeek 余额预警阈值(元). 余额低于此或不可用 → /deepseek/balance-check 飞书告警 Frankie.
 # 根因: DeepSeek 欠费 → 整条 AI 生成链(enrich/reply_drafter/regen/talking_points)静默 402 停摆,
