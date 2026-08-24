@@ -14,6 +14,15 @@ def _certificate():
 
 
 class LaunchRuntimeTests(unittest.TestCase):
+    def test_zero_model_launch_date_uses_controlled_campaign_mapping_only(self):
+        known = launch_runtime._launch_date_labels(
+            "launch-20260915-powkong-piranha-v2",
+        )
+        unknown = launch_runtime._launch_date_labels("unmapped-campaign")
+
+        self.assertEqual("September 15", known["en"])
+        self.assertEqual("the launch window", unknown["en"])
+
     def test_pending_review_reconcile_auto_passes_only_deterministic_candidate(self):
         participant = {"record_id": "part1", "fields": {
             "参与状态": "已入围", "审核结论": "待补资料",
@@ -191,6 +200,214 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(0, result["updated"])
         self.assertEqual(2, result["kept_blocked"])
         update_record.assert_not_awaited()
+    def test_zero_model_draft_validator_accepts_safe_template_and_rejects_placeholder(self):
+        kol = {"fields": {
+            "账号名": "Creator One", "国家": "US", "语言": "en",
+        }}
+        product = {"fields": {
+            "产品英文名": "Piranha Plant 2 Dock",
+            "官网链接": {"link": "https://powkong.com/products/piranha-dock"},
+        }}
+        draft = launch_runtime._deterministic_fallback_draft(kol, product, "POWKONG")
+
+        valid = launch_runtime.validate_deterministic_launch_draft(draft)
+        invalid = launch_runtime.validate_deterministic_launch_draft({
+            **draft, "body": draft["body"] + " [TBD]",
+        })
+
+        self.assertTrue(valid["passed"])
+        self.assertEqual([], valid["errors"])
+        self.assertFalse(invalid["passed"])
+        self.assertIn("unresolved_placeholder", invalid["errors"])
+
+    def test_zero_model_refill_preview_has_no_model_calls_or_writes(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "活动目标语言": ["en"], "运行模式": "正式运行",
+            "状态": "正式执行中",
+        }}
+        product = {"record_id": "product1", "fields": {
+            "品牌": "POWKONG", "产品英文名": "Piranha Plant 2 Dock",
+            "官网链接": {"link": "https://powkong.com/products/piranha-dock"},
+        }}
+        kol = {"record_id": "k1", "fields": {
+            "账号名": "Creator One", "国家": "US", "语言": "en",
+        }}
+        preview = {
+            "summary": {"eligible_new_cold": 1},
+            "profile_refresh_candidate_ids": ["k2"],
+            "profile_refresh_candidates": [{"contact_id": "k2"}],
+            "candidates": [{
+                "contact_id": "k1", "decision": "eligible_new_cold",
+                "review_decision": "通过", "score": 91,
+            }],
+        }
+        metrics = {"campaign_id": "campaign1", "participants": 10,
+                   "action": "expand", "approved_new_development_24h": 2}
+
+        async def get_record(table, record_id):
+            return product if record_id == "product1" else kol
+
+        with patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "campaign_metrics", new=AsyncMock(return_value=metrics),
+        ), patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(side_effect=get_record),
+        ), patch.object(
+            launch_runtime, "_brand_quota_snapshot",
+            new=AsyncMock(return_value={"brand": "POWKONG", "cap": 120,
+                                        "sent_24h": 20, "remaining": 100}),
+        ), patch.object(
+            launch_runtime, "_campaign_ready_inventory",
+            new=AsyncMock(return_value={"ready": 0, "pending_review": 0}),
+        ), patch.object(
+            launch_runtime.launch_candidate_preview, "preview_candidates",
+            new=AsyncMock(return_value=preview),
+        ), patch.object(
+            launch_runtime.relabel, "run_profile_records",
+            new=AsyncMock(return_value={"dry_run": True, "classification_mode": "deterministic",
+                                        "model_calls": 0, "writes": 0, "processed": 1}),
+        ) as refresh, patch.object(
+            launch_runtime.keyword_supply, "ensure_campaign_supply",
+            new=AsyncMock(return_value={"created": 0, "would_create": 3,
+                                        "model_calls": 0, "shortfall_tasks": 0}),
+        ) as keywords, patch.object(
+            launch_runtime.enrich, "gen_draft", new=AsyncMock(),
+        ) as generate, patch.object(
+            launch_runtime.draft_router, "route_draft", new=AsyncMock(),
+        ) as review, patch.object(
+            launch_runtime.feishu, "create_record", new=AsyncMock(),
+        ) as write:
+            result = asyncio.run(launch_runtime.preview_zero_model_refill(
+                campaign_id="campaign1", profile_refresh_limit=10, draft_preview_limit=5,
+            ))
+
+        self.assertTrue(result["read_only"])
+        self.assertTrue(result["dry_run"])
+        self.assertEqual("zero_model", result["ai_mode"])
+        self.assertEqual(0, result["model_calls"])
+        self.assertEqual(0, result["writes"])
+        self.assertEqual(0, result["drafts_created"])
+        self.assertEqual(0, result["emails_sent"])
+        self.assertEqual(1, result["draft_preview_count"])
+        self.assertTrue(result["draft_previews"][0]["validation"]["passed"])
+        refresh.assert_awaited_once_with(
+            ["k2"], dry_run=True, limit=1, classification_mode="deterministic",
+        )
+        self.assertFalse(keywords.await_args.kwargs["allow_ai"])
+        generate.assert_not_awaited()
+        review.assert_not_awaited()
+        write.assert_not_awaited()
+
+    def test_zero_model_preview_holds_inactive_campaign_without_downstream_reads(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "运行模式": "预演", "状态": "已暂停",
+        }}
+        with patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "campaign_metrics",
+            new=AsyncMock(return_value={"campaign_id": "campaign1", "action": "expand"}),
+        ), patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(),
+        ) as get_record, patch.object(
+            launch_runtime.launch_candidate_preview, "preview_candidates", new=AsyncMock(),
+        ) as preview:
+            result = asyncio.run(launch_runtime.preview_zero_model_refill(
+                campaign_id="campaign1",
+            ))
+
+        self.assertTrue(result["held"])
+        self.assertEqual("held", result["business_outcome"])
+        self.assertEqual(0, result["writes"])
+        get_record.assert_not_awaited()
+        preview.assert_not_awaited()
+
+    def test_zero_model_preview_reports_degraded_when_fixed_keywords_have_shortfall(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "运行模式": "正式运行", "状态": "正式执行中",
+        }}
+        product = {"record_id": "product1", "fields": {
+            "品牌": "POWKONG", "产品英文名": "Piranha Plant 2 Dock",
+            "官网链接": {"link": "https://powkong.com/products/piranha-dock"},
+        }}
+        with patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "campaign_metrics",
+            new=AsyncMock(return_value={"action": "expand", "participants": 0}),
+        ), patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(return_value=product),
+        ), patch.object(
+            launch_runtime, "_brand_quota_snapshot",
+            new=AsyncMock(return_value={"remaining": 100}),
+        ), patch.object(
+            launch_runtime, "_campaign_ready_inventory",
+            new=AsyncMock(return_value={"ready": 0}),
+        ), patch.object(
+            launch_runtime.launch_candidate_preview, "preview_candidates",
+            new=AsyncMock(return_value={"candidates": [], "summary": {}}),
+        ), patch.object(
+            launch_runtime.keyword_supply, "ensure_campaign_supply",
+            new=AsyncMock(return_value={
+                "ok": True, "model_calls": 0, "shortfall_tasks": 2,
+            }),
+        ):
+            result = asyncio.run(launch_runtime.preview_zero_model_refill(
+                campaign_id="campaign1",
+            ))
+
+        self.assertEqual("preview_degraded", result["business_outcome"])
+        self.assertEqual("degraded", launch_runtime.runtime_job_status(result))
+        self.assertIn("fixed_keywords_shortfall", result["readiness"]["reasons"])
+
+    def test_zero_model_preview_reports_degraded_when_profile_scrape_fails(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "运行模式": "正式运行", "状态": "正式执行中",
+        }}
+        product = {"record_id": "product1", "fields": {
+            "品牌": "POWKONG", "产品英文名": "Piranha Plant 2 Dock",
+            "官网链接": {"link": "https://powkong.com/products/piranha-dock"},
+        }}
+        with patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "campaign_metrics",
+            new=AsyncMock(return_value={"action": "expand", "participants": 0}),
+        ), patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(return_value=product),
+        ), patch.object(
+            launch_runtime, "_brand_quota_snapshot",
+            new=AsyncMock(return_value={"remaining": 100}),
+        ), patch.object(
+            launch_runtime, "_campaign_ready_inventory",
+            new=AsyncMock(return_value={"ready": 0}),
+        ), patch.object(
+            launch_runtime.launch_candidate_preview, "preview_candidates",
+            new=AsyncMock(return_value={
+                "candidates": [], "summary": {},
+                "profile_refresh_candidate_ids": ["k1"],
+            }),
+        ), patch.object(
+            launch_runtime.relabel, "run_profile_records",
+            new=AsyncMock(return_value={
+                "dry_run": True, "model_calls": 0, "writes": 0,
+                "processed": 1, "by_status": {"scrape_fail": 1},
+            }),
+        ), patch.object(
+            launch_runtime.keyword_supply, "ensure_campaign_supply",
+            new=AsyncMock(return_value={"ok": True, "shortfall_tasks": 0}),
+        ):
+            result = asyncio.run(launch_runtime.preview_zero_model_refill(
+                campaign_id="campaign1",
+            ))
+
+        self.assertEqual("preview_degraded", result["business_outcome"])
+        self.assertEqual(1, result["readiness"]["profile_error_count"])
+        self.assertIn("profile_refresh_error", result["readiness"]["reasons"])
 
     def test_sync_outcomes_and_metrics_reuses_the_same_draft_snapshot(self):
         activity = {"record_id": "a1", "fields": {"活动ID": "campaign1"}}

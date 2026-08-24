@@ -2653,13 +2653,17 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                                     pool_target: int = 100, queue_limit: int = 120,
                                     review_target: int = 20,
                                     sample_limit: int = 20,
+                                    profile_refresh_limit: int = 30,
+                                    draft_preview_limit: int = 20,
                                     seed_candidates: list[dict] | None = None,
                                     source_job_id: str = "",
                                     controlled_import_commit: bool = False,
                                     expected_handles: list[str] | None = None,
                                     continuation_offset: int = 17,
                                     continuation_import_limit: int = 3) -> dict:
-    read_only_modes = {"evidence_author_pilot", "evidence_author_enrichment"}
+    read_only_modes = {
+        "autonomous_preview", "evidence_author_pilot", "evidence_author_enrichment",
+    }
     is_read_only = mode in read_only_modes or (
         mode in {"evidence_author_import", "evidence_author_continuation"}
         and not controlled_import_commit
@@ -2669,7 +2673,11 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
     _prune_launch_runtime_jobs()
     # Zeabur 重启后旧进程里的后台协程已经不存在，不能把活动表里残留的
     # running 记录继续当成活任务。当前生产为单实例，真实并发只以内存任务表判定。
-    request_key = f"{mode}|{campaign_id}|commit={int(controlled_import_commit)}"
+    request_key = (
+        f"{mode}|{campaign_id}|commit={int(controlled_import_commit)}"
+        f"|profile_refresh_limit={profile_refresh_limit}"
+        f"|draft_preview_limit={draft_preview_limit}"
+    )
     if mode == "evidence_author_continuation":
         request_key += (
             f"|offset={int(continuation_offset)}"
@@ -2690,6 +2698,8 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
         "expected_handles": expected_handles or [],
         "continuation_offset": continuation_offset,
         "continuation_import_limit": continuation_import_limit,
+        "profile_refresh_limit": profile_refresh_limit,
+        "draft_preview_limit": draft_preview_limit,
     }
     durable_job = mode == "autonomous" or (
         mode in {"evidence_author_import", "evidence_author_continuation"}
@@ -2716,6 +2726,12 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
             elif mode == "autonomous":
                 result = await launch_runtime.autonomous_refill(
                     campaign_id=campaign_id, runtime_job_id=job_id,
+                )
+            elif mode == "autonomous_preview":
+                result = await launch_runtime.preview_zero_model_refill(
+                    campaign_id=campaign_id,
+                    profile_refresh_limit=profile_refresh_limit,
+                    draft_preview_limit=draft_preview_limit,
                 )
             elif mode == "evidence_author_pilot":
                 result = await launch_candidate_preview.preview_unmatched_evidence_authors(
@@ -2795,7 +2811,10 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                     )
                 except Exception:
                     pass
-            await _alert_endpoint_failure(f"/launch/runtime/{mode}", type(exc).__name__, tr)
+            if not is_read_only:
+                await _alert_endpoint_failure(
+                    f"/launch/runtime/{mode}", type(exc).__name__, tr,
+                )
 
     asyncio.create_task(_job())
     return {"ok": True, "accepted": True, "already_running": False,
@@ -2848,12 +2867,49 @@ async def launch_outcomes_reconcile(
 async def launch_runtime_autonomous_refill(
     request: Request, authorization: str = Header(default=""),
 ):
-    """按邮箱余量和活动承诺缺口后台补池；不直接发邮件。"""
+    """默认执行零模型只读演练；旧 DeepSeek 真补池需双重明确确认。"""
     _check_auth(authorization)
     payload = await _launch_json(request)
-    return await _start_launch_runtime_job(
-        campaign_id=_launch_required(payload, "campaign_id"), mode="autonomous",
+    campaign_id = _launch_required(payload, "campaign_id")
+    dry_run = payload.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        raise HTTPException(status_code=422, detail="dry_run 必须是 JSON 布尔值")
+    ai_mode = str(payload.get("ai_mode") or "zero_model").strip().lower()
+    if ai_mode not in {"zero_model", "legacy_deepseek"}:
+        raise HTTPException(
+            status_code=422, detail="ai_mode 只能是 zero_model 或 legacy_deepseek",
+        )
+    if dry_run:
+        if ai_mode != "zero_model":
+            raise HTTPException(status_code=400, detail="dry-run 只开放 zero_model 模式")
+        try:
+            profile_refresh_limit = max(
+                1, min(100, int(payload.get("profile_refresh_limit") or 30)),
+            )
+            draft_preview_limit = max(
+                1, min(50, int(payload.get("draft_preview_limit") or 20)),
+            )
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="演练数量参数必须是整数")
+        response = await _start_launch_runtime_job(
+            campaign_id=campaign_id,
+            mode="autonomous_preview",
+            profile_refresh_limit=profile_refresh_limit,
+            draft_preview_limit=draft_preview_limit,
+        )
+        return {**response, "dry_run": True, "ai_mode": "zero_model"}
+
+    if ai_mode != "legacy_deepseek":
+        raise HTTPException(status_code=403, detail="零模型真实写入尚未开放")
+    if payload.get("confirm") != "RUN_LEGACY_DEEPSEEK_REFILL":
+        raise HTTPException(
+            status_code=400,
+            detail="旧 DeepSeek 真补池需明确确认 RUN_LEGACY_DEEPSEEK_REFILL",
+        )
+    response = await _start_launch_runtime_job(
+        campaign_id=campaign_id, mode="autonomous",
     )
+    return {**response, "dry_run": False, "ai_mode": "legacy_deepseek"}
 
 
 @app.post("/launch/runtime/keyword-pilot")

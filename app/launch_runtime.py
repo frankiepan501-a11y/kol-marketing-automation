@@ -44,6 +44,14 @@ CAMPAIGN_REVIEW_VIEWS = {
     "launch-20260915-funlab-dave-ys11-5": "vewH5ud840",
     "launch-20260915-powkong-piranha-v2": "vewTsJRx9G",
 }
+CAMPAIGN_LAUNCH_DATES = {
+    "launch-20260915-funlab-dave-ys11-5": {
+        "en": "September 15", "de": "15. September", "es": "15 de septiembre",
+    },
+    "launch-20260915-powkong-piranha-v2": {
+        "en": "September 15", "de": "15. September", "es": "15 de septiembre",
+    },
+}
 
 
 def _ids(value) -> list[str]:
@@ -55,7 +63,16 @@ def _queue_key(campaign_id: str, participant_id: str) -> str:
     return f"launchq-{digest}"
 
 
-def _deterministic_fallback_draft(kol: dict, product: dict, brand: str) -> dict:
+def _launch_date_labels(campaign_id: str) -> dict[str, str]:
+    """只使用已确认的正式发布日期；绝不拿活动准备窗口猜发布日期。"""
+    return CAMPAIGN_LAUNCH_DATES.get(campaign_id) or {
+        "en": "the launch window", "de": "unseren Launch-Zeitraum",
+        "es": "la ventana de lanzamiento",
+    }
+
+
+def _deterministic_fallback_draft(kol: dict, product: dict, brand: str,
+                                  *, launch_dates: dict[str, str] | None = None) -> dict:
     """DeepSeek 余额/计费故障时的保守模板；不编造内容、不写价格或佣金。"""
     kf = kol.get("fields") or {}
     pf = product.get("fields") or {}
@@ -80,12 +97,15 @@ def _deterministic_fallback_draft(kol: dict, product: dict, brand: str) -> dict:
     safe_name = html.escape(kol_name)
     safe_product = html.escape(product_name)
     signature = "Tom from FUNLAB Team" if brand == "FUNLAB" else "Lisa @ POWKONG Team"
+    launch_dates = launch_dates or {
+        "en": "September 15", "de": "15. September", "es": "15 de septiembre",
+    }
     if language == "de":
         subject = f"{kol_name}, ein Launch-Sample für dich"[:80]
         body = (
             f"<p>Hey {safe_name},</p><p>dein Gaming-Content passt gut zu unserem kommenden "
             f"Launch. Wir möchten dir gern den {safe_product} zum Testen anbieten.</p>{link_html}"
-            "<p>Wir koordinieren die Berichterstattung rund um den 15. September. "
+            f"<p>Wir koordinieren die Berichterstattung rund um {html.escape(launch_dates['de'])}. "
             "Hättest du Interesse, ein Sample unverbindlich auszuprobieren? Wir senden es dir gern zu.</p>"
             f"<p>-- {html.escape(signature)}</p>"
         )
@@ -94,7 +114,7 @@ def _deterministic_fallback_draft(kol: dict, product: dict, brand: str) -> dict:
         body = (
             f"<p>Hey {safe_name},</p><p>tu contenido de gaming encaja bien con nuestro próximo "
             f"lanzamiento. Nos gustaría ofrecerte el {safe_product} para que lo pruebes.</p>{link_html}"
-            "<p>Estamos coordinando publicaciones alrededor del 15 de septiembre. "
+            f"<p>Estamos coordinando publicaciones alrededor de {html.escape(launch_dates['es'])}. "
             "¿Te interesaría probar una muestra sin compromiso? Estaremos encantados de enviártela.</p>"
             f"<p>-- {html.escape(signature)}</p>"
         )
@@ -103,17 +123,197 @@ def _deterministic_fallback_draft(kol: dict, product: dict, brand: str) -> dict:
         body = (
             f"<p>Hey {safe_name},</p><p>Your gaming content looks like a good fit for our upcoming "
             f"launch. We would love to offer you the {safe_product} to try.</p>{link_html}"
-            "<p>We are coordinating coverage around September 15. Would you be curious to try a sample, "
+            f"<p>We are coordinating coverage around {html.escape(launch_dates['en'])}. "
+            "Would you be curious to try a sample, "
             "with no strings attached? We would be happy to send one over.</p>"
             f"<p>-- {html.escape(signature)}</p>"
         )
     return {
         "subject": subject, "body": body,
         "highlights": "Activity filters and global duplicate-contact precheck passed.",
-        "angle": "Upcoming September 15 launch sample.",
+        "angle": f"Upcoming {launch_dates['en']} launch sample.",
         "ban_phrase_failed": False, "utm_url": links[0][1],
         "utm_id": utm.kol_utm_id(kol_name), "language": language,
         "deterministic_fallback": True,
+    }
+
+
+def validate_deterministic_launch_draft(draft: dict) -> dict:
+    """对固定活动模板做可回放检查；不调用模型。"""
+    subject = str(draft.get("subject") or "").strip()
+    body = str(draft.get("body") or "").strip()
+    plain_body = re.sub(r"<[^>]+>", " ", body)
+    errors: list[str] = []
+    if not subject or len(subject) > 80:
+        errors.append("invalid_subject")
+    if len(re.sub(r"\s+", " ", plain_body).strip()) < 80:
+        errors.append("body_too_short")
+    if re.search(r"\[(?:TBD|待填|CARRIER[^\]]*)\]|<%=|\{\{[^}]+\}\}", body, re.I):
+        errors.append("unresolved_placeholder")
+    if re.search(r"\b(?:YM\d{2,4}|SKU[-_]?[A-Z]{1,3}\d+)\b|内部(?:代号|\s*SKU)",
+                 subject + "\n" + body, re.I):
+        errors.append("internal_sku_leak")
+    links = re.findall(r'href="([^"]+)"', body, re.I)
+    if not links or any(not link.startswith("https://") for link in links):
+        errors.append("invalid_or_missing_link")
+    if enrich._check_ban_phrases(body):
+        errors.append("fabricated_content_claim")
+    return {"passed": not errors, "errors": errors, "link_count": len(links)}
+
+
+async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
+                                    profile_refresh_limit: int = 30,
+                                    draft_preview_limit: int = 20) -> dict:
+    """只读演练活动补池；固定规则、固定模板、零模型、零生产写入。"""
+    activity = await launch_evidence.get_activity(campaign_id)
+    activity_fields = activity.get("fields") or {}
+    metrics = await campaign_metrics(campaign_id, activity=activity)
+    base_result = {
+        "campaign_id": campaign_id, "read_only": True, "dry_run": True,
+        "ai_mode": "zero_model", "model_calls": 0, "writes": 0,
+        "drafts_created": 0, "emails_sent": 0, "safe_to_commit": False,
+    }
+    if (
+        ext(activity_fields.get("运行模式")) != "正式运行"
+        or ext(activity_fields.get("状态")) != "正式执行中"
+    ):
+        return {
+            **base_result, **metrics, "action": "hold", "held": True,
+            "runtime": "campaign_not_formally_active", "business_outcome": "held",
+            "reason": "活动不是正式运行/正式执行中，零模型演练保持暂停",
+        }
+    try:
+        window_end = int(activity_fields.get("窗口结束") or 0)
+    except (TypeError, ValueError):
+        window_end = 0
+    if window_end and int(time.time() * 1000) > window_end:
+        return {
+            **base_result, **metrics, "action": "stop", "stopped": True,
+            "runtime": "campaign_window_ended", "business_outcome": "stopped",
+            "reason": "活动窗口已结束；dry-run 未修改邮件授权",
+        }
+    if metrics.get("action") in {"stop", "hold"}:
+        action = metrics["action"]
+        return {
+            **base_result, **metrics,
+            ("stopped" if action == "stop" else "held"): True,
+            "runtime": f"campaign_metrics_{action}",
+            "business_outcome": "stopped" if action == "stop" else "held",
+        }
+    product_id = ext(activity_fields.get("产品主记录ID")).strip()
+    if not product_id:
+        raise LaunchRuntimeError("活动缺少产品主记录ID")
+    product = await feishu.get_record(config.T_PRODUCT, product_id)
+    brand = config.brand_from_text(ext((product.get("fields") or {}).get("品牌")))
+    if brand not in config.BRAND_CONFIG:
+        raise LaunchRuntimeError("活动产品品牌无法匹配Zoho邮箱")
+
+    quota = await _brand_quota_snapshot(brand)
+    days = max(1, min(int(buffer_days), 3))
+    target_ready = min(
+        auto_send.SEND_DAILY_CAP * 2,
+        max(auto_send.SEND_DAILY_CAP, quota["remaining"] * days),
+    )
+    inventory = await _campaign_ready_inventory(campaign_id)
+    preview = await launch_candidate_preview.preview_candidates(
+        "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
+    )
+
+    refresh_ids = list(dict.fromkeys(
+        preview.get("profile_refresh_candidate_ids") or []
+    ))[:max(0, min(int(profile_refresh_limit), 100))]
+    profile_refresh = {
+        "dry_run": True, "classification_mode": "deterministic",
+        "model_calls": 0, "writes": 0, "processed": 0,
+    }
+    if refresh_ids:
+        profile_refresh = await relabel.run_profile_records(
+            refresh_ids, dry_run=True, limit=len(refresh_ids),
+            classification_mode="deterministic",
+        )
+
+    eligible = [
+        candidate for candidate in (preview.get("candidates") or [])
+        if candidate.get("decision") == "eligible_new_cold"
+        and candidate.get("review_decision") == "通过"
+    ]
+    draft_previews = []
+    for candidate in eligible[:max(0, min(int(draft_preview_limit), 50))]:
+        contact_id = str(candidate.get("contact_id") or "").strip()
+        if not contact_id:
+            continue
+        try:
+            kol = await feishu.get_record(config.T_KOL, contact_id)
+            draft = _deterministic_fallback_draft(
+                kol, product, brand,
+                launch_dates=_launch_date_labels(campaign_id),
+            )
+            draft_previews.append({
+                "contact_id": contact_id,
+                "score": candidate.get("score"),
+                "subject": draft["subject"], "body": draft["body"],
+                "language": draft.get("language"),
+                "validation": validate_deterministic_launch_draft(draft),
+            })
+        except Exception as exc:
+            draft_previews.append({
+                "contact_id": contact_id,
+                "validation": {"passed": False, "errors": [str(exc)[:160]]},
+            })
+
+    remaining = max(0, target_ready - int(inventory.get("ready") or 0))
+    discovery = {
+        "created": 0, "would_create": 0, "model_calls": 0,
+        "shortfall_tasks": 0, "skipped": "inventory_sufficient",
+    }
+    if remaining:
+        discovery = await keyword_supply.ensure_campaign_supply(
+            campaign_id=campaign_id, activity=activity, product=product,
+            required_candidates=remaining,
+            approved_candidates=int(metrics.get("approved_new_development_24h") or 0),
+            dry_run=True, allow_ai=False,
+        )
+
+    profile_statuses = profile_refresh.get("by_status") or {}
+    profile_errors = sum(
+        int(count or 0) for status, count in profile_statuses.items() if status != "ok"
+    )
+    draft_errors = sum(
+        not bool((item.get("validation") or {}).get("passed"))
+        for item in draft_previews
+    )
+    discovery_shortfall = int(discovery.get("shortfall_tasks") or 0)
+    degraded_reasons = []
+    if profile_errors:
+        degraded_reasons.append("profile_refresh_error")
+    if draft_errors:
+        degraded_reasons.append("draft_validation_failed")
+    if not discovery.get("ok", True):
+        degraded_reasons.append("discovery_preview_failed")
+    if discovery_shortfall:
+        degraded_reasons.append("fixed_keywords_shortfall")
+
+    return {
+        **base_result,
+        "brand": brand, "metrics": metrics, "quota": quota,
+        "target_ready_inventory": target_ready,
+        "inventory_before": int(inventory.get("ready") or 0),
+        "preview_summary": preview.get("summary") or {},
+        "eligible_template_candidates": len(eligible),
+        "profile_refresh": profile_refresh,
+        "discovery": discovery,
+        "draft_preview_count": len(draft_previews),
+        "draft_previews": draft_previews,
+        "readiness": {
+            "status": "degraded" if degraded_reasons else "ready",
+            "reasons": degraded_reasons,
+            "profile_error_count": profile_errors,
+            "draft_validation_error_count": draft_errors,
+            "discovery_shortfall_tasks": discovery_shortfall,
+        },
+        "business_outcome": (
+            "preview_degraded" if degraded_reasons else "preview_ready"
+        ),
     }
 
 
@@ -1269,6 +1469,7 @@ def runtime_job_status(result: dict | None) -> str:
     result = result or {}
     if result.get("business_outcome") in {
         "supply_blocked", "outcome_reconcile_failed", "evidence_continuation_failed",
+        "preview_degraded",
     }:
         return "degraded"
     if (result.get("outcome_reconcile") or {}).get("errors"):

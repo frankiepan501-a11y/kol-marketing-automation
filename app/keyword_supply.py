@@ -619,7 +619,8 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
                                  dry_run: bool = False,
                                  max_tasks: int | None = None,
                                  structured_pilot: bool = False,
-                                 pilot_version: str = "v1") -> dict:
+                                 pilot_version: str = "v1",
+                                 allow_ai: bool = True) -> dict:
     """为单个活动补确定性 YouTube 发现任务；只建爬虫任务，不直接创建 KOL。"""
     rows = await feishu.fetch_all_records(T_CRAWLER)
     fields = activity.get("fields") or {}
@@ -746,6 +747,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         "quality_gate": quality_gate,
         "quality_filters_lowered": False,
         "uncovered_target_countries": uncovered_target_countries,
+        "model_calls": 0,
     }
     if quality_gate_enabled and quality_gate["mode"] == "cooldown":
         return {
@@ -817,12 +819,13 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
                 "curated_fallback"
                 if fallback_added == len(candidates) else "mixed_curated_fallback"
             )
-    if need and theme == "piranha":
+    if need and theme == "piranha" and allow_ai:
         prompt = f"""你是海外游戏KOL发现助手。为{theme}主题新品活动补充YouTube创作者搜索词。
 目标语言只能从 {languages} 选择。搜索对象必须是Nintendo/Switch、Mario收藏、主机游戏房或游戏硬件评测创作者；
 不要生成产品购买词、店铺词、官方频道词，不要重复这些词：{sorted(existing_keywords)[-80:]}。
 返回JSON：{{"keywords":[{{"language":"en","keyword":"..."}}]}}，至少{max(need * 2, need)}条。"""
         try:
+            common_result["model_calls"] += 1
             generated = await deepseek.chat_json(prompt, max_tokens=1200, temperature=0.6)
             raw_words = (generated or {}).get("keywords") or []
             for index, item in enumerate(raw_words):
@@ -865,6 +868,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
     if need and generation_warning:
         generation_error = generation_warning
 
+    skipped = "fixed_keywords_exhausted" if need and not allow_ai else ""
     if dry_run:
         return {
             "ok": True, "created": 0, "would_create": len(candidates),
@@ -876,6 +880,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             "keyword_source": keyword_source, "shortfall_tasks": need,
             "generation_error": generation_error,
             "generation_warning": generation_warning,
+            "skipped": skipped,
             **common_result,
         }
 
@@ -922,6 +927,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         "keyword_source": keyword_source, "shortfall_tasks": need,
         "generation_error": generation_error,
         "generation_warning": generation_warning,
+        "skipped": skipped,
         **common_result,
     }
 

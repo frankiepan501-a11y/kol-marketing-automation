@@ -63,6 +63,124 @@ class LaunchRouteTests(unittest.TestCase):
 
         self.assertEqual(400, ctx.exception.status_code)
 
+    def test_autonomous_refill_defaults_to_zero_model_background_dry_run(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            preview_result = {
+                "read_only": True, "dry_run": True, "ai_mode": "zero_model",
+                "model_calls": 0, "writes": 0, "drafts_created": 0, "emails_sent": 0,
+            }
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", False,
+            ), patch.object(
+                main.launch_runtime, "preview_zero_model_refill",
+                new=AsyncMock(return_value=preview_result),
+            ) as preview:
+                accepted = await main.launch_runtime_autonomous_refill(
+                    FakeRequest({"campaign_id": "c1"}), authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+                status = await main.get_launch_runtime_job(
+                    accepted["job_id"], authorization="Bearer secret",
+                )
+            main._launch_runtime_jobs.clear()
+            return accepted, status, preview
+
+        accepted, status, preview = asyncio.run(exercise())
+
+        self.assertTrue(accepted["dry_run"])
+        self.assertEqual("zero_model", accepted["ai_mode"])
+        self.assertTrue(status["result"]["read_only"])
+        preview.assert_awaited_once_with(
+            campaign_id="c1", profile_refresh_limit=30, draft_preview_limit=20,
+        )
+
+    def test_autonomous_refill_rejects_unconfirmed_real_legacy_mode(self):
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.launch_runtime_autonomous_refill(
+                    FakeRequest({
+                        "campaign_id": "c1", "dry_run": False,
+                        "ai_mode": "legacy_deepseek",
+                    }),
+                    authorization="Bearer secret",
+                ))
+
+        self.assertEqual(400, ctx.exception.status_code)
+
+    def test_zero_model_preview_error_never_sends_alert_card(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", False,
+            ), patch.object(
+                main.launch_runtime, "preview_zero_model_refill",
+                new=AsyncMock(side_effect=RuntimeError("read failed")),
+            ), patch.object(
+                main, "_alert_endpoint_failure", new=AsyncMock(),
+            ) as alert:
+                accepted = await main.launch_runtime_autonomous_refill(
+                    FakeRequest({"campaign_id": "c1"}), authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+                status = await main.get_launch_runtime_job(
+                    accepted["job_id"], authorization="Bearer secret",
+                )
+            main._launch_runtime_jobs.clear()
+            return status, alert
+
+        status, alert = asyncio.run(exercise())
+
+        self.assertEqual("error", status["status"])
+        alert.assert_not_awaited()
+
+    def test_zero_model_preview_different_limits_create_distinct_jobs(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            gate = asyncio.Event()
+
+            async def preview(**_kwargs):
+                await gate.wait()
+                return {"read_only": True, "writes": 0, "model_calls": 0}
+
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", False,
+            ), patch.object(
+                main.launch_runtime, "preview_zero_model_refill", side_effect=preview,
+            ):
+                first = await main.launch_runtime_autonomous_refill(
+                    FakeRequest({
+                        "campaign_id": "c1", "profile_refresh_limit": 10,
+                        "draft_preview_limit": 5,
+                    }), authorization="Bearer secret",
+                )
+                second = await main.launch_runtime_autonomous_refill(
+                    FakeRequest({
+                        "campaign_id": "c1", "profile_refresh_limit": 20,
+                        "draft_preview_limit": 10,
+                    }), authorization="Bearer secret",
+                )
+                gate.set()
+                await asyncio.sleep(0)
+            main._launch_runtime_jobs.clear()
+            return first, second
+
+        first, second = asyncio.run(exercise())
+
+        self.assertNotEqual(first["job_id"], second["job_id"])
+        self.assertFalse(second["already_running"])
+
+    def test_zero_model_preview_rejects_non_integer_limits(self):
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.launch_runtime_autonomous_refill(
+                    FakeRequest({
+                        "campaign_id": "c1", "profile_refresh_limit": "many",
+                    }), authorization="Bearer secret",
+                ))
+
+        self.assertEqual(422, ctx.exception.status_code)
+
     def test_evidence_author_import_defaults_to_background_dry_run(self):
         seeds = [
             {"platform": "YouTube", "handle": "MekelKasanova", "creator_id": "",
@@ -559,7 +677,11 @@ class LaunchRouteTests(unittest.TestCase):
                 new=AsyncMock(return_value={"inventory_after": 40}),
             ):
                 accepted = await main.launch_runtime_autonomous_refill(
-                    FakeRequest({"campaign_id": "c1"}), authorization="Bearer secret",
+                    FakeRequest({
+                        "campaign_id": "c1", "dry_run": False,
+                        "ai_mode": "legacy_deepseek",
+                        "confirm": "RUN_LEGACY_DEEPSEEK_REFILL",
+                    }), authorization="Bearer secret",
                 )
                 await asyncio.sleep(0)
                 main._launch_runtime_jobs.clear()
@@ -610,7 +732,11 @@ class LaunchRouteTests(unittest.TestCase):
                 new=AsyncMock(return_value={"business_outcome": "supply_in_progress"}),
             ) as refill:
                 accepted = await main.launch_runtime_autonomous_refill(
-                    FakeRequest({"campaign_id": "c1"}), authorization="Bearer secret",
+                    FakeRequest({
+                        "campaign_id": "c1", "dry_run": False,
+                        "ai_mode": "legacy_deepseek",
+                        "confirm": "RUN_LEGACY_DEEPSEEK_REFILL",
+                    }), authorization="Bearer secret",
                 )
                 await asyncio.sleep(0)
             main._launch_runtime_jobs.clear()
@@ -643,7 +769,11 @@ class LaunchRouteTests(unittest.TestCase):
                 main.launch_runtime, "autonomous_refill", new=AsyncMock(return_value=blocked),
             ):
                 accepted = await main.launch_runtime_autonomous_refill(
-                    FakeRequest({"campaign_id": "c1"}), authorization="Bearer secret",
+                    FakeRequest({
+                        "campaign_id": "c1", "dry_run": False,
+                        "ai_mode": "legacy_deepseek",
+                        "confirm": "RUN_LEGACY_DEEPSEEK_REFILL",
+                    }), authorization="Bearer secret",
                 )
                 await asyncio.sleep(0)
                 status = await main.get_launch_runtime_job(

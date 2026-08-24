@@ -76,6 +76,47 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         self.assertNotIn("competitor", {item["source"] for item in disabled})
         self.assertIn("competitor", {item["source"] for item in enabled})
 
+    def test_zero_model_mode_reports_keyword_shortfall_without_calling_deepseek(self):
+        exhausted = set(keyword_supply._CAMPAIGN_KEYWORDS["piranha"]["en"])
+        exhausted.update(keyword_supply._CAMPAIGN_FALLBACK_KEYWORDS["piranha"]["en"])
+        activity = {"fields": {
+            "活动目标语言": ["en"], "竞品证据模式": "不使用",
+            "竞品分析状态": "不适用",
+        }}
+        product = {"fields": {
+            "产品英文名": "POWKONG Piranha Plant 2 Dock",
+            "品类": "底座", "适配IP": ["Super Mario", "Piranha Plant"],
+            "适配主机": ["Switch 2"],
+        }}
+        exhausted.update(
+            item["keyword"] for item in keyword_supply._piranha_seven_layer_candidates(
+                activity_fields=activity["fields"], product_fields=product["fields"],
+                languages=["en"], existing_keywords=exhausted, limit=1000,
+            )
+        )
+        used = [{"fields": {
+            "任务名": "[活动补池:campaign1] YT KOL - " + word,
+            "关键词列表": word, "爬虫类型": "KOL-YouTube",
+            "任务状态": "3-已完成", "筛选-语言": ["en"],
+        }} for word in exhausted]
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=used),
+        ), patch.object(
+            keyword_supply.deepseek, "chat_json", new=AsyncMock(),
+        ) as model, patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(),
+        ) as write:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, dry_run=True, allow_ai=False,
+            ))
+
+        self.assertEqual(0, result["model_calls"])
+        self.assertGreater(result["shortfall_tasks"], 0)
+        self.assertEqual("fixed_keywords_exhausted", result["skipped"])
+        model.assert_not_awaited()
+        write.assert_not_awaited()
+
     def test_piranha_uses_curated_fallback_when_dynamic_generation_is_unavailable(self):
         activity = {"fields": {"活动目标语言": ["en"]}}
         product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}

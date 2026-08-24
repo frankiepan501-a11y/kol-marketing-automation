@@ -355,6 +355,38 @@ class RelabelProfileTests(unittest.TestCase):
         self.assertEqual(1, result["by_status"]["processing_error"])
         self.assertEqual(1, result["by_status"]["no_channel_id"])
 
+    def test_deterministic_profile_mode_never_calls_deepseek_or_writes(self):
+        record = {"record_id": "kol1", "fields": {
+            "账号名": "Switch Reviewer", "合作状态": "未建联",
+            "主链接": {"link": "https://youtube.com/channel/UC123"},
+            "YouTube频道ID": "UC123", "粉丝数": 12000,
+        }}
+        videos = [
+            {"title": "Nintendo Switch 2 Dock Review", "published_at": NOW_MS - DAY_MS},
+            {"title": "Mario Kart Controller Setup", "published_at": NOW_MS - 2 * DAY_MS},
+            {"title": "Zelda Hardware Comparison", "published_at": NOW_MS - 3 * DAY_MS},
+        ]
+
+        with patch.object(
+            relabel.feishu, "get_record", new=AsyncMock(return_value=record),
+        ), patch.object(
+            relabel, "fetch_recent_videos", new=AsyncMock(return_value=videos),
+        ), patch.object(
+            relabel.deepseek, "chat_json", new=AsyncMock(),
+        ) as model, patch.object(
+            relabel.feishu, "update_record", new=AsyncMock(),
+        ) as write:
+            result = asyncio.run(relabel.run_profile_records(
+                ["kol1"], dry_run=True, classification_mode="deterministic",
+            ))
+
+        self.assertEqual("deterministic", result["classification_mode"])
+        self.assertEqual(0, result["model_calls"])
+        self.assertEqual(0, result["writes"])
+        self.assertEqual("deterministic_fallback", result["results"][0]["classification_source"])
+        model.assert_not_awaited()
+        write.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

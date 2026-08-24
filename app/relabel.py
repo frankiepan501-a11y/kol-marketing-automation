@@ -805,7 +805,8 @@ def plan_profile_update(fields: dict, recent_videos: list[dict], classification:
 
 
 async def relabel_one_kol(record: dict, *, dry_run: bool = False,
-                          now_ms: int | None = None) -> dict:
+                          now_ms: int | None = None,
+                          classification_mode: str = "deepseek") -> dict:
     """重打一个 KOL 的标签. 返回 {record_id, status, scrape_ok, classify_ok, titles_n, ...}"""
     rid = record["record_id"]
     f = record["fields"]
@@ -849,7 +850,10 @@ async def relabel_one_kol(record: dict, *, dry_run: bool = False,
             channel_id=cid, titles_n=len(titles),
         )
 
-    # 2. AI 分类
+    if classification_mode not in {"deepseek", "deterministic"}:
+        raise ValueError("classification_mode must be deepseek or deterministic")
+
+    # 2. 内容分类。活动零模型演练使用可回放的确定性规则；旧调用保持 DeepSeek 行为。
     handle = ""
     m = re.search(r"@([\w.\-]+)", main_link)
     if m:
@@ -860,7 +864,12 @@ async def relabel_one_kol(record: dict, *, dry_run: bool = False,
     except (TypeError, ValueError):
         sub = 0
 
-    cls = await classify_v2(name, handle, description, sub, titles)
+    if classification_mode == "deterministic":
+        cls = deterministic_profile_classification(
+            name=name, description=description, recent_titles=titles,
+        )
+    else:
+        cls = await classify_v2(name, handle, description, sub, titles)
     if cls.get("type") == "不确定" or "deepseek_err" in cls.get("reason", ""):
         update_fields = plan_profile_update(f, videos, cls, now_ms=now_ms)
         update_fields.update({"标签版本": "待手工校验", "资料可用状态": "缺资料"})
@@ -883,6 +892,7 @@ async def relabel_one_kol(record: dict, *, dry_run: bool = False,
         update_fields=update_fields, write_error=write_error,
         channel_id=cid, titles_n=len(titles), new_styles=styles, new_tags=tags,
         classify_reason=cls.get("reason", "")[:120],
+        classification_source=cls.get("classification_source", classification_mode),
     )
 
 
@@ -913,7 +923,8 @@ def _profile_result(record_id: str, name: str, *, intended_status: str,
 
 
 async def run_profile_records(record_ids: list[str], *, dry_run: bool = True,
-                              limit: int = 100) -> dict:
+                              limit: int = 100,
+                              classification_mode: str = "deepseek") -> dict:
     """按明确记录 ID 后台刷新画像；默认只演练，不写主表。"""
     unique_ids = list(dict.fromkeys(str(value).strip() for value in record_ids if str(value).strip()))
     unique_ids = unique_ids[:max(1, min(int(limit), 100))]
@@ -923,7 +934,10 @@ async def run_profile_records(record_ids: list[str], *, dry_run: bool = True,
         async with semaphore:
             try:
                 record = await feishu.get_record(config.T_KOL, record_id)
-                return await relabel_one_kol(record, dry_run=dry_run)
+                return await relabel_one_kol(
+                    record, dry_run=dry_run,
+                    classification_mode=classification_mode,
+                )
             except Exception as exc:
                 return {
                     "record_id": record_id, "name": "", "status": "processing_error",
@@ -937,7 +951,9 @@ async def run_profile_records(record_ids: list[str], *, dry_run: bool = True,
     for result in results:
         counts[result["status"]] = counts.get(result["status"], 0) + 1
     return {
-        "dry_run": dry_run, "requested": len(unique_ids), "processed": len(results),
+        "dry_run": dry_run, "classification_mode": classification_mode,
+        "model_calls": 0 if classification_mode == "deterministic" else None,
+        "requested": len(unique_ids), "processed": len(results),
         "writes": sum(bool(result.get("write_applied")) for result in results),
         "by_status": counts, "results": results,
     }
