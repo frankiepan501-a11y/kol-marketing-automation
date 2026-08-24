@@ -26,6 +26,9 @@
 ## 运行
 
 ```powershell
+# 安装 Python 侧依赖；FFmpeg 和 lark-cli 仍按各自安装方式放入 PATH。
+python.exe -m pip install -r ./tools/media_archive_worker/requirements-worker.txt
+
 # 只读检查工具版本、飞书视频目录权限和云端健康状态
 pwsh -File ./tools/media_archive_worker/probe.ps1
 
