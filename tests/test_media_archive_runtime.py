@@ -76,6 +76,20 @@ def test_parse_cli_json_accepts_a_progress_line_before_json():
     assert value["file_token"] == "file123"
 
 
+def test_parse_cli_json_keeps_the_outer_response_when_it_contains_nested_objects():
+    text = (
+        '[page 1] fetching...\n'
+        '{"ok":true,"identity":{"type":"bot"},'
+        '"data":{"files":[{"name":"FUNLAB","type":"folder","token":"folder-1"}]},'
+        '"_notice":{"risk":"read"}}\n'
+    )
+
+    value = runtime.parse_cli_json(text)
+
+    assert value["ok"] is True
+    assert value["data"]["files"][0]["token"] == "folder-1"
+
+
 def test_drive_upload_reuses_exact_existing_file_without_second_upload(tmp_path):
     media_file = tmp_path / "YT-KOL-Product-01.mp4"
     media_file.write_bytes(b"video")

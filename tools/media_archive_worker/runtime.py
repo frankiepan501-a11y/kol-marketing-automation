@@ -24,25 +24,27 @@ import httpx
 from . import worker
 
 
-WORKER_VERSION = "0.2.1"
+WORKER_VERSION = "0.2.2"
 
 
 def parse_cli_json(text: str) -> dict:
-    """Extract the last JSON object even when a CLI prints progress first."""
+    """Extract the complete JSON response even when a CLI prints progress first."""
     decoder = json.JSONDecoder()
-    values: list[dict] = []
+    values: list[tuple[int, dict]] = []
     for index, character in enumerate(text or ""):
         if character != "{":
             continue
         try:
-            value, _ = decoder.raw_decode(text[index:])
+            value, end = decoder.raw_decode(text[index:])
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
-            values.append(value)
+            values.append((end, value))
     if not values:
         raise RuntimeError(f"command returned no JSON object: {(text or '')[-500:]}")
-    return values[-1]
+    # Nested objects also decode successfully when scanning from every ``{``.
+    # The outer CLI envelope is the widest decoded object, not the last one.
+    return max(values, key=lambda item: item[0])[1]
 
 
 def _number(value: Any) -> int:
