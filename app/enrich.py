@@ -44,6 +44,29 @@ LINK_LABELS = {
 
 KOL_COLD_TEMPLATE_VERSION = "kol-cold-template-v1"
 
+_ENGLISH_CATEGORY_NAMES = {
+    "手柄": "controller",
+    "游戏手柄": "controller",
+    "底座": "dock",
+    "充电底座": "charging dock",
+    "收纳包": "carrying case",
+    "保护壳": "protective case",
+    "摇杆帽": "thumb grips",
+}
+
+
+def _english_category_name(value: str) -> str:
+    """Return safe English category copy for the fixed English template."""
+    raw = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not raw:
+        return "gaming accessory"
+    mapped = _ENGLISH_CATEGORY_NAMES.get(raw.casefold()) or _ENGLISH_CATEGORY_NAMES.get(raw)
+    if mapped:
+        return mapped
+    if re.search(r"[\u3400-\u9fff]", raw) or not re.search(r"[A-Za-z]", raw):
+        return "gaming accessory"
+    return raw
+
 
 def _build_links_block(pf, brand, p_name, kol_name, lang, _utm):
     """构建邮件产品链接段落: 任务栏填了几条(亚马逊/独立站)就生成几行 <p>👉<a>...</a></p>,
@@ -66,7 +89,7 @@ def _build_template_draft(kol_record: dict, product: dict, brand: str,
     pf = product["fields"]
     kol_name = ext(k.get("账号名")).strip() or "there"
     p_name = ext(pf.get("产品英文名")).strip()
-    p_cat = ext(pf.get("品类")).strip() or "gaming accessory"
+    p_cat = _english_category_name(ext(pf.get("品类")))
     clean_email, email_reason = feishu.clean_email(ext(k.get("邮箱")))
     if not clean_email:
         return {"skip": f"无有效邮箱: {email_reason}"}
@@ -81,17 +104,20 @@ def _build_template_draft(kol_record: dict, product: dict, brand: str,
     safe_name = html.escape(kol_name, quote=True)
     safe_product = html.escape(p_name, quote=True)
     safe_category = html.escape(p_cat, quote=True)
-    safe_brand = html.escape(brand, quote=True)
     safe_signature = html.escape(signature, quote=True)
-    benefits = [html.escape(ext(pf.get(key)).strip(), quote=True)
-                for key in ("卖点1", "卖点2", "卖点3") if ext(pf.get(key)).strip()]
+    benefits = [
+        html.escape(value, quote=True)
+        for key in ("卖点1", "卖点2", "卖点3")
+        if (value := ext(pf.get(key)).strip())
+        and not re.search(r"[\u3400-\u9fff]", value)
+    ]
     benefit_text = ", ".join(benefits[:3]) or "a player-friendly design"
     subject_name = re.sub(r"[\r\n]+", " ", kol_name).strip()
     subject_category = re.sub(r"[\r\n]+", " ", p_cat).strip()
     subject = f"{subject_name}, a {subject_category} for your setup"[:55]
     body = (
         f"<p>Hey {safe_name},</p>"
-        f"<p>I'm {safe_signature} from {safe_brand}. We're introducing the "
+        f"<p>I'm {safe_signature}. We're introducing the "
         f"{safe_product}, a {safe_category} built for everyday gaming setups. "
         f"Its main features are {benefit_text}.</p>"
         f"{links_block}"
@@ -102,6 +128,7 @@ def _build_template_draft(kol_record: dict, product: dict, brand: str,
     )
     validation = _validate_template_draft(
         subject, body, links_block, kol_name, _product_internal_ids(pf),
+        expected_lang="en",
     )
     return {
         "subject": subject,
@@ -129,13 +156,23 @@ def _product_internal_ids(product_fields: dict) -> list[str]:
 
 
 def _validate_template_draft(subject: str, body: str, links_block: str,
-                             kol_name: str, internal_ids=()) -> dict:
+                             kol_name: str, internal_ids=(),
+                             expected_lang: str = "") -> dict:
     reasons = []
     combined = f"{subject}\n{body}"
     if not subject.strip() or not body.strip():
         reasons.append("empty_content")
     if kol_name not in combined:
         reasons.append("missing_contact_name")
+    if expected_lang == "en":
+        copy_without_contact_name = combined.replace(kol_name, "")
+        if re.search(r"[\u3400-\u9fff]", copy_without_contact_name):
+            reasons.append("mixed_language_copy")
+    if re.search(
+        r"\bfrom\s+(FUNLAB|POWKONG)\b[^.!?]{0,80}\bfrom\s+\1\b",
+        combined, re.I,
+    ):
+        reasons.append("repeated_brand_intro")
     if re.search(
         r"\[(?:TBD|待填|CARRIER|TRACKING|ETA|ADDRESS|PRICE|QUANTITY|"
         r"CREATOR|KOL|NAME|PRODUCT|LINK|URL|XXX)[^\]]*\]|<%=|\{\{",
@@ -713,6 +750,7 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
             validation = _validate_template_draft(
                 r.get("email_subject", ""), body, links_block, kol_name,
                 _product_internal_ids(pf),
+                expected_lang=lang,
             )
             return {
                 "subject": r.get("email_subject", ""), "body": body,
@@ -754,6 +792,7 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
     output_validation = _validate_template_draft(
         r.get("email_subject", ""), body, links_block, kol_name,
         _product_internal_ids(pf),
+        expected_lang=lang,
     )
     if output_validation["passed"] and not ban_phrase_failed:
         model_budget.record_success()

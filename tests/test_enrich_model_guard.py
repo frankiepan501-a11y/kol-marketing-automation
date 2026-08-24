@@ -210,6 +210,32 @@ class EnrichTemplateModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["passed"])
         self.assertIn("internal_sku", result["error"])
 
+    def test_english_template_translates_category_and_does_not_repeat_brand(self):
+        product = _product()
+        product["fields"]["品类"] = "手柄"
+        generated = enrich._build_template_draft(
+            _kol(), product, "FUNLAB", "Tom from FUNLAB Team", {}, 90,
+        )
+
+        self.assertTrue(generated["template_validation"]["passed"])
+        self.assertIn("a controller for your setup", generated["subject"])
+        self.assertIn("I'm Tom from FUNLAB Team.", generated["body"])
+        self.assertNotIn("from FUNLAB Team from FUNLAB", generated["body"])
+        self.assertNotIn("手柄", generated["body"])
+
+    def test_english_validator_rejects_mixed_language_and_repeated_brand_intro(self):
+        link = '<p><a href="https://example.com/controller">See it</a></p>'
+        checked = enrich._validate_template_draft(
+            "Creator, a controller for your setup",
+            "<p>Hey Creator,</p><p>I'm Tom from FUNLAB Team from FUNLAB. "
+            f"A 手柄 for you.</p>{link}",
+            link, "Creator", expected_lang="en",
+        )
+
+        self.assertFalse(checked["passed"])
+        self.assertIn("mixed_language_copy", checked["reasons"])
+        self.assertIn("repeated_brand_intro", checked["reasons"])
+
     def test_validator_rejects_generic_placeholders_price_promises_and_fake_reviews(self):
         link = '<p><a href="https://example.com/controller">See it</a></p>'
         for unsafe in ("[CREATOR]", "20% discount", "I read your latest review"):
