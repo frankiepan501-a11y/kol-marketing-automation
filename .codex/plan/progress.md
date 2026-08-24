@@ -581,3 +581,5 @@
 - 工作流重新激活后，21:35自然execution `1004081`继续准时受理任务`launchruntime-d1340d282a17`；最终`success/supply_cooling_down`，资料写入15、待审仍为15，草稿0、邮件0。证明active恢复能持续触发，不是一次性生效。
 - 21:27独立审计execution `1004032`为success：Dave=`business_result_ok/supply_in_progress`，食人花当时为`running_within_expected_window`；其后直接回读食人花任务已success。自治工作流最终回读`active=true / Asia/Shanghai / 4 nodes / 2 connections`，Dave每小时00分，食人花每小时05/20/35/50分。
 - 当前P0共同技术阻塞已解除；唯一发送中心、额度、活动锁和重复触达规则未改。剩余业务瓶颈是两活动可发库存仍为0、自动通过为0，需要现有审核/爬虫链把待审候选转成合格草稿；承诺与实际上稿仍为0，继续列P1结果闭环。
+- 2026-08-25待审旁路P0已上线：commit `80d4f99` / deployment `6a8c87cdba5938b757238ed7`，n8n `uvBfJBtGH93FPa6w` 保持active且未手动触发。食人花 execution `1006003` → job `launchruntime-2e60616da618` 成功，18名待审不阻塞，清退10条永久失败旧对象并创建5个发现任务，筛选标准未降低。
+- Dave execution `1006231` → job `launchruntime-474ed084e29b` 完成，16名待审没有阻止系统刷新16份画像、扫描20名证据作者和清退6条永久失败旧对象；但七层发现词已耗尽且当日模型预算60/60，新增合格/草稿/发现任务均为0，业务仍为 `supply_blocked`。该剩余阻塞与人审无关，需单独补Dave备用词供给。

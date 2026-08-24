@@ -43,6 +43,8 @@
 
 ## 生产状态与下一步
 
-- 本次没有部署、没有手动触发补池、没有发送邮件，也没有改n8n工作流开关。
-- 部署前应只读确认两个活动没有正在运行的后台补池job，再发布新版本。
-- 发布后等待自然cron，验收：待审人数可保留；自动通过新增数、可发库存、实际发信数继续增长；`quality_filters_lowered=false`。
+- 已部署 commit `80d4f99`，Zeabur deployment `6a8c87cdba5938b757238ed7` 为 `RUNNING`，`/health=status ok`。
+- n8n工作流 `uvBfJBtGH93FPa6w` 全程保持 `active=true`；没有手动触发补池、没有额外发送消息或邮件，也没有修改n8n和生产环境变量。
+- 食人花首个有效自然轮次：execution `1006003` → job `launchruntime-2e60616da618` → `success/supply_in_progress`。18名待审继续留在旁路，不占有效库存；本轮清退10条永久失败旧对象并创建5个七层发现任务，`volume_priority=true`、`quality_cooldown_overridden=true`、`quality_filters_lowered=false`。证明待审不会阻塞继续发现。
+- Dave首个有效自然轮次：execution `1006231` → job `launchruntime-474ed084e29b` → `degraded/supply_blocked`。16名待审被保留在旁路，系统仍继续刷新16份画像、扫描20名NYXI证据作者并清退6条永久失败旧对象，说明本次“待审不阻塞”修复生效；但没有新增合格候选、草稿或发现任务。
+- Dave剩余阻塞与人审无关：现有七层发现词已经全部使用，确定性词库无法再生成4个新词；当日模型预算也已用满，无法补充新词，因此可发库存仍为0。下一步应单独补充Dave备用词供给，不能把这次零产出归因于等待审核。

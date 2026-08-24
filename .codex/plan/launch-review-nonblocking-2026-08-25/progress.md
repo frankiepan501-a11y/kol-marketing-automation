@@ -24,3 +24,7 @@
 - Spec与Standards最终增量复审均PASS，无P0/P1/P2；待审隔离、硬筛选、发送中心与raw证书闸均未回退。当前只剩生产部署与自然cron验收，仍待明确授权。
 - 用户已明确授权P0生产部署。部署前回读确认n8n工作流启用且活动版本一致；Dave与食人花均无运行中后台任务。
 - 推送前发现远端master已前进到`6d5d1ca`（媒体归档项目），保护检查拒绝覆盖；本分支无冲突rebase到最新生产基线后重跑：聚焦82项通过，全仓763项＋23个子样例通过，唯一失败仍为既有Zeabur watchdog旧日期fixture。
+- commit `80d4f99` 已部署为 Zeabur deployment `6a8c87cdba5938b757238ed7`，状态 `RUNNING`，`/health=status ok`；n8n `uvBfJBtGH93FPa6w` 全程保持 active，没有手动触发或额外发送。
+- 食人花02:20自然 execution `1006003` 受理 job `launchruntime-2e60616da618`，最终 `success/supply_in_progress`：18名待审保留旁路、永久失败清退10条、创建5个发现任务，未降低筛选标准。
+- Dave03:00自然 execution `1006231` 受理 job `launchruntime-474ed084e29b`，最终 `degraded/supply_blocked`：16名待审未阻塞系统继续刷新16份画像和扫描20名证据作者；新增合格0、草稿0、发现任务0，`quality_filters_lowered=false`。
+- Dave独立阻塞已定位：七层确定性发现词全部用过，仍缺4个未使用词；当日模型预算60/60，无法生成补充词。P0“待审不阻塞”生产验收完成，但Dave业务供给仍需单独补备用词。
