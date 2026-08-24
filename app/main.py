@@ -2318,8 +2318,11 @@ async def deepseek_balance_check(authorization: str = Header(default="")):
     import httpx
     try:
         async with httpx.AsyncClient(timeout=20.0) as cli:
+            api_key = config.KOL_DEEPSEEK_API_KEY.strip()
+            if not api_key:
+                raise RuntimeError("missing KOL_DEEPSEEK_API_KEY")
             r = await cli.get("https://api.deepseek.com/user/balance",
-                              headers={"Authorization": f"Bearer {config.DEEPSEEK_API_KEY}"})
+                              headers={"Authorization": f"Bearer {api_key}"})
             r.raise_for_status()
             d = r.json()
         avail = bool(d.get("is_available"))

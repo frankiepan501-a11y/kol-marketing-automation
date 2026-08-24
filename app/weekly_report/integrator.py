@@ -1,6 +1,6 @@
 """AI 整合层. 把 collected_data dict 整合成 12 sections markdown.
 
-- model: DeepSeek Chat (env DEEPSEEK_API_KEY, 已有于 kol-auto)
+- model: DeepSeek Chat (env KOL_DEEPSEEK_API_KEY)
   Phase 3.1 用 DeepSeek 起步, Phase 3.2 可换 Claude (新加 ANTHROPIC_API_KEY)
 - system prompt: hardcode 12 sections 结构 + 数据缺口规则 (不去拉飞书 wiki - 减少依赖)
 - user prompt: 时间区间 + collected_data JSON (只指标, 无 raw orders) + gaps 列表
@@ -95,9 +95,9 @@ SYSTEM_PROMPT = """你是双品牌 (Powkong + FUNLAB) 独立站运营的周报�
 
 async def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 8000) -> str:
     """同步调 DeepSeek chat. 返回 raw markdown text."""
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    api_key = os.environ.get("KOL_DEEPSEEK_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY env 未设")
+        raise RuntimeError("KOL_DEEPSEEK_API_KEY env 未设")
 
     body = {
         "model": DEFAULT_MODEL,

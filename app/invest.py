@@ -414,8 +414,9 @@ async def fetch_posts(limit: int = 10, lookback_hours: int = 30) -> dict[str, An
 
 
 async def _call_deepseek(system_prompt: str, user_prompt: str, max_tokens: int = 2500) -> str:
-    if not config.DEEPSEEK_API_KEY:
-        raise InvestConfigError("missing DEEPSEEK_API_KEY")
+    api_key = config.MANUAL_TOOLS_DEEPSEEK_API_KEY.strip()
+    if not api_key:
+        raise InvestConfigError("missing MANUAL_TOOLS_DEEPSEEK_API_KEY")
     payload = {
         "model": os.environ.get("INVEST_AI_MODEL", "deepseek-chat"),
         "messages": [
@@ -428,7 +429,7 @@ async def _call_deepseek(system_prompt: str, user_prompt: str, max_tokens: int =
     async with httpx.AsyncClient(timeout=120.0) as cli:
         r = await cli.post(
             "https://api.deepseek.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {config.DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json=payload,
         )
     if r.status_code >= 400:
@@ -887,7 +888,7 @@ async def invest_config_check(authorization: str = Header(default="")):
     keys = [
         "X_BEARER_TOKEN",
         "TWITTER_BEARER_TOKEN",
-        "DEEPSEEK_API_KEY",
+        "MANUAL_TOOLS_DEEPSEEK_API_KEY",
         "FEISHU_INVEST_ASSISTANT_APP_ID",
         "FEISHU_INVEST_ASSISTANT_APP_SECRET",
         "INVEST_NOTIFY_UNION_ID",

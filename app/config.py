@@ -125,8 +125,11 @@ REPLY_EXTRA_ALIASES = {
         "marketing@fireflyfunlab.com").split(",") if a.strip()],
 }
 
-# DeepSeek
-DEEPSEEK_API_KEY = env("DEEPSEEK_API_KEY", required=True)
+# DeepSeek keys are isolated by business channel.  Never re-introduce a shared
+# DEEPSEEK_API_KEY here: this public repository previously leaked that key via
+# .env.example and one compromised channel could spend the whole account.
+KOL_DEEPSEEK_API_KEY = env("KOL_DEEPSEEK_API_KEY", "")
+MANUAL_TOOLS_DEEPSEEK_API_KEY = env("MANUAL_TOOLS_DEEPSEEK_API_KEY", "")
 
 # KOL enrich hybrid mode: routine English cold drafts are deterministic templates.
 # DeepSeek is reserved for localization/high-value exceptions and bounded at three levels.
