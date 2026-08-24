@@ -277,11 +277,11 @@ class LarkCliDrive:
         self.executable = executable
         self.profile = profile
 
-    async def _run(self, *args: str) -> dict:
+    async def _run(self, *args: str, cwd: Path | None = None) -> dict:
         command = [self.executable, *args, "--as", "bot", "--format", "json"]
         if self.profile:
             command.extend(["--profile", self.profile])
-        return parse_cli_json(await _run_process(command))
+        return parse_cli_json(await _run_process(command, cwd=cwd))
 
     async def _list(self, folder_token: str) -> list[dict]:
         result = await self._run(
@@ -318,8 +318,9 @@ class LarkCliDrive:
                     )
                 return _find_token(item)
         result = await self._run(
-            "drive", "+upload", "--file", str(media_file),
+            "drive", "+upload", "--file", f"./{media_file.name}",
             "--folder-token", folder_token, "--name", filename,
+            cwd=media_file.parent,
         )
         token = _find_token(result)
         if not token:

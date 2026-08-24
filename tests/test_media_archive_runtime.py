@@ -133,6 +133,31 @@ def test_drive_upload_rejects_an_existing_same_name_with_a_different_size(tmp_pa
         raise AssertionError("same-name size mismatch must not be reused")
 
 
+def test_drive_upload_uses_a_relative_file_path_from_the_media_directory(tmp_path):
+    media_file = tmp_path / "TK-ninkevdo-食人花2代-01.mp4"
+    media_file.write_bytes(b"video")
+
+    class FakeCliDrive(runtime.LarkCliDrive):
+        def __init__(self):
+            super().__init__(executable="lark-cli")
+            self.calls = []
+
+        async def _run(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            if args[:3] == ("drive", "files", "list"):
+                return {"files": []}
+            return {"file_token": "uploaded-file"}
+
+    drive = FakeCliDrive()
+    token = asyncio.run(drive.upload(media_file, "folder-1", media_file.name))
+
+    assert token == "uploaded-file"
+    upload_args, upload_kwargs = drive.calls[1]
+    file_index = upload_args.index("--file")
+    assert upload_args[file_index + 1] == f"./{media_file.name}"
+    assert upload_kwargs == {"cwd": media_file.parent}
+
+
 def test_controller_client_sends_completion_for_one_source_group(monkeypatch):
     calls = []
 
