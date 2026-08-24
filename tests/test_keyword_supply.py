@@ -1,9 +1,12 @@
 import asyncio
+import tempfile
 import unittest
 from collections import Counter
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from app import keyword_supply
+from app.enrich_model_guard import EnrichModelBudget
 
 
 class KeywordSupplyBrazilTests(unittest.TestCase):
@@ -152,6 +155,46 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         self.assertEqual("curated_fallback", result["keyword_source"])
         self.assertIn("402 Payment Required", result["generation_warning"])
         self.assertEqual("", result["generation_error"])
+        self.assertEqual(5, create_record.await_count)
+
+    def test_launch_keyword_generation_respects_shared_budget_and_uses_curated_fallback(self):
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+        fixed = list(keyword_supply._CAMPAIGN_KEYWORDS["piranha"]["en"])
+        seven_layer = keyword_supply._piranha_seven_layer_candidates(
+            activity_fields=activity["fields"], product_fields=product["fields"],
+            languages=["en"], existing_keywords=set(fixed), limit=100,
+        )
+        used = [{"fields": {
+            "任务名": "[活动补池:campaign1] YT KOL - " + word,
+            "关键词列表": word, "爬虫类型": "KOL-YouTube",
+            "任务状态": "3-已完成", "筛选-语言": ["en"],
+        }} for word in fixed + [item["keyword"] for item in seven_layer]]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = EnrichModelBudget(
+                per_task=2, per_run=0, daily=10, failure_threshold=2,
+                state_path=Path(tmp) / "launch-budget.json",
+            )
+            with patch.object(
+                keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=used),
+            ), patch.object(
+                keyword_supply.deepseek, "chat_json", new=AsyncMock(),
+            ) as model, patch.object(
+                keyword_supply.feishu, "create_record", new=AsyncMock(return_value="task1"),
+            ) as create_record:
+                result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                    campaign_id="campaign1", activity=activity, product=product,
+                    required_candidates=250, dry_run=False, model_budget=budget,
+                ))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(5, result["created"])
+        self.assertEqual("curated_fallback", result["keyword_source"])
+        self.assertEqual("run_budget_exhausted", result["generation_warning"])
+        self.assertEqual(0, result["model_calls"])
+        self.assertEqual(0, result["model_budget"]["run_calls"])
+        model.assert_not_awaited()
         self.assertEqual(5, create_record.await_count)
 
     def test_campaign_supply_generates_more_targeted_keywords_after_seed_list_is_exhausted(self):

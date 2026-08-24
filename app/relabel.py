@@ -486,7 +486,8 @@ async def fetch_recent_video_titles(channel_id_or_handle: str, n: int = 10) -> l
 
 
 async def classify_v2(name: str, handle: str, description: str, sub: int,
-                      recent_titles: list) -> dict:
+                      recent_titles: list, *, model_budget=None,
+                      task_id: str = "profile") -> dict:
     """v2 classifier: 加入近期视频标题作为 grounding signal.
 
     返回 {type, confidence, styles[], ip_tags[], country_guess, reason}
@@ -536,12 +537,35 @@ Handle: @{handle or 'unknown'}
 只返回 JSON, 不要解释:
 {{"type":"KOL|品牌商|游戏厂商|媒体|不确定","confidence":0.0-1.0,"reason":"基于哪几条视频判断的","styles":["游戏"],"ip_tags":["Switch 2"],"country_guess":"US|null","content_vertical":"主机游戏","ecosystems":["Switch 2"]}}"""
 
+    if model_budget is not None:
+        allowed, reason = model_budget.reserve(task_id)
+        if not allowed:
+            fallback = deterministic_profile_classification(
+                name=name, description=description, recent_titles=recent_titles,
+            )
+            fallback["model_skip_reason"] = reason
+            return fallback
+
     try:
         data = await deepseek.chat_json(prompt, max_tokens=400, temperature=0.1)
-    except Exception:
-        return deterministic_profile_classification(
+        if not isinstance(data, dict):
+            raise ValueError("DeepSeek profile response must be a JSON object")
+        if data.get("type") not in {"KOL", "品牌商", "游戏厂商", "媒体", "不确定"}:
+            raise ValueError("DeepSeek profile response has no valid type")
+    except Exception as exc:
+        if model_budget is not None:
+            model_budget.record_failure(terminal=deepseek.is_terminal_error(exc))
+        fallback = deterministic_profile_classification(
             name=name, description=description, recent_titles=recent_titles,
         )
+        fallback["model_fallback_reason"] = (
+            "terminal_provider_failure"
+            if deepseek.is_terminal_error(exc) else "model_error"
+        )
+        return fallback
+
+    if model_budget is not None:
+        model_budget.record_success()
 
     data.setdefault("styles", [])
     data.setdefault("ip_tags", [])
@@ -806,7 +830,8 @@ def plan_profile_update(fields: dict, recent_videos: list[dict], classification:
 
 async def relabel_one_kol(record: dict, *, dry_run: bool = False,
                           now_ms: int | None = None,
-                          classification_mode: str = "deepseek") -> dict:
+                          classification_mode: str = "deepseek",
+                          model_budget=None) -> dict:
     """重打一个 KOL 的标签. 返回 {record_id, status, scrape_ok, classify_ok, titles_n, ...}"""
     rid = record["record_id"]
     f = record["fields"]
@@ -869,7 +894,10 @@ async def relabel_one_kol(record: dict, *, dry_run: bool = False,
             name=name, description=description, recent_titles=titles,
         )
     else:
-        cls = await classify_v2(name, handle, description, sub, titles)
+        cls = await classify_v2(
+            name, handle, description, sub, titles,
+            model_budget=model_budget, task_id=f"profile:{rid}",
+        )
     if cls.get("type") == "不确定" or "deepseek_err" in cls.get("reason", ""):
         update_fields = plan_profile_update(f, videos, cls, now_ms=now_ms)
         update_fields.update({"标签版本": "待手工校验", "资料可用状态": "缺资料"})
@@ -893,6 +921,8 @@ async def relabel_one_kol(record: dict, *, dry_run: bool = False,
         channel_id=cid, titles_n=len(titles), new_styles=styles, new_tags=tags,
         classify_reason=cls.get("reason", "")[:120],
         classification_source=cls.get("classification_source", classification_mode),
+        model_skip_reason=cls.get("model_skip_reason", ""),
+        model_fallback_reason=cls.get("model_fallback_reason", ""),
     )
 
 
@@ -924,11 +954,15 @@ def _profile_result(record_id: str, name: str, *, intended_status: str,
 
 async def run_profile_records(record_ids: list[str], *, dry_run: bool = True,
                               limit: int = 100,
-                              classification_mode: str = "deepseek") -> dict:
+                              classification_mode: str = "deepseek",
+                              model_budget=None) -> dict:
     """按明确记录 ID 后台刷新画像；默认只演练，不写主表。"""
     unique_ids = list(dict.fromkeys(str(value).strip() for value in record_ids if str(value).strip()))
     unique_ids = unique_ids[:max(1, min(int(limit), 100))]
     semaphore = asyncio.Semaphore(3)
+    model_calls_before = (
+        model_budget.snapshot()["run_calls"] if model_budget is not None else 0
+    )
 
     async def one(record_id):
         async with semaphore:
@@ -937,6 +971,7 @@ async def run_profile_records(record_ids: list[str], *, dry_run: bool = True,
                 return await relabel_one_kol(
                     record, dry_run=dry_run,
                     classification_mode=classification_mode,
+                    model_budget=model_budget,
                 )
             except Exception as exc:
                 return {
@@ -950,9 +985,15 @@ async def run_profile_records(record_ids: list[str], *, dry_run: bool = True,
     counts = {}
     for result in results:
         counts[result["status"]] = counts.get(result["status"], 0) + 1
+    model_snapshot = model_budget.snapshot() if model_budget is not None else {}
     return {
         "dry_run": dry_run, "classification_mode": classification_mode,
-        "model_calls": 0 if classification_mode == "deterministic" else None,
+        "model_calls": (
+            0 if classification_mode == "deterministic"
+            else model_snapshot.get("run_calls", 0) - model_calls_before
+            if model_budget is not None else None
+        ),
+        "model_budget": model_snapshot,
         "requested": len(unique_ids), "processed": len(results),
         "writes": sum(bool(result.get("write_applied")) for result in results),
         "by_status": counts, "results": results,

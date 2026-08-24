@@ -722,7 +722,7 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
     try:
         r = await deepseek.chat_json(prompt, max_tokens=1000, temperature=0.4)
     except Exception as e:
-        model_budget.record_failure()
+        model_budget.record_failure(terminal=deepseek.is_terminal_error(e))
         return {
             "error": f"deepseek: {str(e)[:100]}",
             "model_skip_reason": "model_error",
@@ -771,7 +771,7 @@ async def gen_draft(kol_record: dict, product: dict, brand: str,
             else:
                 print(f"[ban-phrase] 首生命中 {hits[:3]}, 重生后干净")
         except Exception as e:
-            model_budget.record_failure()
+            model_budget.record_failure(terminal=deepseek.is_terminal_error(e))
             return {
                 "error": f"deepseek_retry: {str(e)[:100]}",
                 "model_skip_reason": "model_retry_error",
@@ -833,7 +833,7 @@ async def generate_controlled_draft(
     else:
         draft = factory()
 
-    if use_model and lang == "en" and (
+    if use_model and (lang == "en" or template_factory is not None) and (
         "error" in draft or "model_skip_reason" in draft
         or not draft.get("output_validation", {}).get("passed", False)
     ):

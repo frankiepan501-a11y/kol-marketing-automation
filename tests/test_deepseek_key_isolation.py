@@ -17,6 +17,21 @@ class _Response:
         return {"choices": [{"message": {"content": '{"ok": true}'}}]}
 
 
+class _PaymentRequiredResponse(_Response):
+    status_code = 402
+
+    def raise_for_status(self):
+        request = deepseek.httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+        response = deepseek.httpx.Response(402, request=request)
+        raise deepseek.httpx.HTTPStatusError(
+            "payment required", request=request, response=response,
+        )
+
+
+class _UnauthorizedResponse(_PaymentRequiredResponse):
+    status_code = 401
+
+
 class _Client:
     def __init__(self, captured, *args, **kwargs):
         self.captured = captured
@@ -30,6 +45,18 @@ class _Client:
     async def post(self, url, **kwargs):
         self.captured.append((url, kwargs))
         return _Response()
+
+
+class _PaymentRequiredClient(_Client):
+    async def post(self, url, **kwargs):
+        self.captured.append((url, kwargs))
+        return _PaymentRequiredResponse()
+
+
+class _UnauthorizedClient(_Client):
+    async def post(self, url, **kwargs):
+        self.captured.append((url, kwargs))
+        return _UnauthorizedResponse()
 
 
 class DeepSeekKeyIsolationTests(unittest.TestCase):
@@ -59,6 +86,28 @@ class DeepSeekKeyIsolationTests(unittest.TestCase):
         with patch.object(deepseek.config, "KOL_DEEPSEEK_API_KEY", ""):
             with self.assertRaisesRegex(RuntimeError, "missing KOL_DEEPSEEK_API_KEY"):
                 asyncio.run(deepseek.chat_json("hello"))
+
+    def test_kol_client_marks_402_as_terminal_provider_failure(self):
+        captured = []
+        factory = lambda *a, **kw: _PaymentRequiredClient(captured, *a, **kw)
+        with patch.object(deepseek.config, "KOL_DEEPSEEK_API_KEY", "kol-key"), \
+             patch.object(deepseek.httpx, "AsyncClient", factory):
+            with self.assertRaises(deepseek.DeepSeekTerminalError) as caught:
+                asyncio.run(deepseek.chat_json("hello"))
+
+        self.assertEqual(402, caught.exception.status_code)
+        self.assertEqual(1, len(captured))
+
+    def test_kol_client_marks_401_as_terminal_provider_failure(self):
+        captured = []
+        factory = lambda *a, **kw: _UnauthorizedClient(captured, *a, **kw)
+        with patch.object(deepseek.config, "KOL_DEEPSEEK_API_KEY", "kol-key"), \
+             patch.object(deepseek.httpx, "AsyncClient", factory):
+            with self.assertRaises(deepseek.DeepSeekTerminalError) as caught:
+                asyncio.run(deepseek.chat_json("hello"))
+
+        self.assertEqual(401, caught.exception.status_code)
+        self.assertEqual(1, len(captured))
 
     def test_dtc_weekly_uses_only_dedicated_key(self):
         captured = []

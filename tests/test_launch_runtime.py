@@ -1,9 +1,12 @@
 import asyncio
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from app import auto_send, enrich, launch_runtime
+from app.enrich_model_guard import EnrichModelBudget
 
 
 def _certificate():
@@ -14,6 +17,24 @@ def _certificate():
 
 
 class LaunchRuntimeTests(unittest.TestCase):
+    def test_autonomous_refill_already_running_reports_model_budget(self):
+        async def scenario():
+            campaign_id = "campaign-already-running"
+            lock = asyncio.Lock()
+            await lock.acquire()
+            launch_runtime._LOCKS[campaign_id] = lock
+            try:
+                return await launch_runtime.autonomous_refill(campaign_id=campaign_id)
+            finally:
+                lock.release()
+                launch_runtime._LOCKS.pop(campaign_id, None)
+
+        result = asyncio.run(scenario())
+
+        self.assertTrue(result["already_running"])
+        self.assertEqual("already_running", result["runtime"])
+        self.assertIn("run_calls", result["model_budget"])
+
     def test_queue_approved_passes_one_shared_model_budget_to_all_queue_entries(self):
         activity = {"record_id": "a1", "fields": {
             "活动ID": "campaign1", "产品主记录ID": "product1",
@@ -25,6 +46,12 @@ class LaunchRuntimeTests(unittest.TestCase):
             "参与状态": "已入围", "审核结论": "通过", "进入方式": "新开发",
             "活动分池": "新开发池", "关联邮件草稿": [],
         }}
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        shared_budget = EnrichModelBudget(
+            per_task=2, per_run=12, daily=60, failure_threshold=2,
+            state_path=Path(temp_dir.name) / "launch-budget.json",
+        )
         with patch.object(
             launch_runtime.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
         ), patch.object(
@@ -40,10 +67,12 @@ class LaunchRuntimeTests(unittest.TestCase):
             launch_runtime, "_queue_one",
             new=AsyncMock(return_value={"participant_id": "part1", "draft_id": "draft1"}),
         ) as queue_one:
-            result = asyncio.run(launch_runtime.queue_approved(campaign_id="campaign1"))
+            result = asyncio.run(launch_runtime.queue_approved(
+                campaign_id="campaign1", model_budget=shared_budget,
+            ))
 
         self.assertEqual(1, result["queued"])
-        self.assertIsNotNone(queue_one.await_args.kwargs["model_budget"])
+        self.assertIs(shared_budget, queue_one.await_args.kwargs["model_budget"])
         self.assertIsInstance(queue_one.await_args.kwargs["generation_lock"], asyncio.Lock)
         self.assertIn("run_calls", result["model_budget"])
 
@@ -893,8 +922,16 @@ class LaunchRuntimeTests(unittest.TestCase):
             {"ready": 8, "pending_review": 0},
             {"ready": 12, "pending_review": 0},
         ]
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        shared_budget = EnrichModelBudget(
+            per_task=2, per_run=12, daily=60, failure_threshold=2,
+            state_path=Path(temp_dir.name) / "launch-autonomous-budget.json",
+        )
 
         with patch.object(
+            launch_runtime, "new_launch_model_budget", return_value=shared_budget,
+        ), patch.object(
             launch_runtime, "sync_campaign_outcomes_and_metrics", new=AsyncMock(return_value=metrics),
         ), patch.object(
             launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
@@ -916,7 +953,7 @@ class LaunchRuntimeTests(unittest.TestCase):
         ) as append_auto, patch.object(
             launch_runtime, "queue_approved",
             new=AsyncMock(side_effect=[{"queued": 8}, {"queued": 4}]),
-        ), patch.object(
+        ) as queue, patch.object(
             launch_runtime.relabel, "run_profile_records",
             new=AsyncMock(return_value={"processed": 3, "writes": 3}),
         ) as refresh, patch.object(
@@ -947,6 +984,7 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(214, result["target_ready_inventory"])
         refresh.assert_awaited_once_with(
             ["pending1", "k1", "k2"], dry_run=False, limit=3,
+            model_budget=shared_budget,
         )
         reconcile.assert_awaited_once()
         continue_evidence.assert_awaited_once_with(
@@ -958,6 +996,13 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertTrue(all(call.kwargs["allow_parallel_review"] for call in append_auto.await_args_list))
         discover.assert_awaited_once()
         self.assertEqual(3, discover.await_args.kwargs["approved_candidates"])
+        self.assertIs(shared_budget, discover.await_args.kwargs["model_budget"])
+        self.assertEqual(2, queue.await_count)
+        self.assertTrue(all(
+            call.kwargs["model_budget"] is shared_budget
+            for call in queue.await_args_list
+        ))
+        self.assertEqual(shared_budget.snapshot(), result["model_budget"])
         review.assert_awaited_once()
         self.assertTrue(review.await_args.kwargs["operator_only"])
         notify_review.assert_awaited_once_with(
@@ -1182,6 +1227,7 @@ class LaunchRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result["held"])
         self.assertEqual("campaign_not_formally_active", result["runtime"])
+        self.assertIn("run_calls", result["model_budget"])
         preview.assert_not_awaited()
 
     def test_autonomous_refill_stops_after_campaign_window_end(self):

@@ -1,8 +1,11 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from app import relabel
+from app.enrich_model_guard import EnrichModelBudget
 
 
 DAY_MS = 86_400_000
@@ -314,6 +317,24 @@ class RelabelProfileTests(unittest.TestCase):
         self.assertEqual("游戏厂商", publisher["type"])
         self.assertEqual("媒体", media["type"])
 
+    def test_empty_model_profile_counts_as_failure_and_uses_deterministic_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = EnrichModelBudget(
+                per_task=2, per_run=2, daily=10, failure_threshold=2,
+                state_path=Path(tmp) / "budget.json",
+            )
+            with patch.object(
+                relabel.deepseek, "chat_json", new=AsyncMock(return_value={}),
+            ):
+                result = asyncio.run(relabel.classify_v2(
+                    "Switch Reviewer", "reviewer", "Nintendo hardware",
+                    12000, ["Switch 2 Dock Review"], model_budget=budget,
+                ))
+
+        self.assertEqual("deterministic_fallback", result["classification_source"])
+        self.assertEqual("model_error", result["model_fallback_reason"])
+        self.assertEqual(1, budget.consecutive_failures)
+
     def test_touch_route_is_relationship_based_and_deterministic(self):
         self.assertEqual("可新开发", relabel.touch_route_for_status("未建联"))
         self.assertEqual("沿用原线程", relabel.touch_route_for_status("洽谈中"))
@@ -386,6 +407,53 @@ class RelabelProfileTests(unittest.TestCase):
         self.assertEqual("deterministic_fallback", result["results"][0]["classification_source"])
         model.assert_not_awaited()
         write.assert_not_awaited()
+
+    def test_launch_profile_refresh_caps_model_calls_and_falls_back_deterministically(self):
+        records = {
+            record_id: {"record_id": record_id, "fields": {
+                "账号名": f"Reviewer {record_id}", "合作状态": "未建联",
+                "主链接": {"link": f"https://youtube.com/channel/UC{index:022d}"},
+                "粉丝数": 12000,
+            }}
+            for index, record_id in enumerate(("kol1", "kol2", "kol3"), start=1)
+        }
+        videos = [
+            {"title": "Nintendo Switch 2 Dock Review", "published_at": NOW_MS - DAY_MS},
+            {"title": "Mario Kart Controller Setup", "published_at": NOW_MS - 2 * DAY_MS},
+            {"title": "Zelda Hardware Comparison", "published_at": NOW_MS - 3 * DAY_MS},
+        ]
+        model_result = {
+            "type": "KOL", "confidence": 0.9, "styles": ["游戏"],
+            "ip_tags": ["Switch 2"], "country_guess": "US",
+            "content_vertical": "游戏硬件评测", "ecosystems": ["Switch 2"],
+            "reason": "grounded",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = EnrichModelBudget(
+                per_task=1, per_run=1, daily=10, failure_threshold=2,
+                state_path=Path(tmp) / "launch-budget.json",
+            )
+            with patch.object(
+                relabel.feishu, "get_record",
+                new=AsyncMock(side_effect=lambda _table, record_id: records[record_id]),
+            ), patch.object(
+                relabel, "fetch_recent_videos", new=AsyncMock(return_value=videos),
+            ), patch.object(
+                relabel.deepseek, "chat_json", new=AsyncMock(return_value=model_result),
+            ) as model:
+                result = asyncio.run(relabel.run_profile_records(
+                    ["kol1", "kol2", "kol3"], dry_run=True,
+                    classification_mode="deepseek", model_budget=budget,
+                ))
+
+        self.assertEqual(1, result["model_calls"])
+        self.assertEqual(1, model.await_count)
+        self.assertEqual(2, sum(
+            item.get("classification_source") == "deterministic_fallback"
+            for item in result["results"]
+        ))
+        self.assertEqual(1, result["model_budget"]["run_calls"])
 
 
 if __name__ == "__main__":

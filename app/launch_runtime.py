@@ -30,6 +30,7 @@ from . import (
     utm,
 )
 from .feishu import ext, xrid
+from .enrich_model_guard import EnrichModelBudget
 
 
 class LaunchRuntimeError(RuntimeError):
@@ -53,6 +54,16 @@ CAMPAIGN_LAUNCH_DATES = {
         "en": "September 15", "de": "15. September", "es": "15 de septiembre",
     },
 }
+
+
+def new_launch_model_budget() -> EnrichModelBudget:
+    return EnrichModelBudget(
+        per_task=config.KOL_LAUNCH_MODEL_PER_TASK,
+        per_run=config.KOL_LAUNCH_MODEL_PER_RUN,
+        daily=config.KOL_LAUNCH_MODEL_DAILY,
+        failure_threshold=config.KOL_LAUNCH_MODEL_FAILURE_THRESHOLD,
+        state_path=config.KOL_LAUNCH_MODEL_STATE_PATH,
+    )
 
 
 def _ids(value) -> list[str]:
@@ -949,7 +960,8 @@ async def _queue_one(*, activity: dict, participant: dict, product: dict,
             "reused": False, "path": "待人审", "generation_mode": "ai"}
 
 
-async def queue_approved(*, campaign_id: str, limit: int = 120) -> dict:
+async def queue_approved(*, campaign_id: str, limit: int = 120,
+                         model_budget: EnrichModelBudget | None = None) -> dict:
     """为已审通过的新开发参与人生成草稿；不发送。"""
     if not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise LaunchRuntimeError("LAUNCH_ACTIVITY_QUEUE_ENABLED 未开启")
@@ -977,7 +989,7 @@ async def queue_approved(*, campaign_id: str, limit: int = 120) -> dict:
     ][:max(1, min(int(limit), 500))]
     semaphore = asyncio.Semaphore(4)
     generation_lock = asyncio.Lock()
-    model_budget = enrich.new_model_budget()
+    model_budget = model_budget or new_launch_model_budget()
 
     async def one(row):
         async with semaphore:
@@ -1252,10 +1264,12 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                             runtime_job_id: str = "") -> dict:
     """按活动进度与邮箱余量自治补池；不直接发送邮件，也不降低筛选标准。"""
     lock = _LOCKS.setdefault(campaign_id, asyncio.Lock())
+    model_budget = new_launch_model_budget()
     if lock.locked():
         return _with_business_outcome({
             "campaign_id": campaign_id, "already_running": True,
             "action": "hold", "held": True, "runtime": "already_running",
+            "model_budget": model_budget.snapshot(),
         })
     async with lock:
         activity = await launch_evidence.get_activity(campaign_id)
@@ -1269,6 +1283,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                 "action": "hold", "held": True,
                 "runtime": "campaign_not_formally_active",
                 "reason": "活动不是正式运行/正式执行中，自治补池保持暂停",
+                "model_budget": model_budget.snapshot(),
                 "quality_filters_lowered": False,
             })
         try:
@@ -1285,6 +1300,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                 "action": "stop", "stopped": True,
                 "runtime": "campaign_window_ended",
                 "reason": "活动窗口已结束，已关闭邮件授权并停止补池",
+                "model_budget": model_budget.snapshot(),
                 "quality_filters_lowered": False,
             })
         metrics = await sync_campaign_outcomes_and_metrics(campaign_id)
@@ -1295,10 +1311,12 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             )
             return _with_business_outcome({
                 **metrics, "already_running": False, "stopped": True,
+                "model_budget": model_budget.snapshot(),
             })
         if metrics["action"] == "hold":
             return _with_business_outcome({
                 **metrics, "already_running": False, "held": True,
+                "model_budget": model_budget.snapshot(),
             })
 
         product_id = ext(activity_fields.get("产品主记录ID")).strip()
@@ -1322,6 +1340,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                 "inventory_before": inventory_before["ready"],
                 "inventory_after": inventory_before["ready"],
                 "runtime": "inventory_sufficient",
+                "model_budget": model_budget.snapshot(),
             })
 
         preview = await launch_candidate_preview.preview_candidates(
@@ -1333,7 +1352,9 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             pool_target=metrics["participants"] + min(deficit, 120),
             preview=preview, allow_parallel_review=True,
         )
-        first_queue = await queue_approved(campaign_id=campaign_id, limit=queue_limit)
+        first_queue = await queue_approved(
+            campaign_id=campaign_id, limit=queue_limit, model_budget=model_budget,
+        )
         inventory_after_master = await _campaign_ready_inventory(campaign_id)
 
         refresh_result = {"processed": 0, "writes": 0}
@@ -1354,6 +1375,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             if refresh_ids:
                 refresh_result = await relabel.run_profile_records(
                     refresh_ids, dry_run=False, limit=len(refresh_ids),
+                    model_budget=model_budget,
                 )
                 latest_preview = await launch_candidate_preview.preview_candidates(
                     "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
@@ -1376,6 +1398,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             if refresh_ids or pending_review_reconcile.get("auto_passed"):
                 second_queue = await queue_approved(
                     campaign_id=campaign_id, limit=queue_limit,
+                    model_budget=model_budget,
                 )
         inventory_after = await _campaign_ready_inventory(campaign_id)
         remaining = max(0, target_ready - inventory_after["ready"])
@@ -1423,6 +1446,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                     metrics.get("approved_new_development_24h") or 0
                 ),
                 dry_run=False,
+                model_budget=model_budget,
             )
             review_preview = dict(latest_preview)
             review_preview["candidates"] = list(latest_preview.get("candidates") or []) + list(
@@ -1455,6 +1479,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             "evidence_continuation": evidence_continuation,
             "discovery": discovery, "review_pool": review_pool,
             "review_notification": review_notification,
+            "model_budget": model_budget.snapshot(),
             "quality_filters_lowered": False,
         }
         return _with_business_outcome(result)
@@ -1575,6 +1600,8 @@ def _runtime_result_summary(result: dict | None) -> dict:
             "supply_progress_breakdown", "outcome_reconcile_error_count",
         ) if key in result
     } | ({"quota": quota} if quota else {})
+    if result.get("model_budget"):
+        summary["model_budget"] = result["model_budget"]
     reconcile = result.get("outcome_reconcile") or {}
     discovery = result.get("discovery") or {}
     if discovery:

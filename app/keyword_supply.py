@@ -620,7 +620,8 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
                                  max_tasks: int | None = None,
                                  structured_pilot: bool = False,
                                  pilot_version: str = "v1",
-                                 allow_ai: bool = True) -> dict:
+                                 allow_ai: bool = True,
+                                 model_budget=None) -> dict:
     """为单个活动补确定性 YouTube 发现任务；只建爬虫任务，不直接创建 KOL。"""
     rows = await feishu.fetch_all_records(T_CRAWLER)
     fields = activity.get("fields") or {}
@@ -755,6 +756,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             "skipped": "quality_cooldown", "keywords": [],
             "keyword_source": "quality_cooldown", "shortfall_tasks": target_tasks,
             "generation_error": "", "generation_warning": "",
+            "model_budget": model_budget.snapshot() if model_budget is not None else {},
             **common_result,
         }
     need = (
@@ -820,38 +822,52 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
                 if fallback_added == len(candidates) else "mixed_curated_fallback"
             )
     if need and theme == "piranha" and allow_ai:
-        prompt = f"""你是海外游戏KOL发现助手。为{theme}主题新品活动补充YouTube创作者搜索词。
+        allowed, budget_reason = (
+            model_budget.reserve(f"keyword:{campaign_id}")
+            if model_budget is not None else (True, "ok")
+        )
+        if not allowed:
+            generation_warning = budget_reason
+        else:
+            prompt = f"""你是海外游戏KOL发现助手。为{theme}主题新品活动补充YouTube创作者搜索词。
 目标语言只能从 {languages} 选择。搜索对象必须是Nintendo/Switch、Mario收藏、主机游戏房或游戏硬件评测创作者；
 不要生成产品购买词、店铺词、官方频道词，不要重复这些词：{sorted(existing_keywords)[-80:]}。
 返回JSON：{{"keywords":[{{"language":"en","keyword":"..."}}]}}，至少{max(need * 2, need)}条。"""
-        try:
-            common_result["model_calls"] += 1
-            generated = await deepseek.chat_json(prompt, max_tokens=1200, temperature=0.6)
-            raw_words = (generated or {}).get("keywords") or []
-            for index, item in enumerate(raw_words):
-                if need <= 0:
-                    break
-                if isinstance(item, dict):
-                    lang = str(item.get("language") or "").strip().lower()
-                    word = str(item.get("keyword") or "").strip().lower()
-                else:
-                    lang = languages[index % len(languages)]
-                    word = str(item or "").strip().lower()
-                if lang not in languages or not (2 <= len(word) <= 80):
-                    continue
-                if word in existing_keywords or any(
-                    _candidate_keyword(existing) == word for existing in candidates
-                ):
-                    continue
-                market = next((m for m in MARKETS if m["lang"] == lang), {"lang": lang})
-                if not _is_localized(word, market):
-                    continue
-                candidates.append((lang, word))
-                need -= 1
-            if candidates:
-                keyword_source = "mixed" if keyword_source == "deterministic" else "dynamic"
-        except Exception as exc:
-            generation_warning = str(exc)[:160]
+            try:
+                common_result["model_calls"] += 1
+                accepted_before = len(candidates)
+                generated = await deepseek.chat_json(prompt, max_tokens=1200, temperature=0.6)
+                raw_words = (generated or {}).get("keywords") or []
+                for index, item in enumerate(raw_words):
+                    if need <= 0:
+                        break
+                    if isinstance(item, dict):
+                        lang = str(item.get("language") or "").strip().lower()
+                        word = str(item.get("keyword") or "").strip().lower()
+                    else:
+                        lang = languages[index % len(languages)]
+                        word = str(item or "").strip().lower()
+                    if lang not in languages or not (2 <= len(word) <= 80):
+                        continue
+                    if word in existing_keywords or any(
+                        _candidate_keyword(existing) == word for existing in candidates
+                    ):
+                        continue
+                    market = next((m for m in MARKETS if m["lang"] == lang), {"lang": lang})
+                    if not _is_localized(word, market):
+                        continue
+                    candidates.append((lang, word))
+                    need -= 1
+                if len(candidates) > accepted_before:
+                    if model_budget is not None:
+                        model_budget.record_success()
+                    keyword_source = "mixed" if keyword_source == "deterministic" else "dynamic"
+                elif model_budget is not None:
+                    model_budget.record_failure()
+            except Exception as exc:
+                if model_budget is not None:
+                    model_budget.record_failure(terminal=deepseek.is_terminal_error(exc))
+                generation_warning = str(exc)[:160]
 
     if need and theme == "piranha":
         need, fallback_added = _append_curated_candidates(
@@ -881,6 +897,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             "generation_error": generation_error,
             "generation_warning": generation_warning,
             "skipped": skipped,
+            "model_budget": model_budget.snapshot() if model_budget is not None else {},
             **common_result,
         }
 
@@ -928,6 +945,7 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         "generation_error": generation_error,
         "generation_warning": generation_warning,
         "skipped": skipped,
+        "model_budget": model_budget.snapshot() if model_budget is not None else {},
         **common_result,
     }
 

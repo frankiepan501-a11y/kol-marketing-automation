@@ -143,6 +143,32 @@ class EnrichTemplateModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("model_error", result["model_fallback_reason"])
         self.assertTrue(result["template_validation"]["passed"])
 
+    async def test_launch_template_factory_falls_back_for_german_terminal_failure(self):
+        controlled = {
+            "subject": "Kontrollierter Aktivitätsentwurf",
+            "body": "<p>Deterministische Vorlage</p>",
+            "template_validation": {"passed": True, "reasons": []},
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "app.enrich.deepseek.chat_json",
+            new=mock.AsyncMock(side_effect=enrich.deepseek.DeepSeekTerminalError(402)),
+        ) as chat:
+            budget = EnrichModelBudget(
+                per_task=2, per_run=4, daily=10, failure_threshold=2,
+                state_path=Path(tmp) / "budget.json",
+            )
+            result = await enrich.generate_controlled_draft(
+                _kol(country="DE", language="de"), _product(), "FUNLAB", "Mia", {}, 100,
+                model_budget=budget, task_id="launch_de",
+                template_factory=lambda: dict(controlled),
+            )
+
+        self.assertEqual("template", result["generation_mode"])
+        self.assertEqual("model_error", result["model_fallback_reason"])
+        self.assertEqual("Kontrollierter Aktivitätsentwurf", result["subject"])
+        self.assertTrue(budget.circuit_open)
+        self.assertEqual(1, chat.await_count)
+
     async def test_two_model_failures_open_circuit_and_third_candidate_skips_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             budget = EnrichModelBudget(
@@ -263,6 +289,61 @@ class EnrichModelBudgetTests(unittest.TestCase):
             self.assertTrue(budget.circuit_open)
             self.assertEqual((False, "circuit_open"), budget.reserve("task_c"))
             self.assertEqual(3, budget.snapshot()["run_calls"])
+
+    def test_terminal_provider_failure_opens_circuit_immediately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = EnrichModelBudget(
+                per_task=10, per_run=10, daily=10, failure_threshold=2,
+                state_path=Path(tmp) / "budget.json",
+            )
+
+            self.assertEqual((True, "ok"), budget.reserve("launch-profile"))
+            budget.record_failure(terminal=True)
+
+            self.assertTrue(budget.circuit_open)
+            self.assertEqual((False, "circuit_open"), budget.reserve("launch-keyword"))
+
+    def test_two_budget_instances_share_one_atomic_daily_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "budget.json"
+            first = EnrichModelBudget(
+                per_task=10, per_run=10, daily=1, failure_threshold=2,
+                state_path=state,
+            )
+            second = EnrichModelBudget(
+                per_task=10, per_run=10, daily=1, failure_threshold=2,
+                state_path=state,
+            )
+
+            self.assertEqual((True, "ok"), first.reserve("dave"))
+            self.assertEqual((False, "daily_budget_exhausted"), second.reserve("piranha"))
+            self.assertEqual(1, second.snapshot()["daily_calls"])
+
+    def test_unavailable_budget_state_fails_closed_without_raising(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = EnrichModelBudget(
+                per_task=10, per_run=10, daily=10, failure_threshold=2,
+                state_path=Path(tmp),
+            )
+
+            self.assertEqual(
+                (False, "budget_state_unavailable"), budget.reserve("launch"),
+            )
+            self.assertEqual(0, budget.snapshot()["run_calls"])
+
+    def test_non_object_budget_state_fails_closed_without_constructor_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "budget.json"
+            state.write_text("[]", encoding="utf-8")
+
+            budget = EnrichModelBudget(
+                per_task=10, per_run=10, daily=10, failure_threshold=2,
+                state_path=state,
+            )
+
+            self.assertEqual(
+                (False, "budget_state_unavailable"), budget.reserve("launch"),
+            )
 
     def test_run_and_daily_limits_survive_new_budget_instance(self):
         with tempfile.TemporaryDirectory() as tmp:

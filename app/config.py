@@ -147,6 +147,19 @@ KOL_ENRICH_MODEL_STATE_PATH = env(
 KOL_ENRICH_AI_SCORE_MIN = _float_env("KOL_ENRICH_AI_SCORE_MIN", 100)
 KOL_ENRICH_AI_MIN_FANS = _int_env("KOL_ENRICH_AI_MIN_FANS", 500000)
 
+# Concentrated-launch autonomous refill shares one budget across profile relabel,
+# keyword generation and exceptional draft generation.  The per-run cap is hard;
+# the daily file is a per-container soft cap until a shared store is introduced.
+KOL_LAUNCH_MODEL_PER_TASK = _int_env("KOL_LAUNCH_MODEL_PER_TASK", 2)
+KOL_LAUNCH_MODEL_PER_RUN = _int_env("KOL_LAUNCH_MODEL_PER_RUN", 12)
+KOL_LAUNCH_MODEL_DAILY = _int_env("KOL_LAUNCH_MODEL_DAILY", 60)
+KOL_LAUNCH_MODEL_FAILURE_THRESHOLD = _int_env(
+    "KOL_LAUNCH_MODEL_FAILURE_THRESHOLD", 2, minimum=1,
+)
+KOL_LAUNCH_MODEL_STATE_PATH = env(
+    "KOL_LAUNCH_MODEL_STATE_PATH", "/tmp/kol_launch_model_budget.json"
+)
+
 # 2026-06-04: DeepSeek 余额预警阈值(元). 余额低于此或不可用 → /deepseek/balance-check 飞书告警 Frankie.
 # 根因: DeepSeek 欠费 → 整条 AI 生成链(enrich/reply_drafter/regen/talking_points)静默 402 停摆,
 # 全靠运营踩到才发现(张佳烨 2026-06-04 重生 402)。这是关键依赖的 dead-man-switch。
