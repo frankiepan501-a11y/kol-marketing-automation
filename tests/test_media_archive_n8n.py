@@ -37,6 +37,10 @@ def test_workflow_specs_cover_queue_metrics_and_external_worker_audit():
         "https://kol-auto.zeabur.app/media-archive/worker/audit?stale_minutes=10&notify=true"
         in urls
     )
+    assert all(
+        workflow["settings"].get("timezone") == "Asia/Shanghai"
+        for workflow in workflows
+    )
 
 
 def test_public_plan_never_contains_the_reused_authorization_value():

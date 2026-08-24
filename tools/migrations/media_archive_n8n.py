@@ -67,7 +67,10 @@ def _schedule_http(name: str, cron: str, method: str, url: str,
         "connections": {
             schedule_name: {"main": [[{"node": call_name, "type": "main", "index": 0}]]},
         },
-        "settings": {"executionOrder": "v1"},
+        "settings": {
+            "executionOrder": "v1",
+            "timezone": "Asia/Shanghai",
+        },
     }
 
 
