@@ -8,7 +8,7 @@ import uuid
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_evidence_author_import, launch_participation, launch_outcomes, launch_outreach, launch_runtime
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_evidence_author_import, launch_participation, launch_outcomes, launch_outreach, launch_runtime, media_archive_controller
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
@@ -26,7 +26,7 @@ from . import x_history  # 竞品 X 历史补采: 独立只读探测/分窗采�
 from . import kol_roi_mapping  # KOL ROI 归因缺口卡 + 映射回填
 from . import discord_tester_routes  # FUN Bot 新品体验官：Discord Modal + 安全表单
 
-app = FastAPI(title="KOL Marketing Automation", version="0.2")
+app = FastAPI(title="KOL Marketing Automation", version="0.3")
 app.include_router(invest.router)
 app.include_router(x_history.router)
 app.include_router(discord_tester_routes.router)
@@ -414,6 +414,192 @@ async def health():
         "status": "ok",
         "dtc_weekly_ai_configured": bool(os.environ.get("DTC_WEEKLY_DEEPSEEK_API_KEY", "").strip()),
     }
+
+
+def _require_media_archive_write_enabled() -> None:
+    """Keep production writes off until the grey terminal is explicitly enabled."""
+    if not config.MEDIA_ARCHIVE_ENABLED:
+        raise HTTPException(503, "MEDIA_ARCHIVE_ENABLED is off; dry-run remains available")
+
+
+@app.get("/media-archive/status")
+async def media_archive_status(authorization: str = Header(default="")):
+    """Read-only n8n gate; never returns credential values."""
+    _check_auth(authorization)
+    return {
+        "ok": True,
+        "enabled": config.MEDIA_ARCHIVE_ENABLED,
+        "youtube_metrics_configured": bool(config.YOUTUBE_DATA_API_KEY),
+        "work_table_configured": bool(config.T_UPLOAD_WORK),
+        "snapshot_table_configured": bool(config.T_MEDIA_ARCHIVE_SNAPSHOT),
+        "worker_table_configured": bool(config.T_MEDIA_ARCHIVE_WORKER),
+    }
+
+
+@app.post("/media-archive/scan")
+async def run_media_archive_scan(authorization: str = Header(default=""),
+                                 commit: bool = False,
+                                 refresh_metrics: bool = True):
+    """Plan archive work; writes only when both commit and the feature flag are on."""
+    _check_auth(authorization)
+    if commit:
+        _require_media_archive_write_enabled()
+    result = await media_archive_controller.scan(
+        commit=commit, refresh_metrics=refresh_metrics,
+    )
+    return {"ok": True, **result}
+
+
+@app.post("/media-archive/tick")
+async def run_media_archive_tick(authorization: str = Header(default="")):
+    """Scheduled safe entrypoint: no writes until the grey flag is enabled."""
+    _check_auth(authorization)
+    if not config.MEDIA_ARCHIVE_ENABLED:
+        return {"ok": True, "enabled": False, "skipped": True}
+    result = await media_archive_controller.scan(
+        commit=True, refresh_metrics=False,
+    )
+    return {"ok": True, "enabled": True, "skipped": False, **result}
+
+
+@app.post("/media-archive/youtube-metrics/refresh")
+async def refresh_media_archive_youtube_metrics(
+    authorization: str = Header(default=""), commit: bool = False,
+):
+    """Refresh public YouTube view/like/comment counts and due snapshots."""
+    _check_auth(authorization)
+    if commit:
+        _require_media_archive_write_enabled()
+    result = await media_archive_controller.refresh_youtube_metrics(commit=commit)
+    return {"ok": True, **result}
+
+
+@app.post("/media-archive/youtube-metrics/tick")
+async def tick_media_archive_youtube_metrics(
+    authorization: str = Header(default=""),
+):
+    """Scheduled safe entrypoint for official YouTube public metrics."""
+    _check_auth(authorization)
+    if not config.MEDIA_ARCHIVE_ENABLED:
+        return {"ok": True, "enabled": False, "skipped": True}
+    if not config.YOUTUBE_DATA_API_KEY:
+        raise HTTPException(503, "YOUTUBE_DATA_API_KEY is not configured")
+    result = await media_archive_controller.refresh_youtube_metrics(commit=True)
+    return {"ok": True, "enabled": True, "skipped": False, **result}
+
+
+@app.post("/media-archive/worker/claim")
+async def claim_media_archive_job(request: Request,
+                                  authorization: str = Header(default="")):
+    """Claim one explicitly enabled archive row for a local worker."""
+    _check_auth(authorization)
+    _require_media_archive_write_enabled()
+    payload = await request.json()
+    worker_id = str(payload.get("worker_id") or "").strip()
+    if not worker_id:
+        raise HTTPException(400, "worker_id is required")
+    job = await media_archive_controller.claim_job(
+        worker_id=worker_id,
+        record_id=str(payload.get("record_id") or "").strip(),
+        commit=True,
+    )
+    return {"ok": True, "job": job}
+
+
+@app.post("/media-archive/worker/complete")
+async def complete_media_archive_job(request: Request,
+                                     authorization: str = Header(default="")):
+    """Backfill a direct Feishu file URL and evidence to every same-source row."""
+    _check_auth(authorization)
+    _require_media_archive_write_enabled()
+    payload = await request.json()
+    record_id = str(payload.get("record_id") or "").strip()
+    source_group = str(payload.get("source_group") or "").strip()
+    job_id = str(payload.get("job_id") or "").strip()
+    result_fields = payload.get("result_fields") or {}
+    if not record_id or not source_group or not job_id or not isinstance(result_fields, dict):
+        raise HTTPException(400, "record_id, source_group, job_id and result_fields are required")
+    result = await media_archive_controller.complete_job(
+        record_id=record_id,
+        source_group=source_group,
+        job_id=job_id,
+        result_fields=result_fields,
+        commit=True,
+    )
+    return {"ok": True, **result}
+
+
+@app.post("/media-archive/worker/fail")
+async def fail_media_archive_job(request: Request,
+                                 authorization: str = Header(default="")):
+    """Record the exact failed stage so one row can be diagnosed and replayed."""
+    _check_auth(authorization)
+    _require_media_archive_write_enabled()
+    payload = await request.json()
+    record_id = str(payload.get("record_id") or "").strip()
+    job_id = str(payload.get("job_id") or "").strip()
+    stage = str(payload.get("stage") or "").strip()
+    error = str(payload.get("error") or "").strip()
+    if not record_id or not job_id or not stage:
+        raise HTTPException(400, "record_id, job_id and stage are required")
+    result = await media_archive_controller.fail_job(
+        record_id=record_id, job_id=job_id, stage=stage, error=error, commit=True,
+    )
+    return {"ok": True, **result}
+
+
+@app.post("/media-archive/worker/heartbeat")
+async def heartbeat_media_archive_worker(request: Request,
+                                         authorization: str = Header(default="")):
+    """Persist worker liveness outside the worker computer for dead-man monitoring."""
+    _check_auth(authorization)
+    _require_media_archive_write_enabled()
+    payload = await request.json()
+    worker_id = str(payload.get("worker_id") or "").strip()
+    if not worker_id:
+        raise HTTPException(400, "worker_id is required")
+    allowed = {
+        "version", "host", "status", "queue_scanned", "claimed", "succeeded",
+        "failed", "last_error", "last_record_id",
+    }
+    kwargs = {key: payload[key] for key in allowed if key in payload}
+    result = await media_archive_controller.heartbeat(
+        worker_id=worker_id, commit=True, **kwargs,
+    )
+    return {"ok": True, **result}
+
+
+@app.get("/media-archive/worker/audit")
+async def audit_media_archive_worker(
+    authorization: str = Header(default=""),
+    stale_minutes: int = Query(default=10, ge=1, le=1440),
+    notify: bool = False,
+):
+    """Cloud-side dead-man check for the local archive terminal."""
+    _check_auth(authorization)
+    result = await media_archive_controller.audit_worker_health(
+        stale_minutes=stale_minutes,
+    )
+    if notify and not result["ok"]:
+        issue_text = "；".join(item["message"] for item in result["issues"])
+        await _alert_endpoint_failure(
+            "/media-archive/worker/audit",
+            issue_text,
+            f"run_id={result['run_id']} active_queue={result['active_queue']} fresh_workers={result['fresh_workers']}",
+        )
+    return {**result, "notify_requested": notify}
+
+
+@app.post("/media-archive/replay")
+async def replay_media_archive_job(record_id: str,
+                                   authorization: str = Header(default=""),
+                                   commit: bool = False):
+    """Validate or requeue exactly one row; dry-run is the default."""
+    _check_auth(authorization)
+    if commit:
+        _require_media_archive_write_enabled()
+    result = await media_archive_controller.replay_job(record_id, commit=commit)
+    return {"ok": True, **result}
 
 
 @app.post("/b2b-mail-reminder/run")

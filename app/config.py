@@ -63,6 +63,15 @@ T_PRODUCT = env("T_PRODUCT", required=True)
 T_TASK_KOL = env("T_TASK_KOL", required=True)
 T_TASK_EDITOR = env("T_TASK_EDITOR", required=True)
 
+# 作品级上稿与素材归档 (2026-08-24).
+# 表 ID / 文件夹 token 不是凭据；敏感 App secret 和 YouTube key 仍只走 env。
+T_UPLOAD_WORK = env("T_UPLOAD_WORK", "tblMSUCDUm7ceVxV")
+T_MEDIA_ARCHIVE_SNAPSHOT = env("T_MEDIA_ARCHIVE_SNAPSHOT", "tblytygpKfVIL3RR")
+T_MEDIA_ARCHIVE_WORKER = env("T_MEDIA_ARCHIVE_WORKER", "tblAXnGejBo3kq3r")
+YOUTUBE_DATA_API_KEY = env("YOUTUBE_DATA_API_KEY", "")
+MEDIA_ARCHIVE_ENABLED = (env("MEDIA_ARCHIVE_ENABLED", "0") or "0") == "1"
+MEDIA_ARCHIVE_MAX_RETRIES = _int_env("MEDIA_ARCHIVE_MAX_RETRIES", 3, minimum=1)
+
 # 新品集中上稿活动控制层。表 ID 不是凭据；现有影子表给安全默认值，
 # 新参与表在 schema dry-run/commit 后必须通过环境变量显式注入。
 T_LAUNCH_CAMPAIGN = env("T_LAUNCH_CAMPAIGN", "tbl8w0O7pI5PsRnq")
