@@ -86,3 +86,6 @@
 - 关闭dry-run之前必须同时通过三层验证：确定性内容校验、Zoho已发送箱raw回读、真实邮件客户端渲染；API 200或message_id本身不算完成。
 - 活动发送恢复只走现有唯一发送中心和自然定时任务；日报已证明原定15封完成后，不再人为追加同一批，防止重复触达。
 - 当前活动Raw证书是单槽结构；验证另一模板后必须恢复生产实际使用的`launch-queue-v1`证书。长期改造为按模板版本分槽，列为P1，不再让测试动作临时阻断生产队列。
+- Raw证书已在P1升级为按`template_version`独立分槽的schema v2；发送中心必须显式读取自己需要的模板槽，任何测试模板都不得覆盖或替代生产活动模板证书。
+- Zeabur环境变量的`updateEnvironmentVariable`属于全量替换，不得用于单变量修改；以后只能用`createSingleEnvironmentVariable`、`updateSingleEnvironmentVariable`或`deleteSingleEnvironmentVariable`，并在变更前后核对变量总数与关键项。
+- 两活动的“邮箱额度”和“可发库存”继续独立判断。2026-08-24事实为额度充足但库存为0；自动补池总调度停用时，发送中心成功不代表活动能继续推进。

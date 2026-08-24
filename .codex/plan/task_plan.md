@@ -224,7 +224,7 @@
 | 12.3 部署与只读生产预览 | P0 | complete | `f2571ee`部署后`notify=false`读取两项真实活动并生成合格卡片；2项活动、4条进度图、业务写入0 |
 | 12.4 Frankie-only真实样卡 | P0 | complete | Card 2.0兼容修复`92e2e0d`部署后仅Frankie收到1张样卡；message_id=`om_x100b674afba06cb0c00611d1b8a2689`，发送回执读回`sent` |
 | 12.5 每日17:15运营群定时发送 | P1 | complete | Frankie确认紧凑版排版后已启用独立工作流`3GDllutHPUNPEDHs`；`Asia/Shanghai + 15 17 * * *`，只发当前KOL运营群，后台计算后等待12分钟回查并校验只发送1张群卡 |
-| 12.6 食人花当日只读验证 | P0 | pending | Codex在约定时点回读活动发信、可发送池和额度使用；不发任何飞书验证卡 |
+| 12.6 食人花当日只读验证 | P0 | complete | 2026-08-24只读日报与活动任务回读完成：今日活动发信0、累计18、可发库存0、POWKONG滚动24小时1/120；未发飞书验证卡。结论为候选供给/调度阻塞，不是邮箱额度阻塞 |
 
 ## 2026-08-23 Dave 可选竞品证据与七层词源灰度
 
@@ -291,4 +291,13 @@
 | 16.3 清除开关与重新部署 | P0 | complete | 仅删除 `EMAIL_DRY_RUN_TO` 单个变量；最终 deployment `6a8bf95ff0c2fe61c934ef75` 为 RUNNING，状态接口回读 `dry_run_active=false` |
 | 16.4 恢复 Dave 15 封真发 | P0 | complete | 当日 Dave 活动发送从6封增至21封，正好补足15封；未手动重复触发，19条真实发件扫描无重复收件人 |
 | 16.5 正常定时发送回归 | P0 | complete | n8n execution `1001940` 创建任务 `autosend-f33f538eda2b`，正常发送3封、失败0、raw发送后校验3/3通过；最终日报 Dave 今日24封、累计176封 |
-| 16.6 多模板Raw证书分槽 | P1 | pending | 当前活动只保存一张Raw证书；验证其他模板会覆盖活动发送证书。现已恢复`launch-queue-v1`，后续改为按模板版本分别保存，避免临时阻断 |
+| 16.6 多模板Raw证书分槽 | P1 | complete | Raw证书升级为schema v2并按模板版本独立保存；`launch-queue-v1`与`kol-cold-template-v1`均完成测试邮箱raw验证并同时保留，发送中心只读取活动模板证书；111项聚焦测试通过，合并最新master后全仓676项通过 |
+
+## 2026-08-24 P1上线后双活动生产审计
+
+| Phase | Priority | Status | Success Check |
+|---|---|---|---|
+| 17.1 P1部署与证书回读 | P1 | complete | 生产活动记录回读为schema v2，两个模板槽均`passed=true`；测试只发测试邮箱，生产草稿写入0 |
+| 17.2 邮件基础设施恢复与轮换 | P0 | complete | 误覆盖的Zeabur变量已完整恢复，内部调用令牌已轮换；55个n8n请求头全部一致，服务健康、非dry-run、未暂停 |
+| 17.3 正常定时任务回归 | P0 | complete | 20:00真实自动发送execution `1003477`为success，Webhook节点成功且无401；证明恢复后授权可用 |
+| 17.4 双活动卡点审计 | P0 | complete | Dave与食人花均为可发库存0；邮箱余量充足。小时级自治补池工作流`uvBfJBtGH93F`当前inactive，是两活动无法自行续供的直接共同阻塞，需单独生产授权后恢复 |
