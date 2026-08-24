@@ -570,3 +570,14 @@
 - 同轮运营审核通知真实发送1张、目标1人、错误0，证明“证据续供新增→审核卡”已闭环，不再依赖Frankie或Codex会话手动提醒；活动待审池现为25条。
 - 食人花05:50发现任务已由办公室爬虫完成：新增3、更新35、有效邮箱0。06:20控制器据最近12个任务有效邮箱2（0.167/任务）进入2小时`quality_cooldown`，未降低国家、语言、内容或邮箱标准；活动事实表现有56条，其中通过18、排除18、待审核20，已关联草稿18。
 - 06:27独立n8n审计execution `998107`成功：Dave=`business_result_ok/supply_in_progress`，食人花=`business_result_ok/supply_cooling_down`，两项均不是程序卡死。P0恢复清单15.1–15.5已完成；当前影响业务速度的是人工待审量、食人花词源有效邮箱率，以及两活动承诺/上稿仍为0。
+
+## 2026-08-24 P0共同阻塞：自动补池恢复
+
+- Frankie已授权恢复双活动共同阻塞。代码commit `a00b36e428580a0de9c157b0683a2e253d8730bf`把n8n受管节点固定为`dry_run=false + ai_mode=legacy_deepseek + confirm=RUN_LEGACY_DEEPSEEK_REFILL`；本地解析、相关回归和全仓测试已通过，唯一失败仍是既有Zeabur watchdog旧日期fixture。
+- 首次只把工作流切为active后，20:35食人花任务虽然n8n success，但服务返回`dry_run/zero_model/read_only`且业务写入0；这证明“定时器启用”不是生产补池完成。修正节点生产参数后重新启用，并在任务运行期间冻结代码推送。
+- 21:00 Dave自然execution `1003858`受理后台任务`launchruntime-de8ab949c278`，最终`success/supply_in_progress`：建立14条待运营审核候选、发1张审核通知，草稿0、邮件0；可发库存仍为0，FUNLAB滚动24小时41/120。
+- 21:05食人花自然execution `1003904`受理后台任务`launchruntime-d7bb14efbd30`，最终`success/supply_in_progress`：资料写入9、创建1个七层确定性发现任务、建立15条待审核候选，草稿0、邮件0；可发库存仍为0。
+- 21:20食人花自然execution `1003987`再次受理生产任务`launchruntime-add7c3f17ee5`，资料写入15；因质量冷却保持现有15条待审候选，没有重复建池、建草稿或发邮件，最终`success/supply_cooling_down`。
+- 工作流重新激活后，21:35自然execution `1004081`继续准时受理任务`launchruntime-d1340d282a17`；最终`success/supply_cooling_down`，资料写入15、待审仍为15，草稿0、邮件0。证明active恢复能持续触发，不是一次性生效。
+- 21:27独立审计execution `1004032`为success：Dave=`business_result_ok/supply_in_progress`，食人花当时为`running_within_expected_window`；其后直接回读食人花任务已success。自治工作流最终回读`active=true / Asia/Shanghai / 4 nodes / 2 connections`，Dave每小时00分，食人花每小时05/20/35/50分。
+- 当前P0共同技术阻塞已解除；唯一发送中心、额度、活动锁和重复触达规则未改。剩余业务瓶颈是两活动可发库存仍为0、自动通过为0，需要现有审核/爬虫链把待审候选转成合格草稿；承诺与实际上稿仍为0，继续列P1结果闭环。

@@ -108,3 +108,18 @@
 
 - [x] 未记录任何旧/新令牌、API key、邮箱或邮件正文。
 - [x] 修复脚本只从环境读取敏感值，日志只输出数量、布尔值和资源ID。
+
+# 2026-08-24 n8n自治启用与真实业务模式
+
+## Candidate Lessons
+
+| Symptom | Cause | Prevention | Promote to |
+|---|---|---|---|
+| 工作流已经active且n8n execution success，但补池写入仍为0 | 服务入口安全默认是`dry_run + zero_model`；工作流节点没有显式选择生产模式 | 回读节点请求体的生产双闸，并检查后台任务返回的`dry_run/ai_mode/business_outcome/业务写入`，不能只看active或HTTP成功 | n8n production verification checklist |
+| 已经调用activate，稍后回读又显示inactive | 生产工作流可能被其他更新覆盖状态；单次activate响应不是持续状态证明 | 更新后立即回读，下一次自然执行前后再回读active；以自然定时execution和后台任务终态共同验收 | n8n workflow update SOP |
+| 文档提交可能打断正在计算的补池任务 | 同仓库任意push会触发Zeabur部署，进程内后台任务会随重启终止 | 后台任务running期间只做本地记录，等终态后再push；部署后重新核对服务健康和工作流active | deployment SOP |
+
+## Secret/Privacy Review
+
+- [x] 未记录API key、token、邮箱、邮件正文或KOL个人资料。
+- [x] 只记录生产模式、验收方法和不含个人信息的业务数量。

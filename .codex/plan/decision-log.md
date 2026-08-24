@@ -89,3 +89,11 @@
 - Raw证书已在P1升级为按`template_version`独立分槽的schema v2；发送中心必须显式读取自己需要的模板槽，任何测试模板都不得覆盖或替代生产活动模板证书。
 - Zeabur环境变量的`updateEnvironmentVariable`属于全量替换，不得用于单变量修改；以后只能用`createSingleEnvironmentVariable`、`updateSingleEnvironmentVariable`或`deleteSingleEnvironmentVariable`，并在变更前后核对变量总数与关键项。
 - 两活动的“邮箱额度”和“可发库存”继续独立判断。2026-08-24事实为额度充足但库存为0；自动补池总调度停用时，发送中心成功不代表活动能继续推进。
+
+## 2026-08-24 自动补池生产恢复决策
+
+- `/launch/runtime/autonomous-refill`继续默认零模型只读预览；生产n8n节点必须显式同时传`dry_run=false`、`ai_mode=legacy_deepseek`和确认口令，缺任一项都不得视为真实补池。
+- “P0恢复完成”必须同时满足：工作流active、节点生产参数正确、自然定时execution成功、后台任务到终态、业务写入/候选产出可读；只满足前两项不算完成。
+- 自治控制器只负责刷新资料、建立发现任务、生成待审候选和排入原队列；它不直接发KOL邮件。真实邮件仍由唯一发送中心按活动锁、重复触达和品牌额度执行。
+- n8n生产工作流被更新或重新激活后，要在下一次自然执行前后重复回读`active`；不能把一次activate响应当成持续启用证明。
+- 自动补池恢复不等于可发库存恢复。本轮两活动均产出待审供给但自动通过仍为0，因此后续日报需把“自治健康”和“可发库存”分开标记。
