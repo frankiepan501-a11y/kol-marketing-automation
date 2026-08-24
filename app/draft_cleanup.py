@@ -10,7 +10,7 @@ from . import config, feishu
 CLEANABLE = {"已否决", "发送失败"}  # 唯一可删: dedup 跳过这俩, 删了不影响防重/ROI
 
 
-async def run(days: int = 30) -> dict:
+async def run(days: int = 30, dry_run: bool = False) -> dict:
     cutoff = int(time.time() * 1000) - days * 86400 * 1000
     all_drafts = await feishu.fetch_all_records(config.T_DRAFT)
     to_del = []
@@ -26,12 +26,18 @@ async def run(days: int = 30) -> dict:
             continue                   # 还没到 N 天, 留
         to_del.append(d["record_id"])
     deleted = 0
-    for i in range(0, len(to_del), 500):
-        batch = to_del[i:i+500]
-        await feishu.api("POST",
-            f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{config.T_DRAFT}/records/batch_delete",
-            {"records": batch})
-        deleted += len(batch)
-    print(f"[draft_cleanup] scanned={len(all_drafts)} protected={protected} deleted={deleted} (>{days}d 已否决/失败)")
+    if not dry_run:
+        for i in range(0, len(to_del), 500):
+            batch = to_del[i:i+500]
+            await feishu.api("POST",
+                f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{config.T_DRAFT}/records/batch_delete",
+                {"records": batch})
+            deleted += len(batch)
+    print(
+        f"[draft_cleanup] scanned={len(all_drafts)} protected={protected} "
+        f"planned={len(to_del)} deleted={deleted} dry_run={dry_run} "
+        f"(>{days}d 已否决/失败)"
+    )
     return {"scanned": len(all_drafts), "protected_nonclean": protected,
-            "deleted": deleted, "retention_days": days, "cleanable_states": list(CLEANABLE)}
+            "planned_delete": len(to_del), "deleted": deleted, "dry_run": dry_run,
+            "retention_days": days, "cleanable_states": sorted(CLEANABLE)}

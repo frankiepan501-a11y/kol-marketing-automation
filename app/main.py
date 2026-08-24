@@ -56,6 +56,8 @@ _relabel_profile_jobs = {}
 _RELABEL_PROFILE_JOB_TTL = 24 * 3600
 _auto_send_jobs = {}
 _AUTO_SEND_JOB_TTL = 24 * 3600
+_draft_cleanup_jobs = {}
+_DRAFT_CLEANUP_JOB_TTL = 24 * 3600
 
 
 def _check_auth(auth: str):
@@ -3290,18 +3292,99 @@ async def run_sla_check(authorization: str = Header(default="")):
         return {"ok": False, "error": str(e), "trace": tr}
 
 
-@app.post("/draft-cleanup/run")
-async def run_draft_cleanup(authorization: str = Header(default=""), days: int = 30):
-    """草稿归档清理 (2026-05-27): 删 N 天前的「已否决/发送失败」草稿, 硬保护其他状态.
-    dedup 跳过这俩状态→删了不影响防重/ROI. 建议周 cron."""
-    _check_auth(authorization)
+def _prune_draft_cleanup_jobs() -> None:
+    now = time.time()
+    for job_id in list(_draft_cleanup_jobs):
+        started = _draft_cleanup_jobs[job_id].get("started_ts", 0)
+        if started and now - started > _DRAFT_CLEANUP_JOB_TTL:
+            _draft_cleanup_jobs.pop(job_id, None)
+
+
+def _running_draft_cleanup_job(days: int, dry_run: bool):
+    _prune_draft_cleanup_jobs()
+    for job_id, job in _draft_cleanup_jobs.items():
+        if (
+            job.get("status") == "running"
+            and job.get("days") == days
+            and job.get("dry_run") is dry_run
+        ):
+            return job_id, job
+    return "", None
+
+
+async def _run_draft_cleanup_job(job_id: str, days: int, dry_run: bool) -> None:
     try:
-        result = await draft_cleanup.run(days=days)
-        return {"ok": True, **result}
+        result = await draft_cleanup.run(days=days, dry_run=dry_run)
+        _draft_cleanup_jobs[job_id].update(
+            status="success",
+            finished_at=datetime_now_string(),
+            result={"ok": True, **result},
+        )
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
+        _draft_cleanup_jobs[job_id].update(
+            status="error",
+            finished_at=datetime_now_string(),
+            error=str(e),
+            trace=tr,
+        )
         await _alert_endpoint_failure("/draft-cleanup/run", str(e), tr)
-        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/draft-cleanup/run")
+async def run_draft_cleanup(
+    authorization: str = Header(default=""),
+    days: int = 30,
+    dry_run: bool = False,
+):
+    """后台清理 N 天前的「已否决/发送失败」草稿，立即返回可查询 job_id。
+
+    ``dry_run=true`` 会完成全表扫描和候选统计，但不调用删除接口。
+    """
+    _check_auth(authorization)
+    if days < 1 or days > 3650:
+        raise HTTPException(400, "days must be between 1 and 3650")
+    running_id, running_job = _running_draft_cleanup_job(days, dry_run)
+    if running_job:
+        return {
+            "ok": True,
+            "accepted": True,
+            "already_running": True,
+            "job_id": running_id,
+            "status": "running",
+            "days": days,
+            "dry_run": dry_run,
+        }
+
+    job_id = "draftcleanup-" + uuid.uuid4().hex[:12]
+    _draft_cleanup_jobs[job_id] = {
+        "status": "running",
+        "started_ts": time.time(),
+        "started_at": datetime_now_string(),
+        "days": days,
+        "dry_run": dry_run,
+    }
+    asyncio.create_task(_run_draft_cleanup_job(job_id, days, dry_run))
+    return {
+        "ok": True,
+        "accepted": True,
+        "already_running": False,
+        "job_id": job_id,
+        "status": "running",
+        "days": days,
+        "dry_run": dry_run,
+    }
+
+
+@app.get("/draft-cleanup/jobs/{job_id}")
+async def get_draft_cleanup_job(job_id: str, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    _prune_draft_cleanup_jobs()
+    job = _draft_cleanup_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "draft cleanup job not found")
+    public = {k: v for k, v in job.items() if k not in {"started_ts", "trace"}}
+    return {"ok": True, "job_id": job_id, **public}
 
 
 @app.post("/ship-recon/run")
