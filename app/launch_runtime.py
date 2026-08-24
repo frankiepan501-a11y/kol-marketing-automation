@@ -163,8 +163,14 @@ def validate_deterministic_launch_draft(draft: dict) -> dict:
 
 async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
                                     profile_refresh_limit: int = 30,
-                                    draft_preview_limit: int = 20) -> dict:
+                                    draft_preview_limit: int = 20,
+                                    progress_callback=None) -> dict:
     """只读演练活动补池；固定规则、固定模板、零模型、零生产写入。"""
+    def report(stage: str, detail: dict | None = None) -> None:
+        if progress_callback:
+            progress_callback(stage, detail or {})
+
+    report("activity_metrics")
     activity = await launch_evidence.get_activity(campaign_id)
     activity_fields = activity.get("fields") or {}
     metrics = await campaign_metrics(campaign_id, activity=activity)
@@ -200,6 +206,7 @@ async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
             "runtime": f"campaign_metrics_{action}",
             "business_outcome": "stopped" if action == "stop" else "held",
         }
+    report("product_quota")
     product_id = ext(activity_fields.get("产品主记录ID")).strip()
     if not product_id:
         raise LaunchRuntimeError("活动缺少产品主记录ID")
@@ -215,6 +222,7 @@ async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
         max(auto_send.SEND_DAILY_CAP, quota["remaining"] * days),
     )
     inventory = await _campaign_ready_inventory(campaign_id)
+    report("candidate_preview")
     preview = await launch_candidate_preview.preview_candidates(
         "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
     )
@@ -226,6 +234,7 @@ async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
         "dry_run": True, "classification_mode": "deterministic",
         "model_calls": 0, "writes": 0, "processed": 0,
     }
+    report("profile_refresh", {"planned": len(refresh_ids), "processed": 0})
     if refresh_ids:
         profile_refresh = await relabel.run_profile_records(
             refresh_ids, dry_run=True, limit=len(refresh_ids),
@@ -237,6 +246,7 @@ async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
         if candidate.get("decision") == "eligible_new_cold"
         and candidate.get("review_decision") == "通过"
     ]
+    report("draft_preview", {"planned": min(len(eligible), draft_preview_limit)})
     draft_previews = []
     for candidate in eligible[:max(0, min(int(draft_preview_limit), 50))]:
         contact_id = str(candidate.get("contact_id") or "").strip()
@@ -267,6 +277,7 @@ async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
         "shortfall_tasks": 0, "skipped": "inventory_sufficient",
     }
     if remaining:
+        report("keyword_preview", {"required_candidates": remaining})
         discovery = await keyword_supply.ensure_campaign_supply(
             campaign_id=campaign_id, activity=activity, product=product,
             required_candidates=remaining,
@@ -293,6 +304,7 @@ async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
     if discovery_shortfall:
         degraded_reasons.append("fixed_keywords_shortfall")
 
+    report("finalize")
     return {
         **base_result,
         "brand": brand, "metrics": metrics, "quota": quota,

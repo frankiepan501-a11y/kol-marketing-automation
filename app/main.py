@@ -2645,7 +2645,11 @@ async def launch_participants_lock(request: Request, authorization: str = Header
 def _prune_launch_runtime_jobs() -> None:
     now = time.time()
     for job_id in list(_launch_runtime_jobs):
-        if now - _launch_runtime_jobs[job_id].get("started_ts", 0) > _LAUNCH_RUNTIME_JOB_TTL:
+        job = _launch_runtime_jobs[job_id]
+        if (
+            job.get("status") in {"success", "degraded", "error", "completed"}
+            and now - job.get("started_ts", 0) > _LAUNCH_RUNTIME_JOB_TTL
+        ):
             _launch_runtime_jobs.pop(job_id, None)
 
 
@@ -2671,6 +2675,27 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
     if not is_read_only and not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise HTTPException(status_code=403, detail="活动队列写入开关未开启")
     _prune_launch_runtime_jobs()
+    if mode == "autonomous_preview":
+        for running_job_id, running_job in _launch_runtime_jobs.items():
+            if (
+                running_job.get("status") == "running"
+                and running_job.get("mode") == "autonomous_preview"
+                and running_job.get("campaign_id") == campaign_id
+            ):
+                active_profile_limit = int(
+                    running_job.get("profile_refresh_limit") or 30
+                )
+                active_draft_limit = int(running_job.get("draft_preview_limit") or 20)
+                return {
+                    "ok": True, "accepted": True, "already_running": True,
+                    "job_id": running_job_id, "status": "running",
+                    "requested_parameters_differ": bool(
+                        active_profile_limit != profile_refresh_limit
+                        or active_draft_limit != draft_preview_limit
+                    ),
+                    "active_profile_refresh_limit": active_profile_limit,
+                    "active_draft_preview_limit": active_draft_limit,
+                }
     # Zeabur 重启后旧进程里的后台协程已经不存在，不能把活动表里残留的
     # running 记录继续当成活任务。当前生产为单实例，真实并发只以内存任务表判定。
     request_key = (
@@ -2700,6 +2725,8 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
         "continuation_import_limit": continuation_import_limit,
         "profile_refresh_limit": profile_refresh_limit,
         "draft_preview_limit": draft_preview_limit,
+        "stage": "queued", "stage_detail": {},
+        "stage_started_ts": started_ts,
     }
     durable_job = mode == "autonomous" or (
         mode in {"evidence_author_import", "evidence_author_continuation"}
@@ -2712,6 +2739,12 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
         )
 
     async def _job():
+        def _progress(stage: str, detail: dict | None = None) -> None:
+            now_ts = time.time()
+            _launch_runtime_jobs[job_id].update(
+                stage=stage, stage_detail=detail or {}, stage_started_ts=now_ts,
+            )
+
         try:
             if mode == "feedback":
                 result = await launch_runtime.daily_feedback(campaign_id)
@@ -2732,6 +2765,7 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                     campaign_id=campaign_id,
                     profile_refresh_limit=profile_refresh_limit,
                     draft_preview_limit=draft_preview_limit,
+                    progress_callback=_progress,
                 )
             elif mode == "evidence_author_pilot":
                 result = await launch_candidate_preview.preview_unmatched_evidence_authors(
@@ -2774,6 +2808,8 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                 )
             _launch_runtime_jobs[job_id].update(
                 status=job_status, finished_at=datetime_now_string(), result=result,
+                stage="completed", stage_detail={"status": job_status},
+                stage_started_ts=time.time(),
             )
             outcome_error_count = len(
                 (result.get("outcome_reconcile") or {}).get("errors") or []
@@ -2800,6 +2836,8 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                     audit_result = None
             _launch_runtime_jobs[job_id].update(
                 status="error", finished_at=datetime_now_string(), error=str(exc)[:500],
+                stage="error", stage_detail={"error_type": type(exc).__name__},
+                stage_started_ts=time.time(),
                 **({"result": audit_result} if audit_result is not None else {}),
             )
             if durable_job:
@@ -3153,9 +3191,21 @@ async def get_launch_runtime_job(job_id: str, campaign_id: str = "",
             error="service_restarted_before_job_completion",
             started_ts=job.get("started_ts"),
         )
+    job = dict(job)
+    if memory_job and job.get("status") == "running":
+        now_ts = time.time()
+        job["elapsed_seconds"] = round(
+            max(0.0, now_ts - float(job.get("started_ts") or now_ts)), 1,
+        )
+        job["stage_elapsed_seconds"] = round(
+            max(0.0, now_ts - float(job.get("stage_started_ts") or now_ts)), 1,
+        )
     public = {
         key: value for key, value in job.items()
-        if key not in {"request_key", "started_ts", "seed_candidates", "expected_handles"}
+        if key not in {
+            "request_key", "started_ts", "stage_started_ts",
+            "seed_candidates", "expected_handles",
+        }
     }
     return {"ok": True, "job_id": public.pop("job_id", job_id), **public}
 

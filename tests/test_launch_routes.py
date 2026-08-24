@@ -91,9 +91,11 @@ class LaunchRouteTests(unittest.TestCase):
         self.assertTrue(accepted["dry_run"])
         self.assertEqual("zero_model", accepted["ai_mode"])
         self.assertTrue(status["result"]["read_only"])
-        preview.assert_awaited_once_with(
-            campaign_id="c1", profile_refresh_limit=30, draft_preview_limit=20,
-        )
+        preview.assert_awaited_once()
+        self.assertEqual("c1", preview.await_args.kwargs["campaign_id"])
+        self.assertEqual(30, preview.await_args.kwargs["profile_refresh_limit"])
+        self.assertEqual(20, preview.await_args.kwargs["draft_preview_limit"])
+        self.assertTrue(callable(preview.await_args.kwargs["progress_callback"]))
 
     def test_autonomous_refill_rejects_unconfirmed_real_legacy_mode(self):
         with patch.object(main.config, "INTERNAL_TOKEN", "secret"):
@@ -134,7 +136,7 @@ class LaunchRouteTests(unittest.TestCase):
         self.assertEqual("error", status["status"])
         alert.assert_not_awaited()
 
-    def test_zero_model_preview_different_limits_create_distinct_jobs(self):
+    def test_zero_model_preview_same_campaign_reuses_running_job_across_limits(self):
         async def exercise():
             main._launch_runtime_jobs.clear()
             gate = asyncio.Event()
@@ -167,8 +169,70 @@ class LaunchRouteTests(unittest.TestCase):
 
         first, second = asyncio.run(exercise())
 
-        self.assertNotEqual(first["job_id"], second["job_id"])
-        self.assertFalse(second["already_running"])
+        self.assertEqual(first["job_id"], second["job_id"])
+        self.assertTrue(second["already_running"])
+        self.assertTrue(second["requested_parameters_differ"])
+        self.assertEqual(10, second["active_profile_refresh_limit"])
+        self.assertEqual(5, second["active_draft_preview_limit"])
+
+    def test_zero_model_preview_job_exposes_current_stage_and_elapsed_time(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            gate = asyncio.Event()
+
+            async def preview(*, progress_callback, **_kwargs):
+                progress_callback("profile_refresh", {"planned": 7, "processed": 0})
+                await gate.wait()
+                return {"read_only": True, "writes": 0, "model_calls": 0}
+
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", False,
+            ), patch.object(
+                main.launch_runtime, "preview_zero_model_refill", side_effect=preview,
+            ):
+                accepted = await main.launch_runtime_autonomous_refill(
+                    FakeRequest({"campaign_id": "c1"}), authorization="Bearer secret",
+                )
+                await asyncio.sleep(0)
+                status = await main.get_launch_runtime_job(
+                    accepted["job_id"], authorization="Bearer secret",
+                )
+                gate.set()
+                await asyncio.sleep(0)
+            main._launch_runtime_jobs.clear()
+            return status
+
+        status = asyncio.run(exercise())
+
+        self.assertEqual("profile_refresh", status["stage"])
+        self.assertEqual({"planned": 7, "processed": 0}, status["stage_detail"])
+        self.assertGreaterEqual(status["elapsed_seconds"], 0)
+
+    def test_prune_keeps_running_jobs_past_retention_ttl(self):
+        main._launch_runtime_jobs.clear()
+        stale_started = main.time.time() - main._LAUNCH_RUNTIME_JOB_TTL - 60
+        main._launch_runtime_jobs["running-job"] = {
+            "job_id": "running-job",
+            "status": "running",
+            "started_ts": stale_started,
+        }
+        main._launch_runtime_jobs["success-job"] = {
+            "job_id": "success-job",
+            "status": "success",
+            "started_ts": stale_started,
+        }
+        main._launch_runtime_jobs["degraded-job"] = {
+            "job_id": "degraded-job",
+            "status": "degraded",
+            "started_ts": stale_started,
+        }
+
+        main._prune_launch_runtime_jobs()
+
+        self.assertIn("running-job", main._launch_runtime_jobs)
+        self.assertNotIn("success-job", main._launch_runtime_jobs)
+        self.assertNotIn("degraded-job", main._launch_runtime_jobs)
+        main._launch_runtime_jobs.clear()
 
     def test_zero_model_preview_rejects_non_integer_limits(self):
         with patch.object(main.config, "INTERNAL_TOKEN", "secret"):
