@@ -763,6 +763,39 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         generate.assert_not_awaited()
         create_record.assert_not_awaited()
 
+    def test_volume_priority_keeps_discovery_running_during_quality_cooldown(self):
+        now_ms = int(keyword_supply.time.time() * 1000)
+        rows = [{"fields": {
+            "任务名": f"[活动补池:campaign1] YT KOL - low yield {index}",
+            "关键词列表": f"low yield {index}", "任务状态": "3-已完成",
+            "创建日期": now_ms - index * 60_000,
+            "实际产出-新增": 0,
+            "执行日志": "待入库: 0\n其中有邮箱: 0",
+            "筛选-语言": ["en"],
+        }} for index in range(12)]
+        activity = {"fields": {"活动目标语言": ["en"]}}
+        product = {"fields": {"产品英文名": "POWKONG Piranha Plant 2 Dock"}}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records", new=AsyncMock(return_value=rows),
+        ), patch.object(
+            keyword_supply.deepseek, "chat_json", new=AsyncMock(return_value={"keywords": []}),
+        ), patch.object(
+            keyword_supply.feishu, "create_record", new=AsyncMock(),
+        ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=300, approved_candidates=1, dry_run=True,
+                volume_priority=True,
+            ))
+
+        self.assertEqual("cooldown", result["quality_gate"]["mode"])
+        self.assertTrue(result["volume_priority"])
+        self.assertTrue(result["quality_cooldown_overridden"])
+        self.assertEqual(6, result["target_tasks"])
+        self.assertGreater(result["would_create"], 0)
+        self.assertFalse(result["quality_filters_lowered"])
+
     def test_piranha_low_yield_after_cooldown_allows_only_one_probe_task(self):
         now_ms = int(keyword_supply.time.time() * 1000)
         old_ms = now_ms - keyword_supply.LOW_YIELD_PROBE_COOLDOWN_MS - 1

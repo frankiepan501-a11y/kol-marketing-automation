@@ -510,9 +510,8 @@ async def reconcile_pending_participant_reviews(*, campaign_id: str,
 
 
 async def append_auto_approved(*, campaign_id: str, pool_target: int,
-                               preview: dict | None = None,
-                               allow_parallel_review: bool = False) -> dict:
-    """只追加系统已有充分资料且 review_decision=通过 的新开发对象；不取消旧记录。"""
+                               preview: dict | None = None) -> dict:
+    """只追加系统明确通过的新开发对象；待审对象始终保留在旁路。"""
     if not config.LAUNCH_ACTIVITY_QUEUE_ENABLED:
         raise LaunchRuntimeError("LAUNCH_ACTIVITY_QUEUE_ENABLED 未开启")
     activity = await launch_evidence.get_activity(campaign_id)
@@ -549,14 +548,10 @@ async def append_auto_approved(*, campaign_id: str, pool_target: int,
         and ext((row.get("fields") or {}).get("审核结论")) in {"待审核", "待补资料"}
         for row in existing
     )
-    if outstanding_review and not allow_parallel_review:
-        return {
-            "campaign_id": campaign_id, "pool_before": active_count,
-            "eligible_auto_approved": 0, "created": 0,
-            "pool_after": active_count, "participant_ids": [],
-            "blocked_by_pending_review": outstanding_review,
-        }
-    room = max(0, int(pool_target) - active_count)
+    # 待审记录只进入运营旁路，不占用“明确可开发对象”的目标名额。
+    # 历史记录可能没有审核结论，因此只剔除明确待审/待补资料的记录。
+    non_review_active_count = max(0, active_count - outstanding_review)
+    room = max(0, int(pool_target) - non_review_active_count)
     batch_room = min(room, 120)
     candidates = [
         c for c in (preview.get("candidates") or [])
@@ -589,9 +584,10 @@ async def append_auto_approved(*, campaign_id: str, pool_target: int,
         created.append(record_id)
     return {
         "campaign_id": campaign_id, "pool_before": active_count,
+        "non_review_pool_before": non_review_active_count,
         "eligible_auto_approved": len(candidates), "created": len(created),
         "pool_after": active_count + len(created), "participant_ids": created,
-        "pending_review_kept_parallel": outstanding_review if allow_parallel_review else 0,
+        "pending_review_kept_parallel": outstanding_review,
     }
 
 
@@ -1347,10 +1343,16 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
         )
         deficit = max(0, target_ready - inventory_before["ready"])
+        active_before = int(
+            inventory_before.get("active_participants", metrics["participants"])
+        )
+        non_review_before = max(
+            0, active_before - int(inventory_before.get("pending_review") or 0),
+        )
         first_append = await append_auto_approved(
             campaign_id=campaign_id,
-            pool_target=metrics["participants"] + min(deficit, 120),
-            preview=preview, allow_parallel_review=True,
+            pool_target=non_review_before + min(deficit, 120),
+            preview=preview,
         )
         first_queue = await queue_approved(
             campaign_id=campaign_id, limit=queue_limit, model_budget=model_budget,
@@ -1381,13 +1383,20 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                     "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
                 )
                 remaining = max(0, target_ready - inventory_after_master["ready"])
+                active_after_master = int(
+                    inventory_after_master.get(
+                        "active_participants", metrics["participants"],
+                    )
+                )
+                non_review_after_master = max(
+                    0,
+                    active_after_master
+                    - int(inventory_after_master.get("pending_review") or 0),
+                )
                 second_append = await append_auto_approved(
                     campaign_id=campaign_id,
-                    pool_target=(
-                        int(inventory_after_master.get("active_participants")
-                            or metrics["participants"]) + min(remaining, 120)
-                    ),
-                    preview=latest_preview, allow_parallel_review=True,
+                    pool_target=non_review_after_master + min(remaining, 120),
+                    preview=latest_preview,
                 )
             if inventory_before.get("pending_contact_ids"):
                 pending_review_reconcile = await reconcile_pending_participant_reviews(
@@ -1445,7 +1454,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                 approved_candidates=int(
                     metrics.get("approved_new_development_24h") or 0
                 ),
-                dry_run=False,
+                dry_run=False, volume_priority=True,
                 model_budget=model_budget,
             )
             review_preview = dict(latest_preview)

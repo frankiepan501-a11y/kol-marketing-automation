@@ -661,22 +661,21 @@ class LaunchRuntimeTests(unittest.TestCase):
         ) as create_record:
             result = asyncio.run(launch_runtime.append_auto_approved(
                 campaign_id="campaign1", pool_target=20, preview=preview,
-                allow_parallel_review=True,
             ))
 
         self.assertEqual(1, result["created"])
         self.assertEqual(1, result["pending_review_kept_parallel"])
         create_record.assert_awaited_once()
 
-    def test_auto_append_stops_while_any_candidate_still_needs_review(self):
+    def test_auto_append_never_stops_for_pending_review(self):
         activity = {"record_id": "a1", "fields": {
             "活动ID": "campaign1", "产品主记录ID": "product1",
             "证据排序版本": "v1", "KOL名单阻塞代码": "",
         }}
-        pending = {"record_id": "p0", "fields": {
-            "关联KOL": {"link_record_ids": ["old"]},
+        pending = [{"record_id": f"p{index}", "fields": {
+            "关联KOL": {"link_record_ids": [f"old-{index}"]},
             "参与状态": "已入围", "审核结论": "待审核",
-        }}
+        }} for index in range(20)]
         preview = {
             "ranking_version": "v1", "evidence_pending": False,
             "candidates": [{
@@ -690,7 +689,10 @@ class LaunchRuntimeTests(unittest.TestCase):
         ), patch.object(
             launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
         ), patch.object(
-            launch_runtime, "_participants", new=AsyncMock(return_value=[pending]),
+            launch_runtime, "_participants", new=AsyncMock(return_value=pending),
+        ), patch.object(
+            launch_runtime.launch_participation, "_participants_by_unique_key",
+            new=AsyncMock(return_value=[]),
         ), patch.object(
             launch_runtime.feishu, "create_record", new=AsyncMock(),
         ) as create_record:
@@ -698,9 +700,9 @@ class LaunchRuntimeTests(unittest.TestCase):
                 campaign_id="campaign1", pool_target=20, preview=preview,
             ))
 
-        self.assertEqual(1, result["blocked_by_pending_review"])
-        self.assertEqual(0, result["created"])
-        create_record.assert_not_awaited()
+        self.assertEqual(20, result["pending_review_kept_parallel"])
+        self.assertEqual(1, result["created"])
+        create_record.assert_awaited_once()
 
     def test_review_pool_forces_new_candidates_to_pending_without_queueing(self):
         activity = {"record_id": "a1", "fields": {
@@ -993,9 +995,9 @@ class LaunchRuntimeTests(unittest.TestCase):
             offset=17, sample_limit=20, import_limit=3, commit=True,
         )
         self.assertEqual(2, append_auto.await_count)
-        self.assertTrue(all(call.kwargs["allow_parallel_review"] for call in append_auto.await_args_list))
         discover.assert_awaited_once()
         self.assertEqual(3, discover.await_args.kwargs["approved_candidates"])
+        self.assertTrue(discover.await_args.kwargs["volume_priority"])
         self.assertIs(shared_budget, discover.await_args.kwargs["model_budget"])
         self.assertEqual(2, queue.await_count)
         self.assertTrue(all(

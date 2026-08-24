@@ -621,8 +621,9 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
                                  structured_pilot: bool = False,
                                  pilot_version: str = "v1",
                                  allow_ai: bool = True,
+                                 volume_priority: bool = False,
                                  model_budget=None) -> dict:
-    """为单个活动补确定性 YouTube 发现任务；只建爬虫任务，不直接创建 KOL。"""
+    """为单个活动补发现任务；体量优先时换词续跑，但不降低候选硬筛选。"""
     rows = await feishu.fetch_all_records(T_CRAWLER)
     fields = activity.get("fields") or {}
     product_fields = product.get("fields") or {}
@@ -738,7 +739,16 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             max(0, DAVE_KEYWORD_PILOT_MAX_TASKS - len(pilot_rows)),
         )
     quality_gate_enabled = theme == "piranha" or structured_pilot
-    if quality_gate_enabled and quality_gate["mode"] in {"cooldown", "slow_probe"}:
+    quality_cooldown_overridden = bool(
+        volume_priority
+        and quality_gate_enabled
+        and quality_gate["mode"] in {"cooldown", "slow_probe"}
+    )
+    if (
+        quality_gate_enabled
+        and quality_gate["mode"] in {"cooldown", "slow_probe"}
+        and not volume_priority
+    ):
         target_tasks = 1
     common_result = {
         "pending_before": active_pending_for_campaign + stale_pending_for_campaign,
@@ -746,11 +756,17 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         "stale_pending_before": stale_pending_for_campaign,
         "target_tasks": target_tasks,
         "quality_gate": quality_gate,
+        "volume_priority": bool(volume_priority),
+        "quality_cooldown_overridden": quality_cooldown_overridden,
         "quality_filters_lowered": False,
         "uncovered_target_countries": uncovered_target_countries,
         "model_calls": 0,
     }
-    if quality_gate_enabled and quality_gate["mode"] == "cooldown":
+    if (
+        quality_gate_enabled
+        and quality_gate["mode"] == "cooldown"
+        and not volume_priority
+    ):
         return {
             "ok": True, "created": 0, "would_create": 0,
             "skipped": "quality_cooldown", "keywords": [],
