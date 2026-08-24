@@ -204,7 +204,7 @@ def test_claim_job_builds_filename_and_marks_processing(monkeypatch):
 
     async def get_record(table_id, record_id):
         if record_id == "kol-1":
-            return {"fields": {"KOL": "Amrie47"}}
+            return {"fields": {"账号名": "Amrie47"}}
         return {"fields": {"产品名": "Long product title", "素材归档名": "YS11-5-戴夫"}}
 
     monkeypatch.setattr(controller.feishu, "get_record", get_record)

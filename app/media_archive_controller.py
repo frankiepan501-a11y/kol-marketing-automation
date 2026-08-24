@@ -362,7 +362,9 @@ async def claim_job(worker_id: str, commit: bool = True,
     product = await feishu.get_record(config.T_PRODUCT, product_ids[0])
     kol_fields = kol.get("fields") or {}
     product_fields = product.get("fields") or {}
-    kol_name = media_archive.field_text(kol_fields.get("KOL") or kol_fields.get("媒体人"))
+    kol_name = media_archive.field_text(
+        kol_fields.get("账号名") or kol_fields.get("KOL") or kol_fields.get("媒体人")
+    )
     product_name = media_archive.field_text(
         product_fields.get("素材归档名") or product_fields.get("SKU") or product_fields.get("产品名")
     )
