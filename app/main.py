@@ -410,7 +410,10 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "dtc_weekly_ai_configured": bool(os.environ.get("DTC_WEEKLY_DEEPSEEK_API_KEY", "").strip()),
+    }
 
 
 @app.post("/b2b-mail-reminder/run")

@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from app import deepseek, invest
+from app.weekly_report import integrator
 
 
 class _Response:
@@ -58,6 +59,32 @@ class DeepSeekKeyIsolationTests(unittest.TestCase):
         with patch.object(deepseek.config, "KOL_DEEPSEEK_API_KEY", ""):
             with self.assertRaisesRegex(RuntimeError, "missing KOL_DEEPSEEK_API_KEY"):
                 asyncio.run(deepseek.chat_json("hello"))
+
+    def test_dtc_weekly_uses_only_dedicated_key(self):
+        captured = []
+        factory = lambda *a, **kw: _Client(captured, *a, **kw)
+        with patch.dict(
+            "os.environ",
+            {
+                "DTC_WEEKLY_DEEPSEEK_API_KEY": "dtc-key",
+                "KOL_DEEPSEEK_API_KEY": "kol-key",
+                "DEEPSEEK_API_KEY": "legacy-key",
+            },
+            clear=False,
+        ), patch.object(integrator.httpx, "AsyncClient", factory):
+            result = asyncio.run(integrator._call_llm("system", "user"))
+
+        self.assertEqual('{"ok": true}', result)
+        self.assertEqual("Bearer dtc-key", captured[0][1]["headers"]["Authorization"])
+
+    def test_dtc_weekly_missing_dedicated_key_fails_before_network(self):
+        with patch.dict(
+            "os.environ",
+            {"KOL_DEEPSEEK_API_KEY": "kol-key", "DEEPSEEK_API_KEY": "legacy-key"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "DTC_WEEKLY_DEEPSEEK_API_KEY"):
+                asyncio.run(integrator._call_llm("system", "user"))
 
 
 if __name__ == "__main__":
