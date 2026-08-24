@@ -64,7 +64,7 @@ async def _update_status(record_id: str, fields: dict) -> None:
     }
     select_fields = {
         key: value for key, value in fields.items()
-        if key in select_names and value is not None
+        if key in select_names and (value is not None or key == "失败环节")
     }
     if data_fields:
         await feishu.update_record(config.T_UPLOAD_WORK, record_id, data_fields)

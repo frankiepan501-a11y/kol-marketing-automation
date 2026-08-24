@@ -222,7 +222,7 @@ def test_claim_job_builds_filename_and_marks_processing(monkeypatch):
     assert any(call.args[2] == {"自动处理状态": "处理中"} for call in calls)
 
 
-def test_status_writer_omits_none_instead_of_clearing_select(monkeypatch):
+def test_status_writer_clears_a_stale_failure_stage(monkeypatch):
     update = AsyncMock(return_value={})
     monkeypatch.setattr(controller.feishu, "update_record", update)
 
@@ -232,7 +232,7 @@ def test_status_writer_omits_none_instead_of_clearing_select(monkeypatch):
         "失败原因": "",
     }))
 
-    assert all(call.args[2] != {"失败环节": None} for call in update.await_args_list)
+    assert any(call.args[2] == {"失败环节": None} for call in update.await_args_list)
 
 
 def test_worker_heartbeat_writes_data_before_status_select(monkeypatch):
