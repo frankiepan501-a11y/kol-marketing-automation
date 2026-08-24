@@ -113,6 +113,39 @@ def test_refresh_youtube_metrics_writes_latest_and_due_snapshot(monkeypatch):
     assert snapshot_fields["数据源"] == "YouTube Data API"
 
 
+def test_refresh_youtube_metrics_can_limit_a_commit_to_one_record(monkeypatch):
+    selected = _row("yt-selected")
+    selected["fields"]["平台作品ID"] = "selected-id"
+    other = _row("yt-other", url="https://youtu.be/other-id")
+    other["fields"]["平台作品ID"] = "other-id"
+    monkeypatch.setattr(controller.config, "T_MEDIA_ARCHIVE_SNAPSHOT", "")
+    monkeypatch.setattr(
+        controller.feishu,
+        "fetch_all_records",
+        AsyncMock(return_value=[selected, other]),
+    )
+    fetch = AsyncMock(return_value={
+        "selected-id": {
+            "id": "selected-id",
+            "snippet": {"title": "Selected", "publishedAt": "2026-08-20T12:00:00Z"},
+            "statistics": {"viewCount": "100", "likeCount": "5", "commentCount": "1"},
+        },
+    })
+    monkeypatch.setattr(controller, "fetch_youtube_videos", fetch)
+    update = AsyncMock(return_value={})
+    monkeypatch.setattr(controller.feishu, "update_record", update)
+
+    result = asyncio.run(controller.refresh_youtube_metrics(
+        commit=True, record_id="yt-selected",
+        now=datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
+    ))
+
+    assert result["youtube_rows"] == 1
+    assert result["updated"] == 1
+    fetch.assert_awaited_once_with(["selected-id"])
+    assert all(call.args[1] == "yt-selected" for call in update.await_args_list)
+
+
 def test_claim_job_builds_filename_and_marks_processing(monkeypatch):
     row = _row("yt", state="待执行")
     monkeypatch.setattr(controller.feishu, "fetch_all_records", AsyncMock(return_value=[row]))

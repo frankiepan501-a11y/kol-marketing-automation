@@ -177,7 +177,8 @@ def _snapshot_days_by_work(records: list[dict]) -> dict[str, set[int]]:
 
 
 async def refresh_youtube_metrics(commit: bool = False,
-                                  now: datetime | None = None) -> dict:
+                                  now: datetime | None = None,
+                                  record_id: str = "") -> dict:
     now_dt = now or datetime.now(timezone.utc)
     now_ms = _now_ms(now_dt)
     records = await feishu.fetch_all_records(config.T_UPLOAD_WORK, field_names=WORK_FIELDS, page_size=200)
@@ -192,6 +193,8 @@ async def refresh_youtube_metrics(commit: bool = False,
 
     youtube_rows: list[tuple[dict, str]] = []
     for record in records:
+        if record_id and str(record.get("record_id") or "") != record_id:
+            continue
         fields = record.get("fields") or {}
         if media_archive.field_text(fields.get("发布平台")) != "YouTube":
             continue

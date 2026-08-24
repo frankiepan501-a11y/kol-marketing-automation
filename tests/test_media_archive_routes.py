@@ -61,6 +61,54 @@ def test_archive_tick_commits_queue_scan_only_after_flag_is_enabled(monkeypatch)
     scan.assert_awaited_once_with(commit=True, refresh_metrics=False)
 
 
+def test_youtube_tick_uses_its_own_flag_while_archive_downloads_stay_off(monkeypatch):
+    monkeypatch.setattr(main.config, "INTERNAL_TOKEN", "test-token")
+    monkeypatch.setattr(main.config, "MEDIA_ARCHIVE_ENABLED", False)
+    monkeypatch.setattr(main.config, "YOUTUBE_METRICS_ENABLED", True)
+    monkeypatch.setattr(main.config, "YOUTUBE_DATA_API_KEY", "configured")
+    refresh = AsyncMock(return_value={"commit": True, "updated": 1})
+    monkeypatch.setattr(main.media_archive_controller, "refresh_youtube_metrics", refresh)
+
+    result = asyncio.run(main.tick_media_archive_youtube_metrics(
+        authorization="Bearer test-token",
+    ))
+
+    assert result["enabled"] is True
+    assert result["updated"] == 1
+    refresh.assert_awaited_once_with(commit=True)
+
+
+def test_youtube_single_record_commit_uses_metrics_flag_and_filter(monkeypatch):
+    monkeypatch.setattr(main.config, "INTERNAL_TOKEN", "test-token")
+    monkeypatch.setattr(main.config, "MEDIA_ARCHIVE_ENABLED", False)
+    monkeypatch.setattr(main.config, "YOUTUBE_METRICS_ENABLED", True)
+    refresh = AsyncMock(return_value={"commit": True, "updated": 1})
+    monkeypatch.setattr(main.media_archive_controller, "refresh_youtube_metrics", refresh)
+
+    result = asyncio.run(main.refresh_media_archive_youtube_metrics(
+        authorization="Bearer test-token", commit=True, record_id="rec-1",
+    ))
+
+    assert result["updated"] == 1
+    refresh.assert_awaited_once_with(commit=True, record_id="rec-1")
+
+
+def test_scan_commit_cannot_bypass_the_youtube_metrics_flag(monkeypatch):
+    monkeypatch.setattr(main.config, "INTERNAL_TOKEN", "test-token")
+    monkeypatch.setattr(main.config, "MEDIA_ARCHIVE_ENABLED", True)
+    monkeypatch.setattr(main.config, "YOUTUBE_METRICS_ENABLED", False)
+    scan = AsyncMock()
+    monkeypatch.setattr(main.media_archive_controller, "scan", scan)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main.run_media_archive_scan(
+            authorization="Bearer test-token", commit=True, refresh_metrics=True,
+        ))
+
+    assert exc.value.status_code == 503
+    scan.assert_not_awaited()
+
+
 def test_worker_claim_requires_enabled_feature_and_returns_job(monkeypatch):
     monkeypatch.setattr(main.config, "INTERNAL_TOKEN", "test-token")
     monkeypatch.setattr(main.config, "MEDIA_ARCHIVE_ENABLED", True)

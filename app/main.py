@@ -422,6 +422,12 @@ def _require_media_archive_write_enabled() -> None:
         raise HTTPException(503, "MEDIA_ARCHIVE_ENABLED is off; dry-run remains available")
 
 
+def _require_youtube_metrics_write_enabled() -> None:
+    """Allow public YouTube metrics without opening the local-download queue."""
+    if not config.YOUTUBE_METRICS_ENABLED:
+        raise HTTPException(503, "YOUTUBE_METRICS_ENABLED is off; dry-run remains available")
+
+
 @app.get("/media-archive/status")
 async def media_archive_status(authorization: str = Header(default="")):
     """Read-only n8n gate; never returns credential values."""
@@ -429,6 +435,7 @@ async def media_archive_status(authorization: str = Header(default="")):
     return {
         "ok": True,
         "enabled": config.MEDIA_ARCHIVE_ENABLED,
+        "youtube_metrics_enabled": config.YOUTUBE_METRICS_ENABLED,
         "youtube_metrics_configured": bool(config.YOUTUBE_DATA_API_KEY),
         "work_table_configured": bool(config.T_UPLOAD_WORK),
         "snapshot_table_configured": bool(config.T_MEDIA_ARCHIVE_SNAPSHOT),
@@ -439,11 +446,13 @@ async def media_archive_status(authorization: str = Header(default="")):
 @app.post("/media-archive/scan")
 async def run_media_archive_scan(authorization: str = Header(default=""),
                                  commit: bool = False,
-                                 refresh_metrics: bool = True):
+                                 refresh_metrics: bool = False):
     """Plan archive work; writes only when both commit and the feature flag are on."""
     _check_auth(authorization)
     if commit:
         _require_media_archive_write_enabled()
+        if refresh_metrics:
+            _require_youtube_metrics_write_enabled()
     result = await media_archive_controller.scan(
         commit=commit, refresh_metrics=refresh_metrics,
     )
@@ -465,12 +474,15 @@ async def run_media_archive_tick(authorization: str = Header(default="")):
 @app.post("/media-archive/youtube-metrics/refresh")
 async def refresh_media_archive_youtube_metrics(
     authorization: str = Header(default=""), commit: bool = False,
+    record_id: str = Query(default=""),
 ):
     """Refresh public YouTube view/like/comment counts and due snapshots."""
     _check_auth(authorization)
     if commit:
-        _require_media_archive_write_enabled()
-    result = await media_archive_controller.refresh_youtube_metrics(commit=commit)
+        _require_youtube_metrics_write_enabled()
+    result = await media_archive_controller.refresh_youtube_metrics(
+        commit=commit, record_id=record_id,
+    )
     return {"ok": True, **result}
 
 
@@ -480,7 +492,7 @@ async def tick_media_archive_youtube_metrics(
 ):
     """Scheduled safe entrypoint for official YouTube public metrics."""
     _check_auth(authorization)
-    if not config.MEDIA_ARCHIVE_ENABLED:
+    if not config.YOUTUBE_METRICS_ENABLED:
         return {"ok": True, "enabled": False, "skipped": True}
     if not config.YOUTUBE_DATA_API_KEY:
         raise HTTPException(503, "YOUTUBE_DATA_API_KEY is not configured")
