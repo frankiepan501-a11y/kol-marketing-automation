@@ -21,3 +21,4 @@
 - 最终全仓回归：700项＋23个子样例通过；唯一失败仍为与本次无关的Zeabur watchdog旧日期fixture。`compileall` 与 `git diff --check` 通过。
 - 最终Standards复审发现并已修复两个边界：①旧待审行自动转通过时写入当前审核时间，让30分钟在途重试窗从“转通过”时刻开始；②坏邮箱在实时预检前先清洗，确保进入永久失败退出分支。两项均先用失败测试复现，再修至通过。
 - 修复后聚焦82项通过；全仓701项＋23个子样例通过，唯一失败仍为既有Zeabur watchdog旧日期fixture；`compileall` 与 `git diff --check` 通过。
+- Spec与Standards最终增量复审均PASS，无P0/P1/P2；待审隔离、硬筛选、发送中心与raw证书闸均未回退。当前只剩生产部署与自然cron验收，仍待明确授权。
