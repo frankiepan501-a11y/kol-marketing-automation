@@ -27,11 +27,19 @@ def test_ytdlp_command_locks_the_audited_video_and_audio_formats(tmp_path):
         executable="yt-dlp.exe",
         url="https://youtu.be/nUkwNTRFJBc",
         output_template=tmp_path / "YT-Creator-Product-01.mp4",
+        ffmpeg_location="D:/kol_media_archive/bin/ffmpeg/ffmpeg.exe",
+        js_runtime="deno:D:/kol_media_archive/bin/deno.exe",
         video_format_id="v1440",
         audio_format_id="a-best",
     )
 
     assert command[command.index("-f") + 1] == "v1440+a-best/v1440/best"
+    assert command[command.index("--ffmpeg-location") + 1] == (
+        "D:/kol_media_archive/bin/ffmpeg/ffmpeg.exe"
+    )
+    assert command[command.index("--js-runtimes") + 1] == (
+        "deno:D:/kol_media_archive/bin/deno.exe"
+    )
     assert "--recode-video" not in command
 
 

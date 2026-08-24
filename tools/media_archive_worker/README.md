@@ -58,4 +58,5 @@ pwsh -File ./tools/media_archive_worker/install-task.ps1 -Credential $credential
 
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp)：YouTube / TikTok / Instagram 格式识别与最高画质下载。
 - [yt-dlp FFmpeg builds](https://github.com/yt-dlp/FFmpeg-Builds)：合并音视频、解码检查、抽质检帧。
+- [Deno](https://github.com/denoland/deno)：供 yt-dlp 处理 YouTube 的 JavaScript 挑战，避免可用格式静默减少。
 - `lark-cli drive +upload`：文件超过 20 MB 时自动走飞书分片上传。

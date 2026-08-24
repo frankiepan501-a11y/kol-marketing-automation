@@ -24,7 +24,7 @@ import httpx
 from . import worker
 
 
-WORKER_VERSION = "0.2.2"
+WORKER_VERSION = "0.2.4"
 
 
 def parse_cli_json(text: str) -> dict:
@@ -124,18 +124,22 @@ async def _run_process(args: list[str], cwd: Path | None = None) -> str:
 class SubprocessToolchain:
     def __init__(self, ytdlp: str = "yt-dlp", ffprobe: str = "ffprobe",
                  ffmpeg: str = "ffmpeg", proxy: str = "",
-                 cookies_browser: str = "", cookies_file: str = ""):
+                 cookies_browser: str = "", cookies_file: str = "",
+                 js_runtime: str = ""):
         self.ytdlp = ytdlp
         self.ffprobe = ffprobe
         self.ffmpeg = ffmpeg
         self.proxy = proxy
         self.cookies_browser = cookies_browser
         self.cookies_file = cookies_file
+        self.js_runtime = js_runtime
 
     def _access_args(self) -> list[str]:
         args: list[str] = []
         if self.proxy:
             args.extend(["--proxy", self.proxy])
+        if self.js_runtime:
+            args.extend(["--js-runtimes", self.js_runtime])
         if self.cookies_file:
             args.extend(["--cookies", self.cookies_file])
         elif self.cookies_browser:
@@ -176,6 +180,8 @@ class SubprocessToolchain:
             cookies_file=self.cookies_file,
             video_format_id=str((job.get("_format_info") or {}).get("video_format_id") or ""),
             audio_format_id=str((job.get("_format_info") or {}).get("audio_format_id") or ""),
+            ffmpeg_location=self.ffmpeg,
+            js_runtime=self.js_runtime,
         )
         await _run_process(command, cwd=job_dir)
         if target.exists() and target.stat().st_size > 0:
@@ -386,6 +392,7 @@ class Settings:
     proxy: str
     cookies_browser: str
     cookies_file: str
+    js_runtime: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -407,6 +414,7 @@ class Settings:
             proxy=os.environ.get("KOL_SCRAPER_PROXY", "").strip(),
             cookies_browser=os.environ.get("MEDIA_ARCHIVE_COOKIES_BROWSER", "").strip(),
             cookies_file=os.environ.get("MEDIA_ARCHIVE_COOKIES_FILE", "").strip(),
+            js_runtime=os.environ.get("YTDLP_JS_RUNTIME", "").strip(),
         )
 
 
@@ -455,7 +463,7 @@ async def run_once(settings: Settings, record_id: str = "") -> dict:
     toolchain = SubprocessToolchain(
         ytdlp=settings.ytdlp, ffprobe=settings.ffprobe, ffmpeg=settings.ffmpeg,
         proxy=settings.proxy, cookies_browser=settings.cookies_browser,
-        cookies_file=settings.cookies_file,
+        cookies_file=settings.cookies_file, js_runtime=settings.js_runtime,
     )
     drive = LarkCliDrive(settings.lark_cli, settings.lark_profile)
     try:
@@ -514,6 +522,11 @@ async def probe_environment(settings: Settings) -> dict:
     }.items():
         output = await _run_process(command)
         versions[name] = (output.splitlines() or [""])[0].strip()
+    if settings.js_runtime:
+        runtime_name, separator, runtime_path = settings.js_runtime.partition(":")
+        executable = runtime_path if separator and runtime_path else runtime_name
+        output = await _run_process([executable, "--version"])
+        versions["js_runtime"] = (output.splitlines() or [""])[0].strip()
 
     whoami = parse_cli_json(await _run_process([
         settings.lark_cli, "whoami", "--as", "bot",

@@ -28,7 +28,9 @@ class QualityReport:
 def build_ytdlp_command(executable: str, url: str, output_template: Path,
                         proxy: str = "", cookies_browser: str = "",
                         cookies_file: str = "", video_format_id: str = "",
-                        audio_format_id: str = "") -> list[str]:
+                        audio_format_id: str = "",
+                        ffmpeg_location: str = "",
+                        js_runtime: str = "") -> list[str]:
     if video_format_id and audio_format_id:
         format_selector = f"{video_format_id}+{audio_format_id}/{video_format_id}/best"
     elif video_format_id:
@@ -45,6 +47,10 @@ def build_ytdlp_command(executable: str, url: str, output_template: Path,
         "--merge-output-format", "mp4",
         "--output", str(output_template),
     ]
+    if ffmpeg_location:
+        command.extend(["--ffmpeg-location", ffmpeg_location])
+    if js_runtime:
+        command.extend(["--js-runtimes", js_runtime])
     if proxy:
         command.extend(["--proxy", proxy])
     if cookies_file:
