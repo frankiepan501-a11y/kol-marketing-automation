@@ -35,8 +35,8 @@
 
 ## 验证
 
-- 聚焦测试：82项全部通过。
-- 全仓测试：701项＋23个子样例通过。
+- 接入最新生产基线后聚焦测试：82项全部通过。
+- 接入最新生产基线后全仓测试：763项＋23个子样例通过。
 - 唯一失败：既有 `test_zeabur_watchdog...failed_deployment` 旧日期fixture；仓内历史交接已多次记录，与本次KOL文件无交集。
 - `compileall`、`git diff --check` 通过。
 - Spec与Standards最终复审均通过，无P0/P1/P2。
