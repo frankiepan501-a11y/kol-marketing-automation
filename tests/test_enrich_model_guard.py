@@ -1,5 +1,9 @@
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -368,6 +372,149 @@ class EnrichModelBudgetTests(unittest.TestCase):
                 state_path=state,
             )
             self.assertEqual((False, "daily_budget_exhausted"), third.reserve("task_d"))
+
+    def test_sqlite_budget_survives_new_instance_and_exposes_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "launch-budget.sqlite3"
+            first = EnrichModelBudget(
+                per_task=10, per_run=10, daily=1, failure_threshold=2,
+                state_path=state,
+            )
+            second = EnrichModelBudget(
+                per_task=10, per_run=10, daily=1, failure_threshold=2,
+                state_path=state,
+            )
+
+            self.assertEqual((True, "ok"), first.reserve("dave"))
+            self.assertEqual(
+                (False, "daily_budget_exhausted"), second.reserve("piranha"),
+            )
+            snapshot = second.snapshot()
+            self.assertEqual("sqlite", snapshot["state_backend"])
+            self.assertTrue(snapshot["state_available"])
+            self.assertEqual("daily_budget_exhausted", snapshot["last_denial_reason"])
+            self.assertEqual(1, snapshot["daily_calls"])
+
+    def test_sqlite_budget_reservation_is_atomic_across_processes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "launch-budget.sqlite3"
+            start = Path(tmp) / "start"
+            repo = Path(__file__).resolve().parents[1]
+            script = (
+                "import json,sys,time;"
+                f"sys.path.insert(0,{str(repo)!r});"
+                "from pathlib import Path;"
+                "from app.enrich_model_guard import EnrichModelBudget;"
+                "budget=EnrichModelBudget(per_task=10,per_run=10,daily=1,"
+                "failure_threshold=2,state_path=Path(sys.argv[1]));"
+                "start=Path(sys.argv[2]);"
+                "\nwhile not start.exists(): time.sleep(0.01)"
+                "\nprint(json.dumps(budget.reserve(sys.argv[3])))"
+            )
+            processes = []
+            results = []
+            try:
+                for task in ("dave", "piranha"):
+                    processes.append(subprocess.Popen(
+                        [sys.executable, "-c", script, str(state), str(start), task],
+                        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    ))
+                start.touch()
+                for process in processes:
+                    stdout, stderr = process.communicate(timeout=15)
+                    self.assertEqual(0, process.returncode, stderr)
+                    results.append(json.loads(stdout.strip()))
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.communicate(timeout=5)
+
+            self.assertCountEqual(
+                [[True, "ok"], [False, "daily_budget_exhausted"]], results,
+            )
+
+    def test_budget_refreshes_beijing_day_without_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = [
+                datetime(2026, 8, 24, 23, 59, tzinfo=timezone(timedelta(hours=8)))
+            ]
+            budget = EnrichModelBudget(
+                per_task=10, per_run=10, daily=1, failure_threshold=2,
+                state_path=Path(tmp) / "launch-budget.sqlite3",
+                now_fn=lambda: current[0],
+            )
+
+            self.assertEqual((True, "ok"), budget.reserve("before-midnight"))
+            self.assertEqual("2026-08-24", budget.snapshot()["budget_day"])
+
+            current[0] = datetime(
+                2026, 8, 25, 0, 1, tzinfo=timezone(timedelta(hours=8)),
+            )
+            self.assertEqual((True, "ok"), budget.reserve("after-midnight"))
+            snapshot = budget.snapshot()
+            self.assertEqual("2026-08-25", snapshot["budget_day"])
+            self.assertEqual(1, snapshot["daily_calls"])
+
+    def test_circuit_open_reserve_still_refreshes_beijing_day(self):
+        current = [
+            datetime(2026, 8, 24, 23, 59, tzinfo=timezone(timedelta(hours=8)))
+        ]
+        clock_calls = []
+
+        def now_fn():
+            clock_calls.append(current[0])
+            return current[0]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = EnrichModelBudget(
+                per_task=10, per_run=10, daily=10, failure_threshold=2,
+                state_path=Path(tmp) / "launch-budget.sqlite3", now_fn=now_fn,
+            )
+            budget.record_failure(terminal=True)
+            calls_before_reserve = len(clock_calls)
+            current[0] = datetime(
+                2026, 8, 25, 0, 1, tzinfo=timezone(timedelta(hours=8)),
+            )
+
+            self.assertEqual((False, "circuit_open"), budget.reserve("after-midnight"))
+            self.assertEqual(calls_before_reserve + 1, len(clock_calls))
+
+    def test_sqlite_state_failure_is_observable_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked_parent = Path(tmp) / "not-a-directory"
+            blocked_parent.write_text("file", encoding="utf-8")
+            budget = EnrichModelBudget(
+                per_task=10, per_run=10, daily=10, failure_threshold=2,
+                state_path=blocked_parent / "launch-budget.sqlite3",
+            )
+
+            self.assertEqual(
+                (False, "budget_state_unavailable"), budget.reserve("launch"),
+            )
+            snapshot = budget.snapshot()
+            self.assertEqual("sqlite", snapshot["state_backend"])
+            self.assertFalse(snapshot["state_available"])
+            self.assertEqual("budget_state_unavailable", snapshot["last_denial_reason"])
+            self.assertEqual(0, snapshot["run_calls"])
+
+    def test_corrupt_sqlite_state_fails_closed_without_leaking_file_handle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "launch-budget.sqlite3"
+            state.write_text("not a sqlite database", encoding="utf-8")
+            budget = EnrichModelBudget(
+                per_task=10, per_run=10, daily=10, failure_threshold=2,
+                state_path=state,
+            )
+
+            self.assertEqual(
+                (False, "budget_state_unavailable"), budget.reserve("launch"),
+            )
+            self.assertFalse(budget.snapshot()["state_available"])
 
 
 class EnrichTemplateRoutingTests(unittest.IsolatedAsyncioTestCase):
