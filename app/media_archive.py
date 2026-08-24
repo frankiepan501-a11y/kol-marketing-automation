@@ -132,10 +132,16 @@ def validate_work_row(record: dict) -> WorkValidation:
         errors.append("作品链接格式无效")
     elif declared_platform != detected_platform:
         errors.append("发布平台与作品链接不一致")
-    if not linked_record_ids(fields.get("关联KOL")):
+    kol_ids = linked_record_ids(fields.get("关联KOL"))
+    product_ids = linked_record_ids(fields.get("关联产品"))
+    if not kol_ids:
         errors.append("缺少关联KOL")
-    if not linked_record_ids(fields.get("关联产品")):
+    elif len(kol_ids) != 1:
+        errors.append("关联KOL必须且只能有一条")
+    if not product_ids:
         errors.append("缺少关联产品")
+    elif len(product_ids) != 1:
+        errors.append("关联产品必须且只能有一条")
     if not field_text(fields.get("品牌")):
         errors.append("缺少品牌")
 

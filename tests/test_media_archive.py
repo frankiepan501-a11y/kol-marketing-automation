@@ -53,6 +53,22 @@ def test_validate_work_rejects_platform_mismatch_and_missing_relations():
     assert "缺少关联产品" in result.errors
 
 
+def test_validate_work_rejects_multiple_kol_or_product_relations():
+    row = _row(
+        "rec1",
+        "TikTok",
+        "https://www.tiktok.com/@creator/video/7491234567890123456",
+    )
+    row["fields"]["关联KOL"] = [{"record_ids": ["kol-1", "kol-2"]}]
+    row["fields"]["关联产品"] = [{"record_ids": ["product-1", "product-2"]}]
+
+    result = media_archive.validate_work_row(row)
+
+    assert result.valid is False
+    assert "关联KOL必须且只能有一条" in result.errors
+    assert "关联产品必须且只能有一条" in result.errors
+
+
 def test_group_plan_selects_one_youtube_master_for_cross_posted_work():
     rows = [
         _row("rec-ig", "Instagram", "https://www.instagram.com/reel/ABC123/"),
