@@ -115,6 +115,30 @@ class LaunchRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(1, result["terminal_cancelled"])
 
+    def test_queue_one_marks_bad_email_terminal_before_live_precheck(self):
+        activity = {"fields": {"活动ID": "campaign1", "产品主记录ID": "product1"}}
+        product = {"record_id": "product1", "fields": {"品牌": "FUNLAB"}}
+        participant = {"record_id": "part1", "fields": {
+            "关联KOL": {"link_record_ids": ["kol1"]}, "关联邮件草稿": [],
+        }}
+        kol = {"record_id": "kol1", "fields": {"邮箱": "not-an-email"}}
+
+        with patch.object(
+            launch_runtime, "_find_queue_draft", new=AsyncMock(return_value=None),
+        ), patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(return_value=kol),
+        ), patch.object(
+            launch_runtime.launch_outreach, "_fast_precheck", new=AsyncMock(),
+        ) as precheck:
+            result = asyncio.run(launch_runtime._queue_one(
+                activity=activity, participant=participant, product=product,
+                brand="FUNLAB", model_budget=None, generation_lock=asyncio.Lock(),
+            ))
+
+        precheck.assert_not_awaited()
+        self.assertTrue(result["terminal_failure"])
+        self.assertTrue(result["skipped"].startswith("bad_email:"))
+
     def test_zero_model_launch_date_uses_controlled_campaign_mapping_only(self):
         known = launch_runtime._launch_date_labels(
             "launch-20260915-powkong-piranha-v2",
@@ -144,7 +168,9 @@ class LaunchRuntimeTests(unittest.TestCase):
         ), patch.object(
             launch_runtime.launch_participation, "_update_and_confirm",
             new=AsyncMock(return_value={"record_id": "part1"}),
-        ) as update:
+        ) as update, patch.object(
+            launch_runtime.time, "time", return_value=1_800_000_000,
+        ):
             result = asyncio.run(launch_runtime.reconcile_pending_participant_reviews(
                 campaign_id="campaign1", ranking_version="v1",
                 preview={"candidates": [candidate], "profile_refresh_candidates": []},
@@ -155,6 +181,14 @@ class LaunchRuntimeTests(unittest.TestCase):
         fields = update.await_args.args[2]
         self.assertEqual("通过", fields["审核结论"])
         self.assertEqual("系统建议通过", fields["系统审核分流"])
+        self.assertEqual(1_800_000_000_000, fields["审核时间"])
+        refreshed_row = {
+            "created_time": 1_700_000_000_000,
+            "fields": {**participant["fields"], **fields},
+        }
+        self.assertTrue(launch_runtime._is_recent_queueable(
+            refreshed_row, now_ts=1_800_000_000,
+        ))
         self.assertNotIn("关联邮件草稿", fields)
 
     def test_pending_review_reconcile_keeps_actionable_ambiguity_for_operator(self):

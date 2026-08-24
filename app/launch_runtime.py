@@ -530,6 +530,9 @@ async def reconcile_pending_participant_reviews(*, campaign_id: str,
             if candidate.get("review_decision") == "待补资料"
             else "待审核"
         )
+        if deterministic_pass:
+            # 自动转通过也要记录本次决定时间，供草稿在途TTL从此刻开始计算。
+            ranking_fields["审核时间"] = int(time.time() * 1000)
         ranking_fields["审核原因代码"] = list(dict.fromkeys(
             str(code).strip()
             for code in (candidate.get("base_filter_reason_codes") or [])
@@ -886,6 +889,13 @@ async def _queue_one(*, activity: dict, participant: dict, product: dict,
         return {"participant_id": participant_id, "skipped": "participant_already_has_draft"}
 
     kol = await feishu.get_record(config.T_KOL, contact_id)
+    email, reason = feishu.clean_email(ext((kol.get("fields") or {}).get("邮箱")))
+    if not email:
+        return {
+            "participant_id": participant_id,
+            "skipped": f"bad_email:{reason}",
+            "terminal_failure": True,
+        }
     precheck = await launch_outreach._fast_precheck(
         kol=kol, product=product, product_id=product_id,
         contact_id=contact_id, brand=brand,
@@ -894,13 +904,6 @@ async def _queue_one(*, activity: dict, participant: dict, product: dict,
         return {
             "participant_id": participant_id,
             "skipped": precheck.get("decision") or "precheck_failed",
-            "terminal_failure": True,
-        }
-    email, reason = feishu.clean_email(ext((kol.get("fields") or {}).get("邮箱")))
-    if not email:
-        return {
-            "participant_id": participant_id,
-            "skipped": f"bad_email:{reason}",
             "terminal_failure": True,
         }
 
