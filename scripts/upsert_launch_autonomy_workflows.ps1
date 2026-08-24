@@ -194,7 +194,7 @@ $startNodes = @(
             sendBody = $true
             contentType = 'raw'
             rawContentType = 'application/json'
-            body = '{"campaign_id":"launch-20260915-funlab-dave-ys11-5"}'
+            body = '{"campaign_id":"launch-20260915-funlab-dave-ys11-5","dry_run":false,"ai_mode":"legacy_deepseek","confirm":"RUN_LEGACY_DEEPSEEK_REFILL"}'
             options = @{ timeout = 30000 }
         }
     },
@@ -220,7 +220,7 @@ $startNodes = @(
             sendBody = $true
             contentType = 'raw'
             rawContentType = 'application/json'
-            body = '{"campaign_id":"launch-20260915-powkong-piranha-v2"}'
+            body = '{"campaign_id":"launch-20260915-powkong-piranha-v2","dry_run":false,"ai_mode":"legacy_deepseek","confirm":"RUN_LEGACY_DEEPSEEK_REFILL"}'
             options = @{ timeout = 30000 }
         }
     }
