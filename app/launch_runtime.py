@@ -54,6 +54,21 @@ CAMPAIGN_LAUNCH_DATES = {
         "en": "September 15", "de": "15. September", "es": "15 de septiembre",
     },
 }
+ACTIVE_PARTICIPANT_STATES = frozenset({"锁定准备中", "已入围"})
+PENDING_REVIEW_DECISIONS = frozenset({"待审核", "待补资料"})
+
+
+def _non_review_active_count(active_count: int, pending_review: int) -> int:
+    """待审是运营旁路，不占用明确可开发池名额。"""
+    return max(0, int(active_count or 0) - int(pending_review or 0))
+
+
+def _effective_ready_inventory(inventory: dict | None) -> int:
+    """可发草稿与已通过待生成草稿共同构成在途供给。"""
+    inventory = inventory or {}
+    return max(0, int(inventory.get("ready") or 0)) + max(
+        0, int(inventory.get("queueable_approved") or 0),
+    )
 
 
 def new_launch_model_budget() -> EnrichModelBudget:
@@ -313,7 +328,7 @@ async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
                 "validation": {"passed": False, "errors": [str(exc)[:160]]},
             })
 
-    remaining = max(0, target_ready - int(inventory.get("ready") or 0))
+    remaining = max(0, target_ready - _effective_ready_inventory(inventory))
     discovery = {
         "created": 0, "would_create": 0, "model_calls": 0,
         "shortfall_tasks": 0, "skipped": "inventory_sufficient",
@@ -324,7 +339,7 @@ async def preview_zero_model_refill(*, campaign_id: str, buffer_days: int = 2,
             campaign_id=campaign_id, activity=activity, product=product,
             required_candidates=remaining,
             approved_candidates=int(metrics.get("approved_new_development_24h") or 0),
-            dry_run=True, allow_ai=False,
+            dry_run=True, allow_ai=False, volume_priority=True,
         )
 
     profile_statuses = profile_refresh.get("by_status") or {}
@@ -540,17 +555,19 @@ async def append_auto_approved(*, campaign_id: str, pool_target: int,
         cid for row in existing for cid in _ids((row.get("fields") or {}).get("关联KOL"))
     }
     active_count = sum(
-        ext((row.get("fields") or {}).get("参与状态")) in {"锁定准备中", "已入围"}
+        ext((row.get("fields") or {}).get("参与状态")) in ACTIVE_PARTICIPANT_STATES
         for row in existing
     )
     outstanding_review = sum(
-        ext((row.get("fields") or {}).get("参与状态")) in {"锁定准备中", "已入围"}
-        and ext((row.get("fields") or {}).get("审核结论")) in {"待审核", "待补资料"}
+        ext((row.get("fields") or {}).get("参与状态")) in ACTIVE_PARTICIPANT_STATES
+        and ext((row.get("fields") or {}).get("审核结论")) in PENDING_REVIEW_DECISIONS
         for row in existing
     )
     # 待审记录只进入运营旁路，不占用“明确可开发对象”的目标名额。
     # 历史记录可能没有审核结论，因此只剔除明确待审/待补资料的记录。
-    non_review_active_count = max(0, active_count - outstanding_review)
+    non_review_active_count = _non_review_active_count(
+        active_count, outstanding_review,
+    )
     room = max(0, int(pool_target) - non_review_active_count)
     batch_room = min(room, 120)
     candidates = [
@@ -1161,8 +1178,16 @@ async def _campaign_ready_inventory(campaign_id: str) -> dict:
     participants = await _participants(campaign_id)
     active = [
         row for row in participants
-        if ext((row.get("fields") or {}).get("参与状态")) in {"锁定准备中", "已入围"}
+        if ext((row.get("fields") or {}).get("参与状态")) in ACTIVE_PARTICIPANT_STATES
     ]
+    queueable_approved = sum(
+        ext((row.get("fields") or {}).get("参与状态")) == "已入围"
+        and ext((row.get("fields") or {}).get("审核结论")) == "通过"
+        and ext((row.get("fields") or {}).get("进入方式")) == "新开发"
+        and ext((row.get("fields") or {}).get("活动分池")) == "新开发池"
+        and not _ids((row.get("fields") or {}).get("关联邮件草稿"))
+        for row in active
+    )
     draft_ids = {
         draft_id for row in active
         for draft_id in _ids((row.get("fields") or {}).get("关联邮件草稿"))
@@ -1193,8 +1218,9 @@ async def _campaign_ready_inventory(campaign_id: str) -> dict:
     return {
         "participants": len(participants), "active_participants": len(active),
         "ready": approved_unsent, "due_now": due_now,
+        "queueable_approved": queueable_approved,
         "pending_review": sum(
-            ext((row.get("fields") or {}).get("审核结论")) in {"待审核", "待补资料"}
+            ext((row.get("fields") or {}).get("审核结论")) in PENDING_REVIEW_DECISIONS
             for row in active
         ),
         "pending_contact_ids": _pending_review_contact_ids(
@@ -1335,6 +1361,12 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                 "quota": quota, "target_ready_inventory": target_ready,
                 "inventory_before": inventory_before["ready"],
                 "inventory_after": inventory_before["ready"],
+                "effective_inventory_before": _effective_ready_inventory(
+                    inventory_before,
+                ),
+                "effective_inventory_after": _effective_ready_inventory(
+                    inventory_before,
+                ),
                 "runtime": "inventory_sufficient",
                 "model_budget": model_budget.snapshot(),
             })
@@ -1342,12 +1374,14 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
         preview = await launch_candidate_preview.preview_candidates(
             "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
         )
-        deficit = max(0, target_ready - inventory_before["ready"])
+        deficit = max(
+            0, target_ready - _effective_ready_inventory(inventory_before),
+        )
         active_before = int(
             inventory_before.get("active_participants", metrics["participants"])
         )
-        non_review_before = max(
-            0, active_before - int(inventory_before.get("pending_review") or 0),
+        non_review_before = _non_review_active_count(
+            active_before, int(inventory_before.get("pending_review") or 0),
         )
         first_append = await append_auto_approved(
             campaign_id=campaign_id,
@@ -1367,7 +1401,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
         second_append = {"created": 0}
         second_queue = {"queued": 0}
         latest_preview = preview
-        if inventory_after_master["ready"] < target_ready:
+        if _effective_ready_inventory(inventory_after_master) < target_ready:
             refresh_ids = _pending_review_contact_ids(
                 [], preview_refresh_ids=(
                     list(inventory_before.get("pending_contact_ids") or [])
@@ -1382,26 +1416,35 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                 latest_preview = await launch_candidate_preview.preview_candidates(
                     "", campaign_id=campaign_id, object_type="KOL", internal_full=True,
                 )
-                remaining = max(0, target_ready - inventory_after_master["ready"])
+            if inventory_before.get("pending_contact_ids"):
+                pending_review_reconcile = await reconcile_pending_participant_reviews(
+                    campaign_id=campaign_id,
+                    ranking_version=ext(activity_fields.get("证据排序版本")),
+                    preview=latest_preview,
+                )
+            auto_passed = int(pending_review_reconcile.get("auto_passed") or 0)
+            effective_after_reconcile = (
+                _effective_ready_inventory(inventory_after_master) + auto_passed
+            )
+            remaining_after_reconcile = max(
+                0, target_ready - effective_after_reconcile,
+            )
+            if refresh_ids and remaining_after_reconcile:
                 active_after_master = int(
                     inventory_after_master.get(
                         "active_participants", metrics["participants"],
                     )
                 )
-                non_review_after_master = max(
-                    0,
-                    active_after_master
-                    - int(inventory_after_master.get("pending_review") or 0),
-                )
+                non_review_after_reconcile = _non_review_active_count(
+                    active_after_master,
+                    int(inventory_after_master.get("pending_review") or 0),
+                ) + auto_passed
                 second_append = await append_auto_approved(
                     campaign_id=campaign_id,
-                    pool_target=non_review_after_master + min(remaining, 120),
-                    preview=latest_preview,
-                )
-            if inventory_before.get("pending_contact_ids"):
-                pending_review_reconcile = await reconcile_pending_participant_reviews(
-                    campaign_id=campaign_id,
-                    ranking_version=ext(activity_fields.get("证据排序版本")),
+                    pool_target=(
+                        non_review_after_reconcile
+                        + min(remaining_after_reconcile, 120)
+                    ),
                     preview=latest_preview,
                 )
             if refresh_ids or pending_review_reconcile.get("auto_passed"):
@@ -1410,7 +1453,8 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                     model_budget=model_budget,
                 )
         inventory_after = await _campaign_ready_inventory(campaign_id)
-        remaining = max(0, target_ready - inventory_after["ready"])
+        effective_inventory_after = _effective_ready_inventory(inventory_after)
+        remaining = max(0, target_ready - effective_inventory_after)
 
         evidence_continuation = {"planned": 0, "participation_writes": 0}
         if (
@@ -1480,6 +1524,11 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             "inventory_before": inventory_before["ready"],
             "inventory_after_master": inventory_after_master["ready"],
             "inventory_after": inventory_after["ready"],
+            "effective_inventory_before": _effective_ready_inventory(inventory_before),
+            "effective_inventory_after_master": _effective_ready_inventory(
+                inventory_after_master,
+            ),
+            "effective_inventory_after": effective_inventory_after,
             "append": first_append, "queue": first_queue,
             "profile_refresh": refresh_result,
             "pending_review_reconcile": pending_review_reconcile,
@@ -1604,7 +1653,9 @@ def _runtime_result_summary(result: dict | None) -> dict:
         key: result.get(key) for key in (
             "action", "brand", "participants", "sent", "replies", "commitments",
             "ontime_posts", "target_ready_inventory", "inventory_before", "inventory_after",
-            "inventory_after_master", "stopped", "held", "quality_filters_lowered",
+            "inventory_after_master", "effective_inventory_before",
+            "effective_inventory_after_master", "effective_inventory_after",
+            "stopped", "held", "quality_filters_lowered",
             "runtime", "business_outcome", "made_supply_progress",
             "supply_progress_breakdown", "outcome_reconcile_error_count",
         ) if key in result
@@ -1618,7 +1669,8 @@ def _runtime_result_summary(result: dict | None) -> dict:
             key: discovery.get(key) for key in (
                 "created", "skipped", "keyword_source", "active_pending_before",
                 "stale_pending_before", "target_tasks", "quality_gate",
-                "quality_filters_lowered",
+                "quality_filters_lowered", "volume_priority",
+                "quality_cooldown_overridden",
             ) if key in discovery
         }
     if reconcile:
@@ -1779,7 +1831,12 @@ async def daily_feedback(campaign_id: str) -> dict:
         )
         return {**metrics, "runtime": {"stopped": True}}
     if metrics["action"] == "expand":
-        target = max(100, metrics["participants"] + 100)
+        inventory = await _campaign_ready_inventory(campaign_id)
+        non_review_active = _non_review_active_count(
+            int(inventory.get("active_participants") or 0),
+            int(inventory.get("pending_review") or 0),
+        )
+        target = max(100, non_review_active + 100)
         runtime = await run_campaign(
             campaign_id=campaign_id, pool_target=target, queue_limit=120,
         )

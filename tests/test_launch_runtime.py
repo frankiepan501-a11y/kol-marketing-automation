@@ -371,6 +371,7 @@ class LaunchRuntimeTests(unittest.TestCase):
             ["k2"], dry_run=True, limit=1, classification_mode="deterministic",
         )
         self.assertFalse(keywords.await_args.kwargs["allow_ai"])
+        self.assertTrue(keywords.await_args.kwargs["volume_priority"])
         generate.assert_not_awaited()
         review.assert_not_awaited()
         write.assert_not_awaited()
@@ -1016,6 +1017,98 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(3, result["supply_progress_breakdown"]["evidence_candidates_imported"])
         self.assertGreater(sum(result["supply_progress_breakdown"].values()), 0)
 
+    def test_autonomous_refill_counts_approved_without_draft_as_inflight_supply(self):
+        metrics = {
+            "campaign_id": "campaign1", "participants": 220, "sent": 0,
+            "approved_new_development": 200,
+            "approved_new_development_24h": 0,
+            "replies": 0, "commitments": 0, "ontime_posts": 0,
+            "action": "expand", "reason": "commitment gap",
+        }
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "运行模式": "正式运行", "状态": "正式执行中",
+        }}
+        product = {"record_id": "product1", "fields": {
+            "品牌": "POWKONG", "产品英文名": "Piranha Plant 2 Dock",
+        }}
+        inventory = {
+            "ready": 0, "queueable_approved": 200,
+            "active_participants": 220, "pending_review": 20,
+            "pending_contact_ids": [],
+        }
+
+        with patch.object(
+            launch_runtime, "sync_campaign_outcomes_and_metrics",
+            new=AsyncMock(return_value=metrics),
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity",
+            new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime.feishu, "get_record", new=AsyncMock(return_value=product),
+        ), patch.object(
+            launch_runtime, "_brand_quota_snapshot",
+            new=AsyncMock(return_value={"brand": "POWKONG", "cap": 120,
+                                        "sent_24h": 20, "remaining": 100}),
+        ), patch.object(
+            launch_runtime, "_campaign_ready_inventory",
+            new=AsyncMock(side_effect=[inventory, inventory, inventory]),
+        ), patch.object(
+            launch_runtime.launch_candidate_preview, "preview_candidates",
+            new=AsyncMock(return_value={"candidates": [], "summary": {}}),
+        ), patch.object(
+            launch_runtime, "append_auto_approved",
+            new=AsyncMock(return_value={"created": 0}),
+        ) as append_auto, patch.object(
+            launch_runtime, "queue_approved", new=AsyncMock(return_value={"queued": 0}),
+        ), patch.object(
+            launch_runtime.keyword_supply, "ensure_campaign_supply", new=AsyncMock(),
+        ) as discover, patch.object(
+            launch_runtime, "append_review_candidates", new=AsyncMock(),
+        ) as review:
+            result = asyncio.run(launch_runtime.autonomous_refill(
+                campaign_id="campaign1", buffer_days=2,
+            ))
+
+        append_auto.assert_awaited_once()
+        self.assertEqual(200, append_auto.await_args.kwargs["pool_target"])
+        discover.assert_not_awaited()
+        review.assert_not_awaited()
+        self.assertEqual(200, result["effective_inventory_after"])
+
+    def test_ready_inventory_reports_approved_without_draft_as_queueable(self):
+        participants = [
+            {"record_id": "pending", "fields": {
+                "参与状态": "已入围", "审核结论": "待审核",
+                "进入方式": "新开发", "活动分池": "新开发池",
+            }},
+            {"record_id": "queueable", "fields": {
+                "参与状态": "已入围", "审核结论": "通过",
+                "进入方式": "新开发", "活动分池": "新开发池",
+            }},
+            {"record_id": "ready", "fields": {
+                "参与状态": "已入围", "审核结论": "通过",
+                "进入方式": "新开发", "活动分池": "新开发池",
+                "关联邮件草稿": {"link_record_ids": ["draft1"]},
+            }},
+        ]
+        drafts = [{"record_id": "draft1", "fields": {
+            "邮件草稿状态": "自动通过", "发送状态": "未发",
+            "建议发送时间": 0,
+        }}]
+        with patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=participants),
+        ), patch.object(
+            launch_runtime.feishu, "fetch_all_records", new=AsyncMock(return_value=drafts),
+        ):
+            inventory = asyncio.run(
+                launch_runtime._campaign_ready_inventory("campaign1")
+            )
+
+        self.assertEqual(1, inventory["ready"])
+        self.assertEqual(1, inventory["queueable_approved"])
+        self.assertEqual(2, launch_runtime._effective_ready_inventory(inventory))
+
     def test_dave_evidence_cursor_uses_latest_completed_runtime_result(self):
         old = launch_runtime.RUNTIME_JOB_PREFIX + json.dumps({
             "job_id": "launchruntime-old", "status": "success",
@@ -1122,11 +1215,45 @@ class LaunchRuntimeTests(unittest.TestCase):
             "discovery": {
                 "created": 0, "skipped": "quality_cooldown",
                 "quality_gate": {"mode": "cooldown", "recent_valid_emails": 0},
+                "volume_priority": True,
+                "quality_cooldown_overridden": True,
             },
         })
 
         self.assertEqual("quality_cooldown", summary["discovery"]["skipped"])
         self.assertEqual("cooldown", summary["discovery"]["quality_gate"]["mode"])
+        self.assertTrue(summary["discovery"]["volume_priority"])
+        self.assertTrue(summary["discovery"]["quality_cooldown_overridden"])
+
+    def test_daily_feedback_target_excludes_pending_review_capacity(self):
+        metrics = {
+            "campaign_id": "campaign1", "participants": 120, "sent": 10,
+            "replies": 1, "commitments": 0, "ontime_posts": 0,
+            "action": "expand", "reason": "commitment gap",
+        }
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "数据口径备注": "",
+        }}
+        with patch.object(
+            launch_runtime, "sync_campaign_outcomes_and_metrics",
+            new=AsyncMock(return_value=metrics),
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity",
+            new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime.feishu, "update_record", new=AsyncMock(),
+        ), patch.object(
+            launch_runtime, "_campaign_ready_inventory",
+            new=AsyncMock(return_value={
+                "active_participants": 100, "pending_review": 20,
+            }),
+        ), patch.object(
+            launch_runtime, "run_campaign",
+            new=AsyncMock(return_value={"already_running": False}),
+        ) as run_campaign:
+            asyncio.run(launch_runtime.daily_feedback("campaign1"))
+
+        self.assertEqual(180, run_campaign.await_args.kwargs["pool_target"])
 
     def test_runtime_summary_keeps_pending_review_reconcile_for_restart_audit(self):
         summary = launch_runtime._runtime_result_summary({
