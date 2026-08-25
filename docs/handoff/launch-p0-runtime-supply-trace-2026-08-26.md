@@ -21,14 +21,21 @@
 
 ## 验证
 
-- 目标回归：`tests/test_launch_runtime.py`、`tests/test_keyword_supply.py`、`tests/test_launch_routes.py` 共 148 项 + 9 个子测试通过。
-- 云端完整回归：792 项 + 23 个子测试通过；另有 1 个本次未改动的 Zeabur 看门狗测试使用 2026-07-07 固定时间，已超出其 24 小时窗口，属于既有时间敏感测试。
-- 本地 daemon 完整回归：21 项通过。
+- 云端专项回归：`tests/test_launch_runtime.py` 54 项、`tests/test_keyword_supply.py` 48 项全部通过。
+- 云端完整回归：702 项中 701 项通过；唯一失败是本次未改动的 Zeabur 看门狗测试使用 2026-07-07 固定时间，已超出其 24 小时窗口，属于既有时间敏感测试，不是本轮回归。
+- 本地 daemon 完整回归：22 项通过；Python 编译检查和 `git diff --check` 通过。
+- 代码审查补齐三项缺口：日报写备注时不再破坏后台任务标记；食人花按活动真实国家而非硬编码国家拓词；本地爬虫在查重前统一频道 URL 与账号名。
+
+## 发布候选
+
+- 云端修复提交：`7292017`、`3167553`（发布前仍需包含本交接记录的最终提交）。
+- 本地 daemon 目标提交：`fd35e0e`，已快进推送到 `origin/master`。
+- 发布前只读状态：n8n `uvBfJBtGH93FPa6w` 保持 `active=true`；云端后台无运行中 job；飞书爬虫任务表无“2-运行中”记录。
 
 ## 发布与自然验收
 
-1. 等 Dave、食人花后台 job 与本地 crawler 均无运行中任务。
-2. 先更新部署终端 daemon，确认版本正确、只有一个 daemon 进程、日志无 Traceback。
+1. Dave、食人花后台 job 与本地 crawler 已确认无运行中任务。
+2. 先更新部署终端 daemon 至 `fd35e0e`，确认只有一个逻辑 daemon、日志无 Traceback。
 3. 再把云端分支快进到最新 `origin/master` 后推送；Zeabur 只部署一次并验证 `/health`。
 4. 不手动触发，等待 Dave 整点、食人花每小时 05/20/35/50 分自然轮次。
 5. 验收：latest job 可回读；食人花在 AI 额度不足时仍创建确定性任务；新一轮主表结果出现完整四段来源标记；`quality_filters_lowered=false`。
