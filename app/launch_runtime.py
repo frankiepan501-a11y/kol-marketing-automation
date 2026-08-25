@@ -1843,6 +1843,57 @@ def _runtime_result_summary(result: dict | None) -> dict:
     return summary
 
 
+def _runtime_persisted_result_summary(result: dict | None) -> dict:
+    """生成可持久化的小摘要，保住审计字段，不把大诊断数组写进活动备注。"""
+    summary = _runtime_result_summary(result)
+
+    def scalars(section):
+        if not isinstance(section, dict):
+            return {}
+        return {
+            key: value for key, value in section.items()
+            if value is None or isinstance(value, (bool, int, float, str))
+        }
+
+    for key in (
+        "quota", "model_budget", "supply_progress_breakdown",
+        "internal_pool", "external_youtube_discovery", "external_youtube_outcome",
+    ):
+        if key in summary:
+            summary[key] = scalars(summary[key])
+    discovery = summary.get("discovery")
+    if isinstance(discovery, dict) and isinstance(discovery.get("quality_gate"), dict):
+        summary["discovery"] = {
+            **discovery, "quality_gate": scalars(discovery["quality_gate"]),
+        }
+    # 单条对象明细留在后台 job 内存/日志里；活动备注只承担任务恢复和业务审计。
+    summary.pop("blocked", None)
+    summary.pop("results", None)
+    return summary
+
+
+def _runtime_minimum_result_summary(result: dict | None) -> dict:
+    """极端情况下仍保留审计判定所需的最小业务字段。"""
+    result = result or {}
+    keys = (
+        "action", "brand", "business_outcome", "made_supply_progress",
+        "quality_filters_lowered", "inventory_before", "inventory_after",
+        "effective_inventory_before", "effective_inventory_after",
+    )
+    compact = {key: result.get(key) for key in keys if key in result}
+    for key in (
+        "quota", "model_budget", "internal_pool",
+        "external_youtube_discovery", "external_youtube_outcome",
+    ):
+        section = result.get(key)
+        if isinstance(section, dict):
+            compact[key] = {
+                name: value for name, value in section.items()
+                if value is None or isinstance(value, (bool, int, float, str))
+            }
+    return compact
+
+
 async def load_runtime_job(campaign_id: str, job_id: str = "") -> dict | None:
     activity = await launch_evidence.get_activity(campaign_id)
     note = ext((activity.get("fields") or {}).get("数据口径备注"))
@@ -1911,17 +1962,28 @@ async def persist_runtime_job(*, campaign_id: str, job_id: str, mode: str,
             "updated_ts": now_ts,
         }
         if result is not None and status in {"success", "degraded", "error"}:
-            payload["result"] = _runtime_result_summary(result)
+            payload["result"] = _runtime_persisted_result_summary(result)
         if error:
             payload["error"] = str(error)[:300]
         current_line = RUNTIME_JOB_PREFIX + json.dumps(
             payload, ensure_ascii=False, separators=(",", ":"),
         )
+        if len(current_line) > 3000 and result is not None:
+            payload["result"] = _runtime_minimum_result_summary(result)
+            current_line = RUNTIME_JOB_PREFIX + json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":"),
+            )
+        if len(current_line) > 3000:
+            payload.pop("result", None)
+            payload["error"] = "runtime_result_summary_exceeded_note_limit"
+            current_line = RUNTIME_JOB_PREFIX + json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":"),
+            )
         # 保留同活动其他后台任务，确保自治补池与证据续供可分别按job_id回查。
         retained = ordinary_lines + other_job_lines[-5:] + [current_line]
         while len("\n".join(retained)) > 3000 and len(retained) > 1:
             retained.pop(0)
-        note = "\n".join(retained)[-3000:]
+        note = "\n".join(retained)
         await feishu.update_record(
             config.T_LAUNCH_CAMPAIGN, activity["record_id"],
             {"数据口径备注": note},

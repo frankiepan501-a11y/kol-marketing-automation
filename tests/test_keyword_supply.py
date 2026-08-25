@@ -425,6 +425,73 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         self.assertFalse(result["quality_filters_lowered"])
         model.assert_not_awaited()
 
+    def test_autonomous_piranha_reuses_seven_layer_keys_without_ai_after_seven_days(self):
+        now_ms = 1_800_000_000_000
+        old_seconds = (now_ms - keyword_supply.DISCOVERY_REUSE_WINDOW_MS - 1) // 1000
+        activity = {"fields": {
+            "活动目标语言": ["en", "de", "es"],
+            "活动目标国家": ["US", "UK", "DE", "ES"],
+            "竞品证据模式": "不使用竞品证据", "竞品分析状态": "不适用",
+        }}
+        product = {"fields": {
+            "产品英文名": "POWKONG Piranha Plant 2 Dock",
+            "适配IP": ["Piranha Plant"], "适配主机": ["Switch 2"],
+            "品类": "底座",
+        }}
+        countries = {"en": ["US", "UK"], "de": ["DE"], "es": ["ES"]}
+        deterministic = keyword_supply._piranha_seven_layer_candidates(
+            activity_fields=activity["fields"], product_fields=product["fields"],
+            languages=["en", "de", "es"], existing_keywords=set(), limit=100,
+        )
+        rows = []
+        for language in ("en", "de", "es"):
+            for word in keyword_supply._CAMPAIGN_KEYWORDS["piranha"][language]:
+                rows.append({"last_modified_time": old_seconds, "fields": {
+                    "任务名": (
+                        f"[活动补池:campaign1][词源:legacy_fixed] YT KOL - {word}"
+                    ),
+                    "关键词列表": word, "任务状态": "3-已完成",
+                    "筛选-语言": [language], "筛选-国家": countries[language],
+                    "执行日志": "原始发现: 4\n其中有邮箱: 2",
+                }})
+        for item in deterministic:
+            rows.append({"last_modified_time": old_seconds, "fields": {
+                "任务名": (
+                    f"[活动补池:campaign1][词源:{item['source']}] "
+                    f"YT KOL - {item['keyword']}"
+                ),
+                "关键词列表": item["keyword"], "任务状态": "3-已完成",
+                "筛选-语言": [item["language"]],
+                "筛选-国家": countries[item["language"]],
+                "执行日志": "原始发现: 4\n其中有邮箱: 2",
+            }})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = EnrichModelBudget(
+                per_task=2, per_run=0, daily=0, failure_threshold=2,
+                state_path=Path(tmp) / "launch-budget.json",
+            )
+            with patch.object(keyword_supply.time, "time", return_value=now_ms / 1000), \
+                 patch.object(
+                     keyword_supply.feishu, "fetch_all_records",
+                     new=AsyncMock(return_value=rows),
+                 ), patch.object(
+                     keyword_supply.deepseek, "chat_json", new=AsyncMock(),
+                 ) as model:
+                result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                    campaign_id="campaign1", activity=activity, product=product,
+                    required_candidates=200, max_tasks=4, dry_run=True,
+                    model_budget=budget, volume_priority=True,
+                ))
+
+        self.assertEqual(4, result["would_create"])
+        self.assertEqual(0, result["shortfall_tasks"])
+        self.assertGreater(result["keyword_history_state"]["reusable_after_ttl"], 0)
+        self.assertGreaterEqual(len({item["source"] for item in result["keywords"]}), 3)
+        self.assertFalse(result["quality_filters_lowered"])
+        self.assertNotIn("competitor", {item["source"] for item in result["keywords"]})
+        model.assert_not_awaited()
+
     def test_autonomous_dave_blocks_recent_same_key_but_not_other_market_key(self):
         now_ms = 1_800_000_000_000
         recent_seconds = (now_ms - 60_000) // 1000

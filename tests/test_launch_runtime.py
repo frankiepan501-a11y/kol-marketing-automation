@@ -1288,6 +1288,59 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual("running", second["status"])
         self.assertIn("业务备注", state["note"])
 
+    def test_runtime_job_persistence_keeps_current_marker_when_result_is_long(self):
+        state = {"note": "业务备注"}
+
+        async def get_activity(_campaign_id):
+            return {"record_id": "activity1", "fields": {
+                "数据口径备注": state["note"],
+            }}
+
+        async def update_record(_table, _record_id, fields):
+            state["note"] = fields["数据口径备注"]
+            return {"record_id": "activity1", "fields": fields}
+
+        result = {
+            "action": "expand", "business_outcome": "supply_in_progress",
+            "quality_filters_lowered": False,
+            "inventory_before": 0, "inventory_after": 1,
+            "internal_pool": {
+                "processed": 100, "writes": 50,
+                "diagnostic_payload": ["x" * 1200 for _ in range(8)],
+            },
+            "external_youtube_discovery": {
+                "created": 3, "target_tasks": 3,
+                "diagnostic_payload": ["y" * 1200 for _ in range(8)],
+            },
+        }
+
+        async def scenario():
+            await launch_runtime.persist_runtime_job(
+                campaign_id="campaign1", job_id="launchruntime-long",
+                mode="autonomous", status="success", result=result,
+            )
+            return await launch_runtime.load_runtime_job(
+                "campaign1", "launchruntime-long",
+            )
+
+        with patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=get_activity,
+        ), patch.object(
+            launch_runtime.feishu, "update_record", new=update_record,
+        ):
+            loaded = asyncio.run(scenario())
+
+        current_lines = [
+            line for line in state["note"].splitlines()
+            if line.startswith(launch_runtime.RUNTIME_JOB_PREFIX)
+        ]
+        self.assertLessEqual(len(state["note"]), 3000)
+        self.assertEqual(1, len(current_lines))
+        self.assertIsNotNone(loaded)
+        self.assertEqual("launchruntime-long", loaded["job_id"])
+        self.assertEqual("supply_in_progress", loaded["result"]["business_outcome"])
+        self.assertFalse(loaded["result"]["quality_filters_lowered"])
+
     def test_existing_pending_discovery_tasks_keep_supply_in_progress(self):
         result = launch_runtime._with_business_outcome({
             "action": "expand",

@@ -540,10 +540,11 @@ def _task_source(fields: dict) -> str:
     keyword = _normalize_discovery_keyword(fields.get("关键词列表"))
     legacy_words = {
         _normalize_discovery_keyword(word)
-        for words in _CAMPAIGN_KEYWORDS.get("dave", {}).values()
+        for theme in ("dave", "piranha")
+        for words in _CAMPAIGN_KEYWORDS.get(theme, {}).values()
         for word in words
     }
-    # A2 之前的 Dave 固定词没有词源标签，但来源可由受控常量唯一确定；
+    # A2 之前的固定词没有词源标签，但来源可由受控常量唯一确定；
     # 其他无标签任务仍视为缺信号，不能笼统冒充 legacy_fixed。
     return "legacy_fixed" if keyword in legacy_words else ""
 
@@ -847,19 +848,47 @@ def _select_dave_external_candidates(*, rows: list[dict], activity_fields: dict,
                                      countries_by_language: dict[str, list[str]],
                                      prefix: str, now_ms: int, limit: int,
                                      source_outcomes: dict | None = None) -> tuple:
+    return _select_deterministic_external_candidates(
+        theme="dave", rows=rows, activity_fields=activity_fields,
+        product_fields=product_fields, languages=languages,
+        countries_by_language=countries_by_language, prefix=prefix,
+        now_ms=now_ms, limit=limit, source_outcomes=source_outcomes,
+    )
+
+
+def _select_piranha_external_candidates(*, rows: list[dict], activity_fields: dict,
+                                         product_fields: dict, languages: list[str],
+                                         countries_by_language: dict[str, list[str]],
+                                         prefix: str, now_ms: int, limit: int,
+                                         source_outcomes: dict | None = None) -> tuple:
+    return _select_deterministic_external_candidates(
+        theme="piranha", rows=rows, activity_fields=activity_fields,
+        product_fields=product_fields, languages=languages,
+        countries_by_language=countries_by_language, prefix=prefix,
+        now_ms=now_ms, limit=limit, source_outcomes=source_outcomes,
+    )
+
+
+def _select_deterministic_external_candidates(
+    *, theme: str, rows: list[dict], activity_fields: dict,
+    product_fields: dict, languages: list[str],
+    countries_by_language: dict[str, list[str]], prefix: str,
+    now_ms: int, limit: int, source_outcomes: dict | None = None,
+) -> tuple:
+    """确定性词库共用七天复用、来源健康和在途去重。AI只负责增量。"""
     fixed = []
     positions = {language: 0 for language in languages}
     while True:
         progressed = False
         for language in languages:
-            words = _CAMPAIGN_KEYWORDS["dave"].get(language, [])
+            words = _CAMPAIGN_KEYWORDS[theme].get(language, [])
             if positions[language] >= len(words):
                 continue
             word = words[positions[language]]
             positions[language] += 1
             item = _discovery_item(
                 language=language, keyword=word, source="legacy_fixed",
-                reason="Dave 旧固定发现词；保留兼容并纳入七天轮转",
+                reason=f"{theme} 旧固定发现词；保留兼容并纳入七天轮转",
                 axes=["legacy_fixed", "creator_content"],
             )
             if item:
@@ -867,9 +896,16 @@ def _select_dave_external_candidates(*, rows: list[dict], activity_fields: dict,
             progressed = True
         if not progressed:
             break
-    structured = _dave_structured_candidates(
-        activity_fields=activity_fields, product_fields=product_fields,
-        languages=languages, existing_keywords=set(), pilot_version="v2",
+    structured = (
+        _dave_structured_candidates(
+            activity_fields=activity_fields, product_fields=product_fields,
+            languages=languages, existing_keywords=set(), pilot_version="v2",
+        )
+        if theme == "dave" else
+        _piranha_seven_layer_candidates(
+            activity_fields=activity_fields, product_fields=product_fields,
+            languages=languages, existing_keywords=set(), limit=100,
+        )
     )
     source_health = _source_health(
         rows, prefix=prefix, now_ms=now_ms, source_outcomes=source_outcomes,
@@ -885,6 +921,20 @@ def _select_dave_external_candidates(*, rows: list[dict], activity_fields: dict,
     unseen, reusable = [], []
     probe_used: set[str] = set()
     assessed_keys = set()
+    # 旧任务缺国家/语言/完成时间时不能安全复用，也不能当作别的市场的通配符；
+    # 仅跳过同活动同词，其他新七层组合仍可继续供给。
+    untraceable_keywords = {
+        _normalize_discovery_keyword(fields.get("关键词列表"))
+        for row in rows
+        for fields in [row.get("fields") or {}]
+        if ext(fields.get("任务名")).startswith(prefix)
+        and ext(fields.get("任务状态")) == "3-已完成"
+        and (
+            not _normalized_countries(fields.get("筛选-国家"))
+            or not _normalized_language(fields.get("筛选-语言"))
+            or not _last_modified_ms(row)
+        )
+    }
     for item in fixed + structured:
         countries = countries_by_language.get(item["language"]) or []
         if not countries:
@@ -893,6 +943,9 @@ def _select_dave_external_candidates(*, rows: list[dict], activity_fields: dict,
         if key in assessed_keys:
             continue
         assessed_keys.add(key)
+        if _normalize_discovery_keyword(item["keyword"]) in untraceable_keywords:
+            history_state["history_signal_unavailable"] += 1
+            continue
         state = _history_key_state(
             rows, keyword=item["keyword"], countries=countries,
             language=item["language"], now_ms=now_ms,
@@ -924,7 +977,7 @@ def _select_dave_external_candidates(*, rows: list[dict], activity_fields: dict,
     # 新组合优先；旧组合重跑时按词源轮转，避免 legacy_fixed 独占整批。
     ordered = unseen + _round_robin_sources(reusable, source_health)
     effective_limit = max(0, int(limit))
-    if not source_signal["available"]:
+    if theme == "dave" and not source_signal["available"]:
         # 历史已完成任务缺来源/日志/完成时间时，失败关闭为全活动单探测；
         # 若已有任何带来源的在途任务，则本轮不再追加。
         effective_limit = 0 if active_sources else min(1, effective_limit)
@@ -1122,7 +1175,7 @@ async def _ensure_campaign_supply_unlocked(
 
     rows = (
         await feishu.fetch_all_records(T_CRAWLER, automatic_fields=True)
-        if theme == "dave" and not structured_pilot
+        if not structured_pilot
         else await feishu.fetch_all_records(T_CRAWLER)
     )
 
@@ -1234,52 +1287,25 @@ async def _ensure_campaign_supply_unlocked(
             pilot_version=pilot_version,
         )[:need]
         need -= len(candidates)
-    if theme == "dave" and not structured_pilot and need:
-        dave_candidates, history_state, source_health, source_signal = (
-            _select_dave_external_candidates(
+    if theme in {"dave", "piranha"} and not structured_pilot and need:
+        selector = (
+            _select_dave_external_candidates
+            if theme == "dave" else _select_piranha_external_candidates
+        )
+        deterministic_candidates, history_state, source_health, source_signal = (
+            selector(
             rows=rows, activity_fields=fields, product_fields=product_fields,
             languages=languages,
             countries_by_language=discovery_countries_by_language,
             prefix=prefix, now_ms=now_ms, limit=need,
             source_outcomes=source_outcomes,
         ))
-        candidates.extend(dave_candidates)
-        need -= len(dave_candidates)
+        candidates.extend(deterministic_candidates)
+        need -= len(deterministic_candidates)
         common_result["keyword_history_state"] = history_state
         common_result["source_health"] = source_health
         common_result["source_signal"] = source_signal
-    while (theme != "dave" and not structured_pilot and need
-           and any(_CAMPAIGN_KEYWORDS[theme].get(lang) for lang in languages)):
-        progressed = False
-        for lang in languages:
-            for word in _CAMPAIGN_KEYWORDS[theme].get(lang, []):
-                normalized = word.strip().lower()
-                if normalized in existing_keywords or any(
-                    _candidate_keyword(item) == normalized for item in candidates
-                ):
-                    continue
-                candidates.append((lang, normalized))
-                need -= 1
-                progressed = True
-                break
-            if need <= 0:
-                break
-        if not progressed:
-            break
-
-    seven_layer_added = 0
-    if theme == "piranha" and not structured_pilot and need:
-        seven_layer = _piranha_seven_layer_candidates(
-            activity_fields=fields, product_fields=product_fields,
-            languages=languages, existing_keywords=(
-                existing_keywords | {_candidate_keyword(item) for item in candidates}
-            ), limit=need,
-        )
-        candidates.extend(seven_layer)
-        seven_layer_added = len(seven_layer)
-        need -= seven_layer_added
-
-    if theme == "dave" and not structured_pilot and candidates:
+    if theme in {"dave", "piranha"} and not structured_pilot and candidates:
         sources = {item.get("source") for item in candidates if isinstance(item, dict)}
         keyword_source = (
             "deterministic" if sources == {"legacy_fixed"}
@@ -1287,11 +1313,8 @@ async def _ensure_campaign_supply_unlocked(
             else "mixed_seven_layer_deterministic"
         )
     else:
-        keyword_source = f"structured_{pilot_version}" if structured_pilot and candidates else (
-            "seven_layer_deterministic"
-            if seven_layer_added and seven_layer_added == len(candidates)
-            else "mixed_seven_layer_deterministic"
-            if seven_layer_added
+        keyword_source = (
+            f"structured_{pilot_version}" if structured_pilot and candidates
             else "deterministic" if candidates else "none"
         )
     generation_error = ""
@@ -1371,10 +1394,11 @@ async def _ensure_campaign_supply_unlocked(
 
     skipped = (
         "source_signal_unavailable"
-        if theme == "dave" and not common_result["source_signal"].get("available", True)
+        if theme == "dave" and not structured_pilot
+        and not common_result["source_signal"].get("available", True)
         else
         "deterministic_combinations_exhausted"
-        if theme == "dave" and need else
+        if theme == "dave" and not structured_pilot and need else
         "fixed_keywords_exhausted" if need and not allow_ai else ""
     )
     if dry_run:
