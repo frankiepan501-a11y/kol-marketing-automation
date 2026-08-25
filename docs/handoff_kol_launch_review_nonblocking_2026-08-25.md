@@ -87,3 +87,34 @@
 3. 部署终端必须按单实例闸发布：停止旧daemon → 更新包含`discovery_trace.py`在内的完整commit → 只启动1个daemon → 验证普通任务扫描正常；不得让新旧daemon重叠抢同一任务。
 4. 部署终端验证后才发布云端A2；云端仍保持单副本，n8n工作流不启停、不手动触发。
 5. 部署后只等自然cron，先验收Dave创建的YouTube任务，再在任务完成后的下一轮验收来源归因和冷却/恢复，不以HTTP或n8n success代替业务结果。
+
+## 2026-08-25 生产发布与自然轮次验收
+
+### 发布结果
+
+- 部署终端仓库已更新到 `e54cfe0`。计划任务 `KOL-Scraper-Daemon` 正常，Windows显示的两个Python进程是“启动器父进程＋实际解释器子进程”，启动时间一致，属于1个逻辑daemon；新启动日志存在且无`Traceback`。
+- 云端分支在最新 `origin/master` 上重新整合并跑完目标测试：`160 passed, 6 subtests passed`，`git diff --check`通过。
+- 云端生产commit为 `589130993632dea40707ab0590f1640cd32fca19`，Zeabur deployment `6a8d82f03395ae1227601cdd` 为 `RUNNING`，`/health`返回`status=ok`。
+- n8n工作流 `uvBfJBtGH93FPa6w` 始终为 `active=true`，活动版本与当前版本一致。发布期间没有手动触发、没有启停或改写n8n、没有修改环境变量，也没有额外发送消息或邮件。
+
+### Dave A2 自然轮次
+
+1. 20:00自然execution `1012745` → job `launchruntime-b469a9ab45eb` → `success/supply_in_progress`：创建1条站外YouTube任务，`quality_filters_lowered=false`。
+2. 部署终端自然完成首条 `legacy_fixed` 任务：搜索50个频道、写回1条新主表记录，但有效邮箱0；无报错。
+3. 21:00自然execution `1013101` → job `launchruntime-b399940d29fc` → `success/supply_in_progress`：正确回读首条任务的`raw_discovered=50`，随后自动创建第二条西语 `legacy_fixed` 任务。
+4. 第二条任务自然完成：搜索50个频道、有效邮箱0、主表新增0；无报错。
+5. 22:00自然execution `1013474` → job `launchruntime-fb15568c88b2` → `success/supply_in_progress`：系统确认 `legacy_fixed` 连续两轮零可用候选，将该来源切为 `cooldown`，并自动换到 `competitor` 来源创建 `nyxi controller test deutsch`。
+6. 换源任务已被部署终端自然完成：搜索12个频道、有效邮箱0、主表新增0；无报错。
+
+### 验收结论
+
+- A2已证明完整自动闭环：云端按库存缺口创建站外任务 → 部署终端自动搜索并写回 → 下一自然轮次按任务记录回读 → 连续低产自动冷却 → 自动换源继续，不依赖Codex会话或人工逐轮触发。
+- 三层数字口径生效：内部主表筛选、外部任务创建、外部任务结果分开统计；`raw_discovered`没有再用“新增＋更新”冒充。
+- 本次真实搜索没有形成可发送候选，原因是新任务均未取得有效邮箱，不是人工待审、服务异常或筛选条件过严。全程`quality_filters_lowered=false`，没有为凑数量放宽国家、语言、邮箱、历史关系或重复触达门槛。
+- 食人花发布后自然轮次也能正常运行，但当前仍为`supply_blocked`：最近验收轮次仅完成资料刷新，没有新增候选、草稿或发现任务；这是独立的供给问题，不影响Dave A2验收结论。
+
+### 当前剩余事项
+
+1. `P0`：单独修复食人花持续`supply_blocked`，重点检查为什么体量优先下仍没有建立新发现任务。
+2. `P1`：继续通过自然轮次观察Dave其他来源的有效邮箱与可用候选产出；A2系统机制已验收，不需要再由Codex手动触发。
+3. `P2`：Dave灰度获得稳定正样本后，再抽象为其他产品可选的通用词池规格；竞品仍必须由活动配置选择，不把NYXI固化为默认来源。
