@@ -27,6 +27,13 @@ $settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries
+$registerArguments = @{
+    TaskName = $TaskName
+    Action = $action
+    Trigger = $trigger
+    Settings = $settings
+    Force = $true
+}
 
 if ($CurrentUserS4U) {
     $userName = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -34,25 +41,14 @@ if ($CurrentUserS4U) {
         -UserId $userName `
         -LogonType S4U `
         -RunLevel Highest
-    Register-ScheduledTask `
-        -TaskName $TaskName `
-        -Action $action `
-        -Trigger $trigger `
-        -Settings $settings `
-        -Principal $principal `
-        -Force | Out-Null
+    Register-ScheduledTask @registerArguments -Principal $principal | Out-Null
     Write-Output "已安装 $TaskName：$userName 无密码后台启动、开机运行、静默无窗口。"
     exit 0
 }
 
-Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
+Register-ScheduledTask @registerArguments `
     -User $Credential.UserName `
     -Password $Credential.GetNetworkCredential().Password `
-    -RunLevel Highest `
-    -Force | Out-Null
+    -RunLevel Highest | Out-Null
 
 Write-Output "已安装 $TaskName：开机启动、无需用户登录、静默运行。"
