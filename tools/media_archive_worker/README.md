@@ -38,12 +38,16 @@ pwsh -File ./tools/media_archive_worker/start-worker.ps1 -Once
 # 指定一条重跑
 pwsh -File ./tools/media_archive_worker/start-worker.ps1 -RecordId recxxxxxxxx
 
-# 灰度通过后，安装开机静默任务；会弹出 Windows 凭据框
+# 灰度通过后，用管理员 PowerShell 安装当前用户的 S4U 开机任务。
+# 不保存 Windows 密码；即使用户未登录也会后台运行。
+pwsh -File ./tools/media_archive_worker/install-task.ps1 -CurrentUserS4U
+
+# 如果公司后续改用专用 Windows 账号，也可以显式传本机凭据。
 $credential = Get-Credential
 pwsh -File ./tools/media_archive_worker/install-task.ps1 -Credential $credential
 ```
 
-计划任务使用有密码的专用 Windows 用户运行，做到“不登录也能跑”，同时能读取该用户自己的 `lark-cli` bot 配置和 cookies 文件。不要改为依赖当前 Chrome 登录态。
+当前旧终端采用 S4U（Windows 无密码后台登录）运行，做到“不登录也能跑”，同时沿用该本机用户自己的 `lark-cli` bot 配置。S4U 不提供 Windows 网络共享身份，但本工作流只访问本地文件和公网 API，不受影响。若后续迁到专用 Windows 账号，可改用凭据模式。两种模式都不依赖当前 Chrome 登录态。
 
 ## 检查证据
 
