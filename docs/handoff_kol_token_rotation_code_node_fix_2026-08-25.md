@@ -60,3 +60,11 @@ KOL 审核卡「退回重生」失败不是运营操作问题。2026-08-24 的�
 
 - 让 Frankie 或运营在原失败卡上重试一次「退回重生」，确认新草稿卡正常到达。
 - 真实点击后读回旧草稿/新草稿状态和原卡 PATCH 结果；不要用“n8n execution success”单独判定业务成功。
+
+## 远程提交与部署
+
+- 防复发修复提交：`891629cd210e589f9e06b3608f9f20fdb7f04b4d`。
+- 已推送到远程 `master`。
+- Zeabur deployment：`6a8d6896fb33f64e4837f380`，状态 `RUNNING`，对应上述提交。
+- `https://kol-auto.zeabur.app/health` 返回 HTTP 200。
+- Spec/标准两路代码复审均通过；无阻塞项。唯一剩余业务验收是操作人重试原卡按钮。
