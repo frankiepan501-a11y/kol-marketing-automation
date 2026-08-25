@@ -219,7 +219,8 @@ def xrid(f):
     return None
 
 
-async def fetch_all_records(table_id: str, field_names: list = None, page_size: int = 100):
+async def fetch_all_records(table_id: str, field_names: list = None, page_size: int = 100,
+                            automatic_fields: bool = False):
     items = []
     page_token = ""
     try:
@@ -229,6 +230,8 @@ async def fetch_all_records(table_id: str, field_names: list = None, page_size: 
     page_size_i = max(1, min(page_size_i, 500))
     while True:
         params = {"page_size": page_size_i}
+        if automatic_fields:
+            params["automatic_fields"] = "true"
         if field_names:
             params["field_names"] = json.dumps(list(field_names), ensure_ascii=False, separators=(",", ":"))
         if page_token:

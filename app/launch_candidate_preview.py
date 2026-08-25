@@ -11,8 +11,10 @@ import asyncio
 import json
 import re
 import time
+import unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime
+from urllib.parse import unquote
 
 from . import (
     config, dispatch, feishu, launch_competitor_evidence, launch_evidence, relabel,
@@ -42,6 +44,7 @@ KOL_FIELDS = [
     "上次二次接触时间", "上稿日期", "上稿标题", "寄样次数", "KOL级别", "合作报价",
     "标签版本", "内容垂类", "主机生态", "最近发布日", "近90天发布数",
     "资料可用状态", "资料核实时间", "触达路由状态",
+    "迁移备注",
 ]
 
 SWITCH_ECOSYSTEMS = {"Switch", "Switch 2"}
@@ -975,33 +978,132 @@ async def fast_precheck_contact(
     )
 
 
-def _pilot_keyword_source(fields: dict, task_sources: dict[str, str] | None = None) -> str:
+def _normalize_discovery_keyword(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _pilot_keyword_attribution(
+    fields: dict, *, campaign_id: str,
+    task_sources: dict[str, dict[str, str]] | None = None,
+) -> tuple[str, str, str]:
+    """只接受 daemon 写入的活动+任务双重标记，避免跨活动串归因。"""
     note = ext(fields.get("迁移备注"))
-    match = re.search(r"\[词源:([a-z_]+)\]", note)
-    if match:
-        return match.group(1)
-    for keyword, source in (task_sources or {}).items():
-        if keyword and keyword in note.lower():
-            return source
-    return "unknown"
+    campaign_match = re.search(r"\[活动补池:([^\]]+)\]", note)
+    task_match = re.search(r"\[任务:([^\]]+)\]", note)
+    if (
+        not campaign_match or unquote(campaign_match.group(1).strip()) != campaign_id
+        or not task_match
+    ):
+        return "unknown", "", ""
+    task_id = unquote(task_match.group(1).strip())
+    task = (task_sources or {}).get(task_id) or {}
+    if not task or task.get("status") != "3-已完成":
+        return "unknown", "", ""
+    keyword = _normalize_discovery_keyword(task.get("keyword"))
+    source = str(task.get("source") or "").strip().lower()
+    note_keyword_match = re.search(r"\[发现词:([^\]]+)\]", note)
+    note_source_match = re.search(r"\[词源:([a-z_]+)\]", note)
+    if (
+        not keyword or not source
+        or not note_keyword_match
+        or not note_source_match or note_source_match.group(1) != source
+        or _normalize_discovery_keyword(unquote(note_keyword_match.group(1))) != keyword
+    ):
+        return "unknown", "", ""
+    return source, keyword, task_id
 
 
-async def _pilot_task_sources(campaign_id: str) -> dict[str, str]:
-    prefix = f"[活动补池:{campaign_id}][灰度:"
+def _task_log_count(fields: dict, pattern: str) -> int | None:
+    match = re.search(pattern, ext(fields.get("执行日志")), re.I)
+    return int(match.group(1)) if match else None
+
+
+async def _pilot_task_sources(campaign_id: str) -> dict[str, dict]:
+    # 生产 A2 与灰度共用同一来源追踪：灰度标签不是来源归因前提。
+    prefix = f"[活动补池:{campaign_id}]"
     rows = await feishu.search_records(
         T_CRAWLER_TASK,
         [{"field_name": "任务名", "operator": "contains", "value": [prefix]}],
-        field_names=["任务名", "关键词列表"],
+        field_names=[
+            "任务名", "关键词列表", "任务状态", "执行日志",
+            "实际产出-新增", "实际产出-更新", "新增数量", "更新数量",
+        ],
     )
     sources = {}
     for row in rows:
         fields = row.get("fields") or {}
         name = ext(fields.get("任务名"))
         match = re.search(r"\[词源:([a-z_]+)\]", name)
-        keyword = ext(fields.get("关键词列表")).strip().lower()
-        if match and keyword:
-            sources[keyword] = match.group(1)
+        keyword = _normalize_discovery_keyword(fields.get("关键词列表"))
+        task_id = str(row.get("record_id") or "").strip()
+        if match and keyword and task_id:
+            raw_discovered = _task_log_count(
+                fields, r"(?:原始发现|发现作者|发现KOL|抓取结果|共发现)\s*[:：]?\s*(\d+)",
+            )
+            valid_email = _task_log_count(fields, r"其中有邮箱\s*[:：]\s*(\d+)")
+            sources[task_id] = {
+                "keyword": keyword, "source": match.group(1),
+                "status": ext(fields.get("任务状态")),
+                "raw_discovered": raw_discovered,
+                "valid_email": valid_email,
+                "new_records": int(_numeric(
+                    fields.get("实际产出-新增") or fields.get("新增数量")
+                )),
+                "updated_records": int(_numeric(
+                    fields.get("实际产出-更新") or fields.get("更新数量")
+                )),
+            }
     return sources
+
+
+async def _activity_participant_outcomes(campaign_id: str) -> dict[str, dict[str, str]]:
+    """参与记录保留首次筛选分流，避免发信后关系状态反向改写来源产出。"""
+    if not config.T_LAUNCH_PARTICIPANT:
+        return {}
+    rows = await feishu.search_records(
+        config.T_LAUNCH_PARTICIPANT,
+        [{"field_name": "活动ID", "operator": "is", "value": [campaign_id]}],
+        field_names=["关联KOL", "系统审核分流", "审核结论", "参与状态"],
+    )
+    outcomes = {}
+    for row in rows:
+        fields = row.get("fields") or {}
+        route = ext(fields.get("系统审核分流"))
+        if route not in {"系统建议通过", "KOL运营审核"}:
+            continue
+        for contact_id in _link_ids(fields.get("关联KOL")):
+            outcomes[contact_id] = {
+                "review_route": route,
+                "review_decision": ext(fields.get("审核结论")),
+                "participant_status": ext(fields.get("参与状态")),
+            }
+    return outcomes
+
+
+def _discovery_outcome_increments(
+    *, fields: dict, matched: bool, decision: str, review_route: str,
+    frozen_outcome: dict | None = None,
+) -> dict[str, int]:
+    frozen_route = str((frozen_outcome or {}).get("review_route") or "")
+    eligible = bool(frozen_route) or (decision == "eligible_new_cold" and matched)
+    effective_route = frozen_route or review_route
+    effective_matched = bool(frozen_route) or matched
+    return {
+        "discovered": 1,
+        "valid_email": int(bool(feishu.clean_email(ext(fields.get("邮箱")))[0])),
+        "base_filter_passed": int(bool(effective_matched)),
+        "base_filter_failed": int(not effective_matched),
+        "eligible_new_cold": int(eligible),
+        "auto_approved": int(eligible and effective_route == "系统建议通过"),
+        "operator_review": int(eligible and effective_route == "KOL运营审核"),
+        "hard_filtered": int(
+            not eligible and (
+                not matched or decision != "eligible_new_cold"
+                or review_route == "系统排除"
+            )
+        ),
+    }
 
 
 async def replay_candidates_targeted(
@@ -1112,10 +1214,17 @@ async def replay_candidates_targeted(
                         "review_instruction": "邮箱、关系或活动筛选未通过，无需人工复审。",
                     }
                 )
+            keyword_source, discovery_keyword, discovery_task_id = (
+                _pilot_keyword_attribution(
+                    fields, campaign_id=campaign_id, task_sources=task_sources,
+                )
+            )
             return {
                 "contact_id": record.get("record_id", ""),
                 "name": _candidate_name(fields, "KOL"),
-                "keyword_source": _pilot_keyword_source(fields, task_sources),
+                "keyword_source": keyword_source,
+                "discovery_keyword": discovery_keyword,
+                "discovery_task_id": discovery_task_id,
                 "profile_url": feishu.ext_url(fields.get("主链接")).strip(),
                 "platform": ext(fields.get("主平台")),
                 "country": ext(fields.get("国家")),
@@ -1768,11 +1877,82 @@ async def preview_candidates(
     product_fields = family["target"].get("fields") or {}
     brand = config.brand_from_text(ext(product_fields.get("品牌"))) or ext(product_fields.get("品牌")).upper()
     records = ctx["editors"] if object_type == "媒体人" else ctx["kols"]
+    task_sources = (
+        await _pilot_task_sources(campaign_id)
+        if campaign_id and object_type == "KOL" else {}
+    )
+    participant_outcomes = (
+        await _activity_participant_outcomes(campaign_id)
+        if campaign_id and object_type == "KOL" else {}
+    )
     now_ms = int(time.time() * 1000)
     candidates = []
     profile_refresh_candidate_ids = []
     profile_refresh_candidates = []
     filtered_out = 0
+    source_summary: dict[str, dict[str, int]] = {}
+    keyword_summary: dict[str, dict[str, int | str]] = {}
+    task_summary: dict[str, dict] = {}
+    for task_id, task in task_sources.items():
+        if task.get("status") != "3-已完成":
+            continue
+        task_summary[task_id] = {
+            "source": task.get("source") or "", "keyword": task.get("keyword") or "",
+            "status": task.get("status") or "", "raw_discovered": task.get("raw_discovered"),
+            "valid_email_from_task": task.get("valid_email"),
+            "new_records": int(task.get("new_records") or 0),
+            "updated_records": int(task.get("updated_records") or 0),
+            "records_written": (
+                int(task.get("new_records") or 0) + int(task.get("updated_records") or 0)
+            ),
+            "discovered": 0, "valid_email": 0,
+            "base_filter_passed": 0, "base_filter_failed": 0,
+            "eligible_new_cold": 0, "auto_approved": 0,
+            "operator_review": 0, "hard_filtered": 0,
+            "exclusion_reasons": {},
+        }
+
+    def count_source(source: str, keyword: str, task_id: str, *, fields: dict, matched: bool,
+                     decision: str = "", review_route: str = "",
+                     frozen_outcome: dict | None = None,
+                     exclusion_reasons: list[str] | None = None) -> None:
+        if not source or source == "unknown":
+            return
+        metric = source_summary.setdefault(source, {
+            "discovered": 0, "valid_email": 0, "base_filter_passed": 0,
+            "base_filter_failed": 0, "eligible_new_cold": 0,
+            "auto_approved": 0, "operator_review": 0, "hard_filtered": 0,
+        })
+        increments = _discovery_outcome_increments(
+            fields=fields, matched=matched, decision=decision,
+            review_route=review_route, frozen_outcome=frozen_outcome,
+        )
+        for key, value in increments.items():
+            metric[key] += value
+        if keyword:
+            keyword_metric = keyword_summary.setdefault(keyword, {
+                "source": source, "discovered": 0, "valid_email": 0,
+                "base_filter_passed": 0, "base_filter_failed": 0,
+                "eligible_new_cold": 0, "auto_approved": 0,
+                "operator_review": 0, "hard_filtered": 0,
+            })
+            for key, value in increments.items():
+                keyword_metric[key] = int(keyword_metric.get(key) or 0) + value
+        if task_id:
+            task_metric = task_summary.setdefault(task_id, {
+                "source": source, "keyword": keyword, "discovered": 0,
+                "valid_email": 0, "base_filter_passed": 0,
+                "base_filter_failed": 0, "eligible_new_cold": 0,
+                "auto_approved": 0, "operator_review": 0, "hard_filtered": 0,
+                "exclusion_reasons": {},
+            })
+            for key, value in increments.items():
+                task_metric[key] = int(task_metric.get(key) or 0) + value
+            if increments["hard_filtered"]:
+                reasons = task_metric.setdefault("exclusion_reasons", {})
+                for reason in (exclusion_reasons or [decision or "unknown"]):
+                    reason = str(reason or "unknown")[:160]
+                    reasons[reason] = int(reasons.get(reason) or 0) + 1
     evidence_index = (
         launch_competitor_evidence.build_evidence_index(activity_ctx["competitor_posts"])
         if activity_ctx and activity_ctx["competitor_evidence_applied"] and object_type == "KOL"
@@ -1790,6 +1970,11 @@ async def preview_candidates(
 
     for record in records:
         fields = record.get("fields") or {}
+        contact_id = record.get("record_id", "")
+        frozen_outcome = participant_outcomes.get(contact_id)
+        keyword_source, discovery_keyword, discovery_task_id = _pilot_keyword_attribution(
+            fields, campaign_id=campaign_id, task_sources=task_sources,
+        )
         check = precheck_contact(
             record, object_type=object_type, brand=brand,
             product_ids=set(family["product_ids"]),
@@ -1853,6 +2038,13 @@ async def preview_candidates(
                 # 全局关系路由优先。已有关系对象即使产品画像不适配，也要保留在
                 # 回放结果中说明“沿用原线程/禁止新 cold”，不能被基础筛选静默吞掉。
                 if check["decision"] == "eligible_new_cold":
+                    count_source(
+                        keyword_source, discovery_keyword, discovery_task_id,
+                        fields=fields, matched=False,
+                        decision=check["decision"], review_route="系统排除",
+                        frozen_outcome=frozen_outcome,
+                        exclusion_reasons=filter_reasons,
+                    )
                     continue
             score, breakdown = score_kol(
                 fields, product_fields, set(ctx["mapping"].get("expected_styles") or []),
@@ -1894,6 +2086,16 @@ async def preview_candidates(
             build_review_snapshot(fields, evidence_rank, now_ms=now_ms, precheck=check)
             if object_type == "KOL" else {}
         )
+        count_source(
+            keyword_source, discovery_keyword, discovery_task_id,
+            fields=fields, matched=matched,
+            decision=check["decision"],
+            review_route=review_snapshot.get("review_route", ""),
+            frozen_outcome=frozen_outcome,
+            exclusion_reasons=(
+                list(filter_reasons) + list(check.get("reasons") or [])
+            ),
+        )
         candidates.append({
             "contact_id": record.get("record_id", ""),
             "name": _candidate_name(fields, object_type),
@@ -1901,6 +2103,10 @@ async def preview_candidates(
             "country": ext(fields.get("国家")), "language": ext(fields.get("语言")),
             "base_filter_passed": matched, "base_filter_reasons": filter_reasons,
             "base_filter_reason_codes": filter_reason_codes,
+            "keyword_source": keyword_source,
+            "discovery_keyword": discovery_keyword,
+            "discovery_task_id": discovery_task_id,
+            "has_valid_email": bool(feishu.clean_email(ext(fields.get("邮箱")))[0]),
             "score": score, "breakdown": breakdown,
             "competitor_signal": (ext(fields.get("合作竞品"))[:300] if object_type == "KOL" else ""),
             "competitor_evidence": (ext(fields.get("竞品帖子证据"))[:500] if object_type == "KOL" else ""),
@@ -1918,6 +2124,25 @@ async def preview_candidates(
         -float(x.get("final_priority") or x["score"] or 0), x["contact_id"],
     ))
     counts = Counter(x["decision"] for x in candidates)
+    system_approved = sum(
+        x.get("decision") == "eligible_new_cold"
+        and x.get("review_route") == "系统建议通过"
+        for x in candidates
+    )
+    operator_review = sum(
+        x.get("decision") == "eligible_new_cold"
+        and x.get("base_filter_passed")
+        and x.get("review_route") == "KOL运营审核"
+        for x in candidates
+    )
+    for task_metric in task_summary.values():
+        reasons = task_metric.get("exclusion_reasons") or {}
+        task_metric["top_exclusion_reasons"] = [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(
+                reasons.items(), key=lambda item: (-item[1], item[0]),
+            )[:5]
+        ]
     return {
         "read_only": True, "writes": 0,
         "product": {
@@ -1944,11 +2169,14 @@ async def preview_candidates(
         "summary": {
             "pool_records": len(records), "base_filter_excluded": filtered_out,
             "evaluated": len(candidates), "eligible_new_cold": counts["eligible_new_cold"],
+            "system_approved": system_approved, "operator_review": operator_review,
             "existing_pipeline": counts["existing_pipeline_same_thread"],
             "republish": counts["republish_requires_commitment"],
             "held_or_blocked": len(candidates) - counts["eligible_new_cold"]
             - counts["existing_pipeline_same_thread"] - counts["republish_requires_commitment"],
-            "by_decision": dict(counts),
+            "by_decision": dict(counts), "by_source": source_summary,
+            "by_keyword": keyword_summary,
+            "by_task": task_summary,
         },
         "profile_refresh_candidate_ids": [
             value for value in profile_refresh_candidate_ids if value

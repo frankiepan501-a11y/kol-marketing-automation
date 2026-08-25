@@ -990,7 +990,31 @@ class LaunchRuntimeTests(unittest.TestCase):
             "summary": {"eligible_new_cold": 2}, "profile_refresh_candidate_ids": ["k1", "k2"],
         }
         preview2 = {
-            "summary": {"eligible_new_cold": 3}, "profile_refresh_candidate_ids": [],
+            "summary": {
+                "pool_records": 320, "base_filter_excluded": 300,
+                "eligible_new_cold": 3, "system_approved": 2,
+                "operator_review": 1,
+                "by_source": {
+                    "competitor": {
+                        "discovered": 5, "valid_email": 4,
+                        "eligible_new_cold": 3, "auto_approved": 2,
+                        "operator_review": 1,
+                    },
+                },
+                "by_keyword": {
+                    "dave controller review": {
+                        "source": "competitor", "discovered": 5,
+                        "auto_approved": 2, "operator_review": 1,
+                    },
+                },
+                "by_task": {
+                    "task1": {
+                        "source": "competitor", "keyword": "dave controller review",
+                        "discovered": 5, "auto_approved": 2, "operator_review": 1,
+                    },
+                },
+            },
+            "profile_refresh_candidate_ids": [],
         }
         inventories = [
             {"ready": 0, "pending_review": 1,
@@ -1073,6 +1097,10 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(3, discover.await_args.kwargs["approved_candidates"])
         self.assertTrue(discover.await_args.kwargs["volume_priority"])
         self.assertIs(shared_budget, discover.await_args.kwargs["model_budget"])
+        self.assertEqual(
+            preview2["summary"],
+            discover.await_args.kwargs["source_outcomes"],
+        )
         self.assertEqual(2, queue.await_count)
         self.assertTrue(all(
             call.kwargs["model_budget"] is shared_budget
@@ -1085,6 +1113,14 @@ class LaunchRuntimeTests(unittest.TestCase):
             campaign_id=campaign_id, activity=activity, created=4,
         )
         self.assertEqual(12, result["inventory_after"])
+        self.assertEqual(320, result["internal_pool"]["scanned"])
+        self.assertEqual(300, result["internal_pool"]["hard_filtered"])
+        self.assertEqual(2, result["external_youtube_outcome"]["auto_approved"])
+        self.assertEqual(1, result["external_youtube_outcome"]["operator_review"])
+        self.assertEqual(
+            preview2["summary"]["by_task"],
+            result["external_youtube_outcome"]["by_task"],
+        )
         self.assertEqual("ready_inventory_created", result["business_outcome"])
         self.assertTrue(result["made_supply_progress"])
         self.assertEqual(3, result["supply_progress_breakdown"]["evidence_candidates_imported"])
@@ -1306,6 +1342,30 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual("cooldown", summary["discovery"]["quality_gate"]["mode"])
         self.assertTrue(summary["discovery"]["volume_priority"])
         self.assertTrue(summary["discovery"]["quality_cooldown_overridden"])
+
+    def test_runtime_summary_keeps_three_supply_layers_separate(self):
+        summary = launch_runtime._runtime_result_summary({
+            "action": "expand", "quota": {"remaining": 80},
+            "inventory_after": 0, "business_outcome": "supply_in_progress",
+            "made_supply_progress": True, "supply_progress_breakdown": {},
+            "internal_pool": {
+                "scanned": 320, "auto_approved": 4, "operator_review": 12,
+                "hard_filtered": 304, "drafts_queued": 4,
+            },
+            "external_youtube_discovery": {
+                "created": 4, "active_pending": 1,
+                "recently_executed": 7, "shortfall_tasks": 0,
+            },
+            "external_youtube_outcome": {
+                "completed_tasks": 3, "raw_discovered": 150,
+                "valid_email": 18, "auto_approved": 4,
+                "operator_review": 6,
+            },
+        })
+
+        self.assertEqual(320, summary["internal_pool"]["scanned"])
+        self.assertEqual(4, summary["external_youtube_discovery"]["created"])
+        self.assertEqual(150, summary["external_youtube_outcome"]["raw_discovered"])
 
     def test_daily_feedback_target_excludes_pending_review_capacity(self):
         metrics = {

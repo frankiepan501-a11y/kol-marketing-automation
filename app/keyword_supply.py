@@ -15,6 +15,7 @@ import time
 import math
 import re
 import asyncio
+import unicodedata
 from collections import Counter
 from . import config, feishu, deepseek, launch_evidence
 from .feishu import ext
@@ -22,6 +23,7 @@ from .feishu import ext
 T_CRAWLER = "tblQnLHnBa1RjJUE"   # 爬虫任务台 (KOL 营销库内)
 PER_BATCH_LIMIT = 50            # 每词 daemon 抓取上限
 DISCOVERY_ACTIVE_TTL_MS = 2 * 60 * 60 * 1000
+DISCOVERY_REUSE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 LOW_YIELD_PROBE_COOLDOWN_MS = 2 * 60 * 60 * 1000
 LOW_YIELD_RECENT_SAMPLE = 12
 LOW_YIELD_MIN_EMAIL_SAMPLES = 6
@@ -33,7 +35,7 @@ DAVE_KEYWORD_PILOT_CAMPAIGN_ID = "launch-20260915-funlab-dave-ys11-5"
 DAVE_KEYWORD_PILOT_TAG = "[灰度:dave-keyword-v1]"
 DAVE_KEYWORD_PILOT_V2_TAG = "[灰度:dave-keyword-v2]"
 DAVE_KEYWORD_PILOT_MAX_TASKS = 4
-_DAVE_KEYWORD_PILOT_LOCK = asyncio.Lock()
+_CAMPAIGN_SUPPLY_LOCKS: dict[str, asyncio.Lock] = {}
 
 # 市场配置: 英语为主(水位15), 非英语市场(产品在卖+KOL库不足)各保持小水位
 MARKETS = [
@@ -494,9 +496,443 @@ def _created_ms(fields: dict) -> int:
     return value * 1000 if 0 < value < 100_000_000_000 else value
 
 
+def _timestamp_ms(value) -> int:
+    try:
+        parsed = int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+    return parsed * 1000 if 0 < parsed < 100_000_000_000 else parsed
+
+
+def _last_modified_ms(row: dict) -> int:
+    """飞书 automatic_fields=true 返回记录级 last_modified_time。"""
+    return _timestamp_ms(row.get("last_modified_time"))
+
+
+def _normalize_discovery_keyword(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _normalized_countries(value) -> tuple[str, ...]:
+    return tuple(sorted({
+        text.strip().upper() for text in _multi_values(value) if text.strip()
+    }))
+
+
+def _normalized_language(value) -> str:
+    values = _multi_values(value)
+    return values[0].strip().lower() if values else ""
+
+
+def _discovery_history_key(keyword: str, countries, language: str) -> tuple:
+    return (
+        _normalize_discovery_keyword(keyword),
+        _normalized_countries(countries),
+        str(language or "").strip().lower(),
+    )
+
+
+def _task_source(fields: dict) -> str:
+    match = re.search(r"\[词源:([^\]]+)\]", ext(fields.get("任务名")))
+    if match:
+        return match.group(1).strip().lower()
+    keyword = _normalize_discovery_keyword(fields.get("关键词列表"))
+    legacy_words = {
+        _normalize_discovery_keyword(word)
+        for words in _CAMPAIGN_KEYWORDS.get("dave", {}).values()
+        for word in words
+    }
+    # A2 之前的 Dave 固定词没有词源标签，但来源可由受控常量唯一确定；
+    # 其他无标签任务仍视为缺信号，不能笼统冒充 legacy_fixed。
+    return "legacy_fixed" if keyword in legacy_words else ""
+
+
+def _task_matches_history_key(fields: dict, key: tuple) -> bool:
+    keyword, countries, language = key
+    if _normalize_discovery_keyword(fields.get("关键词列表")) != keyword:
+        return False
+    task_countries = _normalized_countries(fields.get("筛选-国家"))
+    task_language = _normalized_language(fields.get("筛选-语言"))
+    # 七天复用键必须是完整三元组。缺国家/语言的旧脏记录不能充当通配符，
+    # 否则一个旧词会错误阻断所有目标市场。
+    return bool(
+        task_countries and task_language
+        and task_countries == countries and task_language == language
+    )
+
+
+def _history_key_state(rows: list[dict], *, keyword: str, countries,
+                       language: str, now_ms: int) -> dict:
+    key = _discovery_history_key(keyword, countries, language)
+    matched = [
+        row for row in rows
+        if _task_matches_history_key(row.get("fields") or {}, key)
+    ]
+    active = [
+        row for row in matched
+        if ext((row.get("fields") or {}).get("任务状态")) in {
+            "1-待触发", "2-执行中", "2-运行中",
+        }
+    ]
+    if active:
+        return {"state": "active_duplicate", "last_completed_ms": 0}
+    terminal = [
+        row for row in matched
+        if ext((row.get("fields") or {}).get("任务状态")) == "3-已完成"
+    ]
+    if not terminal:
+        return {"state": "unseen", "last_completed_ms": 0, "outcome_rank": 1}
+    completed_times = [_last_modified_ms(row) for row in terminal]
+    if not all(completed_times):
+        return {
+            "state": "history_signal_unavailable", "last_completed_ms": 0,
+            "outcome_rank": 1,
+        }
+    last_completed_ms = max(completed_times)
+    if last_completed_ms > now_ms:
+        return {
+            "state": "history_signal_unavailable",
+            "last_completed_ms": last_completed_ms,
+            "outcome_rank": 1,
+        }
+    if 0 <= now_ms - last_completed_ms < DISCOVERY_REUSE_WINDOW_MS:
+        return {
+            "state": "recently_executed", "last_completed_ms": last_completed_ms,
+            "outcome_rank": 1,
+        }
+    latest = max(terminal, key=_last_modified_ms)
+    latest_output = _attributed_usable_output(latest.get("fields") or {})
+    return {
+        "state": "reusable_after_ttl", "last_completed_ms": last_completed_ms,
+        # >7天组合：有可用对象优先、未知其次、明确零产出最后。
+        "outcome_rank": 0 if (latest_output or 0) > 0 else 1 if latest_output is None else 2,
+    }
+
+
 def _valid_email_output(fields: dict) -> int | None:
     match = re.search(r"其中有邮箱\s*[:：]\s*(\d+)", ext(fields.get("执行日志")))
     return int(match.group(1)) if match else None
+
+
+def _int_field(fields: dict, *names: str) -> int:
+    for name in names:
+        try:
+            if fields.get(name) not in (None, ""):
+                return max(0, int(float(fields.get(name))))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _attributed_usable_output(fields: dict) -> int | None:
+    log = ext(fields.get("执行日志"))
+    approved = re.search(r"(?:明确合格|自动通过)\s*[:：]\s*(\d+)", log)
+    review = re.search(r"(?:可运营审核|待运营审核)\s*[:：]\s*(\d+)", log)
+    if approved and review:
+        return int(approved.group(1)) + int(review.group(1))
+    valid_email = _valid_email_output(fields)
+    # 没有有效邮箱时无需等待内部筛选，也能确定可用产出为零。
+    return 0 if valid_email == 0 else None
+
+
+def _source_health(rows: list[dict], *, prefix: str, now_ms: int,
+                   source_outcomes: dict | None = None) -> dict:
+    outcomes_by_task = (source_outcomes or {}).get("by_task") or {}
+    by_source: dict[str, list[dict]] = {}
+    for row in rows:
+        fields = row.get("fields") or {}
+        if not ext(fields.get("任务名")).startswith(prefix):
+            continue
+        if ext(fields.get("任务状态")) != "3-已完成":
+            continue
+        source = _task_source(fields)
+        if source:
+            by_source.setdefault(source, []).append(row)
+    result = {}
+    for source, source_rows in by_source.items():
+        source_rows.sort(key=_last_modified_ms, reverse=True)
+        known = []
+        round_outputs = []
+        pending_unknown = 0
+        missing = 0
+        # “连续两轮”只看最近两条已完成任务；未知轮次不能被跳过后，
+        # 再拿更老的两个零产出拼成一段并不存在的连续低产。
+        recent_rounds = source_rows[:2]
+        for row in recent_rounds:
+            fields = row.get("fields") or {}
+            modified_ms = _last_modified_ms(row)
+            task_metric = outcomes_by_task.get(str(row.get("record_id") or "")) or {}
+            attributed_count = (
+                _int_field(task_metric, "auto_approved")
+                + _int_field(task_metric, "operator_review")
+            )
+            attributed_discovered = _int_field(task_metric, "discovered")
+            if attributed_count > 0:
+                output = attributed_count
+            elif attributed_discovered > 0:
+                output = 0
+            else:
+                output = _attributed_usable_output(fields)
+            if not modified_ms or _valid_email_output(fields) is None:
+                missing += 1
+                round_outputs.append(None)
+                continue
+            if output is None:
+                pending_unknown += 1
+                round_outputs.append(None)
+                continue
+            known.append((modified_ms, output))
+            round_outputs.append(output)
+        mode = "healthy"
+        cooldown_until_ms = 0
+        # 最新一轮已产出可用对象即可恢复；否则连续最近两轮都为0才冷却。
+        # 任何未知轮次都不能被更老的结果跨过去拼接。
+        if round_outputs and (round_outputs[0] or 0) > 0:
+            mode = "healthy"
+        elif len(round_outputs) >= 2 and round_outputs[:2] == [0, 0]:
+            second_zero_ms = _last_modified_ms(recent_rounds[0])
+            cooldown_until_ms = second_zero_ms + LOW_YIELD_PROBE_COOLDOWN_MS
+            mode = "cooldown" if now_ms < cooldown_until_ms else "probe"
+        elif recent_rounds and (missing or pending_unknown):
+            mode = "signal_missing"
+        result[source] = {
+            "mode": mode,
+            "known_outcomes": len(known),
+            "pending_or_unknown": pending_unknown,
+            "signal_missing_tasks": missing,
+            "last_completed_ms": max(
+                (_last_modified_ms(row) for row in source_rows), default=0,
+            ),
+            "cooldown_until_ms": cooldown_until_ms,
+        }
+    return result
+
+
+def _campaign_source_signal(rows: list[dict], *, prefix: str) -> dict:
+    """检查已完成任务是否具备来源、完成时间和执行日志三个审计信号。"""
+    completed = [
+        row for row in rows
+        if ext((row.get("fields") or {}).get("任务名")).startswith(prefix)
+        and ext((row.get("fields") or {}).get("任务状态")) == "3-已完成"
+    ]
+    missing = []
+    # 任何历史已完成轮次缺审计信号，都不能被“最新两条正常”掩盖。
+    # 这是活动级失败关闭；来源冷却本身仍只看各来源最近两轮。
+    for row in completed:
+        fields = row.get("fields") or {}
+        reasons = []
+        if not _task_source(fields):
+            reasons.append("source")
+        if not _last_modified_ms(row):
+            reasons.append("last_modified_time")
+        if _valid_email_output(fields) is None:
+            reasons.append("execution_log")
+        if reasons:
+            missing.append({"record_id": row.get("record_id", ""), "missing": reasons})
+    return {
+        "available": not missing,
+        "missing_tasks": len(missing),
+        "details": missing[:5],
+    }
+
+
+def _active_sources(rows: list[dict], *, prefix: str) -> set[str]:
+    return {
+        source
+        for row in rows
+        for fields in [row.get("fields") or {}]
+        for source in [_task_source(fields)]
+        if source
+        and ext(fields.get("任务名")).startswith(prefix)
+        and ext(fields.get("任务状态")) in {"1-待触发", "2-执行中", "2-运行中"}
+    }
+
+
+def _raw_discovered_output(fields: dict) -> int | None:
+    for name in ("原始发现数", "实际发现数量", "抓取数量", "实际产出总数"):
+        if fields.get(name) not in (None, ""):
+            return _int_field(fields, name)
+    match = re.search(
+        r"(?:原始发现|发现作者|发现KOL|抓取结果|共发现)\s*[:：]?\s*(\d+)",
+        ext(fields.get("执行日志")), re.I,
+    )
+    return int(match.group(1)) if match else None
+
+
+def _external_youtube_outcome(rows: list[dict], *, prefix: str) -> dict:
+    completed = []
+    for row in rows:
+        fields = row.get("fields") or {}
+        if (
+            ext(fields.get("任务名")).startswith(prefix)
+            and ext(fields.get("任务状态")) == "3-已完成"
+        ):
+            completed.append(fields)
+    valid_samples = [
+        value for value in (_valid_email_output(fields) for fields in completed)
+        if value is not None
+    ]
+    attributed = [
+        value for value in (_attributed_usable_output(fields) for fields in completed)
+        if value is not None
+    ]
+    raw_samples = [
+        value for value in (_raw_discovered_output(fields) for fields in completed)
+        if value is not None
+    ]
+    new_records = sum(
+        _int_field(fields, "实际产出-新增", "新增数量") for fields in completed
+    )
+    updated_records = sum(
+        _int_field(fields, "实际产出-更新", "更新数量") for fields in completed
+    )
+    return {
+        "completed_tasks": len(completed),
+        "raw_discovered": sum(raw_samples),
+        "raw_discovered_signal_tasks": len(raw_samples),
+        "new_records": new_records,
+        "updated_records": updated_records,
+        "records_written": new_records + updated_records,
+        "valid_email": sum(valid_samples),
+        "valid_email_signal_tasks": len(valid_samples),
+        "attributed_outcome_tasks": len(attributed),
+        "pending_or_unknown_tasks": len(completed) - len(attributed),
+        "usable_candidates": sum(attributed),
+    }
+
+
+def _campaign_countries_by_language(*, languages: list[str], target_countries: list[str],
+                                    configured: dict[str, list[str]]) -> dict[str, list[str]]:
+    if target_countries:
+        return {
+            language: list(configured.get(language) or [])
+            for language in languages
+        }
+    defaults = {"en": ["US", "UK", "CA"], "de": ["DE"], "es": ["ES"]}
+    return {language: list(defaults.get(language) or []) for language in languages}
+
+
+def _round_robin_sources(items: list[dict], source_health: dict) -> list[dict]:
+    buckets: dict[str, list[dict]] = {}
+    for item in items:
+        buckets.setdefault(item["source"], []).append(item)
+    for source in buckets:
+        buckets[source].sort(key=lambda item: (
+            int(item.get("outcome_rank", 1)),
+            int(item.get("last_completed_ms") or 0),
+            item.get("keyword", ""),
+        ))
+    sources = sorted(
+        buckets,
+        key=lambda source: (
+            int((source_health.get(source) or {}).get("last_completed_ms") or 0),
+            source,
+        ),
+    )
+    out = []
+    while sources:
+        next_sources = []
+        for source in sources:
+            if buckets[source]:
+                out.append(buckets[source].pop(0))
+            if buckets[source]:
+                next_sources.append(source)
+        sources = next_sources
+    return out
+
+
+def _select_dave_external_candidates(*, rows: list[dict], activity_fields: dict,
+                                     product_fields: dict, languages: list[str],
+                                     countries_by_language: dict[str, list[str]],
+                                     prefix: str, now_ms: int, limit: int,
+                                     source_outcomes: dict | None = None) -> tuple:
+    fixed = []
+    positions = {language: 0 for language in languages}
+    while True:
+        progressed = False
+        for language in languages:
+            words = _CAMPAIGN_KEYWORDS["dave"].get(language, [])
+            if positions[language] >= len(words):
+                continue
+            word = words[positions[language]]
+            positions[language] += 1
+            item = _discovery_item(
+                language=language, keyword=word, source="legacy_fixed",
+                reason="Dave 旧固定发现词；保留兼容并纳入七天轮转",
+                axes=["legacy_fixed", "creator_content"],
+            )
+            if item:
+                fixed.append(item)
+            progressed = True
+        if not progressed:
+            break
+    structured = _dave_structured_candidates(
+        activity_fields=activity_fields, product_fields=product_fields,
+        languages=languages, existing_keywords=set(), pilot_version="v2",
+    )
+    source_health = _source_health(
+        rows, prefix=prefix, now_ms=now_ms, source_outcomes=source_outcomes,
+    )
+    source_signal = _campaign_source_signal(rows, prefix=prefix)
+    active_sources = _active_sources(rows, prefix=prefix)
+    history_state = Counter({
+        "unseen": 0, "active_duplicate": 0, "recently_executed": 0,
+        "reusable_after_ttl": 0, "history_signal_unavailable": 0,
+        "source_cooling": 0,
+        "source_signal_unavailable": int(not source_signal["available"]),
+    })
+    unseen, reusable = [], []
+    probe_used: set[str] = set()
+    assessed_keys = set()
+    for item in fixed + structured:
+        countries = countries_by_language.get(item["language"]) or []
+        if not countries:
+            continue
+        key = _discovery_history_key(item["keyword"], countries, item["language"])
+        if key in assessed_keys:
+            continue
+        assessed_keys.add(key)
+        state = _history_key_state(
+            rows, keyword=item["keyword"], countries=countries,
+            language=item["language"], now_ms=now_ms,
+        )
+        history_state[state["state"]] += 1
+        if state["state"] in {
+            "active_duplicate", "recently_executed", "history_signal_unavailable",
+        }:
+            continue
+        health = source_health.get(item["source"]) or {"mode": "healthy"}
+        if health.get("mode") == "cooldown":
+            history_state["source_cooling"] += 1
+            continue
+        if health.get("mode") in {"probe", "signal_missing"}:
+            if item["source"] in active_sources or item["source"] in probe_used:
+                history_state["source_cooling"] += 1
+                continue
+            probe_used.add(item["source"])
+        enriched = {
+            **item, "countries": countries,
+            "history_state": state["state"],
+            "last_completed_ms": state["last_completed_ms"],
+            "outcome_rank": int(state.get("outcome_rank", 1)),
+        }
+        if state["state"] == "unseen":
+            unseen.append(enriched)
+        else:
+            reusable.append(enriched)
+    # 新组合优先；旧组合重跑时按词源轮转，避免 legacy_fixed 独占整批。
+    ordered = unseen + _round_robin_sources(reusable, source_health)
+    effective_limit = max(0, int(limit))
+    if not source_signal["available"]:
+        # 历史已完成任务缺来源/日志/完成时间时，失败关闭为全活动单探测；
+        # 若已有任何带来源的在途任务，则本轮不再追加。
+        effective_limit = 0 if active_sources else min(1, effective_limit)
+    selected = ordered[:effective_limit]
+    history_state["deterministic_combinations_exhausted"] = max(
+        0, int(limit) - len(selected),
+    )
+    return selected, dict(history_state), source_health, source_signal
 
 
 def _campaign_discovery_quality(
@@ -613,18 +1049,15 @@ def _append_curated_candidates(
     return need, added
 
 
-async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: dict,
-                                 required_candidates: int,
-                                 approved_candidates: int | None = None,
-                                 dry_run: bool = False,
-                                 max_tasks: int | None = None,
-                                 structured_pilot: bool = False,
-                                 pilot_version: str = "v1",
-                                 allow_ai: bool = True,
-                                 volume_priority: bool = False,
-                                 model_budget=None) -> dict:
+async def _ensure_campaign_supply_unlocked(
+    *, campaign_id: str, activity: dict, product: dict,
+    required_candidates: int, approved_candidates: int | None = None,
+    dry_run: bool = False, max_tasks: int | None = None,
+    structured_pilot: bool = False, pilot_version: str = "v1",
+    allow_ai: bool = True, volume_priority: bool = False, model_budget=None,
+    source_outcomes: dict | None = None,
+) -> dict:
     """为单个活动补发现任务；体量优先时换词续跑，但不降低候选硬筛选。"""
-    rows = await feishu.fetch_all_records(T_CRAWLER)
     fields = activity.get("fields") or {}
     product_fields = product.get("fields") or {}
     language_aliases = {"英语": "en", "德语": "de", "西班牙语": "es"}
@@ -666,6 +1099,10 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         country for country in target_country_list
         if country not in covered_target_countries
     ]
+    discovery_countries_by_language = _campaign_countries_by_language(
+        languages=languages, target_countries=target_country_list,
+        configured=pilot_countries_by_language,
+    )
     if structured_pilot:
         languages = [
             language for language in languages
@@ -682,6 +1119,12 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
     theme = "dave" if "dave" in identity else "piranha" if "piranha" in identity else ""
     if not theme:
         return {"ok": False, "created": 0, "error": "当前活动缺少可验证的确定性拓词主题"}
+
+    rows = (
+        await feishu.fetch_all_records(T_CRAWLER, automatic_fields=True)
+        if theme == "dave" and not structured_pilot
+        else await feishu.fetch_all_records(T_CRAWLER)
+    )
 
     existing_keywords = {
         ext((row.get("fields") or {}).get("关键词列表")).strip().lower()
@@ -761,6 +1204,10 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         "quality_filters_lowered": False,
         "uncovered_target_countries": uncovered_target_countries,
         "model_calls": 0,
+        "keyword_history_state": {},
+        "source_health": {},
+        "source_signal": {"available": True, "missing_tasks": 0, "details": []},
+        "external_youtube_outcome": _external_youtube_outcome(rows, prefix=prefix),
     }
     if (
         quality_gate_enabled
@@ -787,7 +1234,21 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             pilot_version=pilot_version,
         )[:need]
         need -= len(candidates)
-    while (not structured_pilot and need
+    if theme == "dave" and not structured_pilot and need:
+        dave_candidates, history_state, source_health, source_signal = (
+            _select_dave_external_candidates(
+            rows=rows, activity_fields=fields, product_fields=product_fields,
+            languages=languages,
+            countries_by_language=discovery_countries_by_language,
+            prefix=prefix, now_ms=now_ms, limit=need,
+            source_outcomes=source_outcomes,
+        ))
+        candidates.extend(dave_candidates)
+        need -= len(dave_candidates)
+        common_result["keyword_history_state"] = history_state
+        common_result["source_health"] = source_health
+        common_result["source_signal"] = source_signal
+    while (theme != "dave" and not structured_pilot and need
            and any(_CAMPAIGN_KEYWORDS[theme].get(lang) for lang in languages)):
         progressed = False
         for lang in languages:
@@ -818,13 +1279,21 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         seven_layer_added = len(seven_layer)
         need -= seven_layer_added
 
-    keyword_source = f"structured_{pilot_version}" if structured_pilot and candidates else (
-        "seven_layer_deterministic"
-        if seven_layer_added and seven_layer_added == len(candidates)
-        else "mixed_seven_layer_deterministic"
-        if seven_layer_added
-        else "deterministic" if candidates else "none"
-    )
+    if theme == "dave" and not structured_pilot and candidates:
+        sources = {item.get("source") for item in candidates if isinstance(item, dict)}
+        keyword_source = (
+            "deterministic" if sources == {"legacy_fixed"}
+            else "seven_layer_deterministic" if "legacy_fixed" not in sources
+            else "mixed_seven_layer_deterministic"
+        )
+    else:
+        keyword_source = f"structured_{pilot_version}" if structured_pilot and candidates else (
+            "seven_layer_deterministic"
+            if seven_layer_added and seven_layer_added == len(candidates)
+            else "mixed_seven_layer_deterministic"
+            if seven_layer_added
+            else "deterministic" if candidates else "none"
+        )
     generation_error = ""
     generation_warning = ""
     if need and theme == "piranha" and quality_gate["mode"] == "slow_probe":
@@ -900,8 +1369,23 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
     if need and generation_warning:
         generation_error = generation_warning
 
-    skipped = "fixed_keywords_exhausted" if need and not allow_ai else ""
+    skipped = (
+        "source_signal_unavailable"
+        if theme == "dave" and not common_result["source_signal"].get("available", True)
+        else
+        "deterministic_combinations_exhausted"
+        if theme == "dave" and need else
+        "fixed_keywords_exhausted" if need and not allow_ai else ""
+    )
     if dry_run:
+        external_discovery = {
+            "created": 0, "would_create": len(candidates),
+            "active_pending": active_pending_for_campaign,
+            "stale_pending": stale_pending_for_campaign,
+            "target_tasks": target_tasks,
+            "shortfall_tasks": need,
+            **common_result["keyword_history_state"],
+        }
         return {
             "ok": True, "created": 0, "would_create": len(candidates),
             "keywords": [
@@ -913,13 +1397,15 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             "generation_error": generation_error,
             "generation_warning": generation_warning,
             "skipped": skipped,
+            "external_youtube_discovery": external_discovery,
             "model_budget": model_budget.snapshot() if model_budget is not None else {},
             **common_result,
         }
 
     now = int(time.time() * 1000)
     countries_by_language = (
-        pilot_countries_by_language if structured_pilot
+        discovery_countries_by_language
+        if theme == "dave" or structured_pilot
         else {"en": ["US", "UK", "CA"], "de": ["DE"], "es": ["ES"]}
     )
     created, errors = 0, []
@@ -949,7 +1435,16 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
         except Exception as exc:
             errors.append(f"{word}: {str(exc)[:100]}")
     if need and not generation_error:
-        generation_error = f"仍缺{need}个未使用的活动发现关键词"
+        generation_error = f"仍缺{need}个符合历史窗口和来源健康规则的外部YouTube发现任务"
+    total_shortfall = need + len(errors)
+    external_discovery = {
+        "created": created, "would_create": 0,
+        "active_pending": active_pending_for_campaign,
+        "stale_pending": stale_pending_for_campaign,
+        "target_tasks": target_tasks,
+        "shortfall_tasks": total_shortfall,
+        **common_result["keyword_history_state"],
+    }
     return {
         "ok": not errors and not generation_error, "created": created, "errors": errors[:5],
         "keywords": [
@@ -957,13 +1452,40 @@ async def ensure_campaign_supply(*, campaign_id: str, activity: dict, product: d
             else {"language": item[0], "keyword": item[1]}
             for item in candidates
         ],
-        "keyword_source": keyword_source, "shortfall_tasks": need,
+        "keyword_source": keyword_source, "shortfall_tasks": total_shortfall,
         "generation_error": generation_error,
         "generation_warning": generation_warning,
         "skipped": skipped,
+        "external_youtube_discovery": external_discovery,
         "model_budget": model_budget.snapshot() if model_budget is not None else {},
         **common_result,
     }
+
+
+async def ensure_campaign_supply(
+    *, campaign_id: str, activity: dict, product: dict,
+    required_candidates: int, approved_candidates: int | None = None,
+    dry_run: bool = False, max_tasks: int | None = None,
+    structured_pilot: bool = False, pilot_version: str = "v1",
+    allow_ai: bool = True, volume_priority: bool = False, model_budget=None,
+    source_outcomes: dict | None = None,
+) -> dict:
+    """活动级唯一写入口；同一活动的自治补池和灰度共用一把读后写锁。"""
+    kwargs = {
+        "campaign_id": campaign_id, "activity": activity, "product": product,
+        "required_candidates": required_candidates,
+        "approved_candidates": approved_candidates, "dry_run": dry_run,
+        "max_tasks": max_tasks, "structured_pilot": structured_pilot,
+        "pilot_version": pilot_version, "allow_ai": allow_ai,
+        "volume_priority": volume_priority, "model_budget": model_budget,
+        "source_outcomes": source_outcomes,
+    }
+    if dry_run:
+        return await _ensure_campaign_supply_unlocked(**kwargs)
+    lock = _CAMPAIGN_SUPPLY_LOCKS.setdefault(campaign_id, asyncio.Lock())
+    async with lock:
+        # 获取锁后才读取爬虫任务表，关闭两个入口并发“同时读旧快照再重复建任务”。
+        return await _ensure_campaign_supply_unlocked(**kwargs)
 
 
 async def run_campaign_pilot(*, campaign_id: str, required_candidates: int = 200,
@@ -1000,12 +1522,7 @@ async def run_campaign_pilot(*, campaign_id: str, required_candidates: int = 200
             structured_pilot=True, pilot_version=pilot_version,
         )
 
-    if dry_run:
-        result = await execute_pilot()
-    else:
-        # 当前生产为单实例；锁内重新读取任务台，避免两个同时提交各写4条。
-        async with _DAVE_KEYWORD_PILOT_LOCK:
-            result = await execute_pilot()
+    result = await execute_pilot()
     writes = int(result.get("created") or 0)
     return {
         **result, "campaign_id": campaign_id, "product_id": product_id,

@@ -1559,6 +1559,7 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
                 ),
                 dry_run=False, volume_priority=True,
                 model_budget=model_budget,
+                source_outcomes=latest_preview.get("summary") or {},
             )
             review_preview = dict(latest_preview)
             review_preview["candidates"] = list(latest_preview.get("candidates") or []) + list(
@@ -1599,6 +1600,56 @@ async def autonomous_refill(*, campaign_id: str, buffer_days: int = 2,
             "model_budget": model_budget.snapshot(),
             "quality_filters_lowered": False,
         }
+        preview_candidates = list(latest_preview.get("candidates") or [])
+        preview_summary = latest_preview.get("summary") or {}
+        by_source = preview_summary.get("by_source") or {}
+        known_external_sources = {
+            source: values for source, values in by_source.items()
+            if source and source != "unknown"
+        }
+        result["internal_pool"] = {
+            "scanned": int(preview_summary.get("pool_records") or 0),
+            "evaluated": int(preview_summary.get("evaluated") or len(preview_candidates)),
+            "auto_approved": int(preview_summary.get("system_approved") or 0),
+            "participants_created": (
+                int(first_append.get("created") or 0)
+                + int(second_append.get("created") or 0)
+            ),
+            "operator_review": sum(
+                candidate.get("review_route") == "KOL运营审核"
+                for candidate in preview_candidates
+            ) if "operator_review" not in preview_summary else int(
+                preview_summary.get("operator_review") or 0
+            ),
+            "hard_filtered": int(preview_summary.get("base_filter_excluded") or 0),
+            "base_filter_failed": int(preview_summary.get("base_filter_excluded") or 0),
+            "drafts_queued": (
+                int(first_queue.get("queued") or 0)
+                + int(second_queue.get("queued") or 0)
+            ),
+            "pending_review": int(inventory_after.get("pending_review") or 0),
+        }
+        result["external_youtube_discovery"] = dict(
+            discovery.get("external_youtube_discovery") or {
+                "created": int(discovery.get("created") or 0),
+                "active_pending": int(discovery.get("active_pending_before") or 0),
+                "shortfall_tasks": int(discovery.get("shortfall_tasks") or 0),
+            }
+        )
+        external_outcome = dict(discovery.get("external_youtube_outcome") or {})
+        external_outcome.update({
+            "source_breakdown": known_external_sources,
+            "by_task": preview_summary.get("by_task") or {},
+            "auto_approved": sum(
+                int(values.get("auto_approved") or 0)
+                for values in known_external_sources.values()
+            ),
+            "operator_review": sum(
+                int(values.get("operator_review") or 0)
+                for values in known_external_sources.values()
+            ),
+        })
+        result["external_youtube_outcome"] = external_outcome
         return _with_business_outcome(result)
 
 
@@ -1721,6 +1772,11 @@ def _runtime_result_summary(result: dict | None) -> dict:
     } | ({"quota": quota} if quota else {})
     if result.get("model_budget"):
         summary["model_budget"] = result["model_budget"]
+    for key in (
+        "internal_pool", "external_youtube_discovery", "external_youtube_outcome",
+    ):
+        if isinstance(result.get(key), dict):
+            summary[key] = result[key]
     reconcile = result.get("outcome_reconcile") or {}
     discovery = result.get("discovery") or {}
     if discovery:

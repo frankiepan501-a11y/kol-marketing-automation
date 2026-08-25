@@ -75,6 +75,25 @@ class FeishuFetchAllRecordsTests(unittest.TestCase):
         self.assertEqual(second_qs["page_token"], ["recNext"])
         self.assertEqual(json.loads(second_qs["field_names"][0]), ["发送状态", "邮件草稿ID"])
 
+    def test_fetch_all_records_can_request_persistent_automatic_timestamps(self):
+        paths = []
+
+        async def fake_api(method, path, body=None, which="bitable"):
+            paths.append(path)
+            return {"data": {"items": [], "has_more": False}}
+
+        original_api = feishu.api
+        feishu.api = fake_api
+        try:
+            asyncio.run(feishu.fetch_all_records(
+                "tblTest", automatic_fields=True,
+            ))
+        finally:
+            feishu.api = original_api
+
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(paths[0]).query)
+        self.assertEqual(["true"], query["automatic_fields"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -877,6 +877,11 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
                 "账号名": "Test Creator", "邮箱": "test@example.com", "合作状态": "未建联",
                 "主平台": "YouTube", "国家": "US", "语言": "en", "粉丝数": 100000,
                 "内容风格": ["手柄评测"],
+                "迁移备注": (
+                    "[活动补池:launch-20260915-funlab-dave-ys11-5]"
+                    "[任务:task1][词源:competitor]"
+                    "[发现词:dave controller review]"
+                ),
             },
         }
         posts = {}
@@ -896,6 +901,16 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
              patch.object(preview.config, "T_EDITOR", "editors"), \
              patch.object(preview.config, "T_DRAFT", "drafts"), \
              patch.object(preview.launch_evidence, "get_activity", new=AsyncMock(return_value=activity)), \
+             patch.object(
+                 preview, "_pilot_task_sources",
+                 new=AsyncMock(return_value={
+                     "task1": {
+                         "keyword": "dave controller review", "source": "competitor",
+                         "status": "3-已完成", "raw_discovered": 8,
+                         "valid_email": 3, "new_records": 1, "updated_records": 0,
+                     },
+                 }),
+             ), \
              patch.object(preview.feishu, "fetch_all_records", side_effect=fake_fetch), \
              patch.object(preview.feishu, "get_record", new=AsyncMock(side_effect=lambda table, rid: posts[rid])), \
              patch.object(preview.dispatch, "fetch_mapping_for_product", new=AsyncMock(return_value={
@@ -914,8 +929,150 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertFalse(result["evidence_pending"])
         self.assertEqual(8, result["evidence_coverage"]["valid_partner_posts"])
         self.assertEqual(1, result["evidence_coverage"]["matched_contacts"])
+        self.assertEqual("competitor", result["candidates"][0]["keyword_source"])
+        self.assertEqual(1, result["summary"]["by_source"]["competitor"]["discovered"])
+        self.assertEqual(1, result["summary"]["by_source"]["competitor"]["valid_email"])
+        self.assertEqual(1, sum(
+            result["summary"]["by_keyword"]["dave controller review"][key]
+            for key in ("auto_approved", "operator_review")
+        ))
+        self.assertEqual(1, sum(
+            result["summary"]["by_task"]["task1"][key]
+            for key in ("auto_approved", "operator_review")
+        ))
+        self.assertEqual(8, result["summary"]["by_task"]["task1"]["raw_discovered"])
+        self.assertEqual(3, result["summary"]["by_task"]["task1"]["valid_email_from_task"])
         create_mock.assert_not_awaited()
         update_mock.assert_not_awaited()
+
+    def test_discovery_attribution_requires_current_campaign_and_known_task(self):
+        tasks = {
+            "task1": {
+                "keyword": "dave controller review", "source": "competitor",
+                "status": "3-已完成",
+            },
+        }
+        other = {"迁移备注": (
+            "[活动补池:other-campaign][任务:task1][词源:competitor]"
+            "[发现词:dave controller review]"
+        )}
+        unknown_task = {"迁移备注": (
+            "[活动补池:campaign1][任务:task-other][词源:competitor]"
+            "[发现词:dave controller review]"
+        )}
+        current = {"迁移备注": (
+            "[活动补池:campaign1][任务:task1][词源:competitor]"
+            "[发现词:dave%20controller%20review]"
+        )}
+
+        self.assertEqual(
+            ("unknown", "", ""),
+            preview._pilot_keyword_attribution(
+                other, campaign_id="campaign1", task_sources=tasks,
+            ),
+        )
+        self.assertEqual(
+            ("unknown", "", ""),
+            preview._pilot_keyword_attribution(
+                unknown_task, campaign_id="campaign1", task_sources=tasks,
+            ),
+        )
+        self.assertEqual(
+            ("competitor", "dave controller review", "task1"),
+            preview._pilot_keyword_attribution(
+                current, campaign_id="campaign1", task_sources=tasks,
+            ),
+        )
+
+    def test_activity_task_source_index_is_keyed_by_record_id(self):
+        rows = [{"record_id": "task1", "fields": {
+            "任务名": "[活动补池:campaign1][词源:competitor] YT KOL",
+            "关键词列表": "Dave Controller Review",
+            "任务状态": "3-已完成",
+            "执行日志": "原始发现: 9\n其中有邮箱: 4",
+            "实际产出-新增": 2, "实际产出-更新": 1,
+        }}]
+
+        with patch.object(
+            preview.feishu, "search_records", new=AsyncMock(return_value=rows),
+        ):
+            result = asyncio.run(preview._pilot_task_sources("campaign1"))
+
+        self.assertEqual("dave controller review", result["task1"]["keyword"])
+        self.assertEqual("competitor", result["task1"]["source"])
+        self.assertEqual("3-已完成", result["task1"]["status"])
+        self.assertEqual(9, result["task1"]["raw_discovered"])
+        self.assertEqual(4, result["task1"]["valid_email"])
+        self.assertEqual(2, result["task1"]["new_records"])
+        self.assertEqual(1, result["task1"]["updated_records"])
+
+    def test_running_task_cannot_attribute_partial_kol_to_completed_outcome(self):
+        tasks = {
+            "task-running": {
+                "keyword": "dave controller review", "source": "competitor",
+                "status": "2-运行中",
+            },
+        }
+        fields = {"迁移备注": (
+            "[活动补池:campaign1][任务:task-running][词源:competitor]"
+            "[发现词:dave%20controller%20review]"
+        )}
+
+        self.assertEqual(
+            ("unknown", "", ""),
+            preview._pilot_keyword_attribution(
+                fields, campaign_id="campaign1", task_sources=tasks,
+            ),
+        )
+
+    def test_discovery_outcome_never_counts_blocked_contact_as_operator_review(self):
+        fields = {"邮箱": "blocked@example.com"}
+
+        increments = preview._discovery_outcome_increments(
+            fields=fields, matched=True, decision="blocked",
+            review_route="KOL运营审核",
+        )
+
+        self.assertEqual(0, increments["operator_review"])
+        self.assertEqual(1, increments["hard_filtered"])
+
+    def test_discovery_outcome_counts_hold_as_filtered_not_usable(self):
+        increments = preview._discovery_outcome_increments(
+            fields={"邮箱": "duplicate@example.com"}, matched=True,
+            decision="hold_duplicate_identity", review_route="系统暂缓",
+        )
+
+        self.assertEqual(0, increments["operator_review"])
+        self.assertEqual(0, increments["eligible_new_cold"])
+        self.assertEqual(1, increments["hard_filtered"])
+
+    def test_participant_snapshot_keeps_task_positive_after_relationship_advances(self):
+        increments = preview._discovery_outcome_increments(
+            fields={"邮箱": "sent@example.com"}, matched=True,
+            decision="existing_pipeline_same_thread", review_route="系统暂缓",
+            frozen_outcome={"review_route": "系统建议通过"},
+        )
+
+        self.assertEqual(1, increments["eligible_new_cold"])
+        self.assertEqual(1, increments["auto_approved"])
+        self.assertEqual(1, increments["base_filter_passed"])
+        self.assertEqual(0, increments["base_filter_failed"])
+        self.assertEqual(0, increments["hard_filtered"])
+
+    def test_activity_participant_outcomes_reads_immutable_review_route(self):
+        rows = [{"record_id": "participant1", "fields": {
+            "关联KOL": ["kol1"], "系统审核分流": "KOL运营审核",
+            "审核结论": "通过", "参与状态": "已入围",
+        }}]
+        with patch.object(
+            preview.config, "T_LAUNCH_PARTICIPANT", "participants",
+        ), patch.object(
+            preview.feishu, "search_records", new=AsyncMock(return_value=rows),
+        ):
+            result = asyncio.run(preview._activity_participant_outcomes("campaign1"))
+
+        self.assertEqual("KOL运营审核", result["kol1"]["review_route"])
+        self.assertEqual("通过", result["kol1"]["review_decision"])
 
 
     def test_targeted_replay_evaluates_only_requested_contacts_and_never_writes(self):
@@ -988,7 +1145,8 @@ class LaunchCandidatePreviewTests(unittest.TestCase):
         self.assertEqual(2, result["summary"]["evaluated"])
         self.assertEqual("eligible_new_cold", result["candidates"][0]["decision"])
         self.assertEqual("blocked_base_filter", result["candidates"][1]["decision"])
-        self.assertEqual("competitor", result["candidates"][0]["keyword_source"])
+        # 旧备注只有词源、没有活动/任务标记，不能跨活动猜来源。
+        self.assertEqual("unknown", result["candidates"][0]["keyword_source"])
 
     def test_unmatched_evidence_author_pilot_is_read_only_and_dave_scoped(self):
         posts = [{"record_id": "post1", "fields": {

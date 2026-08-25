@@ -10,6 +10,16 @@ from app.enrich_model_guard import EnrichModelBudget
 
 
 class KeywordSupplyBrazilTests(unittest.TestCase):
+    def test_external_youtube_history_key_normalizes_unicode_case_space_and_country_order(self):
+        left = keyword_supply._discovery_history_key(
+            "  ＮＹＸＩ   Switch Controller  ", ["UK", "US"], "EN",
+        )
+        right = keyword_supply._discovery_history_key(
+            "nyxi switch controller", ["US", "UK"], "en",
+        )
+
+        self.assertEqual(left, right)
+
     def test_piranha_exhausted_seeds_use_traceable_seven_layer_deterministic_pool(self):
         old_words = []
         for groups in (
@@ -239,9 +249,13 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
 
     def test_campaign_supply_is_deterministic_idempotent_and_target_language_only(self):
         rows = [{"fields": {
-            "任务名": "[活动补池:campaign1] YT KOL - dave the diver gameplay",
+            "任务名": (
+                "[活动补池:campaign1][词源:legacy_fixed] "
+                "YT KOL - dave the diver gameplay"
+            ),
             "关键词列表": "dave the diver gameplay", "爬虫类型": "KOL-YouTube",
             "任务状态": "1-待触发", "筛选-语言": ["en"],
+            "筛选-国家": ["US", "UK", "CA"],
         }}]
         activity = {"fields": {"活动目标语言": ["en", "de", "es"]}}
         product = {"fields": {"产品英文名": "FUNLAB Dave the Diver Controller"}}
@@ -345,6 +359,468 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         self.assertTrue(all("nyxi" not in item["keyword"] for item in result["keywords"]))
         create_record.assert_not_awaited()
 
+    def test_autonomous_dave_reuses_old_external_youtube_keys_after_seven_days(self):
+        now_ms = 1_800_000_000_000
+        old_seconds = (now_ms - keyword_supply.DISCOVERY_REUSE_WINDOW_MS - 1) // 1000
+        activity = {"fields": {
+            "活动目标语言": ["en", "de", "es"],
+            "活动目标国家": ["US", "UK", "DE", "ES"],
+            "竞品证据模式": "引用历史证据", "竞品分析状态": "已就绪",
+            "竞品品牌": "NYXI",
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"],
+            "品类": "手柄", "目标人群": "indie game players",
+        }}
+        structured = keyword_supply._dave_structured_candidates(
+            activity_fields=activity["fields"], product_fields=product["fields"],
+            languages=["en", "de", "es"], existing_keywords=set(),
+            pilot_version="v2",
+        )
+        language_countries = {
+            "en": ["US", "UK"], "de": ["DE"], "es": ["ES"],
+        }
+        used = []
+        for language in ("en", "de", "es"):
+            for word in keyword_supply._CAMPAIGN_KEYWORDS["dave"][language]:
+                used.append({"last_modified_time": old_seconds, "fields": {
+                    "任务名": (
+                        f"[活动补池:campaign1][词源:legacy_fixed] YT KOL - {word}"
+                    ),
+                    "关键词列表": word, "任务状态": "3-已完成",
+                    "筛选-语言": [language], "筛选-国家": language_countries[language],
+                    "执行日志": "待入库: 4\n其中有邮箱: 2",
+                }})
+        for item in structured:
+            used.append({"last_modified_time": old_seconds, "fields": {
+                "任务名": (
+                    f"[活动补池:campaign1][词源:{item['source']}] "
+                    f"YT KOL - {item['keyword']}"
+                ),
+                "关键词列表": item["keyword"], "任务状态": "3-已完成",
+                "筛选-语言": [item["language"]],
+                "筛选-国家": language_countries[item["language"]],
+                "执行日志": "待入库: 4\n其中有邮箱: 2",
+            }})
+
+        with patch.object(keyword_supply.time, "time", return_value=now_ms / 1000), \
+             patch.object(
+                 keyword_supply.feishu, "fetch_all_records",
+                 new=AsyncMock(return_value=used),
+             ), patch.object(
+                 keyword_supply.deepseek, "chat_json", new=AsyncMock(),
+             ) as model:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, max_tasks=4, dry_run=True,
+            ))
+
+        self.assertEqual(4, result["would_create"])
+        self.assertEqual(0, result["shortfall_tasks"])
+        self.assertGreaterEqual(len({item["source"] for item in result["keywords"]}), 3)
+        self.assertGreater(result["keyword_history_state"]["reusable_after_ttl"], 0)
+        self.assertEqual(4, result["external_youtube_discovery"]["would_create"])
+        self.assertIn("completed_tasks", result["external_youtube_outcome"])
+        self.assertFalse(result["quality_filters_lowered"])
+        model.assert_not_awaited()
+
+    def test_autonomous_dave_blocks_recent_same_key_but_not_other_market_key(self):
+        now_ms = 1_800_000_000_000
+        recent_seconds = (now_ms - 60_000) // 1000
+        word = keyword_supply._CAMPAIGN_KEYWORDS["dave"]["en"][0]
+        rows = [{"last_modified_time": recent_seconds, "fields": {
+            "任务名": f"[活动补池:campaign1] YT KOL - {word}",
+            "关键词列表": word, "任务状态": "3-已完成",
+            "筛选-语言": ["de"], "筛选-国家": ["DE"],
+            "执行日志": "待入库: 2\n其中有邮箱: 1",
+        }}]
+        activity = {"fields": {
+            "活动目标语言": ["en"], "活动目标国家": ["US"],
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"],
+            "品类": "手柄",
+        }}
+
+        with patch.object(keyword_supply.time, "time", return_value=now_ms / 1000), \
+             patch.object(
+                 keyword_supply.feishu, "fetch_all_records",
+                 new=AsyncMock(return_value=rows),
+             ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=150, max_tasks=3, dry_run=True,
+            ))
+
+        self.assertIn(word, {item["keyword"] for item in result["keywords"]})
+        self.assertEqual(0, result["keyword_history_state"]["recently_executed"])
+
+    def test_autonomous_dave_never_duplicates_an_active_external_youtube_key(self):
+        now_ms = 1_800_000_000_000
+        word = keyword_supply._CAMPAIGN_KEYWORDS["dave"]["en"][0]
+        rows = [{"last_modified_time": (now_ms - 30 * 86_400_000) // 1000,
+                 "fields": {
+            "任务名": f"[活动补池:campaign1] YT KOL - {word}",
+            "关键词列表": word, "任务状态": "1-待触发",
+            "筛选-语言": ["en"], "筛选-国家": ["US"],
+            "创建日期": now_ms - 30 * 86_400_000,
+        }}]
+        activity = {"fields": {
+            "活动目标语言": ["en"], "活动目标国家": ["US"],
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"],
+            "品类": "手柄",
+        }}
+
+        with patch.object(keyword_supply.time, "time", return_value=now_ms / 1000), \
+             patch.object(
+                 keyword_supply.feishu, "fetch_all_records",
+                 new=AsyncMock(return_value=rows),
+             ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=150, max_tasks=3, dry_run=True,
+            ))
+
+        self.assertNotIn(word, {item["keyword"] for item in result["keywords"]})
+        self.assertGreater(result["keyword_history_state"]["active_duplicate"], 0)
+
+    def test_autonomous_dave_source_zero_twice_cools_only_that_campaign_source(self):
+        now_ms = 1_800_000_000_000
+        recent_seconds = (now_ms - 60_000) // 1000
+        activity = {"fields": {
+            "活动目标语言": ["en", "de", "es"],
+            "活动目标国家": ["US", "UK", "DE", "ES"],
+            "竞品证据模式": "引用历史证据", "竞品分析状态": "已就绪",
+            "竞品品牌": "NYXI",
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"],
+            "品类": "手柄",
+        }}
+        rows = [{"last_modified_time": recent_seconds - index * 30,
+                 "fields": {
+            "任务名": (
+                f"[活动补池:campaign1][词源:competitor] "
+                f"YT KOL - zero result {index}"
+            ),
+            "关键词列表": f"zero result {index}", "任务状态": "3-已完成",
+            "筛选-语言": ["en"], "筛选-国家": ["US", "UK"],
+            "执行日志": "待入库: 0\n其中有邮箱: 0",
+        }} for index in range(2)]
+
+        with patch.object(keyword_supply.time, "time", return_value=now_ms / 1000), \
+             patch.object(
+                 keyword_supply.feishu, "fetch_all_records",
+                 new=AsyncMock(return_value=rows),
+             ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, max_tasks=9, dry_run=True,
+                volume_priority=True,
+            ))
+
+        self.assertEqual("cooldown", result["source_health"]["competitor"]["mode"])
+        self.assertNotIn("competitor", {item["source"] for item in result["keywords"]})
+        self.assertGreater(result["keyword_history_state"]["source_cooling"], 0)
+
+    def test_positive_email_without_internal_attribution_stays_in_probe_mode(self):
+        now_ms = 1_800_000_000_000
+        recent_seconds = (now_ms - 60_000) // 1000
+        activity = {"fields": {
+            "活动目标语言": ["en"], "活动目标国家": ["US"],
+            "竞品证据模式": "引用历史证据", "竞品分析状态": "已就绪",
+            "竞品品牌": "NYXI",
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"],
+            "品类": "手柄",
+        }}
+        rows = [{"last_modified_time": recent_seconds - index * 30,
+                 "fields": {
+            "任务名": (
+                f"[活动补池:campaign1][词源:competitor] "
+                f"YT KOL - pending outcome {index}"
+            ),
+            "关键词列表": f"pending outcome {index}", "任务状态": "3-已完成",
+            "筛选-语言": ["en"], "筛选-国家": ["US"],
+            "执行日志": (
+                "待入库: 4\n其中有邮箱: 2"
+                if index == 0 else "待入库: 0\n其中有邮箱: 0"
+            ),
+        }} for index in range(3)]
+
+        with patch.object(keyword_supply.time, "time", return_value=now_ms / 1000), \
+             patch.object(
+                 keyword_supply.feishu, "fetch_all_records",
+                 new=AsyncMock(return_value=rows),
+             ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, max_tasks=4, dry_run=True,
+            ))
+
+        health = result["source_health"]["competitor"]
+        self.assertEqual("signal_missing", health["mode"])
+        self.assertEqual(1, health["pending_or_unknown"])
+        self.assertNotEqual("cooldown", health["mode"])
+        self.assertLessEqual(
+            sum(item["source"] == "competitor" for item in result["keywords"]), 1,
+        )
+
+    def test_source_outcome_with_usable_candidate_restores_healthy_rotation(self):
+        now_ms = 1_800_000_000_000
+        recent_seconds = (now_ms - 60_000) // 1000
+        rows = [{"record_id": f"task{index}",
+                 "last_modified_time": recent_seconds - index * 30, "fields": {
+            "任务名": (
+                f"[活动补池:campaign1][词源:competitor] "
+                f"YT KOL - pending outcome {index}"
+            ),
+            "关键词列表": f"pending outcome {index}", "任务状态": "3-已完成",
+            "筛选-语言": ["en"], "筛选-国家": ["US"],
+            "执行日志": "待入库: 4\n其中有邮箱: 2",
+        }} for index in range(2)]
+        activity = {"fields": {
+            "活动目标语言": ["en"], "活动目标国家": ["US"],
+            "竞品证据模式": "引用历史证据", "竞品分析状态": "已就绪",
+            "竞品品牌": "NYXI",
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"],
+            "品类": "手柄",
+        }}
+
+        with patch.object(keyword_supply.time, "time", return_value=now_ms / 1000), \
+             patch.object(
+                 keyword_supply.feishu, "fetch_all_records",
+                 new=AsyncMock(return_value=rows),
+             ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, max_tasks=4, dry_run=True,
+                source_outcomes={"by_task": {
+                    "task0": {
+                        "source": "competitor", "keyword": "pending outcome 0",
+                        "discovered": 1, "auto_approved": 1, "operator_review": 0,
+                    },
+                }},
+            ))
+
+        self.assertEqual("healthy", result["source_health"]["competitor"]["mode"])
+
+    def test_historical_source_aggregate_cannot_override_two_zero_rounds(self):
+        now_ms = 1_800_000_000_000
+        recent_seconds = (now_ms - 60_000) // 1000
+        rows = [{"record_id": f"zero{index}",
+                 "last_modified_time": recent_seconds - index * 30, "fields": {
+            "任务名": (
+                f"[活动补池:campaign1][词源:competitor] YT KOL - zero {index}"
+            ),
+            "关键词列表": f"zero {index}", "任务状态": "3-已完成",
+            "筛选-语言": ["en"], "筛选-国家": ["US"],
+            "执行日志": "待入库: 0\n其中有邮箱: 0",
+        }} for index in range(2)]
+
+        health = keyword_supply._source_health(
+            rows, prefix="[活动补池:campaign1]", now_ms=now_ms,
+            source_outcomes={
+                "by_source": {"competitor": {"auto_approved": 99}},
+                "by_task": {},
+            },
+        )
+
+        self.assertEqual("cooldown", health["competitor"]["mode"])
+
+    def test_history_key_requires_complete_dimensions_and_completed_status(self):
+        now_ms = 1_800_000_000_000
+        recent_seconds = (now_ms - 60_000) // 1000
+        word = keyword_supply._CAMPAIGN_KEYWORDS["dave"]["en"][0]
+        dirty_rows = [
+            {"last_modified_time": recent_seconds, "fields": {
+                "任务名": "[活动补池:campaign1] missing dimensions",
+                "关键词列表": word, "任务状态": "3-已完成",
+                "筛选-国家": [], "筛选-语言": [],
+                "执行日志": "待入库: 0\n其中有邮箱: 0",
+            }},
+            {"last_modified_time": recent_seconds, "fields": {
+                "任务名": "[活动补池:campaign1] cancelled",
+                "关键词列表": word, "任务状态": "8-已取消",
+                "筛选-国家": ["US"], "筛选-语言": ["en"],
+            }},
+        ]
+
+        state = keyword_supply._history_key_state(
+            dirty_rows, keyword=word, countries=["US"], language="en", now_ms=now_ms,
+        )
+
+        self.assertEqual("unseen", state["state"])
+
+    def test_existing_active_source_probe_blocks_another_probe_across_runs(self):
+        now_ms = 1_800_000_000_000
+        old_seconds = (now_ms - 3 * 60 * 60 * 1000) // 1000
+        rows = [{"last_modified_time": old_seconds - index * 30, "fields": {
+            "任务名": (
+                f"[活动补池:campaign1][词源:competitor] YT KOL - zero {index}"
+            ),
+            "关键词列表": f"zero {index}", "任务状态": "3-已完成",
+            "筛选-国家": ["US"], "筛选-语言": ["en"],
+            "执行日志": "待入库: 0\n其中有邮箱: 0",
+        }} for index in range(2)]
+        rows.append({"last_modified_time": now_ms // 1000, "fields": {
+            "任务名": "[活动补池:campaign1][词源:competitor] YT KOL - active probe",
+            "关键词列表": "active probe", "任务状态": "2-运行中",
+            "筛选-国家": ["US"], "筛选-语言": ["en"],
+        }})
+        activity = {"fields": {
+            "活动目标语言": ["en"], "活动目标国家": ["US"],
+            "竞品证据模式": "引用历史证据", "竞品分析状态": "已就绪",
+            "竞品品牌": "NYXI",
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"],
+            "品类": "手柄",
+        }}
+
+        with patch.object(keyword_supply.time, "time", return_value=now_ms / 1000), \
+             patch.object(
+                 keyword_supply.feishu, "fetch_all_records",
+                 new=AsyncMock(return_value=rows),
+             ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, max_tasks=9, dry_run=True,
+            ))
+
+        self.assertEqual("probe", result["source_health"]["competitor"]["mode"])
+        self.assertNotIn("competitor", {item["source"] for item in result["keywords"]})
+
+    def test_missing_source_signal_fails_closed_to_one_campaign_probe(self):
+        now_ms = 1_800_000_000_000
+        rows = [{"last_modified_time": (now_ms - 60_000) // 1000, "fields": {
+            "任务名": "[活动补池:campaign1] YT KOL - old untagged",
+            "关键词列表": "old untagged", "任务状态": "3-已完成",
+            "筛选-国家": ["US"], "筛选-语言": ["en"],
+            "执行日志": "待入库: 0\n其中有邮箱: 0",
+        }}]
+        activity = {"fields": {
+            "活动目标语言": ["en"], "活动目标国家": ["US"],
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"],
+            "品类": "手柄",
+        }}
+
+        with patch.object(keyword_supply.time, "time", return_value=now_ms / 1000), \
+             patch.object(
+                 keyword_supply.feishu, "fetch_all_records",
+                 new=AsyncMock(return_value=rows),
+             ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, max_tasks=9, dry_run=True,
+            ))
+
+        self.assertEqual("source_signal_unavailable", result["skipped"])
+        self.assertEqual(1, result["would_create"])
+
+    def test_source_signal_scan_does_not_ignore_older_completed_missing_task(self):
+        now_ms = 1_800_000_000_000
+        rows = [
+            {"record_id": f"complete-{index}",
+             "last_modified_time": (now_ms - index * 60_000) // 1000,
+             "fields": {
+                 "任务名": (
+                     f"[活动补池:campaign1][词源:competitor] complete {index}"
+                 ),
+                 "关键词列表": f"complete {index}", "任务状态": "3-已完成",
+                 "执行日志": "原始发现: 2\n其中有邮箱: 1",
+             }}
+            for index in (1, 2)
+        ]
+        rows.append({
+            "record_id": "older-missing-source",
+            "last_modified_time": (now_ms - 3 * 60_000) // 1000,
+            "fields": {
+                "任务名": "[活动补池:campaign1] old completed task",
+                "关键词列表": "old completed task", "任务状态": "3-已完成",
+                "执行日志": "原始发现: 2\n其中有邮箱: 1",
+            },
+        })
+
+        signal = keyword_supply._campaign_source_signal(
+            rows, prefix="[活动补池:campaign1]",
+        )
+
+        self.assertFalse(signal["available"])
+        self.assertEqual(1, signal["missing_tasks"])
+        self.assertEqual("older-missing-source", signal["details"][0]["record_id"])
+
+    def test_reusable_keyword_prefers_positive_then_unknown_then_zero(self):
+        positive_word, zero_word = keyword_supply._CAMPAIGN_KEYWORDS["dave"]["en"][:2]
+        ordered = keyword_supply._round_robin_sources([
+            {"source": "legacy_fixed", "keyword": zero_word,
+             "outcome_rank": 2, "last_completed_ms": 10},
+            {"source": "legacy_fixed", "keyword": "unknown",
+             "outcome_rank": 1, "last_completed_ms": 5},
+            {"source": "legacy_fixed", "keyword": positive_word,
+             "outcome_rank": 0, "last_completed_ms": 20},
+        ], {
+            "legacy_fixed": {"last_completed_ms": 20},
+        })
+
+        self.assertEqual([positive_word, "unknown", zero_word], [x["keyword"] for x in ordered])
+
+    def test_external_outcome_does_not_call_new_plus_updated_raw_discovered(self):
+        rows = [{"fields": {
+            "任务名": "[活动补池:campaign1][词源:platform] task",
+            "任务状态": "3-已完成", "实际产出-新增": 3, "实际产出-更新": 35,
+            "执行日志": "其中有邮箱: 0",
+        }}]
+        outcome = keyword_supply._external_youtube_outcome(
+            rows, prefix="[活动补池:campaign1]",
+        )
+
+        self.assertEqual(0, outcome["raw_discovered"])
+        self.assertEqual(38, outcome["records_written"])
+        self.assertEqual(3, outcome["new_records"])
+
+    def test_real_supply_calls_for_same_campaign_share_one_write_lock(self):
+        state = {"active": 0, "max_active": 0}
+
+        async def fake_unlocked(**_kwargs):
+            state["active"] += 1
+            state["max_active"] = max(state["max_active"], state["active"])
+            await asyncio.sleep(0.01)
+            state["active"] -= 1
+            return {"ok": True}
+
+        async def scenario():
+            common = {
+                "campaign_id": "campaign1", "activity": {}, "product": {},
+                "required_candidates": 1, "dry_run": False,
+            }
+            return await asyncio.gather(
+                keyword_supply.ensure_campaign_supply(**common),
+                keyword_supply.ensure_campaign_supply(**common),
+            )
+
+        with patch.object(
+            keyword_supply, "_ensure_campaign_supply_unlocked", new=fake_unlocked,
+        ):
+            asyncio.run(scenario())
+
+        self.assertEqual(1, state["max_active"])
+
     def test_new_competitor_investigation_is_not_used_before_evidence_is_ready(self):
         activity = {"fields": {
             "活动目标语言": ["en", "de", "es"],
@@ -436,8 +912,10 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
             self.assertEqual(expected[fields["筛选-语言"][0]], fields["筛选-国家"])
         self.assertEqual([], result["uncovered_target_countries"])
 
-    def test_autonomous_dave_supply_keeps_legacy_keywords_and_task_name(self):
-        activity = {"fields": {"活动目标语言": ["en"]}}
+    def test_autonomous_dave_supply_keeps_legacy_keywords_and_adds_source_trace(self):
+        activity = {"fields": {
+            "活动目标语言": ["en"], "活动目标国家": ["US", "UK"],
+        }}
         product = {"fields": {"产品英文名": "FUNLAB Dave the Diver Controller"}}
 
         with patch.object(
@@ -454,7 +932,11 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         self.assertGreater(result["created"], 0)
         self.assertTrue(all(
             "[灰度:" not in call.args[1]["任务名"]
-            and "[词源:" not in call.args[1]["任务名"]
+            and "[词源:legacy_fixed]" in call.args[1]["任务名"]
+            for call in create_record.await_args_list
+        ))
+        self.assertTrue(all(
+            call.args[1]["筛选-国家"] == ["US", "UK"]
             for call in create_record.await_args_list
         ))
 
