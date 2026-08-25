@@ -1450,6 +1450,48 @@ class LaunchRuntimeTests(unittest.TestCase):
 
         self.assertEqual(180, run_campaign.await_args.kwargs["pool_target"])
 
+    def test_daily_feedback_keeps_latest_runtime_job_marker_intact(self):
+        metrics = {
+            "campaign_id": "campaign1", "participants": 120, "sent": 10,
+            "replies": 1, "commitments": 0, "ontime_posts": 0,
+            "action": "hold", "reason": "capacity is sufficient",
+        }
+        marker = launch_runtime.RUNTIME_JOB_PREFIX + json.dumps({
+            "job_id": "launchruntime-current", "campaign_id": "campaign1",
+            "mode": "autonomous", "status": "success",
+            "started_ts": 1, "updated_ts": 2,
+            "error": "x" * 2790,
+        }, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(len(marker), 3000)
+        state = {"note": marker}
+
+        async def get_activity(_campaign_id):
+            return {"record_id": "a1", "fields": {
+                "活动ID": "campaign1", "数据口径备注": state["note"],
+            }}
+
+        async def update_record(_table, _record_id, fields):
+            state["note"] = fields["数据口径备注"]
+            return {"record_id": "a1", "fields": fields}
+
+        with patch.object(
+            launch_runtime, "sync_campaign_outcomes_and_metrics",
+            new=AsyncMock(return_value=metrics),
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=get_activity,
+        ), patch.object(
+            launch_runtime.feishu, "update_record", new=update_record,
+        ):
+            asyncio.run(launch_runtime.daily_feedback("campaign1"))
+            loaded = asyncio.run(launch_runtime.load_runtime_job(
+                "campaign1", "launchruntime-current",
+            ))
+
+        self.assertLessEqual(len(state["note"]), 3000)
+        self.assertIn(marker, state["note"])
+        self.assertIsNotNone(loaded)
+        self.assertEqual("launchruntime-current", loaded["job_id"])
+
     def test_runtime_summary_keeps_pending_review_reconcile_for_restart_audit(self):
         summary = launch_runtime._runtime_result_summary({
             "action": "expand", "quota": {"remaining": 100}, "inventory_after": 0,

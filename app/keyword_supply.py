@@ -1427,19 +1427,22 @@ async def _ensure_campaign_supply_unlocked(
         }
 
     now = int(time.time() * 1000)
-    countries_by_language = (
-        discovery_countries_by_language
-        if theme == "dave" or structured_pilot
-        else {"en": ["US", "UK", "CA"], "de": ["DE"], "es": ["ES"]}
-    )
     created, errors = 0, []
     for item in candidates:
         if isinstance(item, dict):
             lang, word = item["language"], item["keyword"]
             source = item.get("source") or "deterministic"
+            task_countries = list(
+                item.get("countries")
+                or discovery_countries_by_language.get(lang)
+                or []
+            )
         else:
             lang, word = item
             source = "deterministic"
+            task_countries = list(
+                discovery_countries_by_language.get(lang) or []
+            )
         try:
             task_name = (
                 f"{pilot_prefix}[词源:{source}] YT KOL - {word}"
@@ -1451,7 +1454,7 @@ async def _ensure_campaign_supply_unlocked(
             await feishu.create_record(T_CRAWLER, {
                 "任务名": task_name,
                 "爬虫类型": "KOL-YouTube", "关键词列表": word,
-                "筛选-国家": countries_by_language[lang], "筛选-语言": [lang],
+                "筛选-国家": task_countries, "筛选-语言": [lang],
                 "每批数量上限": PER_BATCH_LIMIT, "任务状态": "1-待触发",
                 "触发": True, "创建日期": now,
             })

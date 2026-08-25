@@ -1991,6 +1991,35 @@ async def persist_runtime_job(*, campaign_id: str, job_id: str, mode: str,
         return payload
 
 
+def _append_activity_note_preserving_runtime_jobs(
+    history: str, note: str, *, limit: int = 3000,
+) -> str:
+    """追加业务备注时优先保留完整后台任务标记，避免从行中间截断。"""
+    ordinary_lines = []
+    job_lines = []
+    for line in str(history or "").splitlines():
+        if line.startswith(RUNTIME_JOB_PREFIX):
+            job_lines.append(line)
+        elif line.strip():
+            ordinary_lines.append(line)
+    if str(note or "").strip():
+        ordinary_lines.append(str(note).strip())
+    retained_jobs = job_lines[-5:]
+
+    def build() -> str:
+        return "\n".join(ordinary_lines + retained_jobs)
+
+    while ordinary_lines and len(build()) > limit:
+        ordinary_lines.pop(0)
+    while len(retained_jobs) > 1 and len(build()) > limit:
+        retained_jobs.pop(0)
+    if retained_jobs and len(build()) > limit:
+        # persist_runtime_job 已保证单条标记不超过字段上限；极端情况下宁可
+        # 暂不记录本次日报，也不能破坏最新 job_id 的 JSON 结构。
+        return retained_jobs[-1]
+    return build()[-limit:]
+
+
 async def daily_feedback(campaign_id: str) -> dict:
     metrics = await sync_campaign_outcomes_and_metrics(campaign_id)
     activity = await launch_evidence.get_activity(campaign_id)
@@ -2003,7 +2032,9 @@ async def daily_feedback(campaign_id: str) -> dict:
     )
     history = ext(af.get("数据口径备注"))
     await feishu.update_record(config.T_LAUNCH_CAMPAIGN, activity["record_id"], {
-        "数据口径备注": (history + "\n" + note).strip()[-3000:],
+        "数据口径备注": _append_activity_note_preserving_runtime_jobs(
+            history, note,
+        ),
     })
     if metrics["action"] == "stop":
         await feishu.update_record(

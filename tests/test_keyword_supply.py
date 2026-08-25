@@ -65,6 +65,38 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         ))
         generate.assert_not_awaited()
 
+    def test_piranha_created_tasks_use_activity_country_scope(self):
+        activity = {"fields": {
+            "活动目标语言": ["en"], "活动目标国家": ["US"],
+            "竞品证据模式": "不使用", "竞品分析状态": "不适用",
+        }}
+        product = {"fields": {
+            "产品英文名": "POWKONG Piranha Plant 2 Dock",
+            "品类": "底座", "适配IP": ["Piranha Plant"],
+            "适配主机": ["Switch 2"],
+        }}
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records",
+            new=AsyncMock(return_value=[]),
+        ), patch.object(
+            keyword_supply.deepseek, "chat_json", new=AsyncMock(),
+        ) as model, patch.object(
+            keyword_supply.feishu, "create_record",
+            new=AsyncMock(return_value="task1"),
+        ) as create_record:
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=50, max_tasks=1, dry_run=False,
+                allow_ai=False, volume_priority=True,
+            ))
+
+        self.assertEqual(1, result["created"])
+        self.assertEqual(
+            ["US"], create_record.await_args.args[1]["筛选-国家"],
+        )
+        model.assert_not_awaited()
+
     def test_piranha_competitor_layer_is_only_enabled_by_activity_evidence_mode(self):
         base_fields = {
             "活动目标语言": ["en"], "竞品品牌": "OtherBrand",
