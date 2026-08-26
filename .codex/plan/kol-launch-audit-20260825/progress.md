@@ -63,3 +63,12 @@
 - 专项回归：`tests/test_launch_routes.py`、`tests/test_launch_runtime.py`、`tests/test_launch_daily_report.py` 共 126 项及 3 个子测试通过。完整回归 799 项及 23 个子测试通过；唯一失败仍为固定写死 2026-07-07 部署时间、却要求最近 24 小时命中的既有 Zeabur 看门狗测试。
 - 双轴复核结论：业务验收满足；未改国家/语言/品类/粉丝/邮箱门槛，未改 n8n、环境变量、邮件模板或对外发送。代码审查另发现并修复跨活动重复草稿会虚增新阶段数字的问题。
 - 陈翔宇部署终端没有代码变更需求，继续保持 `58375b0` 一个逻辑 daemon；不需要 pull、重启或手动触发。下一步只做云端保护闸、fast-forward 发布和自然轮次只读验收。
+- 17:57 发布闸通过：n8n `uvBfJBtGH93FPa6w active=true`，云端与飞书爬虫无在途任务，`origin/master=c5aa6a9` 为候选提交祖先且工作区干净。随后仅 fast-forward 推送 `c5aa6a9..d4d440f`，未强推、未改环境变量或 n8n。
+- Zeabur 自动部署 `6a8eb8b404336e4571200123` 已精确运行 `d4d440fb88e2856516d1fd1e59e7178b60e54854`，状态 `RUNNING`，`/health` 返回 `status=ok`；未手动 redeploy 或 restart。
+- 18:00 Dave 自然 execution `1021124` 已返回真实 job `launchruntime-672587a5ed51`，证明 P1 的真实 job_id 修复已在生产生效；但该 job 与 Zeabur 新旧实例切换重叠，持久态明确标记 `service_restarted_before_job_completion`，不能作为候选转化逻辑的有效验收轮次。
+- 18:05 食人花自然 execution `1021181` 返回真实 job `launchruntime-a39d625b8595`，最终 `degraded/supply_blocked`，`quality_filters_lowered=false`；P1 可观测性生效，业务仍是合格供给不足。
+- 18:15 只读回查：Dave 的 5 条“已入围 + 待审核 + 系统建议通过”矛盾记录仍存在，符合 18:00 job 被部署中断的预期；食人花矛盾记录为 0。必须等待部署稳定后的 19:00 Dave 自然轮次完整结束，再判断 P1 候选转化是否通过，禁止手动补跑。
+- 18:27 后只读复核确认 P1 候选转化已生效：Dave 活动 233 条参与记录中 179 条当前可用，矛盾状态 0；食人花 80 条中 22 条当前可用，矛盾状态 0。系统没有把基础筛选失败项直接送入发送，边界项仍归“独立站运营专员”审核。
+- P1 日报分阶段口径已用生产数据只读验证：Dave 已发 177、回复 11、回复待处理 7、待确认上稿日 4、明确承诺/已寄样/实际上稿均 0；食人花已发 22、回复 1、回复待处理 1，其余后续阶段均 0。跨活动草稿未重复计数，负责人和下一动作均可见。
+- 19:00 Dave 自然 execution `1021559` 成功启动真实后台 job `launchruntime-822ebfa6acf6`，证明真实 job_id 可在部署后自然回读；截至 19:11 任务仍为 `running/queued`，未报错。该任务继续自然执行，不手动补跑、不催促，也不再作为 P1 技术完成的阻塞条件。
+- P1 技术整改现已收口：生产 `origin/master=d4d440f`，Zeabur 精确运行目标 commit 且 `/health=ok`；陈翔宇终端无需再操作。剩余为业务运营工作，不是代码故障：处理 Dave 7 条回复和 4 条上稿日期确认、处理食人花 1 条回复，并继续补充符合质量门槛的真实候选供给。
