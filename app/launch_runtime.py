@@ -472,6 +472,25 @@ def _pending_review_contact_ids(participants: list[dict], *,
     return merged[:max(0, min(int(limit), 100))]
 
 
+def _review_reason_codes(candidate: dict) -> list[str]:
+    return list(dict.fromkeys(
+        str(code).strip()
+        for code in (candidate.get("base_filter_reason_codes") or [])
+        if str(code).strip()
+    ))
+
+
+def _is_deterministic_system_pass(candidate: dict) -> bool:
+    """只有内部口径一致的严格筛选结果，才允许跳过人工审核。"""
+    return bool(
+        candidate.get("decision") == "eligible_new_cold"
+        and candidate.get("base_filter_passed") is True
+        and not _review_reason_codes(candidate)
+        and candidate.get("review_route") == "系统建议通过"
+        and candidate.get("review_decision") == "通过"
+    )
+
+
 async def reconcile_pending_participant_reviews(*, campaign_id: str,
                                                 ranking_version: str,
                                                 preview: dict) -> dict:
@@ -516,12 +535,8 @@ async def reconcile_pending_participant_reviews(*, campaign_id: str,
             })
             continue
 
-        deterministic_pass = bool(
-            candidate.get("decision") == "eligible_new_cold"
-            and candidate.get("base_filter_passed") is True
-            and candidate.get("review_route") == "系统建议通过"
-            and candidate.get("review_decision") == "通过"
-        )
+        deterministic_pass = _is_deterministic_system_pass(candidate)
+        reason_codes = _review_reason_codes(candidate)
         ranking_fields = launch_participation._ranking_fields(
             candidate, ranking_version,
         )
@@ -533,11 +548,16 @@ async def reconcile_pending_participant_reviews(*, campaign_id: str,
         if deterministic_pass:
             # 自动转通过也要记录本次决定时间，供草稿在途TTL从此刻开始计算。
             ranking_fields["审核时间"] = int(time.time() * 1000)
-        ranking_fields["审核原因代码"] = list(dict.fromkeys(
-            str(code).strip()
-            for code in (candidate.get("base_filter_reason_codes") or [])
-            if str(code).strip()
-        ))
+        elif ranking_fields.get("系统审核分流") == "系统建议通过":
+            # 旧数据可能同时写着“建议通过”和基础筛选失败原因。此类矛盾项必须
+            # 回到运营边界，不能自动发信，也不能继续伪装成系统已判定通过。
+            issue = "、".join(reason_codes) or "基础筛选未明确通过"
+            ranking_fields["系统审核分流"] = "KOL运营审核"
+            ranking_fields["系统审核说明"] = (
+                f"系统发现基础筛选结果与建议通过结论不一致；请只核实：{issue}。"
+                "未确认前不进入发送。"
+            )
+        ranking_fields["审核原因代码"] = reason_codes
         ranking_fields["排序快照历史"] = launch_participation._with_snapshot(
             fields, candidate, ranking_version,
         )
@@ -604,8 +624,7 @@ async def append_auto_approved(*, campaign_id: str, pool_target: int,
     candidates = [
         c for c in (preview.get("candidates") or [])
         if c.get("contact_id") not in existing_contacts
-        and c.get("decision") == "eligible_new_cold"
-        and c.get("review_decision") == "通过"
+        and _is_deterministic_system_pass(c)
     ][:batch_room]
 
     created = []
@@ -682,6 +701,7 @@ async def append_review_candidates(*, campaign_id: str, review_target: int = 20,
         candidate for candidate in (preview.get("candidates") or [])
         if candidate.get("contact_id") not in existing_contacts
         and candidate.get("decision") == "eligible_new_cold"
+        and not _is_deterministic_system_pass(candidate)
         and (
             candidate.get("base_filter_passed") is True
             or (
@@ -717,17 +737,15 @@ async def append_review_candidates(*, campaign_id: str, review_target: int = 20,
             ranking_fields["审核原因"] = ""
             ranking_fields["审核人"] = None
             ranking_fields["审核时间"] = None
-            reason_codes = list(dict.fromkeys(
-                str(code).strip()
-                for code in (candidate.get("base_filter_reason_codes") or [])
-                if str(code).strip()
-            ))
+            reason_codes = _review_reason_codes(candidate)
             if reason_codes:
                 ranking_fields["审核原因代码"] = reason_codes
             if ranking_fields.get("系统审核分流") == "系统建议通过":
+                issue = "、".join(reason_codes) or "系统通过结论仍有待确认项"
+                ranking_fields["系统审核分流"] = "KOL运营审核"
                 ranking_fields["系统审核说明"] = (
-                    "系统规则已建议通过；本批为新品活动候选质量灰度，请运营抽检主页、"
-                    "近90天内容和实际语言后选择通过/待补资料/排除。"
+                    f"系统结论尚不足以自动通过；请只核实：{issue}。"
+                    "未确认前不进入发送。"
                 )
             fields = {
                 "参与记录ID": unique_key, "活动ID": campaign_id,

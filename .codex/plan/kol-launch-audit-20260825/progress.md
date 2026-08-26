@@ -21,3 +21,45 @@
 - P0-3 目标测试通过：新记录保留四段标记；已有记录只按精确链接或唯一账号名追加标记；重名不自动回填；重复执行幂等。
 - 回归：云端相关 148 项 + 9 子测试通过；daemon 21 项通过。云端全量另有 1 个与本次无关的时间敏感旧测试失败，792 项 + 23 子测试通过。
 - 当前阶段：代码审查与发布前状态检查；生产尚未部署。
+- 陈翔宇部署终端已于 2026-08-26 12:42 完成重启验收：`fd35e0e`，进程 `15104 → 15656` 构成一个逻辑 daemon，两个进程同批启动，最新启动后日志未见 Traceback。
+- Frankie 已确认继续下一步；当前进入只读生产发布前检查，尚未推送云端、未触发 n8n、未改环境变量。
+- 12:53 只读复核：n8n 工作流 `uvBfJBtGH93FPa6w` 仍为 `active=true`，n8n 全局 `running` execution 为 0；飞书爬虫任务表共 2188 行，当前 `运行中` 为 0。
+- 12:56 云端后台回读：食人花 12:50 自然轮次 job 仍为 `running/queued`，因此发布闸保持关闭；Dave 当前 `latest` 为 404，待新版部署后的整点自然轮次验证跨重启回读修复。未手动触发任何任务。
+- 12:57 `git fetch origin` 后最新 `origin/master=5891309`，仍是候选分支祖先；远端主分支未前进，当前满足后续仅快进整合条件，但尚未推送。
+- 只读检查中遇到两次本地命令问题：一次 PowerShell 管道解析错误、一次引用不存在的 `load-env.ps1`；两次都在写入或生产请求前停止，随后改为读取 User/Process 环境值完成查询。n8n MCP 认证也不可用，已改用既有只读 REST API；均未输出凭据。
+- 发布窗口等待期间，保护闸三次拒绝推送：先后因为 KOL 回复监听运行中、另一轮回复监听运行中、以及 13:35 食人花自然 job 已启动；三次均未产生 GitHub/Zeabur 变更。最终采用本地只读监视器，只在回复监听、两个 Launch 后台 job、爬虫运行中任务同时为空时继续。
+- 13:49:54 最终保护检查通过：`HEAD=c5aa6a9`、`origin/master=5891309`、工作流 active、Launch 后台 running=0、飞书爬虫 running=0、回复监听 running=0；随后仅 fast-forward 推送 `5891309..c5aa6a9` 到 `origin/master`，未强推。
+- Zeabur 自动部署目标 deployment `6a8e7e8aa8666e1b794537a0`，13:51:36 状态 `RUNNING`，commit=`c5aa6a9`，`https://kol-auto.zeabur.app/health` 返回 `status=ok`；未手动重启/重部署，未改环境变量或 n8n。
+- 当前等待部署后的自然验收：Dave 14:00、食人花 14:05；不手动触发。
+- 14:00 Dave 自然 execution `1019552` success，后台自治任务正常受理；14:05 食人花自然 execution `1019595` success，后台任务于 14:23 完成 `success/supply_in_progress`。
+- 食人花在模型日预算 60/60 时以 0 次模型调用创建 5 条确定性任务，词源为 `mixed_seven_layer_deterministic`，活动国家为 `US/UK/FR/IT/NL/SE/PT`，`quality_filters_lowered=false`。
+- 14:20 食人花新一轮 execution `1019673` 在约 0.1 秒内返回，原任务继续，证明运行中同活动请求被去重。
+- 本地 daemon 自然完成任务 `recvtnHBPmPj35`：新增 0、更新 18、耗时 342 秒；主表精确查到 18 条活动ID+任务record_id+词源+发现词四段标记。
+- 自然验收随后触发停止闸：`recvtnHCUCVCZt` 与 `recvtnHCrRLcuo` 标记失败，飞书日志仅保留被截断的 `urllib.request` Traceback；`recvtnHDnitInq` 当时运行中、`recvtnHDSP49LN` 待触发，Dave 后台任务仍运行中。未补跑、未改状态、未改 env/n8n、未结束远端进程。
+- 最小阻断：需要部署终端只读提供上述失败 task record_id 对应的完整 daemon 日志尾部（含 Traceback 最后一行），确认明确异常后再做最小本地修复与 22 项回归；随后只等自然轮次复验。
+- Frankie 明确授权后，已用聪哥分身1号把只读取证命令直接发到陈翔宇原 P2P 私聊，`message_id=om_x100b67dc95e8c4a0c1c52a02e16c483`；当前等待回传，不重发、不催促。
+- 发现 P1 可观测性缺口：当前进程内 `/jobs/latest` 的状态可读，但 `job_id` 回退显示为 `latest`；持久标记跨重启读取不受影响，本轮不再次部署。
+- 陈翔宇按只读命令回查后确认：`daemon.log` 中找不到 `recvtnHCUCVCZt`、`recvtnHCrRLcuo`。源码复核证明旧版只写任务名、不写 task record_id；子进程完整 stderr 仅在内存，先取末尾 800 字后又从开头截成 450/500 字，最终异常行被永久丢弃。两次历史真实根因无法恢复，停止继续猜测。
+- 已在 daemon 仓库用模拟长 Traceback 建立确定性失败测试，修复前两项测试均失败；最小修复后会同时保留开头上下文和最后异常、并在本地/飞书执行日志加入 task record_id。
+- daemon 本地完整回归由 22 项增至 24 项并全部通过，`git diff --check` 通过；仅 fast-forward 推送 `fd35e0e..58375b0` 到 daemon `origin/master`，未触发云端 Zeabur 发布。
+- 已用聪哥分身1号向陈翔宇原 P2P 私聊发送“更新至 `58375b0`、校验 2 个父子进程、停止旧实例、仅运行一次计划任务、截图验收”的完整 PowerShell 指引，`message_id=om_x100b67ddfb4ceca4c3d02077c33268b`。命令含 `Read-Host` 防窗口自动关闭，并明确禁止手动触发爬虫/补池/发信或修改代理/env/n8n/任务状态。
+- 陈翔宇首次执行更新时，部署终端直连 GitHub 443 出现 `Recv failure: Connection was reset` / `Could not connect to server`；版本仍为 `fd35e0e`，脚本在停止 daemon 前按闸退出，因此现有一个逻辑 daemon 未被中断。
+- 已用聪哥分身1号发送修正版指引，`message_id=om_x100b67de749f84a8c4f8d8208c9ad81`：先检查工作区干净和本机 `127.0.0.1:7890`，仅让本次 `git fetch` 临时走该端口，不改全局 Git/系统代理/env；只有成功快进到 `58375b0` 且重启前恰为一个父子进程对时才重启。任一检查失败均保留窗口并截图，不再操作。
+- 中途截图已确认 `master`、工作区未提交改动为 0、本机 `7890` 可用，且已成功抓到远端 `58375b0`；截图时整段脚本仍未输出 merge、重启后进程和日志结果，不能作为最终验收。已发送“不要重跑、等待最终 Read-Host 后截图”的短指引，`message_id=om_x100b67de2951b8a8c4cc6959db70f38`。
+- 陈翔宇最终截图验收通过：部署终端已 fast-forward 到 `58375b0`；旧进程被干净替换，重启后 PID `3892 → 8088` 构成一个逻辑 daemon，两个进程均于 16:30:22 启动，最新启动后日志未见 Traceback。
+- 16:50 食人花自然 execution `1020606` success；后台 job 于 16:58:36 完成 `success/supply_in_progress`。模型预算已满时仍以 0 次模型调用创建确定性任务 `recvtokEN0xynI`，词源 `legacy_fixed`、发现词 `nintendo spielzimmer deutsch`、活动真实国家 `DE`，`quality_filters_lowered=false`。
+- 本地 daemon 于 17:00:31 自然领取 `recvtokEN0xynI`，17:02:50 成功完成，原始发现 4 条，均因粉丝少于 5000 被正常质量门槛过滤，新增 0、更新 0、耗时 138 秒；没有 Traceback，也没有降低筛选标准。
+- 再次只读核对已有真实产出任务 `recvtnHBPmPj35`：KOL 主表精确命中 18 条，18/18 均包含活动ID、任务record_id、词源、发现词四段来源标记。
+- 17:00 Dave 自然 job 于 17:13:27 完成 `degraded/supply_blocked`：参与 233、已批准新开发 179、已发 177、回复 11（6.2%）、明确承诺 0、实际上稿 0；本轮可发送库存和可入队候选均为 0，仍缺 3 个符合历史窗口与来源健康规则的外部 YouTube 发现任务。程序完成但供给不足，`quality_filters_lowered=false`。
+- 最终保护检查：n8n 工作流 `uvBfJBtGH93FPa6w active=true`，n8n 全局 running execution=0，飞书爬虫“2-运行中”=0，两项 Launch latest job 均已结束；未手动触发、未改 env/n8n/代理、未发消息或邮件。
+- 临时心跳 `kol-p0` 已核对为 `PAUSED`，不会继续每 5 分钟唤醒本任务。
+- Frankie 要求继续完成剩余 P1 并重新审计项目进度。当前初步判断无需陈翔宇操作：先只审计云端与飞书真实状态；只有证据证明必须修改本地 daemon，才会另行通过飞书下发终端指引。
+- 本轮固定范围为原审计 P1：latest job_id 可观测性、候选资料/审核到草稿的转化、回复到承诺/寄样/上稿闭环。禁止重新设计、降低质量筛选、修改 n8n/env 或手动触发业务任务。
+- 首轮代码核对完成：`latest` 返回字面量的直接原因是当前进程内 runtime job 未携带 `job_id`；承诺日期提取已有严格事实闸门，不能把一般兴趣回复降级当承诺。
+- 下一步继续核对候选补资料/系统通过转草稿、回复后的下一动作字段和日报阶段视图，再建立最小失败测试。
+- P1 真实数据复核发现 Dave 有 5 条活动参与记录同时为“已入围 + 待审核 + 系统建议通过”，其中部分仍带基础筛选失败原因；这会让运营看见互相矛盾的结论。最小修复改为：只有基础筛选明确通过、无原因代码、路由和结论一致的对象才允许系统直达；任何矛盾项回到 KOL 运营边界，未确认前不进入发送。
+- `/launch/runtime/jobs/latest` 已补真实 job_id：当前进程内状态覆盖持久记录时，仍返回持久任务的真实 ID，不再回退成字面值 `latest`。
+- 回复闭环核心事实闸原本已存在（只有明确未来上稿动作和具体日期才计承诺）；本轮没有放宽。日报新增“回复待处理 / 待确认上稿日 / 明确承诺 / 已寄样 / 已上稿”，并明确负责人和下一步；跨活动重复草稿在所有新阶段中统一排除。
+- 专项回归：`tests/test_launch_routes.py`、`tests/test_launch_runtime.py`、`tests/test_launch_daily_report.py` 共 126 项及 3 个子测试通过。完整回归 799 项及 23 个子测试通过；唯一失败仍为固定写死 2026-07-07 部署时间、却要求最近 24 小时命中的既有 Zeabur 看门狗测试。
+- 双轴复核结论：业务验收满足；未改国家/语言/品类/粉丝/邮箱门槛，未改 n8n、环境变量、邮件模板或对外发送。代码审查另发现并修复跨活动重复草稿会虚增新阶段数字的问题。
+- 陈翔宇部署终端没有代码变更需求，继续保持 `58375b0` 一个逻辑 daemon；不需要 pull、重启或手动触发。下一步只做云端保护闸、fast-forward 发布和自然轮次只读验收。

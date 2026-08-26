@@ -2921,7 +2921,7 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
     job_id = "launchruntime-" + uuid.uuid4().hex[:12]
     started_ts = time.time()
     _launch_runtime_jobs[job_id] = {
-        "status": "running", "started_ts": started_ts,
+        "job_id": job_id, "status": "running", "started_ts": started_ts,
         "started_at": datetime_now_string(), "request_key": request_key,
         "campaign_id": campaign_id, "mode": mode,
         "seed_candidates": seed_candidates, "source_job_id": source_job_id,
@@ -3371,10 +3371,12 @@ async def get_launch_runtime_job(job_id: str, campaign_id: str = "",
     _check_auth(authorization)
     _prune_launch_runtime_jobs()
     memory_job = None
+    resolved_job_id = job_id
     if job_id == "latest" and campaign_id:
         job = await launch_runtime.load_runtime_job(campaign_id)
         if job:
-            memory_job = _launch_runtime_jobs.get(job.get("job_id"))
+            resolved_job_id = job.get("job_id") or job_id
+            memory_job = _launch_runtime_jobs.get(resolved_job_id)
             if memory_job:
                 job = memory_job
     else:
@@ -3391,7 +3393,7 @@ async def get_launch_runtime_job(job_id: str, campaign_id: str = "",
                 launch_evidence_author_import.audit_controlled_import_progress(campaign_id)
             )
         job = await launch_runtime.persist_runtime_job(
-            campaign_id=campaign_id, job_id=job.get("job_id") or job_id,
+            campaign_id=campaign_id, job_id=job.get("job_id") or resolved_job_id,
             mode=job.get("mode") or "unknown",
             status="error", result=audit_result,
             error="service_restarted_before_job_completion",
@@ -3413,7 +3415,7 @@ async def get_launch_runtime_job(job_id: str, campaign_id: str = "",
             "seed_candidates", "expected_handles",
         }
     }
-    return {"ok": True, "job_id": public.pop("job_id", job_id), **public}
+    return {"ok": True, "job_id": public.pop("job_id", resolved_job_id), **public}
 
 
 @app.post("/launch/email/test-raw")

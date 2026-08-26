@@ -46,8 +46,10 @@ PARTICIPANT_FIELDS = [
 ]
 DRAFT_FIELDS = [
     "邮件草稿来源", "邮件草稿状态", "发送状态", "建议发送时间",
-    "发送时间", "是否回复", "回复日期",
+    "发送时间", "是否回复", "回复日期", "回复意图", "寄样阶段",
 ]
+POSITIVE_REPLY_INTENTS = {"感兴趣", "要报价"}
+SHIPPED_STAGES = {"已发货", "在途", "已签收", "已产出"}
 
 
 class DailyReportError(RuntimeError):
@@ -209,6 +211,9 @@ def summarize_campaign(
     commitments = 0
     actual_posts = 0
     on_time_posts = 0
+    reply_pending = 0
+    awaiting_post_date = 0
+    shipped = 0
 
     for participant in active:
         fields = participant.get("fields") or {}
@@ -219,12 +224,38 @@ def summarize_campaign(
             today_eligible += int(day_start_ms <= audit_time < day_end_ms)
         else:
             eligible_time_missing += 1
-        draft_ids.update(_ids(fields.get("关联邮件草稿")))
-        commitments += int(_ts(fields.get("承诺上稿时间")) > 0)
+        participant_draft_ids = _ids(fields.get("关联邮件草稿"))
+        draft_ids.update(participant_draft_ids)
+        committed = _ts(fields.get("承诺上稿时间")) > 0
+        commitments += int(committed)
         actual = _ts(fields.get("实际上稿时间"))
         if actual:
             actual_posts += 1
             on_time_posts += int(window_end > 0 and actual <= window_end)
+
+        excluded = excluded_draft_ids or set()
+        linked_drafts = [
+            drafts_by_id.get(draft_id) or {}
+            for draft_id in participant_draft_ids
+            if draft_id not in excluded
+        ]
+        shipped += int(any(
+            _text((draft.get("fields") or {}).get("寄样阶段")) in SHIPPED_STAGES
+            for draft in linked_drafts
+        ))
+        if committed or actual:
+            continue
+        reply_intents = [
+            _text(draft_fields.get("回复意图"))
+            for draft in linked_drafts
+            for draft_fields in [draft.get("fields") or {}]
+            if _text(draft_fields.get("邮件草稿来源")).lower() == "cold"
+            and bool(draft_fields.get("是否回复"))
+        ]
+        if any(intent in POSITIVE_REPLY_INTENTS for intent in reply_intents):
+            awaiting_post_date += 1
+        elif reply_intents:
+            reply_pending += 1
 
     draft_ids.difference_update(excluded_draft_ids or set())
 
@@ -268,7 +299,10 @@ def summarize_campaign(
         "sent_total": sent_total,
         "replies_today": replies_today,
         "replies_total": replies_total,
+        "reply_pending": reply_pending,
+        "awaiting_post_date": awaiting_post_date,
         "commitments": commitments,
+        "shipped": shipped,
         "on_time_posts": on_time_posts,
         "actual_posts": actual_posts,
         "target_posts": target_posts,
@@ -279,8 +313,27 @@ def summarize_campaign(
         "post_progress_pct": _pct(on_time_posts, target_posts),
         "quota_progress_pct": _pct(quota_sent, quota_cap),
         "data_errors": data_errors,
+        "next_action_owner": "独立站运营专员",
     }
     snapshot["status"] = status_for(snapshot)
+    if reply_pending:
+        snapshot["funnel_next_action"] = (
+            f"先处理 {reply_pending} 条未归入下一阶段的真实回复，完成回信草稿审核和业务分流。"
+        )
+    elif awaiting_post_date:
+        snapshot["funnel_next_action"] = (
+            f"推进 {awaiting_post_date} 位已明确感兴趣或询价对象确认具体上稿日；未写日期不计承诺。"
+        )
+    elif commitments > actual_posts:
+        snapshot["funnel_next_action"] = (
+            f"跟进 {commitments - actual_posts} 位已承诺对象按期寄样或上稿，异常单独升级。"
+        )
+    elif shipped > actual_posts:
+        snapshot["funnel_next_action"] = (
+            f"跟进 {shipped - actual_posts} 位已寄样对象确认收货和上稿安排。"
+        )
+    else:
+        snapshot["funnel_next_action"] = "当前没有待推进的真实回复、承诺或寄样阶段对象。"
     return snapshot
 
 
@@ -360,7 +413,10 @@ def build_card(snapshots: list[dict], *, day: date) -> dict:
                     f"**当前可发送池**　{row.get('ready_due', 0)} 人　　"
                     f"**今日 / 累计活动开发信**　{row.get('sent_today', 0)} / {row.get('sent_total', 0)} 封\n"
                     f"**今日 / 累计回复**　{row.get('replies_today', 0)} / {row.get('replies_total', 0)}　　"
+                    f"**回复待处理**　{row.get('reply_pending', 0)} 人\n"
+                    f"**待确认上稿日**　{row.get('awaiting_post_date', 0)} 人　　"
                     f"**明确承诺上稿**　{row.get('commitments', 0)} 人\n"
+                    f"**已寄样**　{row.get('shipped', 0)} 人　　"
                     f"**按时上稿 / 目标**　{row.get('on_time_posts', 0)} / {row.get('target_posts', 0)}　　"
                     f"**全部已上稿**　{row.get('actual_posts', 0)} 人\n"
                     f"**{row.get('brand') or '-'} 邮箱滚动24小时额度**　"
@@ -392,7 +448,11 @@ def build_card(snapshots: list[dict], *, day: date) -> dict:
             {
                 "tag": "markdown",
                 "element_id": f"next_action_{index}",
-                "content": f"**系统下一步**　{status.get('next_action') or '-'}",
+                "content": (
+                    f"**业务负责人**　{row.get('next_action_owner') or '-'}\n"
+                    f"**业务下一步**　{row.get('funnel_next_action') or '-'}\n"
+                    f"**系统动作**　{status.get('next_action') or '-'}"
+                ),
             },
         ])
 
@@ -404,6 +464,7 @@ def build_card(snapshots: list[dict], *, day: date) -> dict:
             "content": (
                 "活动开发信只计算“活动参与记录”关联且真实发送成功的开发信；"
                 "邮箱额度按 Zoho 滚动24小时全部外发邮件统计，两者口径不同。"
+                "回复、承诺、寄样和上稿按各自真实字段统计，阶段之间允许重叠。"
             ),
         },
     ])
@@ -473,8 +534,9 @@ def validate_card(card: dict, snapshots: list[dict], *, day: date) -> dict:
 
     required_metrics = {
         "today_eligible", "eligible_total", "ready_due", "sent_today", "sent_total",
-        "replies_today", "replies_total", "commitments", "on_time_posts", "actual_posts",
-        "target_posts", "quota_sent_24h", "quota_cap", "status",
+        "replies_today", "replies_total", "reply_pending", "awaiting_post_date",
+        "commitments", "shipped", "on_time_posts", "actual_posts", "target_posts",
+        "quota_sent_24h", "quota_cap", "status", "next_action_owner", "funnel_next_action",
     }
     for row in snapshots:
         campaign_id = row.get("campaign_id") or row.get("name") or "unknown"

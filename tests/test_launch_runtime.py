@@ -226,6 +226,38 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual("KOL运营审核", fields["系统审核分流"])
         self.assertEqual(["辅助语言待确认"], fields["审核原因代码"])
 
+    def test_pending_review_reconcile_reroutes_contradictory_system_pass(self):
+        participant = {"record_id": "part1", "fields": {
+            "参与状态": "已入围", "审核结论": "待审核",
+            "关联KOL": {"link_record_ids": ["kol1"]},
+            "关联邮件草稿": [], "排序快照历史": "[]",
+        }}
+        candidate = {
+            "contact_id": "kol1", "decision": "eligible_new_cold",
+            "base_filter_passed": False, "review_decision": "通过",
+            "review_route": "系统建议通过",
+            "base_filter_reason_codes": ["硬件/配件内容不足"],
+            "profile_url": "https://youtube.com/@one",
+        }
+
+        with patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[participant]),
+        ), patch.object(
+            launch_runtime.launch_participation, "_update_and_confirm",
+            new=AsyncMock(return_value={"record_id": "part1"}),
+        ) as update:
+            result = asyncio.run(launch_runtime.reconcile_pending_participant_reviews(
+                campaign_id="campaign1", ranking_version="v1",
+                preview={"candidates": [candidate], "profile_refresh_candidates": []},
+            ))
+
+        self.assertEqual(0, result["auto_passed"])
+        self.assertEqual(1, result["actionable_pending"])
+        fields = update.await_args.args[2]
+        self.assertEqual("待审核", fields["审核结论"])
+        self.assertEqual("KOL运营审核", fields["系统审核分流"])
+        self.assertIn("硬件/配件内容不足", fields["系统审核说明"])
+
     def test_pending_review_contacts_are_prioritized_for_profile_refresh(self):
         participants = [
             {"record_id": "p1", "fields": {
@@ -717,7 +749,8 @@ class LaunchRuntimeTests(unittest.TestCase):
             "ranking_version": "v1", "evidence_pending": False,
             "candidates": [{
                 "contact_id": "new", "decision": "eligible_new_cold",
-                "review_decision": "通过", "score": 90,
+                "base_filter_passed": True, "review_decision": "通过",
+                "review_route": "系统建议通过", "score": 90,
             }],
         }
 
@@ -754,7 +787,8 @@ class LaunchRuntimeTests(unittest.TestCase):
             "ranking_version": "v1", "evidence_pending": False,
             "candidates": [{
                 "contact_id": "new", "decision": "eligible_new_cold",
-                "review_decision": "通过",
+                "base_filter_passed": True, "review_decision": "通过",
+                "review_route": "系统建议通过",
             }],
         }
 
@@ -778,7 +812,7 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual(1, result["created"])
         create_record.assert_awaited_once()
 
-    def test_review_pool_forces_new_candidates_to_pending_without_queueing(self):
+    def test_review_pool_does_not_turn_deterministic_system_pass_into_manual_review(self):
         activity = {"record_id": "a1", "fields": {
             "活动ID": "campaign1", "产品主记录ID": "product1",
             "证据排序版本": "v1", "KOL名单阻塞代码": "",
@@ -791,12 +825,69 @@ class LaunchRuntimeTests(unittest.TestCase):
             "country": "US", "language": "en", "platform": "YouTube",
             "followers": 100000, "profile_url": "https://youtube.com/@one",
         }
-        created = {"record_id": "part1", "fields": {
-            "参与记录ID": "campaign1|product1|KOL|kol1",
-            "活动ID": "campaign1", "审核结论": "待审核",
-            "关联KOL": {"link_record_ids": ["kol1"]},
-        }}
+        with patch.object(
+            launch_runtime.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[]),
+        ), patch.object(
+            launch_runtime.launch_participation, "_participants_by_unique_key",
+            new=AsyncMock(return_value=[]),
+        ), patch.object(
+            launch_runtime.feishu, "create_record", new=AsyncMock(return_value="part1"),
+        ) as create_record:
+            result = asyncio.run(launch_runtime.append_review_candidates(
+                campaign_id="campaign1", review_target=1,
+                preview={"ranking_version": "v1", "evidence_pending": False,
+                         "candidates": [candidate]},
+            ))
 
+        self.assertEqual(0, result["created"])
+        create_record.assert_not_awaited()
+
+    def test_auto_append_rejects_contradictory_system_pass_with_filter_reasons(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "证据排序版本": "v1", "KOL名单阻塞代码": "",
+        }}
+        candidate = {
+            "contact_id": "kol1", "decision": "eligible_new_cold",
+            "base_filter_passed": False,
+            "base_filter_reason_codes": ["硬件/配件内容不足"],
+            "review_decision": "通过", "review_route": "系统建议通过",
+        }
+        with patch.object(
+            launch_runtime.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
+        ), patch.object(
+            launch_runtime.launch_evidence, "get_activity", new=AsyncMock(return_value=activity),
+        ), patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[]),
+        ), patch.object(
+            launch_runtime.feishu, "create_record", new=AsyncMock(),
+        ) as create_record:
+            result = asyncio.run(launch_runtime.append_auto_approved(
+                campaign_id="campaign1", pool_target=10,
+                preview={"ranking_version": "v1", "evidence_pending": False,
+                         "candidates": [candidate]},
+            ))
+
+        self.assertEqual(0, result["created"])
+        create_record.assert_not_awaited()
+
+    def test_review_pool_reroutes_non_deterministic_system_result_to_operator(self):
+        activity = {"record_id": "a1", "fields": {
+            "活动ID": "campaign1", "产品主记录ID": "product1",
+            "证据排序版本": "v1", "KOL名单阻塞代码": "",
+        }}
+        candidate = {
+            "contact_id": "kol1", "decision": "eligible_new_cold",
+            "base_filter_passed": True,
+            "review_decision": "待审核", "review_route": "系统建议通过",
+        }
+        created = {"record_id": "part1", "fields": {
+            "审核结论": "待审核", "关联KOL": {"link_record_ids": ["kol1"]},
+        }}
         with patch.object(
             launch_runtime.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True,
         ), patch.object(
@@ -817,9 +908,8 @@ class LaunchRuntimeTests(unittest.TestCase):
 
         self.assertEqual(1, result["created"])
         fields = create_record.await_args.args[1]
-        self.assertEqual("待审核", fields["审核结论"])
-        self.assertEqual("系统建议通过", fields["系统审核分流"])
-        self.assertNotIn("关联邮件草稿", fields)
+        self.assertEqual("KOL运营审核", fields["系统审核分流"])
+        self.assertIn("未确认前不进入发送", fields["系统审核说明"])
 
     def test_autonomous_review_pool_only_adds_operator_boundary_items(self):
         activity = {"record_id": "a1", "fields": {

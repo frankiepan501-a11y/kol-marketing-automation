@@ -127,6 +127,80 @@ class LaunchDailyReportTests(unittest.TestCase):
         self.assertEqual(1, snap["on_time_posts"])
         self.assertEqual(2, snap["actual_posts"])
 
+    def test_funnel_phases_use_explicit_reply_intent_commitment_shipping_and_post_facts(self):
+        participants = [
+            self._participant("p1", **{"关联邮件草稿": ["d1"]}),
+            self._participant("p2", **{"关联邮件草稿": ["d2"]}),
+            self._participant("p3", **{
+                "关联邮件草稿": ["d3"],
+                "承诺上稿时间": _ms("2026-09-10T12:00:00+08:00"),
+            }),
+            self._participant("p4", **{"关联邮件草稿": ["d4"]}),
+            self._participant("p5", **{
+                "关联邮件草稿": ["d5"],
+                "实际上稿时间": _ms("2026-09-12T12:00:00+08:00"),
+            }),
+        ]
+        drafts = {
+            "d1": {"record_id": "d1", "fields": {
+                "邮件草稿来源": "cold", "发送状态": "已发",
+                "是否回复": True, "回复意图": "感兴趣",
+            }},
+            "d2": {"record_id": "d2", "fields": {
+                "邮件草稿来源": "cold", "发送状态": "已发",
+                "是否回复": True, "回复意图": "质疑/澄清",
+            }},
+            "d3": {"record_id": "d3", "fields": {
+                "邮件草稿来源": "cold", "发送状态": "已发",
+                "是否回复": True, "回复意图": "感兴趣",
+            }},
+            "d4": {"record_id": "d4", "fields": {
+                "邮件草稿来源": "ship_confirm", "发送状态": "已发",
+                "寄样阶段": "在途",
+            }},
+            "d5": {"record_id": "d5", "fields": {
+                "邮件草稿来源": "cold", "发送状态": "已发",
+                "是否回复": True, "回复意图": "感兴趣",
+            }},
+        }
+
+        snap = self.report.summarize_campaign(
+            self.activity, participants, drafts,
+            quota={"sent_24h": 10, "cap": 80}, now_ms=self.now,
+            day_start_ms=self.start, day_end_ms=self.end,
+        )
+
+        self.assertEqual(1, snap["reply_pending"])
+        self.assertEqual(1, snap["awaiting_post_date"])
+        self.assertEqual(1, snap["commitments"])
+        self.assertEqual(1, snap["shipped"])
+        self.assertEqual(1, snap["actual_posts"])
+        self.assertEqual("独立站运营专员", snap["next_action_owner"])
+        self.assertIn("回复", snap["funnel_next_action"])
+
+    def test_funnel_phases_exclude_drafts_linked_to_multiple_campaigns(self):
+        participants = [
+            self._participant("p1", **{"关联邮件草稿": ["ambiguous"]}),
+        ]
+        drafts = {
+            "ambiguous": {"record_id": "ambiguous", "fields": {
+                "邮件草稿来源": "cold", "发送状态": "已发",
+                "是否回复": True, "回复意图": "感兴趣", "寄样阶段": "在途",
+            }},
+        }
+
+        snap = self.report.summarize_campaign(
+            self.activity, participants, drafts,
+            quota={"sent_24h": 10, "cap": 80}, now_ms=self.now,
+            day_start_ms=self.start, day_end_ms=self.end,
+            excluded_draft_ids={"ambiguous"},
+        )
+
+        self.assertEqual(0, snap["sent_total"])
+        self.assertEqual(0, snap["reply_pending"])
+        self.assertEqual(0, snap["awaiting_post_date"])
+        self.assertEqual(0, snap["shipped"])
+
     def test_status_priority_and_thresholds_are_deterministic(self):
         common = {
             "target_posts": 20,
@@ -160,7 +234,10 @@ class LaunchDailyReportTests(unittest.TestCase):
             "sent_total": 91,
             "replies_today": 4,
             "replies_total": 17,
+            "reply_pending": 3,
+            "awaiting_post_date": 5,
             "commitments": 6,
+            "shipped": 4,
             "on_time_posts": 2,
             "actual_posts": 3,
             "target_posts": 20,
@@ -170,6 +247,8 @@ class LaunchDailyReportTests(unittest.TestCase):
             "post_progress_pct": 10,
             "quota_progress_pct": 70,
             "status": {"label": "进度正常", "color": "green", "next_action": "继续自动发送。"},
+            "next_action_owner": "独立站运营专员",
+            "funnel_next_action": "先处理3条真实回复。",
             "data_errors": [],
         }
         card = self.report.build_card([snap], day=self.day)
@@ -196,6 +275,11 @@ class LaunchDailyReportTests(unittest.TestCase):
         self.assertIn("**邮箱额度**　56 / 80　70%", progress)
         self.assertIn("█", progress)
         self.assertIn("░", progress)
+        encoded = json.dumps(card, ensure_ascii=False)
+        self.assertIn("回复待处理", encoded)
+        self.assertIn("待确认上稿日", encoded)
+        self.assertIn("已寄样", encoded)
+        self.assertIn("独立站运营专员", encoded)
 
     def test_run_is_read_only_and_frankie_sample_never_touches_group(self):
         source = {

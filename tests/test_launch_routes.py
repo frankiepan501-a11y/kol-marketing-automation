@@ -777,6 +777,30 @@ class LaunchRouteTests(unittest.TestCase):
         self.assertEqual("success", status["status"])
         load.assert_awaited_once_with("c1")
 
+    def test_latest_job_keeps_durable_id_when_live_memory_entry_wins(self):
+        persisted = {
+            "job_id": "launchruntime-real", "status": "running",
+            "campaign_id": "c1", "mode": "autonomous", "started_ts": 123,
+        }
+        live = {
+            "status": "success", "campaign_id": "c1", "mode": "autonomous",
+            "started_ts": main.time.time(), "result": {"inventory_after": 40},
+        }
+        main._launch_runtime_jobs.clear()
+        main._launch_runtime_jobs["launchruntime-real"] = live
+        try:
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+                main.launch_runtime, "load_runtime_job", new=AsyncMock(return_value=persisted),
+            ):
+                status = asyncio.run(main.get_launch_runtime_job(
+                    "latest", campaign_id="c1", authorization="Bearer secret",
+                ))
+        finally:
+            main._launch_runtime_jobs.clear()
+
+        self.assertEqual("launchruntime-real", status["job_id"])
+        self.assertEqual("success", status["status"])
+
     def test_autonomous_job_restarts_when_durable_running_job_is_not_in_this_process(self):
         async def exercise():
             main._launch_runtime_jobs.clear()
