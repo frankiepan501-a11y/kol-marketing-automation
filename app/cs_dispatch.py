@@ -690,7 +690,12 @@ async def read_social_review_test(rid: str) -> dict:
         except Exception as exc:
             message_error = type(exc).__name__
     nodes = list(_walk_card(card)) if card else []
-    title = (((card.get("header", {}) or {}).get("title", {}) or {}).get("content", ""))
+    title = (((card.get("header", {}) or {}).get("title", {}) or {}).get("content", "")
+             or str(card.get("title", "")))
+    rendered_card = json.dumps(card, ensure_ascii=False) if card else ""
+    api_normalized = bool(card.get("title")) and not bool(card.get("header"))
+    controls_observable = bool(card) and not api_normalized
+    upgrade_placeholder = "请升级至最新版本客户端，以查看内容" in rendered_card
     final_reply = _x(f, "最终回复")
     outbound_audit = _social_review_outbound_audit(f)
     return {
@@ -710,10 +715,18 @@ async def read_social_review_test(rid: str) -> dict:
             "ok": bool(card) and not message_error,
             "error": message_error,
             "title": title,
-            "form_count": sum(node.get("tag") == "form" for node in nodes),
-            "input_count": sum(node.get("tag") == "input" for node in nodes),
-            "button_count": sum(node.get("tag") == "button" for node in nodes),
+            "api_normalized": api_normalized,
+            "controls_observable": controls_observable,
+            "interactive_fallback_present": upgrade_placeholder,
+            "form_count": (sum(node.get("tag") == "form" for node in nodes)
+                           if controls_observable else None),
+            "input_count": (sum(node.get("tag") == "input" for node in nodes)
+                            if controls_observable else None),
+            "button_count": (sum(node.get("tag") == "button" for node in nodes)
+                             if controls_observable else None),
             "processed": "客服审核测试已处理" in title,
+            "processed_static_result": ("客服审核测试已处理" in title
+                                        and not upgrade_placeholder),
         },
     }
 

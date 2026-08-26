@@ -299,9 +299,59 @@ class CsSocialReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(audit["social_platform_zero_evidence_passed"])
         self.assertTrue(result["card_readback"]["ok"])
         self.assertTrue(result["card_readback"]["processed"])
+        self.assertTrue(result["card_readback"]["processed_static_result"])
+        self.assertFalse(result["card_readback"]["api_normalized"])
+        self.assertTrue(result["card_readback"]["controls_observable"])
         self.assertEqual(0, result["card_readback"]["form_count"])
         self.assertEqual(0, result["card_readback"]["input_count"])
         self.assertEqual(0, result["card_readback"]["button_count"])
+
+    async def test_readback_labels_feishu_normalized_interactive_content(self):
+        normalized_card = {
+            "title": "🟢 [CUS·P3] 客服审核测试 · X · TEST-P0-5B-20260826-004",
+            "elements": [[{"tag": "text", "text":
+                            "请升级至最新版本客户端，以查看内容"}]],
+        }
+        fields = {
+            "工单ID": "TEST-P0-5B-20260826-004",
+            "客户标识": "P0-5B TEST · 非真实客户",
+            "品牌": "POWKONG",
+            "状态": "待回",
+            "卡片消息ID": "om_p0_5b_normalized",
+        }
+
+        class FakeResponse:
+            def json(self):
+                return {"code": 0, "data": {"items": [{"body": {
+                    "content": json.dumps(normalized_card, ensure_ascii=False)
+                }}]}}
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return FakeResponse()
+
+        with patch.object(cs_dispatch.feishu, "api", new=AsyncMock(return_value={
+                 "data": {"record": {"fields": fields}}
+             })), \
+             patch.object(cs_dispatch, "_token", new=AsyncMock(return_value="test-token")), \
+             patch.object(cs_dispatch.httpx, "AsyncClient", return_value=FakeClient()):
+            result = await cs_dispatch.read_social_review_test("rec_test")
+
+        card = result["card_readback"]
+        self.assertTrue(card["ok"])
+        self.assertTrue(card["api_normalized"])
+        self.assertFalse(card["controls_observable"])
+        self.assertTrue(card["interactive_fallback_present"])
+        self.assertIsNone(card["form_count"])
+        self.assertIsNone(card["input_count"])
+        self.assertIsNone(card["button_count"])
+        self.assertFalse(card["processed"])
 
 
 if __name__ == "__main__":
