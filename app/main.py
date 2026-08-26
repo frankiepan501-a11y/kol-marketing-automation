@@ -1167,6 +1167,7 @@ async def cs_social_review_health():
             "version": cs_dispatch.SOCIAL_REVIEW_VERSION,
             "sender_app_id": cs_dispatch.CS_ASSIST_ID,
             "frankie_only": True, "send_mode": cs_dispatch.SOCIAL_REVIEW_SEND_MODE,
+            "frankie_identity_configured": cs_dispatch.SOCIAL_REVIEW_FRANKIE_UNION.startswith("on_"),
             "customer_send_enabled": False}
 
 
@@ -1195,6 +1196,21 @@ async def run_cs_social_review_test_card(authorization: str = Header(default="")
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/cs/social-review/test-card", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.get("/cs/social-review/readback")
+async def run_cs_social_review_readback(authorization: str = Header(default=""),
+                                        record_id: str = ""):
+    """Read one P0-5B synthetic row and its original card using the CS app."""
+    _check_auth(authorization)
+    if not record_id:
+        raise HTTPException(400, "record_id is required")
+    try:
+        return await cs_dispatch.read_social_review_test(record_id)
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/social-review/readback", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
 
 

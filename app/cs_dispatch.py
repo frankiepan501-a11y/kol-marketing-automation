@@ -8,6 +8,7 @@
 凭据走 env(public 仓铁律)。
 """
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -34,6 +35,9 @@ CS_ASSIST_SECRET = (os.environ.get("FEISHU_CS_ASSISTANT_APP_SECRET")
 OBSERVE = (os.environ.get("CS_DISPATCH_OBSERVE", "1") or "1") != "0"
 OBSERVE_UNION = os.environ.get("CS_DISPATCH_OBSERVE_UNION",
                                "on_6e85dd60606f76f2d5af892785ac1dfe")  # Frankie union_id
+SOCIAL_REVIEW_FRANKIE_UNION = os.environ.get(
+    "CS_SOCIAL_REVIEW_FRANKIE_UNION", "on_6e85dd60606f76f2d5af892785ac1dfe"
+)  # 独立于观察期路由，避免观察目标变化导致测试卡改发他人
 # 一键回客户闭环是否已上线(默认否 → 卡片提示同事先在原渠道回; 闭环建好+DRY-RUN验证后置 1)
 CS_REPLY_LIVE = (os.environ.get("CS_REPLY_LIVE", "0") or "0") != "0"
 # Scott Stein 铁律: 改/上线回客户代码先开此 env → 全部回复改发测试邮箱(真客户/频道不收), 验证 raw 完整再删
@@ -43,6 +47,7 @@ CS_CARD_INPUT_MAX_CHARS = 1000
 SOCIAL_REVIEW_ACTION = "social_cs_review_save"
 SOCIAL_REVIEW_SEND_MODE = "manual_only"
 SOCIAL_REVIEW_TEST_PREFIX = "TEST-P0-5B-"
+SOCIAL_REVIEW_CLAIM_PREFIX = "P0-5B-CARD-CLAIM:"
 SOCIAL_REVIEW_VERSION = "p0-5b-v1"
 # 发件身份 (Zoho send-as / 网易登录账号)
 ZOHO_CS_FROM = os.environ.get("ZOHO_POWKONG_CS_FROM", "support@powkong.com")
@@ -114,10 +119,14 @@ async def _token() -> str:
     return _tok["v"]
 
 
-async def _send_card(union_id: str, card: dict) -> str:
+async def _send_card(union_id: str, card: dict, idempotency_key: str = "") -> str:
     tok = await _token()
+    params = {"receive_id_type": "union_id"}
+    if idempotency_key:
+        params["uuid"] = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
     async with httpx.AsyncClient(timeout=30.0) as c:
-        r = await c.post("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=union_id",
+        r = await c.post("https://open.feishu.cn/open-apis/im/v1/messages",
+                         params=params,
                          headers={"Authorization": f"Bearer {tok}"},
                          json={"receive_id": union_id, "msg_type": "interactive",
                                "content": json.dumps(card, ensure_ascii=False)})
@@ -476,6 +485,12 @@ def _build_social_review_card(rid: str, f: dict, run_id: str = "") -> dict:
     brand = _x(f, "品牌") or "-"
     draft = (_x(f, "AI草稿") or "").strip()
     summary = _x(f, "客诉摘要") or "X @提及客服审核链路测试"
+    confidence = _x(f, "AI置信度") or "AI起草人工审"
+    fact_status = _x(f, "资源状态") or "缺少权威事实"
+    missing_facts = _x(f, "信息缺口") or "具体产品型号；当前权威兼容性结论"
+    review_note = (_x(f, "沟通历史摘要") or
+                   "客户未提供准确型号；先索取型号，再核对权威兼容性资料。")
+    prohibited = "不得确认兼容性；不得编造价格、库存、物流；不得承诺退款、赔偿或换货。"
     value = {
         "act": SOCIAL_REVIEW_ACTION,
         "action": SOCIAL_REVIEW_ACTION,
@@ -490,6 +505,10 @@ def _build_social_review_card(rid: str, f: dict, run_id: str = "") -> dict:
         f"**测试工单:** `{ticket}`  ·  **来源:** X  ·  **品牌:** {brand}\n"
         "**数据性质:** 人工构造的非真实客户测试记录\n"
         f"**场景:** {summary}\n"
+        f"**风险:** R2 · {confidence}  ·  **事实状态:** {fact_status}\n"
+        f"**仍缺事实:** {missing_facts}\n"
+        f"**禁止声明:** {prohibited}\n"
+        f"**中文审核说明:** {review_note}\n"
         f"**发送模式:** `{SOCIAL_REVIEW_SEND_MODE}`  ·  **客户发送状态:** 未发送"
     )
     return {
@@ -549,15 +568,29 @@ def _validate_social_review_card(card: dict) -> list[str]:
     return errors
 
 
-def _build_social_review_result_card(rid: str, f: dict, *, duplicate: bool = False) -> dict:
+def _review_time_label(value) -> str:
+    try:
+        raw = int(value)
+        if raw > 10_000_000_000:
+            raw //= 1000
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(raw))
+    except (TypeError, ValueError, OverflowError):
+        return str(value or "-")
+
+
+def _build_social_review_result_card(rid: str, f: dict, *, run_id: str = "",
+                                     reviewed_at=None, duplicate: bool = False) -> dict:
     ticket = _ticket_id(f, rid)
+    review_id = f"SOCIAL-REVIEW-{rid}"
     result = ("该审核已经保存；本次重复回调没有产生第二次写入。" if duplicate else
               "审核结果已保存；下一步仍需人工到平台原生界面发送。")
     body = (
         f"**测试工单:** `{ticket}`  ·  **来源:** X  ·  **品牌:** {_x(f, '品牌') or '-'}\n"
         "**审核动作:** 已保存最终草稿\n"
         f"**人工发送状态:** 待人工发送\n"
-        f"**处理结果:** {result}\n\n"
+        f"**处理结果:** {result}\n"
+        f"**审核人:** Frankie  ·  **审核时间:** {_review_time_label(reviewed_at or _x(f, '回复时间'))}\n"
+        f"**review:** `{review_id}`  ·  **run:** `{run_id or '-'}`  ·  **replay:** `{review_id}`\n\n"
         "_此卡片已处理，无需重复点击。_"
     )
     return {
@@ -597,15 +630,92 @@ async def send_social_review_test_card(rid: str, *, mode: str = "dry_run",
     if not CS_ASSIST_SECRET:
         return {**result, "ok": False, "sent": False,
                 "error": "FEISHU_CS_ASSISTANT_APP_SECRET 未配"}
+    if not SOCIAL_REVIEW_FRANKIE_UNION.startswith("on_"):
+        return {**result, "ok": False, "sent": False,
+                "error": "CS_SOCIAL_REVIEW_FRANKIE_UNION 未正确配置"}
     existing_mid = _x(f, "卡片消息ID")
     if existing_mid:
         return {**result, "sent": False, "duplicate": True, "message_id": existing_mid}
-    mid = await _send_card(OBSERVE_UNION, card)
-    if not mid:
-        return {**result, "ok": False, "sent": False, "error": "客服助手卡片发送失败"}
+    existing_claim = _x(f, "线程ID")
+    if existing_claim.startswith(SOCIAL_REVIEW_CLAIM_PREFIX):
+        return {**result, "sent": False, "duplicate": True, "claim_pending": True,
+                "error": "已有发卡占位但尚未绑定 message_id；为防重复，本次不再发卡"}
+    claim = f"{SOCIAL_REVIEW_CLAIM_PREFIX}{run_id}"
     await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
-                     {"fields": {"卡片消息ID": mid, "状态": "待回"}}, which="notify")
-    return {**result, "sent": True, "message_id": mid, "written_fields": ["卡片消息ID", "状态"]}
+                     {"fields": {"线程ID": claim}}, which="notify")
+    mid = await _send_card(SOCIAL_REVIEW_FRANKIE_UNION, card,
+                           idempotency_key=f"social-review:{rid}:{run_id}")
+    if not mid:
+        return {**result, "ok": False, "sent": False, "claim_persisted": True,
+                "error": "客服助手卡片发送失败；已保留占位，防止盲目重发"}
+    try:
+        await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                         {"fields": {"卡片消息ID": mid, "状态": "待回"}}, which="notify")
+    except Exception:
+        await _update_card(mid, {
+            "config": {"wide_screen_mode": True},
+            "header": {"template": "red", "title": {"tag": "plain_text",
+                "content": "🔴 [CUS·P0] 测试卡绑定失败 · 请勿点击"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content":
+                "卡片已发出，但 message_id 未能写回测试记录。按钮已移除；系统不会重发，也不会回复客户。"}}],
+        })
+        return {**result, "ok": False, "sent": True, "message_id": mid,
+                "binding_failed": True, "claim_persisted": True}
+    return {**result, "sent": True, "message_id": mid,
+            "written_fields": ["线程ID", "卡片消息ID", "状态"]}
+
+
+async def read_social_review_test(rid: str) -> dict:
+    """Read back the synthetic row and original card using the same CS app."""
+    rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                           which="notify")
+    f = ((rec.get("data", {}) or {}).get("record", {}) or {}).get("fields", {}) or {}
+    if not f or not _is_social_review_test_record(f):
+        return {"ok": False, "error": "P0-5B test record not found", "record_id": rid}
+    mid = _x(f, "卡片消息ID")
+    card = {}
+    message_error = ""
+    if mid:
+        try:
+            tok = await _token()
+            async with httpx.AsyncClient(timeout=30.0) as c:
+                response = await c.get(f"https://open.feishu.cn/open-apis/im/v1/messages/{mid}",
+                                       headers={"Authorization": f"Bearer {tok}"})
+                data = response.json()
+            items = (data.get("data", {}) or {}).get("items", []) or []
+            body = (items[0].get("body", {}) or {}) if items else {}
+            card = _callback_mapping(body.get("content", ""))
+            if data.get("code") != 0:
+                message_error = f"feishu_code={data.get('code')}"
+        except Exception as exc:
+            message_error = type(exc).__name__
+    nodes = list(_walk_card(card)) if card else []
+    title = (((card.get("header", {}) or {}).get("title", {}) or {}).get("content", ""))
+    final_reply = _x(f, "最终回复")
+    return {
+        "ok": True,
+        "record_id": rid,
+        "record_url": _record_url(rid),
+        "run_id": _x(f, "线程ID").removeprefix(SOCIAL_REVIEW_CLAIM_PREFIX),
+        "message_id": mid,
+        "ticket_status": _x(f, "状态"),
+        "review_saved": bool(final_reply),
+        "reviewer": _x(f, "回复人"),
+        "reviewed_at": _x(f, "回复时间"),
+        "reviewed_draft_length": len(final_reply),
+        "reviewed_draft_sha256": hashlib.sha256(final_reply.encode("utf-8")).hexdigest() if final_reply else "",
+        "customer_writes": 0,
+        "social_platform_writes": 0,
+        "card_readback": {
+            "ok": bool(card) and not message_error,
+            "error": message_error,
+            "title": title,
+            "form_count": sum(node.get("tag") == "form" for node in nodes),
+            "input_count": sum(node.get("tag") == "input" for node in nodes),
+            "button_count": sum(node.get("tag") == "button" for node in nodes),
+            "processed": "客服审核测试已处理" in title,
+        },
+    }
 
 
 async def run(limit: int = 10, rids: str = "") -> dict:
@@ -888,8 +998,11 @@ async def _handle_social_review_callback(event: dict, val: dict) -> dict:
             or val.get("test_mode") is not True):
         return _toast("安全参数不匹配，已拒绝处理", "error")
     operator = event.get("operator", {}) or {}
-    if (operator.get("union_id") or "") != OBSERVE_UNION:
+    if (operator.get("union_id") or "") != SOCIAL_REVIEW_FRANKIE_UNION:
         return _toast("P0-5B 单卡测试仅限 Frankie 操作", "error")
+    run_id = str(val.get("run_id") or "").strip()
+    if not run_id:
+        return _toast("缺少 P0-5B run ID，已拒绝处理", "error")
     try:
         rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                                which="notify")
@@ -904,8 +1017,11 @@ async def _handle_social_review_callback(event: dict, val: dict) -> dict:
         return _toast("原卡与测试工单不匹配，已拒绝处理", "error")
     msg_id = event_mid
     if _x(f, "最终回复"):
-        _spawn(_update_card(msg_id, _build_social_review_result_card(rid, f, duplicate=True)))
-        return _toast("该审核已经保存，无需重复点击")
+        patched = await _update_card(msg_id, _build_social_review_result_card(
+            rid, f, run_id=run_id, duplicate=True
+        ))
+        return _toast("该审核已经保存，无需重复点击" if patched else
+                      "审核已保存，但原卡回读更新失败，请技术侧检查", "success" if patched else "error")
     if _x(f, "状态") in ("已回复", "已解决", "已升级"):
         return _toast("测试工单已进入终态，不能再保存审核", "error")
     claim = f"social-review:{rid}"
@@ -923,14 +1039,20 @@ async def _handle_social_review_callback(event: dict, val: dict) -> dict:
         return _toast(f"草稿含未替换占位符「{ph}」，请改完再保存", "error")
     _inflight.add(claim)
     try:
+        reviewed_at = int(time.time() * 1000)
         await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                          {"fields": {"最终回复": reply[:5000],
-                                     "回复时间": int(time.time() * 1000),
+                                     "回复时间": reviewed_at,
                                      "回复人": "Frankie · P0-5B单卡测试"}}, which="notify")
         _recent[claim] = time.time()
         result_fields = dict(f)
         result_fields["最终回复"] = reply
-        _spawn(_update_card(msg_id, _build_social_review_result_card(rid, result_fields)))
+        result_fields["回复时间"] = reviewed_at
+        patched = await _update_card(msg_id, _build_social_review_result_card(
+            rid, result_fields, run_id=run_id, reviewed_at=reviewed_at
+        ))
+        if not patched:
+            return _toast("审核已保存，但原卡更新失败；未回复客户", "error")
         return _toast("审核结果已保存 ✓ 未回复客户，待人工发送")
     except Exception:
         _recent.pop(claim, None)

@@ -33,6 +33,10 @@ class CsSocialReviewCardTests(unittest.TestCase):
         self.assertIn("🟢 [CUS·P3] 客服审核测试 · X", rendered)
         self.assertIn("只保存审核", rendered)
         self.assertIn("不回复客户", rendered)
+        self.assertIn("**风险:** R2", rendered)
+        self.assertIn("**仍缺事实:**", rendered)
+        self.assertIn("**禁止声明:**", rendered)
+        self.assertIn("**中文审核说明:**", rendered)
         self.assertIn("social_cs_review_save", rendered)
         self.assertIn('"send_mode": "manual_only"', rendered)
         self.assertIn('"frankie_only": true', rendered)
@@ -80,7 +84,7 @@ class CsSocialReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
 
         event = {
             "open_message_id": "om_p0_5b_test",
-            "operator": {"union_id": cs_dispatch.OBSERVE_UNION},
+            "operator": {"union_id": cs_dispatch.SOCIAL_REVIEW_FRANKIE_UNION},
             "action": {
                 "value": {
                     "action": "social_cs_review_save",
@@ -114,6 +118,10 @@ class CsSocialReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         update.assert_awaited_once()
         rendered = json.dumps(update.await_args.args[1], ensure_ascii=False)
         self.assertIn("待人工发送", rendered)
+        self.assertIn("**审核人:** Frankie", rendered)
+        self.assertIn("**review:**", rendered)
+        self.assertIn("**run:** `P0-5B-TEST-001`", rendered)
+        self.assertIn("**replay:**", rendered)
         self.assertNotIn('"tag": "button"', rendered)
 
     async def test_duplicate_and_non_frankie_callbacks_do_not_write(self):
@@ -135,7 +143,7 @@ class CsSocialReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
 
         event = {
             "open_message_id": "om_p0_5b_test",
-            "operator": {"union_id": cs_dispatch.OBSERVE_UNION},
+            "operator": {"union_id": cs_dispatch.SOCIAL_REVIEW_FRANKIE_UNION},
             "action": {
                 "value": {
                     "action": "social_cs_review_save",
@@ -198,10 +206,76 @@ class CsSocialReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(repeated["sent"])
         self.assertTrue(repeated["duplicate"])
         send.assert_awaited_once()
-        self.assertEqual(cs_dispatch.OBSERVE_UNION, send.await_args.args[0])
-        put = next(call for call in calls if call[0] == "PUT")
+        self.assertEqual(cs_dispatch.SOCIAL_REVIEW_FRANKIE_UNION, send.await_args.args[0])
+        self.assertEqual("social-review:rec_test:P0-5B-TEST-002",
+                         send.await_args.kwargs["idempotency_key"])
+        claim_put = next(call for call in calls
+                         if call[0] == "PUT" and "线程ID" in call[2]["fields"])
+        self.assertEqual("P0-5B-CARD-CLAIM:P0-5B-TEST-002",
+                         claim_put[2]["fields"]["线程ID"])
+        put = next(call for call in calls
+                   if call[0] == "PUT" and "卡片消息ID" in call[2]["fields"])
         self.assertEqual({"卡片消息ID": "om_p0_5b_single", "状态": "待回"},
                          put[2]["fields"])
+
+    async def test_readback_proves_processed_card_has_no_controls(self):
+        processed_card = cs_dispatch._build_social_review_result_card(
+            "rec_test",
+            {
+                "工单ID": "TEST-P0-5B-20260826-003",
+                "客户标识": "P0-5B TEST · 非真实客户",
+                "品牌": "POWKONG",
+                "最终回复": "Reviewed synthetic draft text.",
+                "回复时间": 1787702400000,
+            },
+            run_id="P0-5B-TEST-003",
+            reviewed_at=1787702400000,
+        )
+        fields = {
+            "工单ID": "TEST-P0-5B-20260826-003",
+            "客户标识": "P0-5B TEST · 非真实客户",
+            "品牌": "POWKONG",
+            "状态": "待回",
+            "线程ID": "P0-5B-CARD-CLAIM:P0-5B-TEST-003",
+            "卡片消息ID": "om_p0_5b_readback",
+            "最终回复": "Reviewed synthetic draft text.",
+            "回复人": "Frankie · P0-5B单卡测试",
+            "回复时间": 1787702400000,
+        }
+
+        class FakeResponse:
+            def json(self):
+                return {"code": 0, "data": {"items": [{"body": {
+                    "content": json.dumps(processed_card, ensure_ascii=False)
+                }}]}}
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return FakeResponse()
+
+        with patch.object(cs_dispatch.feishu, "api", new=AsyncMock(return_value={
+                 "data": {"record": {"fields": fields}}
+             })), \
+             patch.object(cs_dispatch, "_token", new=AsyncMock(return_value="test-token")), \
+             patch.object(cs_dispatch.httpx, "AsyncClient", return_value=FakeClient()):
+            result = await cs_dispatch.read_social_review_test("rec_test")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["review_saved"])
+        self.assertEqual("待回", result["ticket_status"])
+        self.assertEqual(0, result["customer_writes"])
+        self.assertEqual(0, result["social_platform_writes"])
+        self.assertTrue(result["card_readback"]["ok"])
+        self.assertTrue(result["card_readback"]["processed"])
+        self.assertEqual(0, result["card_readback"]["form_count"])
+        self.assertEqual(0, result["card_readback"]["input_count"])
+        self.assertEqual(0, result["card_readback"]["button_count"])
 
 
 if __name__ == "__main__":
