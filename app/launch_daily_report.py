@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import time
 import urllib.parse
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
@@ -42,11 +43,12 @@ ACTIVITY_FIELDS = [
 ]
 PARTICIPANT_FIELDS = [
     "活动ID", "参与状态", "审核结论", "系统审核分流", "审核时间",
-    "关联邮件草稿", "承诺上稿时间", "实际上稿时间",
+    "关联KOL", "产品家族ID", "关联邮件草稿", "承诺上稿时间", "实际上稿时间",
 ]
 DRAFT_FIELDS = [
     "邮件草稿来源", "邮件草稿状态", "发送状态", "建议发送时间",
-    "发送时间", "是否回复", "回复日期", "回复意图", "寄样阶段",
+    "生成时间", "发送时间", "是否回复", "回复日期", "回复意图", "寄样阶段",
+    "回复原文", "回复目标MsgID", "审核路径", "卡片已标记已审", "关联KOL", "关联产品",
 ]
 POSITIVE_REPLY_INTENTS = {"感兴趣", "要报价"}
 SHIPPED_STAGES = {"已发货", "在途", "已签收", "已产出"}
@@ -93,6 +95,13 @@ def _ids(value: Any) -> list[str]:
     return []
 
 
+def _bounded_ids(values: set[str] | list[str], *, limit: int = 3) -> str:
+    ordered = sorted({str(value) for value in values if value})
+    shown = "、".join(ordered[:limit])
+    remaining = len(ordered) - limit
+    return f"{shown}（另{remaining}项）" if remaining > 0 else shown
+
+
 def _in_day(value: Any, day_start_ms: int, day_end_ms: int) -> bool:
     stamp = _ts(value)
     return day_start_ms <= stamp < day_end_ms
@@ -112,6 +121,141 @@ def _is_active_participant(record: dict) -> bool:
         _text(fields.get("参与状态")) in ACTIVE_PARTICIPANT_STATES
         and _text(fields.get("审核结论")) in APPROVED_REVIEW_STATES
     )
+
+
+def _draft_identity_parts(record: dict) -> tuple[set[str], set[str]]:
+    fields = record.get("fields") or {}
+    return set(_ids(fields.get("关联KOL"))), set(_ids(fields.get("关联产品")))
+
+
+def _draft_identity_keys(record: dict) -> set[tuple[str, str]]:
+    """仅返回唯一KOL＋唯一产品；多值或缺值时不做笛卡尔积猜测。"""
+    contact_ids, product_ids = _draft_identity_parts(record)
+    if len(contact_ids) != 1 or len(product_ids) != 1:
+        return set()
+    return {(next(iter(contact_ids)), next(iter(product_ids)))}
+
+
+def _source_reply_message_id(record: dict) -> str:
+    body = _text((record.get("fields") or {}).get("回复原文"))
+    match = re.match(r"^\[MID:([^\]]+)\]", body)
+    return match.group(1).strip() if match else ""
+
+
+def _reply_target_message_id(record: dict) -> str:
+    return _text((record.get("fields") or {}).get("回复目标MsgID"))
+
+
+def _campaign_reply_evidence(
+    participants: list[dict],
+    drafts_by_id: dict[str, dict],
+    *,
+    excluded_draft_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """用活动直接关联cold上的入站MID建立reply的唯一归属证据。"""
+    excluded = excluded_draft_ids or set()
+    raw_sources: dict[str, list[tuple[str, tuple[str, str]]]] = {}
+    candidate_keys: set[tuple[str, str]] = set()
+    invalid_identity_source_ids: set[str] = set()
+    shared_source_message_ids: dict[str, str] = {}
+    duplicate_source_message_ids: set[str] = set()
+    duplicate_source_draft_ids: set[str] = set()
+    invalid_keys: set[tuple[str, str]] = set()
+    invalid_message_ids: set[str] = set()
+    participant_keys_by_draft: dict[str, list[tuple[str, str] | None]] = {}
+    for participant in participants:
+        if not _is_active_participant(participant):
+            continue
+        fields = participant.get("fields") or {}
+        contact_ids = set(_ids(fields.get("关联KOL")))
+        product_id = _text(fields.get("产品家族ID"))
+        participant_key = (
+            (next(iter(contact_ids)), product_id)
+            if len(contact_ids) == 1 and product_id else None
+        )
+        if participant_key:
+            candidate_keys.add(participant_key)
+        for draft_id in _ids(fields.get("关联邮件草稿")):
+            if draft_id in excluded:
+                continue
+            participant_keys_by_draft.setdefault(draft_id, []).append(participant_key)
+
+    for draft_id, participant_keys in participant_keys_by_draft.items():
+        draft = drafts_by_id.get(draft_id) or {}
+        draft_fields = draft.get("fields") or {}
+        if _text(draft_fields.get("邮件草稿来源")).lower() != "cold":
+            continue
+        draft_keys = _draft_identity_keys(draft)
+        draft_key = next(iter(draft_keys)) if len(draft_keys) == 1 else None
+        message_id = _source_reply_message_id(draft)
+        replied = bool(draft_fields.get("是否回复")) or bool(message_id)
+        if not replied:
+            continue
+        shared_source = len(participant_keys) != 1
+        participant_key = participant_keys[0] if len(participant_keys) == 1 else None
+        if (
+            shared_source
+            or not participant_key
+            or not draft_key
+            or draft_key != participant_key
+            or not message_id
+        ):
+            invalid_identity_source_ids.add(draft_id)
+            invalid_keys.update(key for key in participant_keys if key)
+            if draft_key:
+                invalid_keys.add(draft_key)
+            if message_id:
+                invalid_message_ids.add(message_id)
+            if shared_source:
+                shared_source_message_ids[draft_id] = message_id
+            continue
+        raw_sources.setdefault(message_id, []).append((draft_id, draft_key))
+
+    sources: dict[str, tuple[str, str]] = {}
+    source_ids: dict[str, str] = {}
+    for message_id, rows in raw_sources.items():
+        if len(rows) != 1:
+            duplicate_source_message_ids.add(message_id)
+            duplicate_source_draft_ids.update(draft_id for draft_id, _ in rows)
+            invalid_message_ids.add(message_id)
+            invalid_keys.update(key for _, key in rows)
+            continue
+        sources[message_id] = rows[0][1]
+        source_ids[message_id] = rows[0][0]
+    return {
+        "sources": sources,
+        "source_ids": source_ids,
+        "candidate_keys": candidate_keys,
+        "invalid_identity_source_ids": invalid_identity_source_ids,
+        "shared_source_message_ids": shared_source_message_ids,
+        "duplicate_source_message_ids": duplicate_source_message_ids,
+        "duplicate_source_draft_ids": duplicate_source_draft_ids,
+        "invalid_keys": invalid_keys,
+        "invalid_message_ids": invalid_message_ids,
+    }
+
+
+def _is_live_human_reply_draft(record: dict) -> bool:
+    """当前仍需运营处理的reply草稿；历史回复意图不属于实时队列。"""
+    fields = record.get("fields") or {}
+    return (
+        _text(fields.get("邮件草稿来源")).lower() == "reply"
+        and _text(fields.get("邮件草稿状态")) == "待审"
+        and _text(fields.get("审核路径")) == "待人审"
+        and not bool(fields.get("卡片已标记已审"))
+    )
+
+
+def _reply_matches_campaign(
+    record: dict,
+    evidence: dict[str, Any],
+) -> bool:
+    keys = _draft_identity_keys(record)
+    if len(keys) != 1:
+        return False
+    key = next(iter(keys))
+    message_id = _reply_target_message_id(record)
+    return bool(message_id and evidence["sources"].get(message_id) == key)
 
 
 def _pct(numerator: int, denominator: int) -> float:
@@ -182,6 +326,7 @@ def summarize_campaign(
     quota_error: str = "",
     excluded_draft_ids: set[str] | None = None,
     source_errors: list[str] | None = None,
+    source_diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict:
     """按已确认口径汇总一个活动，不产生任何写入。"""
     activity_fields = activity.get("fields") or {}
@@ -211,9 +356,9 @@ def summarize_campaign(
     commitments = 0
     actual_posts = 0
     on_time_posts = 0
-    reply_pending = 0
     awaiting_post_date = 0
     shipped = 0
+    excluded = excluded_draft_ids or set()
 
     for participant in active:
         fields = participant.get("fields") or {}
@@ -233,7 +378,6 @@ def summarize_campaign(
             actual_posts += 1
             on_time_posts += int(window_end > 0 and actual <= window_end)
 
-        excluded = excluded_draft_ids or set()
         linked_drafts = [
             drafts_by_id.get(draft_id) or {}
             for draft_id in participant_draft_ids
@@ -254,8 +398,17 @@ def summarize_campaign(
         ]
         if any(intent in POSITIVE_REPLY_INTENTS for intent in reply_intents):
             awaiting_post_date += 1
-        elif reply_intents:
-            reply_pending += 1
+
+    campaign_evidence = _campaign_reply_evidence(
+        active, drafts_by_id, excluded_draft_ids=excluded,
+    )
+    reply_pending = sum(
+        1
+        for draft_id, draft in drafts_by_id.items()
+        if draft_id not in excluded
+        and _is_live_human_reply_draft(draft)
+        and _reply_matches_campaign(draft, campaign_evidence)
+    )
 
     draft_ids.difference_update(excluded_draft_ids or set())
 
@@ -313,6 +466,7 @@ def summarize_campaign(
         "post_progress_pct": _pct(on_time_posts, target_posts),
         "quota_progress_pct": _pct(quota_sent, quota_cap),
         "data_errors": data_errors,
+        "data_error_details": source_diagnostics or [],
         "next_action_owner": "独立站运营专员",
     }
     snapshot["status"] = status_for(snapshot)
@@ -413,7 +567,7 @@ def build_card(snapshots: list[dict], *, day: date) -> dict:
                     f"**当前可发送池**　{row.get('ready_due', 0)} 人　　"
                     f"**今日 / 累计活动开发信**　{row.get('sent_today', 0)} / {row.get('sent_total', 0)} 封\n"
                     f"**今日 / 累计回复**　{row.get('replies_today', 0)} / {row.get('replies_total', 0)}　　"
-                    f"**回复待处理**　{row.get('reply_pending', 0)} 人\n"
+                    f"**回复待处理**　{row.get('reply_pending', 0)} 条\n"
                     f"**待确认上稿日**　{row.get('awaiting_post_date', 0)} 人　　"
                     f"**明确承诺上稿**　{row.get('commitments', 0)} 人\n"
                     f"**已寄样**　{row.get('shipped', 0)} 人　　"
@@ -721,11 +875,12 @@ async def run(*, day: date | str | None = None, notify: bool = False, frankie_on
     day_start_ms = int(day_start.timestamp() * 1000)
     day_end_ms = int(day_end.timestamp() * 1000)
 
-    active_campaign_ids = {
-        _text((activity.get("fields") or {}).get("活动ID"))
-        for activity in activities
-        if _text((activity.get("fields") or {}).get("活动ID"))
-    }
+    activities_by_campaign_id: dict[str, list[dict]] = {}
+    for activity in activities:
+        campaign_id = _text((activity.get("fields") or {}).get("活动ID"))
+        if campaign_id:
+            activities_by_campaign_id.setdefault(campaign_id, []).append(activity)
+    active_campaign_ids = set(activities_by_campaign_id)
     draft_campaigns: dict[str, set[str]] = {}
     for participant in participants:
         if not _is_active_participant(participant):
@@ -736,6 +891,115 @@ async def run(*, day: date | str | None = None, notify: bool = False, frankie_on
             continue
         for draft_id in set(_ids(fields.get("关联邮件草稿"))):
             draft_campaigns.setdefault(draft_id, set()).add(campaign_id)
+    campaign_evidence = {
+        campaign_id: _campaign_reply_evidence(
+            [
+                row for row in participants
+                if _text((row.get("fields") or {}).get("活动ID")) == campaign_id
+            ],
+            drafts,
+        )
+        for campaign_id in active_campaign_ids
+    }
+    source_mid_campaigns: dict[str, set[str]] = {}
+    for campaign_id, evidence in campaign_evidence.items():
+        for message_id in evidence["sources"]:
+            source_mid_campaigns.setdefault(message_id, set()).add(campaign_id)
+    ambiguous_source_mids = {
+        message_id: campaign_ids
+        for message_id, campaign_ids in source_mid_campaigns.items()
+        if len(campaign_ids) > 1
+    }
+    for message_id, campaign_ids in ambiguous_source_mids.items():
+        for campaign_id in campaign_ids:
+            evidence = campaign_evidence[campaign_id]
+            evidence["source_ids"].pop(message_id, None)
+            evidence["sources"].pop(message_id, None)
+            evidence["invalid_message_ids"].add(message_id)
+
+    live_reply_ids_by_mid: dict[str, set[str]] = {}
+    for draft_id, draft in drafts.items():
+        if not _is_live_human_reply_draft(draft):
+            continue
+        message_id = _reply_target_message_id(draft)
+        if message_id:
+            live_reply_ids_by_mid.setdefault(message_id, set()).add(draft_id)
+    duplicate_live_reply_ids = {
+        draft_id
+        for draft_ids in live_reply_ids_by_mid.values()
+        if len(draft_ids) > 1
+        for draft_id in draft_ids
+    }
+    malformed_reply_campaigns: dict[str, set[str]] = {
+        campaign_id: set() for campaign_id in active_campaign_ids
+    }
+    duplicate_live_reply_mids_by_campaign: dict[str, set[str]] = {
+        campaign_id: set() for campaign_id in active_campaign_ids
+    }
+    for draft_id, draft in drafts.items():
+        if not _is_live_human_reply_draft(draft):
+            continue
+        reply_keys = _draft_identity_keys(draft)
+        reply_message_id = _reply_target_message_id(draft)
+        source_campaign_ids = {
+            campaign_id
+            for campaign_id, evidence in campaign_evidence.items()
+            if reply_message_id and reply_message_id in evidence["sources"]
+        }
+        invalid_mid_campaign_ids = {
+            campaign_id
+            for campaign_id, evidence in campaign_evidence.items()
+            if reply_message_id and reply_message_id in evidence["invalid_message_ids"]
+        }
+        direct_mid_campaign_ids = source_campaign_ids or invalid_mid_campaign_ids
+        if draft_id in duplicate_live_reply_ids:
+            target_campaign_ids = set(direct_mid_campaign_ids)
+            if not target_campaign_ids and len(reply_keys) == 1:
+                reply_key = next(iter(reply_keys))
+                target_campaign_ids = {
+                    campaign_id
+                    for campaign_id, evidence in campaign_evidence.items()
+                    if reply_key in evidence["candidate_keys"]
+                }
+            for campaign_id in target_campaign_ids:
+                duplicate_live_reply_mids_by_campaign[campaign_id].add(reply_message_id)
+            continue
+        if len(reply_keys) != 1:
+            contacts, products = _draft_identity_parts(draft)
+            attributed = False
+            if direct_mid_campaign_ids:
+                for campaign_id in direct_mid_campaign_ids:
+                    malformed_reply_campaigns[campaign_id].add(draft_id)
+                continue
+            for campaign_id, evidence in campaign_evidence.items():
+                campaign_contacts = {key[0] for key in evidence["candidate_keys"]}
+                campaign_products = {key[1] for key in evidence["candidate_keys"]}
+                if (
+                    (contacts and contacts & campaign_contacts)
+                    or (products and products & campaign_products)
+                ):
+                    malformed_reply_campaigns[campaign_id].add(draft_id)
+                    attributed = True
+            if not attributed and not contacts and not products:
+                for campaign_id in active_campaign_ids:
+                    malformed_reply_campaigns[campaign_id].add(draft_id)
+            continue
+        reply_key = next(iter(reply_keys))
+        if source_campaign_ids:
+            for campaign_id in source_campaign_ids:
+                evidence = campaign_evidence[campaign_id]
+                if evidence["sources"].get(reply_message_id) == reply_key:
+                    draft_campaigns.setdefault(draft_id, set()).add(campaign_id)
+                else:
+                    malformed_reply_campaigns[campaign_id].add(draft_id)
+            continue
+        if invalid_mid_campaign_ids:
+            for campaign_id in invalid_mid_campaign_ids:
+                malformed_reply_campaigns[campaign_id].add(draft_id)
+            continue
+        for campaign_id, evidence in campaign_evidence.items():
+            if reply_key in evidence["candidate_keys"]:
+                malformed_reply_campaigns[campaign_id].add(draft_id)
     ambiguous_drafts = {
         draft_id: campaign_ids
         for draft_id, campaign_ids in draft_campaigns.items()
@@ -747,7 +1011,13 @@ async def run(*, day: date | str | None = None, notify: bool = False, frankie_on
         fields = activity.get("fields") or {}
         campaign_id = _text(fields.get("活动ID"))
         brand = _text(fields.get("品牌")).upper()
-        campaign_participants = [
+        duplicate_activity_records = activities_by_campaign_id.get(campaign_id) or []
+        duplicate_activity_record_ids = sorted({
+            str(row.get("record_id") or "<缺失record_id>")
+            for row in duplicate_activity_records
+        })
+        duplicate_campaign_id = len(duplicate_activity_records) > 1
+        campaign_participants = [] if duplicate_campaign_id else [
             row for row in participants
             if _text((row.get("fields") or {}).get("活动ID")) == campaign_id
         ]
@@ -755,11 +1025,143 @@ async def run(*, day: date | str | None = None, notify: bool = False, frankie_on
             draft_id for draft_id, campaign_ids in ambiguous_drafts.items()
             if campaign_id in campaign_ids
         }
+        campaign_malformed = malformed_reply_campaigns.get(campaign_id) or set()
+        campaign_duplicate_reply_mids = (
+            duplicate_live_reply_mids_by_campaign.get(campaign_id) or set()
+        )
+        campaign_duplicate_reply_ids = {
+            draft_id
+            for message_id in campaign_duplicate_reply_mids
+            for draft_id in live_reply_ids_by_mid.get(message_id, set())
+        }
+        campaign_invalid_identity_sources = (
+            campaign_evidence.get(campaign_id, {}).get("invalid_identity_source_ids") or set()
+        )
+        campaign_shared_source_messages = (
+            campaign_evidence.get(campaign_id, {}).get("shared_source_message_ids") or {}
+        )
+        campaign_shared_source_ids = set(campaign_shared_source_messages)
+        campaign_invalid_identity_sources = (
+            campaign_invalid_identity_sources - campaign_shared_source_ids
+        )
+        campaign_duplicate_source_mids = (
+            campaign_evidence.get(campaign_id, {}).get("duplicate_source_message_ids") or set()
+        )
+        campaign_duplicate_source_ids = (
+            campaign_evidence.get(campaign_id, {}).get("duplicate_source_draft_ids") or set()
+        )
         source_errors = []
+        source_diagnostics: list[dict[str, Any]] = []
+        if duplicate_campaign_id:
+            source_errors.append(
+                f"活动ID重复，无法判断参与者和草稿属于哪条活动记录，"
+                "该活动全部业务统计已暂停"
+                f"（活动记录:{_bounded_ids(duplicate_activity_record_ids)}）"
+            )
+            source_diagnostics.append({
+                "kind": "duplicate_active_campaign_id",
+                "message_ids": [],
+                "draft_ids": [],
+                "activity_record_ids": duplicate_activity_record_ids,
+            })
+        campaign_ambiguous_source_mids = {
+            message_id
+            for message_id, campaign_ids in ambiguous_source_mids.items()
+            if campaign_id in campaign_ids
+        }
+        if campaign_ambiguous_source_mids:
+            source_errors.append(
+                f"{len(campaign_ambiguous_source_mids)}个原邮件ID跨活动重复关联，"
+                "相关reply已从统计中排除"
+                f"（MID:{_bounded_ids(campaign_ambiguous_source_mids)}）"
+            )
+            source_diagnostics.append({
+                "kind": "cross_campaign_source_mid",
+                "message_ids": sorted(campaign_ambiguous_source_mids),
+                "draft_ids": [],
+            })
         if campaign_ambiguous:
             source_errors.append(
                 f"{len(campaign_ambiguous)}个草稿跨活动重复关联，已从统计中排除"
+                f"（草稿:{_bounded_ids(campaign_ambiguous)}）"
             )
+            source_diagnostics.append({
+                "kind": "cross_campaign_draft",
+                "message_ids": [],
+                "draft_ids": sorted(campaign_ambiguous),
+            })
+        if campaign_malformed:
+            source_errors.append(
+                f"{len(campaign_malformed)}个待审reply草稿缺少唯一KOL/产品或原邮件ID，"
+                "或与活动cold归属不一致，已从统计中排除"
+                f"（草稿:{_bounded_ids(campaign_malformed)}）"
+            )
+            source_diagnostics.append({
+                "kind": "malformed_reply",
+                "message_ids": sorted({
+                    _reply_target_message_id(drafts.get(draft_id) or {})
+                    for draft_id in campaign_malformed
+                    if _reply_target_message_id(drafts.get(draft_id) or {})
+                }),
+                "draft_ids": sorted(campaign_malformed),
+            })
+        if campaign_duplicate_reply_mids:
+            source_errors.append(
+                f"{len(campaign_duplicate_reply_mids)}个原邮件ID对应"
+                f"{len(campaign_duplicate_reply_ids)}条待审reply，全部从统计中排除"
+                f"（MID:{_bounded_ids(campaign_duplicate_reply_mids)}；"
+                f"草稿:{_bounded_ids(campaign_duplicate_reply_ids)}）"
+            )
+            source_diagnostics.append({
+                "kind": "duplicate_live_reply",
+                "message_ids": sorted(campaign_duplicate_reply_mids),
+                "draft_ids": sorted(campaign_duplicate_reply_ids),
+            })
+        if campaign_shared_source_ids:
+            shared_message_ids = {
+                message_id for message_id in campaign_shared_source_messages.values()
+                if message_id
+            }
+            source_errors.append(
+                f"{len(campaign_shared_source_ids)}个已回复cold草稿关联多个参与记录，"
+                "整条来源及相关reply已从统计中排除"
+                f"（草稿:{_bounded_ids(campaign_shared_source_ids)}；"
+                f"MID:{_bounded_ids(shared_message_ids)}）"
+            )
+            source_diagnostics.append({
+                "kind": "shared_cold_source",
+                "message_ids": sorted(shared_message_ids),
+                "draft_ids": sorted(campaign_shared_source_ids),
+            })
+        if campaign_invalid_identity_sources:
+            invalid_identity_mids = {
+                _source_reply_message_id(drafts.get(draft_id) or {})
+                for draft_id in campaign_invalid_identity_sources
+                if _source_reply_message_id(drafts.get(draft_id) or {})
+            }
+            source_errors.append(
+                f"{len(campaign_invalid_identity_sources)}个已回复cold草稿归属字段缺失、不唯一，"
+                "或与活动参与记录不一致；该cold来源已排除，"
+                "如有其他唯一有效直接证据，reply仍按有效证据统计"
+                f"（草稿:{_bounded_ids(campaign_invalid_identity_sources)}）"
+            )
+            source_diagnostics.append({
+                "kind": "invalid_cold_identity",
+                "message_ids": sorted(invalid_identity_mids),
+                "draft_ids": sorted(campaign_invalid_identity_sources),
+            })
+        if campaign_duplicate_source_mids:
+            source_errors.append(
+                f"{len(campaign_duplicate_source_mids)}个原邮件ID对应多条有效cold来源，"
+                "相关reply已从统计中排除"
+                f"（MID:{_bounded_ids(campaign_duplicate_source_mids)}；"
+                f"草稿:{_bounded_ids(campaign_duplicate_source_ids)}）"
+            )
+            source_diagnostics.append({
+                "kind": "duplicate_cold_source_mid",
+                "message_ids": sorted(campaign_duplicate_source_mids),
+                "draft_ids": sorted(campaign_duplicate_source_ids),
+            })
         snapshots.append(summarize_campaign(
             activity,
             campaign_participants,
@@ -769,8 +1171,14 @@ async def run(*, day: date | str | None = None, notify: bool = False, frankie_on
             now_ms=now_ms,
             day_start_ms=day_start_ms,
             day_end_ms=day_end_ms,
-            excluded_draft_ids=campaign_ambiguous,
+            excluded_draft_ids=(
+                campaign_ambiguous
+                | campaign_malformed
+                | campaign_duplicate_reply_ids
+                | campaign_shared_source_ids
+            ),
             source_errors=source_errors,
+            source_diagnostics=source_diagnostics,
         ))
 
     card = build_card(snapshots, day=report_day)

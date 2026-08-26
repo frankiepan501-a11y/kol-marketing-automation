@@ -129,8 +129,12 @@ class LaunchDailyReportTests(unittest.TestCase):
 
     def test_funnel_phases_use_explicit_reply_intent_commitment_shipping_and_post_facts(self):
         participants = [
-            self._participant("p1", **{"关联邮件草稿": ["d1"]}),
-            self._participant("p2", **{"关联邮件草稿": ["d2"]}),
+            self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1", "关联邮件草稿": ["d1"],
+            }),
+            self._participant("p2", **{
+                "关联KOL": ["k2"], "产品家族ID": "product1", "关联邮件草稿": ["d2"],
+            }),
             self._participant("p3", **{
                 "关联邮件草稿": ["d3"],
                 "承诺上稿时间": _ms("2026-09-10T12:00:00+08:00"),
@@ -149,6 +153,8 @@ class LaunchDailyReportTests(unittest.TestCase):
             "d2": {"record_id": "d2", "fields": {
                 "邮件草稿来源": "cold", "发送状态": "已发",
                 "是否回复": True, "回复意图": "质疑/澄清",
+                "回复原文": "[MID:mid-r2] Could you clarify?",
+                "关联KOL": ["k2"], "关联产品": ["product1"],
             }},
             "d3": {"record_id": "d3", "fields": {
                 "邮件草稿来源": "cold", "发送状态": "已发",
@@ -161,6 +167,13 @@ class LaunchDailyReportTests(unittest.TestCase):
             "d5": {"record_id": "d5", "fields": {
                 "邮件草稿来源": "cold", "发送状态": "已发",
                 "是否回复": True, "回复意图": "感兴趣",
+            }},
+            "r2": {"record_id": "r2", "fields": {
+                "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                "审核路径": "待人审", "生成时间": self.start + 50_000,
+                "关联KOL": ["k2"],
+                "关联产品": ["product1"], "卡片已标记已审": False,
+                "回复目标MsgID": "mid-r2",
             }},
         }
 
@@ -177,6 +190,569 @@ class LaunchDailyReportTests(unittest.TestCase):
         self.assertEqual(1, snap["actual_posts"])
         self.assertEqual("独立站运营专员", snap["next_action_owner"])
         self.assertIn("回复", snap["funnel_next_action"])
+
+    def test_reply_pending_counts_live_review_draft_even_when_cold_reply_is_positive(self):
+        participants = [
+            self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold1"],
+            }),
+        ]
+        drafts = {
+            "cold1": {"record_id": "cold1", "fields": {
+                "邮件草稿来源": "cold", "发送状态": "已发",
+                "是否回复": True, "回复意图": "感兴趣",
+                "回复原文": "[MID:mid-live] Sounds good",
+                "关联KOL": ["k1"], "关联产品": ["product1"],
+            }},
+            "reply1": {"record_id": "reply1", "fields": {
+                "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                "审核路径": "待人审", "生成时间": self.start + 20_000,
+                "关联KOL": ["k1"],
+                "关联产品": ["product1"], "卡片已标记已审": False,
+                "回复目标MsgID": "mid-live",
+            }},
+        }
+
+        snap = self.report.summarize_campaign(
+            self.activity, participants, drafts,
+            quota={"sent_24h": 10, "cap": 80}, now_ms=self.now,
+            day_start_ms=self.start, day_end_ms=self.end,
+        )
+
+        self.assertEqual(1, snap["reply_pending"])
+        self.assertEqual(1, snap["awaiting_post_date"])
+
+    def test_reply_pending_ignores_historical_nonpositive_reply_after_review_is_resolved(self):
+        participants = [
+            self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold1"],
+            }),
+        ]
+        drafts = {
+            "cold1": {"record_id": "cold1", "fields": {
+                "邮件草稿来源": "cold", "发送状态": "已发",
+                "是否回复": True, "回复意图": "不明意图",
+                "关联KOL": ["k1"], "关联产品": ["product1"],
+            }},
+            "reply1": {"record_id": "reply1", "fields": {
+                "邮件草稿来源": "reply", "邮件草稿状态": "已发送",
+                "审核路径": "待人审", "关联KOL": ["k1"],
+                "关联产品": ["product1"], "卡片已标记已审": True,
+            }},
+        }
+
+        snap = self.report.summarize_campaign(
+            self.activity, participants, drafts,
+            quota={"sent_24h": 10, "cap": 80}, now_ms=self.now,
+            day_start_ms=self.start, day_end_ms=self.end,
+        )
+
+        self.assertEqual(0, snap["reply_pending"])
+
+    def test_late_old_reply_is_not_reassigned_to_reused_kol_product(self):
+        participants = [
+            self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["current-cold"],
+            }),
+        ]
+        drafts = {
+            "current-cold": {"record_id": "current-cold", "fields": {
+                "邮件草稿来源": "cold", "发送状态": "已发",
+                "发送时间": self.start + 20_000,
+                "回复原文": "[MID:mid-current] Current campaign reply",
+                "关联KOL": ["k1"], "关联产品": ["product1"],
+            }},
+            "old-reply": {"record_id": "old-reply", "fields": {
+                "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                "审核路径": "待人审", "生成时间": self.start + 30_000,
+                "关联KOL": ["k1"], "关联产品": ["product1"],
+                "卡片已标记已审": False,
+                "回复目标MsgID": "mid-old-campaign",
+            }},
+        }
+
+        snap = self.report.summarize_campaign(
+            self.activity, participants, drafts,
+            quota={"sent_24h": 10, "cap": 80}, now_ms=self.now,
+            day_start_ms=self.start, day_end_ms=self.end,
+        )
+
+        self.assertEqual(0, snap["reply_pending"])
+
+    def test_replied_cold_missing_identity_is_excluded_and_reported(self):
+        source = {
+            "activities": [self.activity],
+            "participants": [self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold1"],
+            })],
+            "drafts": {
+                "cold1": {"record_id": "cold1", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "是否回复": True, "回复原文": "[MID:mid-1] Reply",
+                }},
+                "reply1": {"record_id": "reply1", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "关联KOL": ["k1"],
+                    "关联产品": ["product1"], "卡片已标记已审": False,
+                    "回复目标MsgID": "mid-1",
+                }},
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        snapshot = result["snapshots"][0]
+        self.assertEqual(0, snapshot["reply_pending"])
+        self.assertTrue(any("cold草稿归属" in error for error in snapshot["data_errors"]))
+
+    def test_cold_identity_mismatch_with_participant_is_excluded_and_reported(self):
+        source = {
+            "activities": [self.activity],
+            "participants": [self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold1"],
+            })],
+            "drafts": {
+                "cold1": {"record_id": "cold1", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "是否回复": True, "回复原文": "[MID:mid-1] Reply",
+                    "关联KOL": ["k-other"], "关联产品": ["product1"],
+                }},
+                "reply1": {"record_id": "reply1", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "关联KOL": ["k-other"],
+                    "关联产品": ["product1"], "卡片已标记已审": False,
+                    "回复目标MsgID": "mid-1",
+                }},
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        snapshot = result["snapshots"][0]
+        self.assertEqual(0, snapshot["reply_pending"])
+        self.assertTrue(any("cold草稿归属" in error for error in snapshot["data_errors"]))
+
+    def test_live_reply_with_multivalue_identity_is_excluded_and_reported(self):
+        source = {
+            "activities": [self.activity],
+            "participants": [
+                self._participant("p1", **{
+                    "关联KOL": ["k1"], "产品家族ID": "product1",
+                    "关联邮件草稿": ["cold1"],
+                }),
+            ],
+            "drafts": {
+                "cold1": {"record_id": "cold1", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "发送时间": self.start + 10_000,
+                    "回复原文": "[MID:mid-multi] Reply",
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                }},
+                "reply1": {"record_id": "reply1", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "生成时间": self.start + 20_000,
+                    "关联KOL": ["k1", "k2"], "关联产品": ["product1"],
+                    "卡片已标记已审": False,
+                    "回复目标MsgID": "mid-multi",
+                }},
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        snapshot = result["snapshots"][0]
+        self.assertEqual(0, snapshot["reply_pending"])
+        self.assertTrue(any("缺少唯一KOL/产品" in error for error in snapshot["data_errors"]))
+
+    def test_live_reply_missing_identity_with_exact_mid_is_excluded_and_reported(self):
+        source = {
+            "activities": [self.activity],
+            "participants": [self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold1"],
+            })],
+            "drafts": {
+                "cold1": {"record_id": "cold1", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "是否回复": True, "回复原文": "[MID:mid-missing] Reply",
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                }},
+                "reply1": {"record_id": "reply1", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "卡片已标记已审": False,
+                    "回复目标MsgID": "mid-missing",
+                }},
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        snapshot = result["snapshots"][0]
+        self.assertEqual(0, snapshot["reply_pending"])
+        self.assertTrue(any("缺少唯一KOL/产品" in error for error in snapshot["data_errors"]))
+
+    def test_live_reply_missing_mid_and_partial_identity_is_never_silent(self):
+        cases = [
+            ("missing_product", {"关联KOL": ["k1"]}),
+            ("missing_kol", {"关联产品": ["product1"]}),
+            ("missing_both", {}),
+        ]
+        for label, reply_identity in cases:
+            with self.subTest(label=label):
+                source = {
+                    "activities": [self.activity],
+                    "participants": [self._participant("p1", **{
+                        "关联KOL": ["k1"], "产品家族ID": "product1",
+                        "关联邮件草稿": ["cold1"],
+                    })],
+                    "drafts": {
+                        "cold1": {"record_id": "cold1", "fields": {
+                            "邮件草稿来源": "cold", "发送状态": "已发",
+                            "回复原文": "[MID:mid-source] Reply",
+                            "关联KOL": ["k1"], "关联产品": ["product1"],
+                        }},
+                        "reply1": {"record_id": "reply1", "fields": {
+                            "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                            "审核路径": "待人审", "卡片已标记已审": False,
+                            **reply_identity,
+                        }},
+                    },
+                    "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+                    "quota_errors": {},
+                }
+                with patch.object(
+                    self.report, "_load_report_source", new=AsyncMock(return_value=source),
+                ):
+                    result = asyncio.run(self.report.run(day=self.day))
+
+                snapshot = result["snapshots"][0]
+                self.assertEqual(0, snapshot["reply_pending"])
+                self.assertTrue(any(
+                    "缺少唯一KOL/产品" in error
+                    for error in snapshot["data_errors"]
+                ))
+
+    def test_live_reply_with_unknown_mid_is_excluded_and_reported(self):
+        source = {
+            "activities": [self.activity],
+            "participants": [self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold1"],
+            })],
+            "drafts": {
+                "cold1": {"record_id": "cold1", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "回复原文": "[MID:mid-current] Current reply",
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                }},
+                "reply1": {"record_id": "reply1", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "卡片已标记已审": False,
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                    "回复目标MsgID": "mid-orphan",
+                }},
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        snapshot = result["snapshots"][0]
+        self.assertEqual(0, snapshot["reply_pending"])
+        self.assertTrue(any("活动cold归属不一致" in error for error in snapshot["data_errors"]))
+
+    def test_live_reply_mid_identity_conflict_is_excluded_and_reported(self):
+        source = {
+            "activities": [self.activity],
+            "participants": [self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold1"],
+            })],
+            "drafts": {
+                "cold1": {"record_id": "cold1", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "回复原文": "[MID:mid-conflict] Reply",
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                }},
+                "reply1": {"record_id": "reply1", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "卡片已标记已审": False,
+                    "关联KOL": ["k-other"], "关联产品": ["product1"],
+                    "回复目标MsgID": "mid-conflict",
+                }},
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        snapshot = result["snapshots"][0]
+        self.assertEqual(0, snapshot["reply_pending"])
+        self.assertTrue(any("活动cold归属不一致" in error for error in snapshot["data_errors"]))
+
+    def test_duplicate_live_replies_for_same_mid_are_excluded_and_reported(self):
+        source = {
+            "activities": [self.activity],
+            "participants": [self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold1"],
+            })],
+            "drafts": {
+                "cold1": {"record_id": "cold1", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "回复原文": "[MID:mid-duplicate] Reply",
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                }},
+                **{
+                    f"reply{index}": {"record_id": f"reply{index}", "fields": {
+                        "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                        "审核路径": "待人审", "卡片已标记已审": False,
+                        "关联KOL": ["k1"], "关联产品": ["product1"],
+                        "回复目标MsgID": "mid-duplicate",
+                    }}
+                    for index in (1, 2)
+                },
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        snapshot = result["snapshots"][0]
+        self.assertEqual(0, snapshot["reply_pending"])
+        self.assertTrue(any(
+            "原邮件ID对应2条待审reply" in error
+            for error in snapshot["data_errors"]
+        ))
+        duplicate_error = next(
+            error for error in snapshot["data_errors"]
+            if "原邮件ID对应2条待审reply" in error
+        )
+        self.assertIn("mid-duplicate", duplicate_error)
+        self.assertIn("reply1", duplicate_error)
+        self.assertIn("reply2", duplicate_error)
+        duplicate_detail = next(
+            detail for detail in snapshot["data_error_details"]
+            if detail["kind"] == "duplicate_live_reply"
+        )
+        self.assertEqual(["mid-duplicate"], duplicate_detail["message_ids"])
+        self.assertEqual(["reply1", "reply2"], duplicate_detail["draft_ids"])
+        self.assertFalse(any(
+            "缺少唯一KOL/产品" in error
+            for error in snapshot["data_errors"]
+        ))
+
+    def test_same_cold_shared_by_two_participants_in_one_campaign_is_invalid(self):
+        source = {
+            "activities": [self.activity],
+            "participants": [
+                self._participant("p1", **{
+                    "关联KOL": ["k1"], "产品家族ID": "product1",
+                    "关联邮件草稿": ["cold-shared"],
+                }),
+                self._participant("p2", **{
+                    "关联KOL": ["k2"], "产品家族ID": "product2",
+                    "关联邮件草稿": ["cold-shared"],
+                }),
+            ],
+            "drafts": {
+                "cold-shared": {"record_id": "cold-shared", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "是否回复": True, "回复意图": "感兴趣", "寄样阶段": "在途",
+                    "回复原文": "[MID:mid-shared-cold] Reply",
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                }},
+                "reply-shared": {"record_id": "reply-shared", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "卡片已标记已审": False,
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                    "回复目标MsgID": "mid-shared-cold",
+                }},
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        snapshot = result["snapshots"][0]
+        self.assertEqual(0, snapshot["reply_pending"])
+        self.assertEqual(0, snapshot["sent_total"])
+        self.assertEqual(0, snapshot["replies_total"])
+        self.assertEqual(0, snapshot["awaiting_post_date"])
+        self.assertEqual(0, snapshot["shipped"])
+        shared_error = next(
+            error for error in snapshot["data_errors"]
+            if "cold草稿关联多个参与记录" in error
+        )
+        self.assertIn("cold-shared", shared_error)
+        shared_detail = next(
+            detail for detail in snapshot["data_error_details"]
+            if detail["kind"] == "shared_cold_source"
+        )
+        self.assertEqual(["mid-shared-cold"], shared_detail["message_ids"])
+        self.assertEqual(["cold-shared"], shared_detail["draft_ids"])
+
+    def test_duplicate_active_campaign_ids_fail_closed_with_record_ids(self):
+        duplicate_activity = {
+            "record_id": "act2",
+            "fields": {
+                **self.activity["fields"],
+                "活动名称": "重复活动记录",
+            },
+        }
+        source = {
+            "activities": [self.activity, duplicate_activity],
+            "participants": [self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold1"],
+            })],
+            "drafts": {
+                "cold1": {"record_id": "cold1", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "是否回复": True, "回复意图": "感兴趣", "寄样阶段": "在途",
+                    "回复原文": "[MID:mid-duplicate-campaign] Reply",
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                }},
+                "reply1": {"record_id": "reply1", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "卡片已标记已审": False,
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                    "回复目标MsgID": "mid-duplicate-campaign",
+                }},
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        self.assertEqual(2, len(result["snapshots"]))
+        for snapshot in result["snapshots"]:
+            self.assertEqual("数据异常", snapshot["status"]["label"])
+            self.assertEqual(0, snapshot["eligible_total"])
+            self.assertEqual(0, snapshot["sent_total"])
+            self.assertEqual(0, snapshot["replies_total"])
+            self.assertEqual(0, snapshot["reply_pending"])
+            self.assertEqual(0, snapshot["awaiting_post_date"])
+            self.assertEqual(0, snapshot["shipped"])
+            self.assertTrue(any("活动ID重复" in error for error in snapshot["data_errors"]))
+            duplicate_detail = next(
+                detail for detail in snapshot["data_error_details"]
+                if detail["kind"] == "duplicate_active_campaign_id"
+            )
+            self.assertEqual(["act1", "act2"], duplicate_detail["activity_record_ids"])
+
+    def test_exact_mid_match_does_not_mark_same_key_other_campaign_invalid(self):
+        second_activity = {
+            "record_id": "act2",
+            "fields": {
+                **self.activity["fields"],
+                "活动ID": "launch-piranha",
+                "活动名称": "9·15 POWKONG 食人花二代",
+                "品牌": "POWKONG",
+            },
+        }
+        source = {
+            "activities": [self.activity, second_activity],
+            "participants": [
+                self._participant("p1", **{
+                    "关联KOL": ["k-shared"], "产品家族ID": "product-shared",
+                    "关联邮件草稿": ["cold-a"],
+                }),
+                self._participant("p2", **{
+                    "活动ID": "launch-piranha",
+                    "关联KOL": ["k-shared"], "产品家族ID": "product-shared",
+                    "关联邮件草稿": ["cold-b"],
+                }),
+            ],
+            "drafts": {
+                "cold-a": {"record_id": "cold-a", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "回复原文": "[MID:mid-a] Reply",
+                    "关联KOL": ["k-shared"], "关联产品": ["product-shared"],
+                }},
+                "cold-b": {"record_id": "cold-b", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "回复原文": "[MID:mid-b] Reply",
+                    "关联KOL": ["k-shared"], "关联产品": ["product-shared"],
+                }},
+                "reply-a": {"record_id": "reply-a", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "卡片已标记已审": False,
+                    "关联KOL": ["k-shared"], "关联产品": ["product-shared"],
+                    "回复目标MsgID": "mid-a",
+                }},
+            },
+            "quotas": {
+                "FUNLAB": {"sent_24h": 1, "cap": 80},
+                "POWKONG": {"sent_24h": 1, "cap": 80},
+            },
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        dave, piranha = result["snapshots"]
+        self.assertEqual(1, dave["reply_pending"])
+        self.assertEqual(0, piranha["reply_pending"])
+        self.assertEqual([], dave["data_errors"])
+        self.assertEqual([], piranha["data_errors"])
+
+    def test_valid_reply_evidence_wins_without_false_exclusion_message(self):
+        source = {
+            "activities": [self.activity],
+            "participants": [self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold-good", "cold-bad"],
+            })],
+            "drafts": {
+                "cold-good": {"record_id": "cold-good", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "回复原文": "[MID:mid-valid] Reply",
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                }},
+                "cold-bad": {"record_id": "cold-bad", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "回复原文": "[MID:mid-valid] Reply",
+                    "关联产品": ["product1"],
+                }},
+                "reply1": {"record_id": "reply1", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "卡片已标记已审": False,
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                    "回复目标MsgID": "mid-valid",
+                }},
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        snapshot = result["snapshots"][0]
+        self.assertEqual(1, snapshot["reply_pending"])
+        self.assertTrue(any("cold草稿归属" in error for error in snapshot["data_errors"]))
+        self.assertFalse(any(
+            "相关reply已从统计中排除" in error
+            for error in snapshot["data_errors"]
+        ))
 
     def test_funnel_phases_exclude_drafts_linked_to_multiple_campaigns(self):
         participants = [
@@ -360,6 +936,105 @@ class LaunchDailyReportTests(unittest.TestCase):
         self.assertTrue(all(
             any("跨活动重复关联" in error for error in row["data_errors"])
             for row in result["snapshots"]
+        ))
+
+    def test_live_reply_matching_two_campaigns_is_excluded_from_both(self):
+        second_activity = {
+            "record_id": "act2",
+            "fields": {
+                **self.activity["fields"],
+                "活动ID": "launch-piranha",
+                "活动名称": "9·15 POWKONG 食人花二代",
+                "品牌": "POWKONG",
+            },
+        }
+        source = {
+            "activities": [self.activity, second_activity],
+            "participants": [
+                self._participant("p1", **{
+                    "关联KOL": ["k-shared"], "产品家族ID": "product-shared",
+                    "关联邮件草稿": ["cold-dave"],
+                }),
+                self._participant("p2", **{
+                    "活动ID": "launch-piranha", "关联KOL": ["k-other"],
+                    "产品家族ID": "product-other",
+                    "关联邮件草稿": ["cold-piranha"],
+                }),
+            ],
+            "drafts": {
+                "cold-dave": {"record_id": "cold-dave", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "发送时间": self.start + 10_000,
+                    "回复原文": "[MID:mid-shared] Shared reply",
+                    "关联KOL": ["k-shared"], "关联产品": ["product-shared"],
+                }},
+                "cold-piranha": {"record_id": "cold-piranha", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "发送时间": self.start + 10_000,
+                    "回复原文": "[MID:mid-shared] Shared reply",
+                    "关联KOL": ["k-other"], "关联产品": ["product-other"],
+                }},
+                "reply-shared": {"record_id": "reply-shared", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "生成时间": self.start + 20_000,
+                    "关联KOL": ["k-other"],
+                    "关联产品": ["product-other"], "卡片已标记已审": False,
+                    "回复目标MsgID": "mid-shared",
+                }},
+            },
+            "quotas": {
+                "FUNLAB": {"sent_24h": 1, "cap": 80},
+                "POWKONG": {"sent_24h": 1, "cap": 80},
+            },
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        self.assertEqual([0, 0], [row["reply_pending"] for row in result["snapshots"]])
+        self.assertTrue(all(
+            any("跨活动重复关联" in error for error in row["data_errors"])
+            for row in result["snapshots"]
+        ))
+
+    def test_duplicate_cold_sources_same_mid_are_excluded_with_precise_error(self):
+        source = {
+            "activities": [self.activity],
+            "participants": [self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold1", "cold2"],
+            })],
+            "drafts": {
+                **{
+                    f"cold{index}": {"record_id": f"cold{index}", "fields": {
+                        "邮件草稿来源": "cold", "发送状态": "已发",
+                        "回复原文": "[MID:mid-duplicate-source] Reply",
+                        "关联KOL": ["k1"], "关联产品": ["product1"],
+                    }}
+                    for index in (1, 2)
+                },
+                "reply1": {"record_id": "reply1", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "卡片已标记已审": False,
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                    "回复目标MsgID": "mid-duplicate-source",
+                }},
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        snapshot = result["snapshots"][0]
+        self.assertEqual(0, snapshot["reply_pending"])
+        self.assertTrue(any(
+            "原邮件ID对应多条有效cold来源" in error
+            for error in snapshot["data_errors"]
+        ))
+        self.assertFalse(any(
+            "归属字段缺失" in error
+            for error in snapshot["data_errors"]
         ))
 
     def test_same_day_same_recipient_and_campaign_set_sends_only_once(self):

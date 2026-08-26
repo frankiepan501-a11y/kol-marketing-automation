@@ -123,3 +123,29 @@
 
 - [x] 未记录API key、token、邮箱、邮件正文或KOL个人资料。
 - [x] 只记录生产模式、验收方法和不含个人信息的业务数量。
+
+# 2026-08-26 日报实时回复队列
+
+## Candidate Lessons
+
+| Symptom | Cause | Prevention | Promote to |
+|---|---|---|---|
+| 日报长期显示“待分类回复”，但运营已处理完对应飞书卡片 | 报表把cold草稿上的历史`回复意图`当成当前工作队列 | 工作队列只从当前未完成状态表计算；历史回复分类只用于漏斗事实，不作为未完成任务 | project docs / KOL report SOP |
+| 同一KOL和产品同时存在于两个执行中活动时可能重复计数 | 只用对象双键，无法证明回复来自哪封开发信 | 用cold草稿`回复原文`中的原始来信MID精确匹配reply草稿`回复目标MsgID`；MID重复时全部排除并报错 | project docs / data integrity rule |
+| 旧活动遗留reply可能被后续同KOL＋产品的新活动接走 | 时间先后只能缩小范围，不能证明回复属于哪封开发信 | 不再用时间猜归属；必须有原始来信MID直接证据，并校验cold、reply、参与记录的唯一KOL＋产品一致 | project docs / data integrity rule |
+| 同一cold草稿被同活动多条参与记录共享时，一条正确关联会掩盖另一条冲突关联 | 逐参与记录累加证据，未先按cold record聚合检查唯一归属 | 先按cold草稿record_id聚合直接关联；只要关联参与记录不唯一就整条来源失效，并在错误里展示MID和草稿ID | project docs / data integrity rule |
+| 两条执行中活动记录复用同一活动ID时，同一reply会在两张日报各算一次 | 证据按活动ID聚合，但快照按活动记录逐条生成，缺少活动ID唯一性闸 | 先按活动ID分组；发现重复就把所有同ID活动标红、业务指标归零，并输出冲突活动record_id | project docs / data integrity rule |
+| 同一MID被两个活动的有效cold复用，或生成两条待审reply时会错计/重复计 | 只在单活动内校验来源MID，且未校验实时reply的MID唯一性 | 跨所有执行中活动聚合唯一有效来源MID；有效来源跨活动重复或实时reply数量不为1时全部排除并报错，坏来源不污染其他有效证据 | project docs / data integrity rule |
+| reply有对象双键但MID找不到cold，或MID与对象冲突时被静默漏掉 | 未匹配分支只排除，没有把证据冲突写入日报错误 | 只要MID或对象指向候选活动但无法精确一致，就标为数据错误；不允许静默失真 | project docs / data integrity rule |
+
+## Failed Attempts
+
+| Attempt | Result | Prevention |
+|---|---|---|
+| 直接使用本机`python`或仅设置`PYTHONPATH`运行测试 | 本机没有裸`python`，嵌入式Python固定了模块路径，首次命令无法导入当前仓库 | 使用已验证的`C:/tmp/py311-embed/python.exe`，并在pytest入口显式把当前仓库插入`sys.path[0]` |
+| 在PowerShell中把`rg`路径写成`app/launch_*` | Windows把星号所在路径当作非法文件名，检索失败 | 让`rg`直接扫目录，再用结果过滤文件名；不要把Unix式文件glob放进Windows路径参数 |
+
+## Secret/Privacy Review
+
+- [x] 未记录API key、token、邮箱、邮件正文或KOL个人资料。
+- [x] 只记录统计口径、归属规则和可复用测试方法。
