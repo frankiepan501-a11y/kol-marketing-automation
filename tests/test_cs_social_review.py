@@ -112,6 +112,13 @@ class CsSocialReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         written = calls[1][2]["fields"]
         self.assertEqual(fields["AI草稿"], written["最终回复"])
         self.assertEqual("Frankie · P0-5B单卡测试", written["回复人"])
+        audit = json.loads(written["资源命中JSON"])
+        self.assertEqual(cs_dispatch.SOCIAL_REVIEW_ACTION, audit["event"])
+        self.assertEqual("X", audit["source_platform"])
+        self.assertEqual("manual_only", audit["send_mode"])
+        self.assertEqual(0, audit["customer_send_attempts"])
+        self.assertEqual(0, audit["social_platform_write_attempts"])
+        self.assertFalse(audit["customer_send_function_called"])
         self.assertNotIn("状态", written)
         self.assertNotIn("已回复", json.dumps(written, ensure_ascii=False))
         dispatch.assert_not_awaited()
@@ -219,6 +226,16 @@ class CsSocialReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
                          put[2]["fields"])
 
     async def test_readback_proves_processed_card_has_no_controls(self):
+        outbound_audit = {
+            "event": cs_dispatch.SOCIAL_REVIEW_ACTION,
+            "run_id": "P0-5B-TEST-003",
+            "source_platform": "X",
+            "send_mode": cs_dispatch.SOCIAL_REVIEW_SEND_MODE,
+            "customer_send_attempts": 0,
+            "social_platform_write_attempts": 0,
+            "customer_send_function_called": False,
+            "reviewed_at": 1787702400000,
+        }
         processed_card = cs_dispatch._build_social_review_result_card(
             "rec_test",
             {
@@ -241,6 +258,9 @@ class CsSocialReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
             "最终回复": "Reviewed synthetic draft text.",
             "回复人": "Frankie · P0-5B单卡测试",
             "回复时间": 1787702400000,
+            "资源命中JSON": json.dumps(outbound_audit, ensure_ascii=False,
+                                         separators=(",", ":")),
+            "最近出站Message-ID": "",
         }
 
         class FakeResponse:
@@ -269,8 +289,14 @@ class CsSocialReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["review_saved"])
         self.assertEqual("待回", result["ticket_status"])
-        self.assertEqual(0, result["customer_writes"])
-        self.assertEqual(0, result["social_platform_writes"])
+        audit = result["outbound_audit"]
+        self.assertTrue(audit["persisted"])
+        self.assertEqual(0, audit["customer_send_attempts"])
+        self.assertEqual(0, audit["social_platform_write_attempts"])
+        self.assertTrue(audit["recent_outbound_message_id_empty"])
+        self.assertTrue(audit["ticket_status_is_waiting_review"])
+        self.assertTrue(audit["customer_zero_evidence_passed"])
+        self.assertTrue(audit["social_platform_zero_evidence_passed"])
         self.assertTrue(result["card_readback"]["ok"])
         self.assertTrue(result["card_readback"]["processed"])
         self.assertEqual(0, result["card_readback"]["form_count"])

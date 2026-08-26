@@ -692,6 +692,7 @@ async def read_social_review_test(rid: str) -> dict:
     nodes = list(_walk_card(card)) if card else []
     title = (((card.get("header", {}) or {}).get("title", {}) or {}).get("content", ""))
     final_reply = _x(f, "最终回复")
+    outbound_audit = _social_review_outbound_audit(f)
     return {
         "ok": True,
         "record_id": rid,
@@ -704,8 +705,7 @@ async def read_social_review_test(rid: str) -> dict:
         "reviewed_at": _x(f, "回复时间"),
         "reviewed_draft_length": len(final_reply),
         "reviewed_draft_sha256": hashlib.sha256(final_reply.encode("utf-8")).hexdigest() if final_reply else "",
-        "customer_writes": 0,
-        "social_platform_writes": 0,
+        "outbound_audit": outbound_audit,
         "card_readback": {
             "ok": bool(card) and not message_error,
             "error": message_error,
@@ -715,6 +715,33 @@ async def read_social_review_test(rid: str) -> dict:
             "button_count": sum(node.get("tag") == "button" for node in nodes),
             "processed": "客服审核测试已处理" in title,
         },
+    }
+
+
+def _social_review_outbound_audit(f: dict) -> dict:
+    raw = _x(f, "资源命中JSON")
+    try:
+        audit = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        audit = {}
+    if not isinstance(audit, dict) or audit.get("event") != SOCIAL_REVIEW_ACTION:
+        audit = {}
+    customer_zero = (audit.get("customer_send_attempts") == 0
+                     and _x(f, "状态") == "待回"
+                     and not _x(f, "最近出站Message-ID"))
+    social_zero = (audit.get("social_platform_write_attempts") == 0
+                   and audit.get("send_mode") == SOCIAL_REVIEW_SEND_MODE
+                   and audit.get("source_platform") == "X")
+    return {
+        "persisted": bool(audit),
+        "event": audit.get("event", ""),
+        "send_mode": audit.get("send_mode", ""),
+        "customer_send_attempts": audit.get("customer_send_attempts"),
+        "social_platform_write_attempts": audit.get("social_platform_write_attempts"),
+        "recent_outbound_message_id_empty": not bool(_x(f, "最近出站Message-ID")),
+        "ticket_status_is_waiting_review": _x(f, "状态") == "待回",
+        "customer_zero_evidence_passed": customer_zero,
+        "social_platform_zero_evidence_passed": social_zero,
     }
 
 
@@ -1017,11 +1044,10 @@ async def _handle_social_review_callback(event: dict, val: dict) -> dict:
         return _toast("原卡与测试工单不匹配，已拒绝处理", "error")
     msg_id = event_mid
     if _x(f, "最终回复"):
-        patched = await _update_card(msg_id, _build_social_review_result_card(
+        _spawn(_update_card(msg_id, _build_social_review_result_card(
             rid, f, run_id=run_id, duplicate=True
-        ))
-        return _toast("该审核已经保存，无需重复点击" if patched else
-                      "审核已保存，但原卡回读更新失败，请技术侧检查", "success" if patched else "error")
+        )))
+        return _toast("该审核已经保存；原卡正在确认结果，无需重复点击")
     if _x(f, "状态") in ("已回复", "已解决", "已升级"):
         return _toast("测试工单已进入终态，不能再保存审核", "error")
     claim = f"social-review:{rid}"
@@ -1040,20 +1066,30 @@ async def _handle_social_review_callback(event: dict, val: dict) -> dict:
     _inflight.add(claim)
     try:
         reviewed_at = int(time.time() * 1000)
+        outbound_audit = {
+            "event": SOCIAL_REVIEW_ACTION,
+            "run_id": run_id,
+            "source_platform": "X",
+            "send_mode": SOCIAL_REVIEW_SEND_MODE,
+            "customer_send_attempts": 0,
+            "social_platform_write_attempts": 0,
+            "customer_send_function_called": False,
+            "reviewed_at": reviewed_at,
+        }
         await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                          {"fields": {"最终回复": reply[:5000],
                                      "回复时间": reviewed_at,
-                                     "回复人": "Frankie · P0-5B单卡测试"}}, which="notify")
+                                     "回复人": "Frankie · P0-5B单卡测试",
+                                     "资源命中JSON": json.dumps(outbound_audit, ensure_ascii=False,
+                                                                 separators=(",", ":"))}}, which="notify")
         _recent[claim] = time.time()
         result_fields = dict(f)
         result_fields["最终回复"] = reply
         result_fields["回复时间"] = reviewed_at
-        patched = await _update_card(msg_id, _build_social_review_result_card(
+        _spawn(_update_card(msg_id, _build_social_review_result_card(
             rid, result_fields, run_id=run_id, reviewed_at=reviewed_at
-        ))
-        if not patched:
-            return _toast("审核已保存，但原卡更新失败；未回复客户", "error")
-        return _toast("审核结果已保存 ✓ 未回复客户，待人工发送")
+        )))
+        return _toast("审核结果已保存 ✓ 未回复客户；原卡正在更新")
     except Exception:
         _recent.pop(claim, None)
         return _toast("审核保存失败，请稍后重试", "error")
