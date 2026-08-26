@@ -592,3 +592,10 @@
 - 修正后日报聚焦测试37项+3个subtests通过；活动与草稿相关回归365项+6个subtests通过；全仓817项+26个subtests通过，唯一失败仍是既有固定日期Zeabur看门狗用例，与本次日报改动无关。补充回归覆盖reply部分/全部缺身份、孤儿MID、MID与对象冲突、重复实时reply、单活动重复来源MID、跨活动同MID不同对象、同活动共享cold、重复执行中活动ID，以及同KOL＋产品跨活动复用但MID不同；共享cold从全部漏斗指标排除，重复活动ID的两条活动记录均标红并暂停业务统计，异常同时保留可定位的MID、草稿record_id或活动record_id。规格轴与规范轴终审均PASS，无剩余P0/P1；本地候选已提交，尚未推送或部署生产。
 - 2026-08-25待审旁路P0已上线：commit `80d4f99` / deployment `6a8c87cdba5938b757238ed7`，n8n `uvBfJBtGH93FPa6w` 保持active且未手动触发。食人花 execution `1006003` → job `launchruntime-2e60616da618` 成功，18名待审不阻塞，清退10条永久失败旧对象并创建5个发现任务，筛选标准未降低。
 - Dave execution `1006231` → job `launchruntime-474ed084e29b` 完成，16名待审没有阻止系统刷新16份画像、扫描20名证据作者和清退6条永久失败旧对象；但七层发现词已耗尽且当日模型预算60/60，新增合格/草稿/发现任务均为0，业务仍为 `supply_blocked`。该剩余阻塞与人审无关，需单独补Dave备用词供给。
+
+## 2026-08-26 P1生产发布前复核
+
+- `git fetch origin`后，`origin/master=d4d440f`，当前候选以该提交为共同基点，主分支未前进。
+- 发布前重跑：日报聚焦`37 passed, 3 subtests passed`；关联范围`365 passed, 6 subtests passed`。
+- 一次直接`python -m pytest`调用命中了机器里另一项目残留的全局导入路径，导致测试收集失败；改回显式把当前仓库放到`sys.path[0]`的隔离调用后全部通过。该失败不是候选代码回归。
+- 尚未推送、尚未部署；未触发任何业务任务、卡片或邮件。
