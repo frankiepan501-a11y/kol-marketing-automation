@@ -40,6 +40,10 @@ CS_REPLY_LIVE = (os.environ.get("CS_REPLY_LIVE", "0") or "0") != "0"
 CS_REPLY_DRY_RUN_TO = (os.environ.get("CS_REPLY_DRY_RUN_TO", "") or "").strip()
 CS_CUSTOM_REPLY_MAX_CHARS = int(os.environ.get("CS_CUSTOM_REPLY_MAX_CHARS", "2000") or "2000")
 CS_CARD_INPUT_MAX_CHARS = 1000
+SOCIAL_REVIEW_ACTION = "social_cs_review_save"
+SOCIAL_REVIEW_SEND_MODE = "manual_only"
+SOCIAL_REVIEW_TEST_PREFIX = "TEST-P0-5B-"
+SOCIAL_REVIEW_VERSION = "p0-5b-v1"
 # 发件身份 (Zoho send-as / 网易登录账号)
 ZOHO_CS_FROM = os.environ.get("ZOHO_POWKONG_CS_FROM", "support@powkong.com")
 NE_SMTP = os.environ.get("NETEASE_SMTP_HOST", "smtp.qiye.163.com")
@@ -447,6 +451,163 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
             "elements": elements}
 
 
+def _walk_card(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_card(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_card(child)
+
+
+def _is_social_review_test_record(f: dict) -> bool:
+    """Only the clearly marked P0-5B synthetic row may use this branch."""
+    ticket = _x(f, "工单ID")
+    customer = _x(f, "客户标识").lower()
+    return (ticket.startswith(SOCIAL_REVIEW_TEST_PREFIX)
+            and "p0-5b" in customer
+            and ("test" in customer or "非真实客户" in customer))
+
+
+def _build_social_review_card(rid: str, f: dict, run_id: str = "") -> dict:
+    """Build the Frankie-only P0-5B card. It can save a review but never send."""
+    ticket = _ticket_id(f, rid)
+    brand = _x(f, "品牌") or "-"
+    draft = (_x(f, "AI草稿") or "").strip()
+    summary = _x(f, "客诉摘要") or "X @提及客服审核链路测试"
+    value = {
+        "act": SOCIAL_REVIEW_ACTION,
+        "action": SOCIAL_REVIEW_ACTION,
+        "rid": rid,
+        "run_id": run_id or ticket,
+        "send_mode": SOCIAL_REVIEW_SEND_MODE,
+        "frankie_only": True,
+        "test_mode": True,
+    }
+    context = (
+        "**测试范围:** P0-5B · 只发 Frankie · 只保存审核，不回复客户\n"
+        f"**测试工单:** `{ticket}`  ·  **来源:** X  ·  **品牌:** {brand}\n"
+        "**数据性质:** 人工构造的非真实客户测试记录\n"
+        f"**场景:** {summary}\n"
+        f"**发送模式:** `{SOCIAL_REVIEW_SEND_MODE}`  ·  **客户发送状态:** 未发送"
+    )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "green",
+            "title": {"tag": "plain_text",
+                      "content": f"🟢 [CUS·P3] 客服审核测试 · X · {_short(ticket, 34)}"},
+        },
+        "elements": [
+            {"tag": "note", "elements": [{"tag": "plain_text",
+                "content": "🧪 测试卡：只保存审核与短修改；不会回复客户、不会修改 X/SocialEcho。"}]},
+            {"tag": "div", "text": {"tag": "lark_md", "content": context}},
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md",
+                "content": "**待审核英文草稿**\n" + (draft or "(无可审核草稿)")}},
+            {"tag": "form", "name": f"social_review_{rid}", "elements": [
+                {"tag": "input", "name": "review_reply", "width": "fill",
+                 "label_position": "top", "max_length": CS_CARD_INPUT_MAX_CHARS,
+                 "label": {"tag": "plain_text",
+                           "content": "短修改（可选，留空=采用上方草稿；最多1000字）"},
+                 "placeholder": {"tag": "plain_text",
+                                 "content": "这里只保存审核结果；不会发送给客户。"}},
+                {"tag": "button", "action_type": "form_submit", "name": "save_review",
+                 "type": "primary", "text": {"tag": "plain_text",
+                                                "content": "保存审核结果（不发送）"},
+                 "value": value},
+            ]},
+            {"tag": "note", "elements": [{"tag": "plain_text",
+                "content": f"版本 {SOCIAL_REVIEW_VERSION} · run {run_id or ticket} · 人工发送状态：待人工发送"}]},
+        ],
+    }
+
+
+def _validate_social_review_card(card: dict) -> list[str]:
+    errors = []
+    rendered = json.dumps(card, ensure_ascii=False, sort_keys=True)
+    if "🟢 [CUS·P3]" not in rendered:
+        errors.append("标题格式不正确")
+    if "只保存审核" not in rendered or "不回复客户" not in rendered:
+        errors.append("缺少安全说明")
+    if any(x in rendered for x in ("cs_send_reply", "live_send", "发送回复给客户")):
+        errors.append("包含客户发送动作")
+    forms = [node for node in _walk_card(card) if node.get("tag") == "form"]
+    submits = [node for node in _walk_card(card)
+               if node.get("action_type") == "form_submit"]
+    if len(forms) != 1 or len(submits) != 1:
+        errors.append("必须且只能有一个表单提交按钮")
+    if forms and any(node.get("tag") == "action" for node in forms[0].get("elements", [])):
+        errors.append("表单内不能嵌套 action")
+    value = submits[0].get("value", {}) if submits else {}
+    if (value.get("action") != SOCIAL_REVIEW_ACTION
+            or value.get("send_mode") != SOCIAL_REVIEW_SEND_MODE
+            or value.get("frankie_only") is not True
+            or value.get("test_mode") is not True):
+        errors.append("提交动作缺少安全硬闸")
+    return errors
+
+
+def _build_social_review_result_card(rid: str, f: dict, *, duplicate: bool = False) -> dict:
+    ticket = _ticket_id(f, rid)
+    result = ("该审核已经保存；本次重复回调没有产生第二次写入。" if duplicate else
+              "审核结果已保存；下一步仍需人工到平台原生界面发送。")
+    body = (
+        f"**测试工单:** `{ticket}`  ·  **来源:** X  ·  **品牌:** {_x(f, '品牌') or '-'}\n"
+        "**审核动作:** 已保存最终草稿\n"
+        f"**人工发送状态:** 待人工发送\n"
+        f"**处理结果:** {result}\n\n"
+        "_此卡片已处理，无需重复点击。_"
+    )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "grey", "title": {"tag": "plain_text",
+            "content": f"🟢 [CUS·P3] 客服审核测试已处理 · X · {_short(ticket, 34)}"}},
+        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": body}}],
+    }
+
+
+async def send_social_review_test_card(rid: str, *, mode: str = "dry_run",
+                                       run_id: str = "") -> dict:
+    """Preview or send exactly one P0-5B synthetic review card to Frankie."""
+    if mode not in ("dry_run", "commit"):
+        raise ValueError("mode must be dry_run or commit")
+    if mode == "commit" and not (run_id or "").strip():
+        raise ValueError("commit requires run_id")
+    rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                           which="notify")
+    f = ((rec.get("data", {}) or {}).get("record", {}) or {}).get("fields", {}) or {}
+    if not f:
+        return {"ok": False, "error": "record not found", "record_id": rid}
+    if not _is_social_review_test_record(f):
+        return {"ok": False, "error": "仅允许明确标记的 P0-5B 非真实客户测试记录",
+                "record_id": rid}
+    card = _build_social_review_card(rid, f, run_id=run_id)
+    validation_errors = _validate_social_review_card(card)
+    if validation_errors:
+        return {"ok": False, "error": "card selftest failed",
+                "validation_errors": validation_errors, "record_id": rid}
+    result = {"ok": True, "mode": mode, "record_id": rid, "run_id": run_id,
+              "frankie_only": True, "sender_app_id": CS_ASSIST_ID,
+              "send_mode": SOCIAL_REVIEW_SEND_MODE, "customer_writes": 0,
+              "social_platform_writes": 0, "card_selftest": "passed"}
+    if mode == "dry_run":
+        return {**result, "sent": False, "would_send": 1, "card": card}
+    if not CS_ASSIST_SECRET:
+        return {**result, "ok": False, "sent": False,
+                "error": "FEISHU_CS_ASSISTANT_APP_SECRET 未配"}
+    existing_mid = _x(f, "卡片消息ID")
+    if existing_mid:
+        return {**result, "sent": False, "duplicate": True, "message_id": existing_mid}
+    mid = await _send_card(OBSERVE_UNION, card)
+    if not mid:
+        return {**result, "ok": False, "sent": False, "error": "客服助手卡片发送失败"}
+    await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                     {"fields": {"卡片消息ID": mid, "状态": "待回"}}, which="notify")
+    return {**result, "sent": True, "message_id": mid, "written_fields": ["卡片消息ID", "状态"]}
+
+
 async def run(limit: int = 10, rids: str = "") -> dict:
     if not CS_ASSIST_SECRET:
         return {"error": "FEISHU_CS_ASSISTANT_APP_SECRET 未配"}
@@ -692,6 +853,92 @@ def _spawn(coro):
     t.add_done_callback(_bg_tasks.discard)
 
 
+def _callback_mapping(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _social_review_form_values(action: dict) -> dict:
+    form = _callback_mapping(action.get("form_value"))
+    nested = form.get("input_values")
+    if isinstance(nested, list):
+        return {str(item.get("name")): item.get("value") for item in nested
+                if isinstance(item, dict) and item.get("name")}
+    values = action.get("input_values")
+    if isinstance(values, list):
+        return {str(item.get("name")): item.get("value") for item in values
+                if isinstance(item, dict) and item.get("name")}
+    return form
+
+
+async def _handle_social_review_callback(event: dict, val: dict) -> dict:
+    """Save a Frankie-only synthetic review. This branch has no send call."""
+    rid = str(val.get("rid") or "").strip()
+    if not rid:
+        return _toast("缺少测试工单ID", "error")
+    if (val.get("send_mode") != SOCIAL_REVIEW_SEND_MODE
+            or val.get("frankie_only") is not True
+            or val.get("test_mode") is not True):
+        return _toast("安全参数不匹配，已拒绝处理", "error")
+    operator = event.get("operator", {}) or {}
+    if (operator.get("union_id") or "") != OBSERVE_UNION:
+        return _toast("P0-5B 单卡测试仅限 Frankie 操作", "error")
+    try:
+        rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                               which="notify")
+        f = ((rec.get("data", {}) or {}).get("record", {}) or {}).get("fields", {}) or {}
+    except Exception:
+        return _toast("读取测试工单失败，请稍后重试", "error")
+    if not _is_social_review_test_record(f):
+        return _toast("该记录不是 P0-5B 非真实客户测试记录，已拒绝处理", "error")
+    event_mid = _card_message_id(event, {})
+    bound_mid = _x(f, "卡片消息ID")
+    if not event_mid or not bound_mid or event_mid != bound_mid:
+        return _toast("原卡与测试工单不匹配，已拒绝处理", "error")
+    msg_id = event_mid
+    if _x(f, "最终回复"):
+        _spawn(_update_card(msg_id, _build_social_review_result_card(rid, f, duplicate=True)))
+        return _toast("该审核已经保存，无需重复点击")
+    if _x(f, "状态") in ("已回复", "已解决", "已升级"):
+        return _toast("测试工单已进入终态，不能再保存审核", "error")
+    claim = f"social-review:{rid}"
+    if claim in _inflight or _recent_seen(claim):
+        return _toast("该审核正在保存或刚已保存，请勿重复点击")
+    form = _social_review_form_values(event.get("action", {}) or {})
+    custom = str(form.get("review_reply") or "").strip()
+    reply = custom or _x(f, "AI草稿").strip()
+    if len(reply) < 10:
+        return _toast("审核草稿过短，请补充后再保存", "error")
+    if len(reply) > CS_CARD_INPUT_MAX_CHARS:
+        return _toast(f"审核草稿超过 {CS_CARD_INPUT_MAX_CHARS} 字，请缩短", "error")
+    ph = _placeholder_hit(reply)
+    if ph:
+        return _toast(f"草稿含未替换占位符「{ph}」，请改完再保存", "error")
+    _inflight.add(claim)
+    try:
+        await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                         {"fields": {"最终回复": reply[:5000],
+                                     "回复时间": int(time.time() * 1000),
+                                     "回复人": "Frankie · P0-5B单卡测试"}}, which="notify")
+        _recent[claim] = time.time()
+        result_fields = dict(f)
+        result_fields["最终回复"] = reply
+        _spawn(_update_card(msg_id, _build_social_review_result_card(rid, result_fields)))
+        return _toast("审核结果已保存 ✓ 未回复客户，待人工发送")
+    except Exception:
+        _recent.pop(claim, None)
+        return _toast("审核保存失败，请稍后重试", "error")
+    finally:
+        _inflight.discard(claim)
+
+
 async def _escalate_async(rid: str, f: dict, tag: str, summary: str, msg_id: str = ""):
     try:
         await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
@@ -831,11 +1078,13 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = 
 async def handle_callback(event: dict) -> dict:
     """飞书卡片按钮回调: 发送回复 / 改派 / 升级。返回 toast 给操作人即时反馈。"""
     action = event.get("action", {}) or {}
-    val = action.get("value", {}) or {}
+    val = _callback_mapping(action.get("value", {}) or {})
     act = val.get("act") or val.get("action")
     if isinstance(act, str) and act.startswith("amz_issue_"):
         from . import amz_review_audit
         return await amz_review_audit.handle_callback(event)
+    if act == SOCIAL_REVIEW_ACTION:
+        return await _handle_social_review_callback(event, val)
     act = {
         "cs_send_reply": "send_reply",
         "cs_reassign": "reassign",

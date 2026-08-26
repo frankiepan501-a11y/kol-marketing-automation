@@ -1160,6 +1160,44 @@ async def run_cs_dispatch(authorization: str = Header(default=""), limit: int = 
         return {"ok": False, "error": str(e), "trace": tr}
 
 
+@app.get("/cs/social-review/health")
+async def cs_social_review_health():
+    """Public, secret-free deployment probe for the P0-5B safe review branch."""
+    return {"ok": True, "service": "cs-social-review",
+            "version": cs_dispatch.SOCIAL_REVIEW_VERSION,
+            "sender_app_id": cs_dispatch.CS_ASSIST_ID,
+            "frankie_only": True, "send_mode": cs_dispatch.SOCIAL_REVIEW_SEND_MODE,
+            "customer_send_enabled": False}
+
+
+@app.post("/cs/social-review/test-card")
+async def run_cs_social_review_test_card(authorization: str = Header(default=""),
+                                         record_id: str = "",
+                                         mode: str = "dry_run",
+                                         run_id: str = "",
+                                         confirm: bool = False):
+    """Preview/send one synthetic P0-5B review card to Frankie only.
+
+    commit requires confirm=true. The callback only saves the reviewed draft; it
+    has no path to email, Discord, X or SocialEcho.
+    """
+    _check_auth(authorization)
+    if not record_id:
+        raise HTTPException(400, "record_id is required")
+    if mode == "commit" and not confirm:
+        raise HTTPException(400, "commit requires confirm=true")
+    try:
+        return await cs_dispatch.send_social_review_test_card(
+            record_id, mode=mode, run_id=run_id
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/social-review/test-card", str(e), tr)
+        return {"ok": False, "error": str(e), "trace": tr}
+
+
 @app.post("/cs/resources/index")
 async def run_cs_resources_index(authorization: str = Header(default=""), commit: bool = False):
     """客服官方资源索引: 解析 FUNLAB 官网固件/手册/视频资源；commit=true 才写资源表。"""
