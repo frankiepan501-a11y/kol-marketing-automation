@@ -137,7 +137,12 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
         reasons_text = "[ship_confirm 强制人审] " + reasons_text
 
     # 3. 决定路由
-    if score >= SCORE_AUTO_THRESHOLD and not committed:
+    # 重生出来的新版必须回到人审卡，不能因低分再次进入 retry 而静默无卡。
+    if force_review_reason:
+        new_status = "待审"
+        path = "待人审"
+        action = "notify_human"
+    elif score >= SCORE_AUTO_THRESHOLD and not committed:
         new_status = "自动通过"
         path = "自动通过"
         action = "auto_send"
@@ -357,6 +362,8 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
     group_msg_id = ""
     try:
         group_msg_id = await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
+        if not group_msg_id:
+            raise RuntimeError("group card API returned no message_id")
         success += 1
     except Exception as e:
         fail += 1
@@ -371,13 +378,18 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
                 uid = await feishu.open_id_to_union_id(oid)
                 if uid:
                     msg_id = await feishu.send_card_via_app3("union_id", uid, action_card)
-                    if msg_id:
-                        _unions.append(uid)
-                        _mids[uid] = msg_id
+                    if not msg_id:
+                        raise RuntimeError("App3 review card API returned no message_id")
+                    _unions.append(uid)
+                    _mids[uid] = msg_id
                 else:
-                    await feishu.send_card_message("open_id", oid, card)  # 拿不到 union_id 降级旧卡
+                    msg_id = await feishu.send_card_message("open_id", oid, card)  # 拿不到 union_id 降级旧卡
+                    if not msg_id:
+                        raise RuntimeError("fallback review card API returned no message_id")
             else:
-                await feishu.send_card_message("open_id", oid, card)
+                msg_id = await feishu.send_card_message("open_id", oid, card)
+                if not msg_id:
+                    raise RuntimeError("review card API returned no message_id")
             success += 1
         except Exception as e:
             fail += 1
@@ -386,6 +398,17 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
     if _unions or _mids:
         await feishu.write_card_recipients_msgids(record_id, _unions, _mids)
     await feishu.mark_card_receipt(record_id, success, fail, errors, group_msg_id=group_msg_id)
+    if action_card is not None and not _mids:
+        raise RuntimeError(
+            "0 App3 review cards delivered; " + (" | ".join(errors) or "no reviewer target")
+        )
+    return {
+        "success": success,
+        "fail": fail,
+        "action_delivered": bool(_mids) if action_card is not None else success > 0,
+        "group_message_id": group_msg_id,
+        "personal_message_ids": dict(_mids),
+    }
 
 
 # ===== ship_confirm 卡片 (V2: SOP 清单, 不查领星 API) =====

@@ -26,7 +26,7 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("degraded", result["status"])
         self.assertFalse(result["kol_ai_configured"])
 
-    async def test_regen_rejects_before_accepting_when_kol_ai_is_unconfigured(self):
+    async def test_regen_rejects_and_deduplicates_when_kol_ai_is_unconfigured(self):
         original = main.config.KOL_DEEPSEEK_API_KEY
         try:
             main.config.KOL_DEEPSEEK_API_KEY = ""
@@ -36,11 +36,19 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
                     feedback="make it warmer",
                     authorization="Bearer test-token",
                 )
+            duplicate = await main.run_draft_regen(
+                record_id="rec_old",
+                feedback="make it warmer",
+                authorization="Bearer test-token",
+            )
         finally:
             main.config.KOL_DEEPSEEK_API_KEY = original
 
         self.assertEqual(503, caught.exception.status_code)
-        self.assertEqual(0, len(main._draft_regen_jobs))
+        self.assertEqual(1, len(main._draft_regen_jobs))
+        self.assertTrue(duplicate["suppress_reply"])
+        self.assertTrue(duplicate["already_processed"])
+        self.assertEqual("done_with_issue", duplicate["status"])
 
     async def asyncTearDown(self):
         main.draft_regen.regen_draft = self._orig_regen

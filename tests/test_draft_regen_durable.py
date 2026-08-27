@@ -41,7 +41,7 @@ class DraftRegenDurableIdempotencyTests(unittest.IsolatedAsyncioTestCase):
                 "fields": {
                     "邮件草稿ID": "draft-old-rg1",
                     "邮件草稿状态": "待审",
-                    "卡片群消息ID": "om_existing",
+                    "卡片个人消息IDs": '{"on_reviewer":"om_existing"}',
                 },
             }]
 

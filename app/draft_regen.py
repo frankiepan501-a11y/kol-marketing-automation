@@ -112,11 +112,9 @@ async def regen_draft(record_id: str, feedback: str = "") -> dict:
             })
         except Exception as e:
             print(f"[regen] 复用草稿时旧草稿置否决失败 {record_id}: {e}")
-        delivered = bool(
-            ext(ef.get("卡片群消息ID"))
-            or ext(ef.get("卡片个人消息IDs"))
-            or ext(ef.get("卡片发送状态")) in ("已发送", "部分成功")
-        )
+        # 重生完成的交接标准是“至少一张可操作的 App3 私聊审核卡已送达”。
+        # 群信息卡或“部分成功”不能代替审核按钮，不能据此显示绿色完成。
+        delivered = bool(ext(ef.get("卡片个人消息IDs")))
         route = {"reused_existing_card": True}
         if not delivered:
             from . import draft_router

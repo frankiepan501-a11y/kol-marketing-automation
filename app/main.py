@@ -1210,6 +1210,19 @@ async def run_draft_regen(record_id: str = Query(...), feedback: str = Query("")
                 response["error"] = existing_job.get("error")
             return response
         if not config.KOL_DEEPSEEK_API_KEY.strip():
+            # 首次缺 Key 请求仍返回 503 给 Event Hub 显示红卡；同时留下短期失败 job，
+            # 飞书重复投递同一回调时可返回 suppress_reply，避免重复文字/重复红卡。
+            job_id = "draftregen-" + uuid.uuid4().hex[:12]
+            failure = "missing KOL_DEEPSEEK_API_KEY"
+            _draft_regen_jobs[job_id] = {
+                "status": "done_with_issue",
+                "started_ts": time.time(),
+                "started_at": datetime_now_string(),
+                "finished_ts": time.time(),
+                "finished_at": datetime_now_string(),
+                "record_id": record_id,
+                "result": {"ok": False, "error": failure},
+            }
             raise HTTPException(503, "KOL AI is not configured")
         job_id = "draftregen-" + uuid.uuid4().hex[:12]
         _draft_regen_jobs[job_id] = {

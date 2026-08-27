@@ -16,13 +16,26 @@ WORKFLOW_ID = "YjTXaoWAcy89xZpT"
 NODE_NAME = "Draft Action Handler"
 
 _HELPER = r"""
-async function markRegenCard(template, title, msg) {
+async function markRegenCard(template, title, msg, retryRid = '') {
   const msgId = data.message_id || '';
-  if (!msgId) return;
-  try {
-    const card = { config: { wide_screen_mode: true }, header: { template: template, title: { tag: 'plain_text', content: title } }, elements: [{ tag: 'div', text: { tag: 'lark_md', content: msg } }] };
-    await HR({ method: 'PATCH', url: 'https://open.feishu.cn/open-apis/im/v1/messages/' + msgId, headers: { 'Authorization': 'Bearer ' + token3, 'Content-Type': 'application/json' }, body: { content: JSON.stringify(card) }, json: true });
-  } catch (e) {}
+  const elements = [{ tag: 'div', text: { tag: 'lark_md', content: msg } }];
+  if (retryRid) elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '🔁 系统修复后重试' }, type: 'primary', value: { action: 'draft_regen', record_id: retryRid } }] });
+  const card = { config: { wide_screen_mode: true }, header: { template: template, title: { tag: 'plain_text', content: title } }, elements: elements };
+  let patched = false;
+  if (msgId) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await HR({ method: 'PATCH', url: 'https://open.feishu.cn/open-apis/im/v1/messages/' + msgId, headers: { 'Authorization': 'Bearer ' + token3, 'Content-Type': 'application/json' }, body: { content: JSON.stringify(card) }, json: true });
+        patched = true;
+        break;
+      } catch (e) {}
+    }
+  }
+  if (!patched && opId) {
+    try {
+      await HR({ method: 'POST', url: 'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id', headers: { 'Authorization': 'Bearer ' + token3, 'Content-Type': 'application/json' }, body: { receive_id: opId, msg_type: 'interactive', content: JSON.stringify(card) }, json: true });
+    } catch (e) {}
+  }
 }
 """.strip()
 
@@ -41,7 +54,7 @@ _NEW_ERROR = (
     "if (err) { const why = /KOL AI is not configured|missing KOL_DEEPSEEK_API_KEY/.test(err) "
     "? 'KOL AI 配置缺失，未生成新草稿，请联系系统管理员。' : "
     "('重生调用异常: ' + err); reply = '⚠️ ' + why + ' (by ' + approver + ')'; "
-    "await markRegenCard('red', '⚠️ [重生失败] 未生成新草稿', reply); }"
+    "await markRegenCard('red', '⚠️ [重生失败] 未生成新草稿', reply, rid); }"
 )
 _OLD_ACCEPTED = (
     "else if (rr && rr.ok && (rr.accepted || rr.job_id)) { const note = rr.already_running ? "
@@ -107,6 +120,9 @@ def verify_js(source: str) -> None:
         "[重生处理中]",
         "[重生失败]",
         "async function markRegenCard",
+        "系统修复后重试",
+        "receive_id_type=open_id",
+        "for (let attempt = 0; attempt < 2; attempt++)",
     ):
         if marker not in source:
             raise ValueError(f"patched Event Hub node missing marker: {marker}")
