@@ -1,6 +1,13 @@
 import unittest
 
-from scripts.migrate_n8n_deepseek_keys import SECRET_RE, migrate_workflow, verify_workflow
+from scripts.migrate_n8n_deepseek_keys import (
+    N8N_PRODUCTION_SERVICE_ID,
+    SECRET_RE,
+    migrate_workflow,
+    resolve_service_by_domain,
+    verify_required_variables,
+    verify_workflow,
+)
 
 
 class N8nDeepSeekKeyMigrationTests(unittest.TestCase):
@@ -144,6 +151,35 @@ class N8nDeepSeekKeyMigrationTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "versionId is missing"):
             verify_workflow(workflow, "SEO_DEEPSEEK_API_KEY")
+
+    def test_production_service_is_resolved_by_domain_not_stale_name(self):
+        services = [
+            {"_id": "69856f0d2e156a6efa59a9aa", "name": "n8n", "status": "SUSPENDED", "domains": []},
+            {
+                "_id": N8N_PRODUCTION_SERVICE_ID,
+                "name": "n8n-hual",
+                "status": "RUNNING",
+                "domains": [{"domain": "frankiepan501.zeabur.app"}],
+            },
+        ]
+        resolved = resolve_service_by_domain(services, "frankiepan501.zeabur.app")
+        self.assertEqual(N8N_PRODUCTION_SERVICE_ID, resolved["_id"])
+        self.assertEqual("n8n-hual", resolved["name"])
+
+    def test_stale_service_id_is_rejected_even_if_given_production_domain(self):
+        services = [{
+            "_id": "69856f0d2e156a6efa59a9aa",
+            "name": "n8n",
+            "status": "RUNNING",
+            "domains": [{"domain": "frankiepan501.zeabur.app"}],
+        }]
+        with self.assertRaisesRegex(ValueError, "unexpected service ID"):
+            resolve_service_by_domain(services, "frankiepan501.zeabur.app")
+
+    def test_commit_preflight_rejects_missing_channel_variable(self):
+        rows = [{"key": "KOL_DEEPSEEK_API_KEY", "value": "configured"}]
+        with self.assertRaisesRegex(ValueError, "SEO_DEEPSEEK_API_KEY"):
+            verify_required_variables(rows, {"SEO_DEEPSEEK_API_KEY"})
 
 
 if __name__ == "__main__":

@@ -37,3 +37,8 @@ one compromised workflow can be revoked without stopping every business line.
    an explicit missing-variable guard to Code nodes.
 4. Production readback reports zero hardcoded DeepSeek keys in the nine mapped
    active workflows.
+5. A production `--commit` resolves the n8n service from
+   `frankiepan501.zeabur.app`, requires the resolved service to be the running
+   `n8n-hual` service, and verifies every selected channel variable is present
+   and non-empty on that same service before changing a workflow.  A similarly
+   named suspended service must never satisfy this preflight.

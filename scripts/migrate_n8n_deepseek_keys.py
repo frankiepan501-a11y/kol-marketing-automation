@@ -26,10 +26,109 @@ WORKFLOW_CHANNELS = {
     "LE9r3DhrTLJuPRoS": "MANUAL_TOOLS_DEEPSEEK_API_KEY",
 }
 
+ZEABUR_GRAPHQL_URL = "https://api.zeabur.com/graphql"
+ZEABUR_PROJECT_ID = "69856f0c2e156a6efa59a9a9"
+N8N_PRODUCTION_DOMAIN = "frankiepan501.zeabur.app"
+N8N_PRODUCTION_SERVICE_ID = "69856f0d2e156a6efa59a9ce"
+
 SECRET_RE = re.compile(r"sk-[A-Za-z0-9_-]{16,}")
 DEEPSEEK_ENV_RE = re.compile(r"\$env\.([A-Z0-9_]*DEEPSEEK_API_KEY)")
 QUOTED_BEARER_RE = re.compile(r"(['\"])Bearer\s+sk-[A-Za-z0-9_-]{16,}\1")
 QUOTED_KEY_RE = re.compile(r"(['\"])sk-[A-Za-z0-9_-]{16,}\1")
+
+
+def resolve_service_by_domain(services: list[dict], domain: str) -> dict:
+    matches = [
+        service
+        for service in services
+        if domain in {
+            str(row.get("domain") or "").strip()
+            for row in service.get("domains") or []
+        }
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"expected exactly one Zeabur service for production domain {domain}; found {len(matches)}"
+        )
+    service = matches[0]
+    if service.get("_id") != N8N_PRODUCTION_SERVICE_ID:
+        raise ValueError(
+            "production domain resolved to unexpected service ID: "
+            f"{service.get('_id')}; expected {N8N_PRODUCTION_SERVICE_ID}"
+        )
+    if service.get("status") != "RUNNING":
+        raise ValueError(
+            f"production n8n service is not RUNNING: {service.get('status')}"
+        )
+    return service
+
+
+def verify_required_variables(rows: list[dict], required: set[str]) -> None:
+    by_key = {}
+    for row in rows:
+        by_key.setdefault(row.get("key"), []).append(row)
+    invalid = []
+    for key in sorted(required):
+        matches = by_key.get(key) or []
+        if len(matches) != 1 or not str(matches[0].get("value") or "").strip():
+            invalid.append(key)
+    if invalid:
+        raise ValueError(
+            "required DeepSeek variable missing or empty on production n8n service: "
+            + ", ".join(invalid)
+        )
+
+
+def _zeabur_request(api_key: str, query: str, variables: dict) -> dict:
+    payload = json.dumps(
+        {"query": query, "variables": variables},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        ZEABUR_GRAPHQL_URL,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "n8n-deepseek-key-migration",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    if result.get("errors"):
+        raise ValueError("Zeabur preflight query failed")
+    return result["data"]
+
+
+def verify_production_environment(api_key: str, required: set[str]) -> dict:
+    project_query = """
+    query($projectID:ObjectID!){
+      project(_id:$projectID){services{_id name status domains{domain}}}
+    }
+    """
+    project = _zeabur_request(
+        api_key,
+        project_query,
+        {"projectID": ZEABUR_PROJECT_ID},
+    )["project"]
+    service = resolve_service_by_domain(
+        project.get("services") or [],
+        N8N_PRODUCTION_DOMAIN,
+    )
+    variables_query = """
+    query($serviceID:ObjectID!,$environmentID:ObjectID!){
+      service(_id:$serviceID){variables(environmentID:$environmentID){key value}}
+    }
+    """
+    environment_id = os.environ.get("ZEABUR_ENVIRONMENT_ID", "69856f0c86311f632dc2c2c9")
+    rows = _zeabur_request(
+        api_key,
+        variables_query,
+        {"serviceID": service["_id"], "environmentID": environment_id},
+    )["service"]["variables"]
+    verify_required_variables(rows, required)
+    return service
 
 
 def _guarded_header_expression(variable: str) -> str:
@@ -185,6 +284,16 @@ def main() -> int:
         if not selected or workflow_id in selected
     }
 
+    production_service = None
+    if args.commit:
+        zeabur_api_key = os.environ.get("ZEABUR_API_KEY", "").strip()
+        if not zeabur_api_key:
+            raise SystemExit("ZEABUR_API_KEY is required for production commit preflight")
+        production_service = verify_production_environment(
+            zeabur_api_key,
+            set(targets.values()),
+        )
+
     for workflow_id, variable in targets.items():
         current = _request(base_url, api_key, "GET", f"/workflows/{workflow_id}")
         migrated, nodes = migrate_workflow(current, variable)
@@ -206,6 +315,8 @@ def main() -> int:
             "changed_nodes": nodes,
             "mode": "commit" if args.commit else "dry-run",
             "verified_nodes": verified_nodes,
+            "production_service_id": production_service.get("_id") if production_service else None,
+            "production_domain": N8N_PRODUCTION_DOMAIN if production_service else None,
         })
     print(json.dumps(reports, ensure_ascii=False, indent=2))
     return 0
