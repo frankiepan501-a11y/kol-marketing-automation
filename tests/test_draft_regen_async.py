@@ -140,6 +140,59 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("success", second["status"])
         self.assertEqual("rec_new", second["result"]["new_rid"])
 
+    async def test_failed_terminal_job_can_be_retried_after_short_dedup_window(self):
+        calls = 0
+
+        async def fake_regen(record_id, feedback=""):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {"ok": False, "error": "review card routing fail: temporary outage"}
+            return {"ok": True, "old_rid": record_id, "new_rid": "rec_recovered", "retries": 1}
+
+        main.draft_regen.regen_draft = fake_regen
+        first = await main.run_draft_regen(
+            record_id="rec_old",
+            feedback="",
+            async_mode=True,
+            authorization="Bearer test-token",
+        )
+        for _ in range(20):
+            if main._draft_regen_jobs[first["job_id"]]["status"] != "running":
+                break
+            await asyncio.sleep(0.01)
+
+        main._draft_regen_jobs[first["job_id"]]["finished_ts"] = (
+            main.time.time() - main._DRAFT_REGEN_FAILURE_DEDUP_SECONDS - 1
+        )
+        second = await main.run_draft_regen(
+            record_id="rec_old",
+            feedback="",
+            async_mode=True,
+            authorization="Bearer test-token",
+        )
+
+        self.assertNotEqual(first["job_id"], second["job_id"])
+        self.assertFalse(second["already_running"])
+        for _ in range(20):
+            if main._draft_regen_jobs[second["job_id"]]["status"] != "running":
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(2, calls)
+        self.assertEqual("success", main._draft_regen_jobs[second["job_id"]]["status"])
+
+    async def test_failure_card_offers_same_app_retry_action(self):
+        card = main._draft_regen_terminal_card(
+            ok=False,
+            record_id="rec_old",
+            approver="测试人",
+            error="review card routing fail: temporary outage",
+        )
+
+        action = card["elements"][1]["actions"][0]
+        self.assertEqual("draft_regen", action["value"]["action"])
+        self.assertEqual("rec_old", action["value"]["record_id"])
+
     async def test_successful_background_regen_patches_original_card_to_success(self):
         updates = []
 

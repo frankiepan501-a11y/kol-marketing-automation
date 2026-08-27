@@ -46,6 +46,7 @@ _DASHBOARD_RETENTION_JOB_TTL = 4 * 3600
 _dashboard_refresh_jobs = {}
 _DASHBOARD_REFRESH_JOB_TTL = 4 * 3600
 _DRAFT_REGEN_JOB_TTL = 6 * 3600
+_DRAFT_REGEN_FAILURE_DEDUP_SECONDS = 60
 _launch_preview_jobs = {}
 _LAUNCH_PREVIEW_JOB_TTL = 6 * 3600
 _launch_daily_report_jobs = {}
@@ -367,8 +368,15 @@ def _cleanup_draft_regen_jobs():
 
 def _draft_regen_job_for_record(record_id: str):
     _cleanup_draft_regen_jobs()
-    for job_id, job in _draft_regen_jobs.items():
+    now = time.time()
+    for job_id, job in list(_draft_regen_jobs.items()):
         if job.get("record_id") == record_id:
+            status = job.get("status") or "running"
+            if status in ("error", "done_with_issue"):
+                finished = job.get("finished_ts", 0)
+                if finished and now - finished > _DRAFT_REGEN_FAILURE_DEDUP_SECONDS:
+                    _draft_regen_jobs.pop(job_id, None)
+                    continue
             return job_id, job
     return "", None
 
@@ -388,8 +396,8 @@ def _draft_regen_failure_reason(raw_error: str) -> str:
     return f"后台未生成新版草稿：{raw_error[:160]}"
 
 
-def _draft_regen_terminal_card(*, ok: bool, approver: str = "", new_rid: str = "",
-                               error: str = "") -> dict:
+def _draft_regen_terminal_card(*, ok: bool, record_id: str = "", approver: str = "",
+                               new_rid: str = "", error: str = "") -> dict:
     if ok:
         template = "green"
         title = "✅ [重生完成] 新草稿已生成"
@@ -406,16 +414,32 @@ def _draft_regen_terminal_card(*, ok: bool, approver: str = "", new_rid: str = "
         )
     if approver:
         content += f"\n\n处理人：{approver[:40]}"
+    elements = [{
+        "tag": "div",
+        "text": {"tag": "lark_md", "content": content},
+    }]
+    if not ok and record_id:
+        elements.append({
+            "tag": "action",
+            "actions": [{
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "🔁 系统修复后重试"},
+                "type": "primary",
+                "value": {
+                    "action": "draft_regen",
+                    "app_token": config.FEISHU_APP_TOKEN,
+                    "table_id": config.T_DRAFT,
+                    "record_id": record_id,
+                },
+            }],
+        })
     return {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": template,
             "title": {"tag": "plain_text", "content": title},
         },
-        "elements": [{
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": content},
-        }],
+        "elements": elements,
     }
 
 
@@ -464,10 +488,12 @@ async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str,
         _draft_regen_jobs[job_id].update(
             status="success" if result.get("ok") else "done_with_issue",
             finished_at=datetime_now_string(),
+            finished_ts=time.time(),
             result=_compact_draft_regen_result(result),
         )
         card = _draft_regen_terminal_card(
             ok=bool(result.get("ok")),
+            record_id=record_id,
             approver=approver,
             new_rid=str(result.get("new_rid") or ""),
             error=str(result.get("error") or result.get("skip") or ""),
@@ -480,11 +506,12 @@ async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str,
         _draft_regen_jobs[job_id].update(
             status="error",
             finished_at=datetime_now_string(),
+            finished_ts=time.time(),
             error=str(e),
             trace=tr,
         )
         card = _draft_regen_terminal_card(
-            ok=False, approver=approver, error=str(e),
+            ok=False, record_id=record_id, approver=approver, error=str(e),
         )
         await _update_draft_regen_terminal_card(
             job_id, message_id, card, operator_open_id,

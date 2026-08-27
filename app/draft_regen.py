@@ -35,6 +35,13 @@ def _link_ids(v) -> list:
     return out
 
 
+def _route_error(route) -> str:
+    """把审核卡路由异常转换成可向上报告的失败原因。"""
+    if not isinstance(route, dict):
+        return f"invalid route result: {type(route).__name__}"
+    return str(route.get("error") or "").strip()
+
+
 def _build_regen_prompt(old_subject: str, old_body: str, score_reason: str, feedback: str,
                         stage: str, source: str, contact_name: str, product_name: str,
                         product_sells: str, lang_display: str, is_reply: bool) -> str:
@@ -76,29 +83,11 @@ async def regen_draft(record_id: str, feedback: str = "") -> dict:
         return {"ok": False, "error": f"get draft fail: {e}"}
     f = rec["fields"]
     status = ext(f.get("邮件草稿状态"))
-    # 幂等: 已被替代/终态(非退回重生/待审/待修改) 跳过. 已否决也跳(避免重复重生).
-    if status in ("已发送", "已否决", "自动通过", "通过"):
+    # 已发送/已通过不可再生；已否决需先查是否已有崩溃前创建的替代草稿。
+    if status in ("已发送", "自动通过", "通过"):
         return {"ok": False, "skip": f"草稿终态={status}, 跳过重生"}
 
     retries = int(f.get("重生次数") or 0)
-    source = ext(f.get("邮件草稿来源")) or "cold"
-    is_reply = source in ("reply", "tracking_followup", "affiliate_quote", "warm_recap")
-    old_subject = ext(f.get("邮件主题"))
-    old_body = ext(f.get("邮件正文"))
-    score_reason = ext(f.get("AI评分理由"))
-    ctype = ext(f.get("对象类型"))
-    link_field = "关联媒体人" if ctype == "媒体人" else "关联KOL"
-    contact_ids = _link_ids(f.get(link_field))
-    contact_table = config.T_EDITOR if ctype == "媒体人" else config.T_KOL
-
-    # 重生次数上限 → 转需人改 (不再重生, 防 runaway)
-    if retries >= MAX_MANUAL_REGEN:
-        await feishu.update_record(config.T_DRAFT, record_id, {
-            "邮件草稿状态": "待审", "审核路径": "需人改",
-            "审批意见": f"[重生已达上限 {retries} 次] 请直接在表格里人工修改正文后发, 不再自动重生。"[:500],
-        })
-        return {"ok": False, "skip": f"重生次数={retries} 已达上限 {MAX_MANUAL_REGEN}, 转需人改"}
-
     # Durable idempotency: the in-memory job registry is lost on a redeploy.
     # The deterministic draft ID lets a restarted worker reuse a draft that was
     # already created before a crash instead of calling the model and creating
@@ -137,6 +126,17 @@ async def regen_draft(record_id: str, feedback: str = "") -> dict:
                 )
             except Exception as e:
                 route = {"error": str(e)[:120]}
+        route_error = _route_error(route)
+        if route_error:
+            return {
+                "ok": False,
+                "old_rid": record_id,
+                "new_rid": new_rid,
+                "retries": retries + 1,
+                "reused": True,
+                "route": route,
+                "error": f"review card routing fail: {route_error}",
+            }
         return {
             "ok": True,
             "old_rid": record_id,
@@ -145,6 +145,28 @@ async def regen_draft(record_id: str, feedback: str = "") -> dict:
             "reused": True,
             "route": route,
         }
+
+    # 已否决且没有确定性替代草稿，说明没有可恢复对象，避免再调模型生成第二版。
+    if status == "已否决":
+        return {"ok": False, "skip": f"草稿终态={status}, 且未找到替代草稿, 跳过重生"}
+
+    # 重生次数上限 → 转需人改 (不再重生, 防 runaway)
+    if retries >= MAX_MANUAL_REGEN:
+        await feishu.update_record(config.T_DRAFT, record_id, {
+            "邮件草稿状态": "待审", "审核路径": "需人改",
+            "审批意见": f"[重生已达上限 {retries} 次] 请直接在表格里人工修改正文后发, 不再自动重生。"[:500],
+        })
+        return {"ok": False, "skip": f"重生次数={retries} 已达上限 {MAX_MANUAL_REGEN}, 转需人改"}
+
+    source = ext(f.get("邮件草稿来源")) or "cold"
+    is_reply = source in ("reply", "tracking_followup", "affiliate_quote", "warm_recap")
+    old_subject = ext(f.get("邮件主题"))
+    old_body = ext(f.get("邮件正文"))
+    score_reason = ext(f.get("AI评分理由"))
+    ctype = ext(f.get("对象类型"))
+    link_field = "关联媒体人" if ctype == "媒体人" else "关联KOL"
+    contact_ids = _link_ids(f.get(link_field))
+    contact_table = config.T_EDITOR if ctype == "媒体人" else config.T_KOL
 
     # KOL 当前阶段 (③ stage-aware)
     stage = "(未知阶段)"
@@ -229,6 +251,16 @@ async def regen_draft(record_id: str, feedback: str = "") -> dict:
     except Exception as e:
         route = {"error": str(e)[:120]}
     print(f"[regen] {record_id} → 新草稿 {new_rid} (重生#{retries+1}, fb={'有' if (feedback or '').strip() else '无'}) route={route}")
+    route_error = _route_error(route)
+    if route_error:
+        return {
+            "ok": False,
+            "old_rid": record_id,
+            "new_rid": new_rid,
+            "retries": retries + 1,
+            "route": route,
+            "error": f"review card routing fail: {route_error}",
+        }
     return {"ok": True, "old_rid": record_id, "new_rid": new_rid, "retries": retries + 1, "route": route}
 
 
