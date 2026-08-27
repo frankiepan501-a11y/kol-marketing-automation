@@ -7,9 +7,9 @@
 ## 目标
 
 1. KOL 专用 Key 缺失时，`/health` 明确显示 degraded，`POST /draft/regen` 在创建后台任务前返回 503。
-2. 同一草稿的重复异步请求复用已有 job；运行中和终态均不重复创建任务，并给 Event Hub `suppress_reply` 信号。
+2. 同一草稿的重复异步请求复用已有 job；运行中和终态均不重复创建任务，并给 Event Hub `suppress_reply` 信号。服务重启后再用确定性的 `邮件草稿ID` 回读并复用已建新版草稿。
 3. 首次卡片回调只显示“重生处理中”，不显示“已处理”。
-4. 后台 job 成功或失败后，使用聪哥分身3号 PATCH 原卡为明确终态。
+4. 后台 job 成功、业务失败或直接抛异常后，使用聪哥分身3号 PATCH 原卡为明确终态；PATCH 失败重试一次，再给原操作人发送 App3 兜底结果卡。
 5. n8n Event Hub 保持 active/published，节点数与连接不变，只修改 `Draft Action Handler`。
 
 ## 安全边界

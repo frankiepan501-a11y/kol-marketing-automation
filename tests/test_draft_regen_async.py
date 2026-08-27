@@ -12,6 +12,8 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
         main._draft_regen_jobs.clear()
         self._orig_regen = main.draft_regen.regen_draft
         self._orig_card_update = main.feishu.update_card_message_with_app
+        self._orig_card_send = main.feishu.send_card_via_app3
+        self._orig_alert = main._alert_endpoint_failure
 
     async def test_health_reports_kol_ai_unconfigured(self):
         original = main.config.KOL_DEEPSEEK_API_KEY
@@ -43,6 +45,8 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         main.draft_regen.regen_draft = self._orig_regen
         main.feishu.update_card_message_with_app = self._orig_card_update
+        main.feishu.send_card_via_app3 = self._orig_card_send
+        main._alert_endpoint_failure = self._orig_alert
         main.config.KOL_DEEPSEEK_API_KEY = self._orig_kol_key
         main._draft_regen_jobs.clear()
 
@@ -156,8 +160,8 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
             approver="测试人",
             authorization="Bearer test-token",
         )
-        for _ in range(20):
-            if main._draft_regen_jobs[response["job_id"]]["status"] != "running":
+        for _ in range(50):
+            if "card_updated" in main._draft_regen_jobs[response["job_id"]]:
                 break
             await asyncio.sleep(0.01)
 
@@ -189,8 +193,8 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
             approver="测试人",
             authorization="Bearer test-token",
         )
-        for _ in range(20):
-            if main._draft_regen_jobs[response["job_id"]]["status"] != "running":
+        for _ in range(50):
+            if "card_updated" in main._draft_regen_jobs[response["job_id"]]:
                 break
             await asyncio.sleep(0.01)
 
@@ -201,3 +205,77 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("red", card["header"]["template"])
         self.assertIn("重生失败", card["header"]["title"]["content"])
         self.assertIn("KOL AI 配置缺失", card["elements"][0]["text"]["content"])
+
+    async def test_background_exception_patches_original_card_to_failure(self):
+        updates = []
+
+        async def fake_regen(record_id, feedback=""):
+            raise RuntimeError("provider timeout")
+
+        async def fake_update(message_id, card, *, which):
+            updates.append((message_id, card, which))
+            return True
+
+        async def fake_alert(*args, **kwargs):
+            return None
+
+        main.draft_regen.regen_draft = fake_regen
+        main.feishu.update_card_message_with_app = fake_update
+        main._alert_endpoint_failure = fake_alert
+
+        response = await main.run_draft_regen(
+            record_id="rec_old",
+            feedback="",
+            message_id="om_test",
+            approver="测试人",
+            authorization="Bearer test-token",
+        )
+        for _ in range(50):
+            if "card_updated" in main._draft_regen_jobs[response["job_id"]]:
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertEqual("error", main._draft_regen_jobs[response["job_id"]]["status"])
+        self.assertEqual(1, len(updates))
+        _, card, which = updates[0]
+        self.assertEqual("app3", which)
+        self.assertEqual("red", card["header"]["template"])
+        self.assertIn("重生失败", card["header"]["title"]["content"])
+
+    async def test_card_patch_failure_retries_then_sends_app3_fallback(self):
+        update_calls = []
+        fallback_calls = []
+
+        async def fake_regen(record_id, feedback=""):
+            return {"ok": True, "old_rid": record_id, "new_rid": "rec_new", "retries": 1}
+
+        async def fake_update(message_id, card, *, which):
+            update_calls.append((message_id, which))
+            return False
+
+        async def fake_send(receive_type, receive_id, card):
+            fallback_calls.append((receive_type, receive_id, card))
+            return "om_fallback"
+
+        main.draft_regen.regen_draft = fake_regen
+        main.feishu.update_card_message_with_app = fake_update
+        main.feishu.send_card_via_app3 = fake_send
+
+        response = await main.run_draft_regen(
+            record_id="rec_old",
+            feedback="",
+            message_id="om_test",
+            operator_open_id="ou_test",
+            authorization="Bearer test-token",
+        )
+        for _ in range(50):
+            if main._draft_regen_jobs[response["job_id"]].get("fallback_message_id"):
+                break
+            await asyncio.sleep(0.01)
+
+        job = main._draft_regen_jobs[response["job_id"]]
+        self.assertEqual(2, len(update_calls))
+        self.assertEqual(1, len(fallback_calls))
+        self.assertEqual(("open_id", "ou_test"), fallback_calls[0][:2])
+        self.assertFalse(job["card_updated"])
+        self.assertEqual("om_fallback", job["fallback_message_id"])

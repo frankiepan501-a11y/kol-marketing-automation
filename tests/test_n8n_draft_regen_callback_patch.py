@@ -50,6 +50,7 @@ class EventHubDraftRegenPatchTests(unittest.TestCase):
         self.assertIn("[重生处理中]", source)
         self.assertIn("[重生失败]", source)
         self.assertIn("&message_id=", source)
+        self.assertIn("&operator_open_id=", source)
         self.assertNotIn("await markCard('退回重生', reply)", source)
 
     def test_patch_is_idempotent(self):
@@ -60,6 +61,14 @@ class EventHubDraftRegenPatchTests(unittest.TestCase):
         self.assertTrue(first_changed)
         self.assertFalse(second_changed)
         self.assertEqual(once, twice)
+
+    def test_verify_rejects_non_target_node_drift(self):
+        before = self.workflow()
+        after, _ = patch_workflow(before)
+        after["nodes"][0]["parameters"]["unexpected"] = True
+
+        with self.assertRaisesRegex(ValueError, "non-target node changed"):
+            verify_workflow(before, after)
 
 
 if __name__ == "__main__":

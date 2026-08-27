@@ -375,13 +375,90 @@ def _draft_regen_job_for_record(record_id: str):
 
 def _compact_draft_regen_result(result: dict) -> dict:
     keep = [
-        "ok", "old_rid", "new_rid", "retries", "route", "skip", "error",
+        "ok", "old_rid", "new_rid", "retries", "route", "skip", "error", "reused",
     ]
     return {k: result.get(k) for k in keep if k in result}
 
 
+def _draft_regen_failure_reason(raw_error: str) -> str:
+    if "missing KOL_DEEPSEEK_API_KEY" in raw_error:
+        return "KOL AI 配置缺失，未生成新草稿；请联系系统管理员处理。"
+    if "HTTP 401" in raw_error or "HTTP 402" in raw_error:
+        return "KOL AI 授权或余额不可用，未生成新草稿；请联系系统管理员处理。"
+    return f"后台未生成新版草稿：{raw_error[:160]}"
+
+
+def _draft_regen_terminal_card(*, ok: bool, approver: str = "", new_rid: str = "",
+                               error: str = "") -> dict:
+    if ok:
+        template = "green"
+        title = "✅ [重生完成] 新草稿已生成"
+        content = (
+            f"新版草稿已生成：`{new_rid}`\n\n"
+            "新的审核卡会按正常流程发出；本卡无需再次点击。"
+        )
+    else:
+        template = "red"
+        title = "⚠️ [重生失败] 未生成新草稿"
+        content = (
+            f"{_draft_regen_failure_reason(error or '后台未生成新版草稿')}\n\n"
+            "原草稿未被替换，本卡无需重复点击。"
+        )
+    if approver:
+        content += f"\n\n处理人：{approver[:40]}"
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": template,
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "elements": [{
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": content},
+        }],
+    }
+
+
+async def _update_draft_regen_terminal_card(job_id: str, message_id: str, card: dict,
+                                            operator_open_id: str = "") -> bool:
+    if not message_id:
+        return False
+    updated = False
+    last_error = ""
+    for attempt in range(2):
+        try:
+            updated = await feishu.update_card_message_with_app(message_id, card, which="app3")
+        except Exception as exc:
+            last_error = str(exc)[:160]
+            updated = False
+        if updated:
+            break
+        if attempt == 0:
+            await asyncio.sleep(0.2)
+    _draft_regen_jobs[job_id]["card_updated"] = bool(updated)
+    if not updated and operator_open_id:
+        try:
+            fallback_message_id = await feishu.send_card_via_app3(
+                "open_id", operator_open_id, card,
+            )
+        except Exception as exc:
+            fallback_message_id = ""
+            last_error = str(exc)[:160]
+        if fallback_message_id:
+            _draft_regen_jobs[job_id]["fallback_message_id"] = fallback_message_id
+            return False
+    if not updated:
+        await _alert_endpoint_failure(
+            "/draft/regen/card",
+            last_error or "App3 PATCH returned false twice and fallback delivery failed",
+            "",
+        )
+    return bool(updated)
+
+
 async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str,
-                               message_id: str = "", approver: str = ""):
+                               message_id: str = "", approver: str = "",
+                               operator_open_id: str = ""):
     try:
         result = await draft_regen.regen_draft(record_id, feedback=feedback or "")
         _draft_regen_jobs[job_id].update(
@@ -389,59 +466,15 @@ async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str,
             finished_at=datetime_now_string(),
             result=_compact_draft_regen_result(result),
         )
-        if result.get("ok") and message_id:
-            new_rid = str(result.get("new_rid") or "")
-            card = {
-                "config": {"wide_screen_mode": True},
-                "header": {
-                    "template": "green",
-                    "title": {"tag": "plain_text", "content": "✅ [重生完成] 新草稿已生成"},
-                },
-                "elements": [{
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": (
-                            f"新版草稿已生成：`{new_rid}`\n\n"
-                            "新的审核卡会按正常流程发出；本卡无需再次点击。"
-                            + (f"\n\n处理人：{approver[:40]}" if approver else "")
-                        ),
-                    },
-                }],
-            }
-            card_updated = await feishu.update_card_message_with_app(
-                message_id, card, which="app3",
-            )
-            _draft_regen_jobs[job_id]["card_updated"] = bool(card_updated)
-        elif message_id:
-            raw_error = str(result.get("error") or result.get("skip") or "后台未生成新版草稿")
-            if "missing KOL_DEEPSEEK_API_KEY" in raw_error:
-                reason = "KOL AI 配置缺失，未生成新草稿；请联系系统管理员处理。"
-            elif "HTTP 401" in raw_error or "HTTP 402" in raw_error:
-                reason = "KOL AI 授权或余额不可用，未生成新草稿；请联系系统管理员处理。"
-            else:
-                reason = f"后台未生成新版草稿：{raw_error[:160]}"
-            card = {
-                "config": {"wide_screen_mode": True},
-                "header": {
-                    "template": "red",
-                    "title": {"tag": "plain_text", "content": "⚠️ [重生失败] 未生成新草稿"},
-                },
-                "elements": [{
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": (
-                            f"{reason}\n\n原草稿未被替换，本卡无需重复点击。"
-                            + (f"\n\n处理人：{approver[:40]}" if approver else "")
-                        ),
-                    },
-                }],
-            }
-            card_updated = await feishu.update_card_message_with_app(
-                message_id, card, which="app3",
-            )
-            _draft_regen_jobs[job_id]["card_updated"] = bool(card_updated)
+        card = _draft_regen_terminal_card(
+            ok=bool(result.get("ok")),
+            approver=approver,
+            new_rid=str(result.get("new_rid") or ""),
+            error=str(result.get("error") or result.get("skip") or ""),
+        )
+        await _update_draft_regen_terminal_card(
+            job_id, message_id, card, operator_open_id,
+        )
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         _draft_regen_jobs[job_id].update(
@@ -449,6 +482,12 @@ async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str,
             finished_at=datetime_now_string(),
             error=str(e),
             trace=tr,
+        )
+        card = _draft_regen_terminal_card(
+            ok=False, approver=approver, error=str(e),
+        )
+        await _update_draft_regen_terminal_card(
+            job_id, message_id, card, operator_open_id,
         )
         await _alert_endpoint_failure("/draft/regen", str(e), tr)
 
@@ -1113,6 +1152,7 @@ async def run_talking_points(authorization: str = Header(default=""),
 async def run_draft_regen(record_id: str = Query(...), feedback: str = Query(""),
                           async_mode: bool = Query(True),
                           message_id: str = Query(""), approver: str = Query(""),
+                          operator_open_id: str = Query(""),
                           authorization: str = Header(default="")):
     """退回重生 方案A: 给指定草稿真重生一版(3信号: 上一版+评分理由 / 运营方向feedback / 当前阶段),
     旧草稿置已否决, 新草稿强制人审重新走卡。n8n 卡片「退回重生」按钮调此端点。
@@ -1156,8 +1196,14 @@ async def run_draft_regen(record_id: str = Query(...), feedback: str = Query("")
             message_id if isinstance(message_id, str) and message_id.startswith("om_") else ""
         )
         safe_approver = approver if isinstance(approver, str) else ""
+        safe_operator_open_id = (
+            operator_open_id
+            if isinstance(operator_open_id, str) and operator_open_id.startswith("ou_")
+            else ""
+        )
         asyncio.create_task(_run_draft_regen_job(
             job_id, record_id, feedback or "", safe_message_id, safe_approver,
+            safe_operator_open_id,
         ))
         return {"ok": True, "accepted": True, "already_running": False,
                 "job_id": job_id, "record_id": record_id}

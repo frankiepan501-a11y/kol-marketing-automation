@@ -33,7 +33,8 @@ _OLD_URL = (
 _NEW_URL = (
     "url: 'https://kol-auto.zeabur.app/draft/regen?record_id=' + rid + "
     "'&feedback=' + fb + '&async_mode=true&message_id=' + "
-    "encodeURIComponent(data.message_id || '') + '&approver=' + encodeURIComponent(approver),"
+    "encodeURIComponent(data.message_id || '') + '&approver=' + encodeURIComponent(approver) + "
+    "'&operator_open_id=' + encodeURIComponent(opId),"
 )
 _OLD_ERROR = "if (err) { reply = '⚠️ 重生调用异常: ' + err + ' (by ' + approver + ')'; }"
 _NEW_ERROR = (
@@ -102,6 +103,7 @@ def verify_js(source: str) -> None:
         "return [];",
         "&message_id=",
         "&approver=",
+        "&operator_open_id=",
         "[重生处理中]",
         "[重生失败]",
         "async function markRegenCard",
@@ -130,8 +132,37 @@ def verify_workflow(before: dict, after: dict) -> None:
         raise ValueError("node count changed")
     if before.get("connections") != after.get("connections"):
         raise ValueError("workflow connections changed")
+    if before.get("settings") != after.get("settings"):
+        raise ValueError("workflow settings changed")
+    before_nodes = {node.get("name"): node for node in before.get("nodes") or []}
+    after_nodes = {node.get("name"): node for node in after.get("nodes") or []}
+    if set(before_nodes) != set(after_nodes):
+        raise ValueError("workflow node names changed")
+    for name, before_node in before_nodes.items():
+        if name == NODE_NAME:
+            before_copy = copy.deepcopy(before_node)
+            after_copy = copy.deepcopy(after_nodes[name])
+            before_copy.setdefault("parameters", {})["jsCode"] = "<target-js>"
+            after_copy.setdefault("parameters", {})["jsCode"] = "<target-js>"
+            if before_copy != after_copy:
+                raise ValueError("target node changed outside jsCode")
+        elif before_node != after_nodes[name]:
+            raise ValueError(f"non-target node changed: {name}")
     node = next(node for node in after.get("nodes") or [] if node.get("name") == NODE_NAME)
     verify_js(str((node.get("parameters") or {}).get("jsCode") or ""))
+
+
+def verify_rollback(expected: dict, actual: dict) -> None:
+    expected_nodes = {node.get("name"): node for node in expected.get("nodes") or []}
+    actual_nodes = {node.get("name"): node for node in actual.get("nodes") or []}
+    if expected_nodes != actual_nodes:
+        raise ValueError("Event Hub rollback node readback mismatch")
+    if expected.get("connections") != actual.get("connections"):
+        raise ValueError("Event Hub rollback connections readback mismatch")
+    if expected.get("settings") != actual.get("settings"):
+        raise ValueError("Event Hub rollback settings readback mismatch")
+    if bool(expected.get("active")) != bool(actual.get("active")):
+        raise ValueError("Event Hub rollback active state mismatch")
 
 
 def _request(base_url: str, api_key: str, method: str, path: str, payload=None):
@@ -184,6 +215,8 @@ def main() -> int:
             _request(base_url, api_key, "PUT", f"/workflows/{WORKFLOW_ID}", _payload(current))
             if current.get("active") is True:
                 _request(base_url, api_key, "POST", f"/workflows/{WORKFLOW_ID}/activate")
+            restored = _request(base_url, api_key, "GET", f"/workflows/{WORKFLOW_ID}")
+            verify_rollback(current, restored)
             raise
     print(json.dumps({
         "workflow_id": WORKFLOW_ID,

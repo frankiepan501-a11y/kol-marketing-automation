@@ -99,6 +99,53 @@ async def regen_draft(record_id: str, feedback: str = "") -> dict:
         })
         return {"ok": False, "skip": f"重生次数={retries} 已达上限 {MAX_MANUAL_REGEN}, 转需人改"}
 
+    # Durable idempotency: the in-memory job registry is lost on a redeploy.
+    # The deterministic draft ID lets a restarted worker reuse a draft that was
+    # already created before a crash instead of calling the model and creating
+    # a second replacement.
+    regen_draft_id = (ext(f.get("邮件草稿ID")) or record_id[:12]) + f"-rg{retries+1}"
+    try:
+        existing = await feishu.search_records(config.T_DRAFT, [
+            {"field_name": "邮件草稿ID", "operator": "is", "value": [regen_draft_id]},
+        ], field_names=[
+            "邮件草稿ID", "邮件草稿状态", "卡片群消息ID", "卡片发送状态", "卡片个人消息IDs",
+        ])
+    except Exception as e:
+        return {"ok": False, "error": f"regen idempotency check fail: {e}"}
+    if existing:
+        existing_rec = existing[0]
+        new_rid = existing_rec.get("record_id") or xrid(existing_rec)
+        ef = existing_rec.get("fields") or {}
+        try:
+            await feishu.update_record(config.T_DRAFT, record_id, {
+                "邮件草稿状态": "已否决",
+                "审批意见": f"[重生替代 → 复用已有新草稿 {new_rid}] 运营点退回重生",
+            })
+        except Exception as e:
+            print(f"[regen] 复用草稿时旧草稿置否决失败 {record_id}: {e}")
+        delivered = bool(
+            ext(ef.get("卡片群消息ID"))
+            or ext(ef.get("卡片个人消息IDs"))
+            or ext(ef.get("卡片发送状态")) in ("已发送", "部分成功")
+        )
+        route = {"reused_existing_card": True}
+        if not delivered:
+            from . import draft_router
+            try:
+                route = await draft_router.route_draft(
+                    new_rid, force_review_reason=f"[重生#{retries+1}] 复用崩溃前已建草稿, 请审"
+                )
+            except Exception as e:
+                route = {"error": str(e)[:120]}
+        return {
+            "ok": True,
+            "old_rid": record_id,
+            "new_rid": new_rid,
+            "retries": retries + 1,
+            "reused": True,
+            "route": route,
+        }
+
     # KOL 当前阶段 (③ stage-aware)
     stage = "(未知阶段)"
     cf = {}
@@ -152,7 +199,7 @@ async def regen_draft(record_id: str, feedback: str = "") -> dict:
         "邮件草稿状态": "待审",
         "重生次数": retries + 1,
         "生成时间": int(time.time() * 1000),
-        "邮件草稿ID": (ext(f.get("邮件草稿ID")) or record_id[:12]) + f"-rg{retries+1}",
+        "邮件草稿ID": regen_draft_id,
         "AI评分理由": f"[重生 #{retries+1}] 上一版({record_id})被否, 已按"
                      + ("运营方向+" if (feedback or '').strip() else "")
                      + "评分理由+当前阶段重写",
