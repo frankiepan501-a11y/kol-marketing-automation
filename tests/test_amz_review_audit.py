@@ -235,6 +235,298 @@ class AmzReviewAuditPureTests(unittest.TestCase):
 
 
 class AmzReviewAuditAsyncTests(unittest.TestCase):
+    def test_daily_digest_refreshes_stale_owner_before_grouping(self):
+        issue = audit.normalize_homepage_group_issue({
+            "country": "意大利",
+            "store": "FunlabDirect-IT",
+            "owner": "余培霓",
+            "parent_asin": "B0OLDPARENT",
+            "representative_asin": "B0CURRENT01",
+            "erp_name": "Test Listing",
+            "positions": [{"asin": "B0CURRENT01", "position": 2, "star": 1, "title": "Broken"}],
+        })
+        fields = audit.issue_to_fields(issue, audit.STATE_NEW)
+        original_list_records = audit._list_audit_records
+        original_current_owners = audit._fetch_current_listing_owners
+
+        async def fake_list_records(statuses=None, limit=200):
+            return [{"record_id": "rec_stale_owner", "fields": fields}]
+
+        async def fake_current_owners(issues):
+            return {
+                ("FunlabDirect-IT", "B0CURRENT01"): "黄奕纯",
+            }
+
+        try:
+            audit._list_audit_records = fake_list_records
+            audit._fetch_current_listing_owners = fake_current_owners
+            result = asyncio.run(audit.daily_digest(mode="dry_run", notify=False))
+        finally:
+            audit._list_audit_records = original_list_records
+            audit._fetch_current_listing_owners = original_current_owners
+
+        self.assertEqual(1, result["owners"])
+        self.assertEqual("黄奕纯", result["cards"][0]["owner"])
+        self.assertEqual(1, result["owner_refresh"]["changed"])
+        self.assertEqual(0, result["owner_refresh"]["persisted"])
+
+    def test_daily_digest_routes_unresolved_owner_to_manual_check(self):
+        issue = audit.normalize_homepage_group_issue({
+            "country": "意大利",
+            "store": "FunlabDirect-IT",
+            "owner": "余培霓",
+            "parent_asin": "B0OLDPARENT",
+            "representative_asin": "B0MISSING01",
+            "erp_name": "Missing Listing",
+            "positions": [{"asin": "B0MISSING01", "position": 2, "star": 1, "title": "Broken"}],
+        })
+        fields = audit.issue_to_fields(issue, audit.STATE_NEW)
+        original_list_records = audit._list_audit_records
+        original_current_owners = audit._fetch_current_listing_owners
+
+        async def fake_list_records(statuses=None, limit=200):
+            return [{"record_id": "rec_unresolved_owner", "fields": fields}]
+
+        async def fake_current_owners(issues):
+            return {}
+
+        try:
+            audit._list_audit_records = fake_list_records
+            audit._fetch_current_listing_owners = fake_current_owners
+            result = asyncio.run(audit.daily_digest(mode="dry_run", notify=False))
+        finally:
+            audit._list_audit_records = original_list_records
+            audit._fetch_current_listing_owners = original_current_owners
+
+        self.assertEqual("待确认负责人", result["cards"][0]["owner"])
+        self.assertEqual(1, result["owner_refresh"]["unresolved"])
+
+    def test_daily_digest_commit_persists_refreshed_owner_without_sending(self):
+        issue = audit.normalize_homepage_group_issue({
+            "country": "意大利",
+            "store": "FunlabDirect-IT",
+            "owner": "余培霓",
+            "parent_asin": "B0OLDPARENT",
+            "representative_asin": "B0CURRENT02",
+            "erp_name": "Persist Listing",
+            "positions": [{"asin": "B0CURRENT02", "position": 2, "star": 1, "title": "Broken"}],
+        })
+        fields = audit.issue_to_fields(issue, audit.STATE_NEW)
+        original_list_records = audit._list_audit_records
+        original_current_owners = audit._fetch_current_listing_owners
+        original_update = audit._update_audit
+        updates = []
+
+        async def fake_list_records(statuses=None, limit=200):
+            return [{"record_id": "rec_persist_owner", "fields": fields}]
+
+        async def fake_current_owners(issues):
+            return {("FunlabDirect-IT", "B0CURRENT02"): "陈翔宇"}
+
+        async def fake_update(record_id, update_fields):
+            updates.append((record_id, update_fields))
+            return {"record_id": record_id}
+
+        try:
+            audit._list_audit_records = fake_list_records
+            audit._fetch_current_listing_owners = fake_current_owners
+            audit._update_audit = fake_update
+            result = asyncio.run(audit.daily_digest(mode="commit", notify=False))
+        finally:
+            audit._list_audit_records = original_list_records
+            audit._fetch_current_listing_owners = original_current_owners
+            audit._update_audit = original_update
+
+        self.assertEqual([("rec_persist_owner", {"负责人": "陈翔宇"})], updates)
+        self.assertEqual(1, result["owner_refresh"]["persisted"])
+        self.assertEqual(0, result["sent"])
+
+    def test_daily_digest_uses_exact_active_child_owner_with_numeric_listing_params(self):
+        issue = audit.normalize_homepage_group_issue({
+            "country": "德国",
+            "store": "FunlabDirect-DE",
+            "owner": "余培霓",
+            "parent_asin": "B0MIXEDFAMILY",
+            "representative_asin": "B0EXACTCHILD",
+            "erp_name": "Mixed Family Listing",
+            "positions": [{"asin": "B0EXACTCHILD", "position": 3, "star": 1, "title": "Broken"}],
+        })
+        fields = audit.issue_to_fields(issue, audit.STATE_NEW)
+        original_list_records = audit._list_audit_records
+        original_lx_proxy = audit._lx_proxy
+        listing_params = []
+
+        async def fake_list_records(statuses=None, limit=200):
+            return [{"record_id": "rec_exact_child", "fields": fields}]
+
+        async def fake_lx_proxy(method, path, params):
+            if path == "/erp/sc/data/seller/lists":
+                return {"code": 0, "data": [{"sid": 1193, "name": "FunlabDirect-DE"}]}
+            listing_params.append(params)
+            return {
+                "code": 0,
+                "data": [
+                    {"asin": "B0OTHERCHILD", "is_delete": 0, "principal_info": [{"principal_name": "黄奕纯"}]},
+                    {"asin": "B0EXACTCHILD", "is_delete": 1, "principal_info": [{"principal_name": "余培霓"}]},
+                    {"asin": "B0EXACTCHILD", "is_delete": 0, "principal_info": [{"principal_name": "陈翔宇"}]},
+                ],
+            }
+
+        try:
+            audit._list_audit_records = fake_list_records
+            audit._lx_proxy = fake_lx_proxy
+            result = asyncio.run(audit.daily_digest(mode="dry_run", notify=False))
+        finally:
+            audit._list_audit_records = original_list_records
+            audit._lx_proxy = original_lx_proxy
+
+        self.assertEqual("陈翔宇", result["cards"][0]["owner"])
+        self.assertEqual([{"sid": 1193, "offset": 0, "length": 500}], listing_params)
+        self.assertTrue(all(isinstance(value, int) for value in listing_params[0].values()))
+
+    def test_daily_digest_finds_current_owner_on_second_listing_page(self):
+        issue = audit.normalize_homepage_group_issue({
+            "country": "英国",
+            "store": "DRIESNAUDE-UK",
+            "owner": "余培霓",
+            "representative_asin": "B0PAGE2OWNER",
+            "erp_name": "Paged Listing",
+            "positions": [{"asin": "B0PAGE2OWNER", "position": 1, "star": 2, "title": "Bad"}],
+        })
+        fields = audit.issue_to_fields(issue, audit.STATE_NEW)
+        original_list_records = audit._list_audit_records
+        original_lx_proxy = audit._lx_proxy
+        offsets = []
+
+        async def fake_list_records(statuses=None, limit=200):
+            return [{"record_id": "rec_page_2", "fields": fields}]
+
+        async def fake_lx_proxy(method, path, params):
+            if path == "/erp/sc/data/seller/lists":
+                return {"code": 0, "data": [{"sid": 1200, "name": "DRIESNAUDE-UK"}]}
+            offsets.append(params["offset"])
+            if params["offset"] == 0:
+                return {
+                    "code": 0,
+                    "data": [
+                        {"asin": f"B0FILLER{i:04d}", "is_delete": 0, "principal_info": []}
+                        for i in range(500)
+                    ],
+                }
+            return {
+                "code": 0,
+                "data": [{
+                    "asin": "B0PAGE2OWNER",
+                    "is_delete": 0,
+                    "principal_info": [{"principal_name": "陈翔宇"}],
+                }],
+            }
+
+        try:
+            audit._list_audit_records = fake_list_records
+            audit._lx_proxy = fake_lx_proxy
+            result = asyncio.run(audit.daily_digest(mode="dry_run", notify=False))
+        finally:
+            audit._list_audit_records = original_list_records
+            audit._lx_proxy = original_lx_proxy
+
+        self.assertEqual([0, 500], offsets)
+        self.assertEqual("陈翔宇", result["cards"][0]["owner"])
+
+    def test_daily_digest_does_not_persist_conflicting_current_owners(self):
+        issue = audit.normalize_homepage_group_issue({
+            "country": "德国",
+            "store": "FunlabDirect-DE",
+            "owner": "余培霓",
+            "representative_asin": "B0CONFLICT01",
+            "erp_name": "Conflicting Listing",
+            "positions": [{"asin": "B0CONFLICT01", "position": 1, "star": 1, "title": "Bad"}],
+        })
+        fields = audit.issue_to_fields(issue, audit.STATE_NEW)
+        original_list_records = audit._list_audit_records
+        original_lx_proxy = audit._lx_proxy
+        original_update = audit._update_audit
+        updates = []
+
+        async def fake_list_records(statuses=None, limit=200):
+            return [{"record_id": "rec_conflicting_owner", "fields": fields}]
+
+        async def fake_lx_proxy(method, path, params):
+            if path == "/erp/sc/data/seller/lists":
+                return {"code": 0, "data": [{"sid": 1193, "name": "FunlabDirect-DE"}]}
+            return {
+                "code": 0,
+                "data": [
+                    {"asin": "B0CONFLICT01", "is_delete": 0, "principal_info": [{"principal_name": "黄奕纯"}]},
+                    {"asin": "B0CONFLICT01", "is_delete": 0, "principal_info": [{"principal_name": "陈翔宇"}]},
+                ],
+            }
+
+        async def fake_update(record_id, update_fields):
+            updates.append((record_id, update_fields))
+
+        try:
+            audit._list_audit_records = fake_list_records
+            audit._lx_proxy = fake_lx_proxy
+            audit._update_audit = fake_update
+            result = asyncio.run(audit.daily_digest(mode="commit", notify=False))
+        finally:
+            audit._list_audit_records = original_list_records
+            audit._lx_proxy = original_lx_proxy
+            audit._update_audit = original_update
+
+        self.assertEqual([], updates)
+        self.assertEqual("待确认负责人", result["cards"][0]["owner"])
+        self.assertEqual(1, result["owner_refresh"]["unresolved"])
+
+    def test_daily_digest_lingxing_failure_stops_before_update_or_send(self):
+        issue = audit.normalize_homepage_group_issue({
+            "country": "法国",
+            "store": "FunlabDirect-FR",
+            "owner": "余培霓",
+            "representative_asin": "B0FAILCLOSED",
+            "erp_name": "Failure Listing",
+            "positions": [{"asin": "B0FAILCLOSED", "position": 1, "star": 1, "title": "Bad"}],
+        })
+        fields = audit.issue_to_fields(issue, audit.STATE_NEW)
+        original_list_records = audit._list_audit_records
+        original_lx_proxy = audit._lx_proxy
+        original_update = audit._update_audit
+        original_send = audit._send_union
+        updates = []
+        sends = []
+
+        async def fake_list_records(statuses=None, limit=200):
+            return [{"record_id": "rec_fail_closed", "fields": fields}]
+
+        async def fake_lx_proxy(method, path, params):
+            if path == "/erp/sc/data/seller/lists":
+                return {"code": 0, "data": [{"sid": 1201, "name": "FunlabDirect-FR"}]}
+            raise RuntimeError("listing proxy unavailable")
+
+        async def fake_update(record_id, update_fields):
+            updates.append((record_id, update_fields))
+
+        async def fake_send(union_id, card):
+            sends.append((union_id, card))
+            return "om_should_not_send"
+
+        try:
+            audit._list_audit_records = fake_list_records
+            audit._lx_proxy = fake_lx_proxy
+            audit._update_audit = fake_update
+            audit._send_union = fake_send
+            with self.assertRaisesRegex(RuntimeError, "listing proxy unavailable"):
+                asyncio.run(audit.daily_digest(mode="commit", notify=True))
+        finally:
+            audit._list_audit_records = original_list_records
+            audit._lx_proxy = original_lx_proxy
+            audit._update_audit = original_update
+            audit._send_union = original_send
+
+        self.assertEqual([], updates)
+        self.assertEqual([], sends)
+
     def test_amz_assistant_url_verification_returns_challenge(self):
         original_token = amz_assistant.VERIFICATION_TOKEN
         try:

@@ -919,6 +919,75 @@ async def _lx_proxy(method: str, path: str, params: dict) -> dict:
         return resp.json()
 
 
+def _current_owner_key(issue: dict) -> tuple[str, str]:
+    return (
+        _text(issue.get("store_name")),
+        (_text(issue.get("representative_asin")) or _text(issue.get("asin"))).upper(),
+    )
+
+
+async def _fetch_current_listing_owners(issues: list[dict]) -> dict[tuple[str, str], str]:
+    """Read the current Lingxing owner for each store + affected child ASIN."""
+    wanted_by_store: dict[str, set[str]] = defaultdict(set)
+    for issue in issues:
+        store_name, asin = _current_owner_key(issue)
+        if store_name and asin:
+            wanted_by_store[store_name].add(asin)
+    if not wanted_by_store:
+        return {}
+
+    sellers_data = await _lx_proxy("POST", "/erp/sc/data/seller/lists", {})
+    if sellers_data.get("code") not in (None, 0):
+        raise RuntimeError(f"领星店铺读取失败: {sellers_data.get('code')} {sellers_data.get('message') or sellers_data.get('msg') or ''}")
+    sellers = sellers_data.get("data") or []
+    sid_by_store = {
+        _text(row.get("name")): int(row.get("sid"))
+        for row in sellers
+        if isinstance(row, dict) and row.get("sid") not in (None, "")
+    }
+
+    owners_by_key: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for store_name, wanted_asins in wanted_by_store.items():
+        sid = sid_by_store.get(store_name)
+        if not sid:
+            continue
+        offset = 0
+        while True:
+            listing_data = await _lx_proxy(
+                "POST",
+                "/erp/sc/data/mws/listing",
+                {"sid": sid, "offset": offset, "length": 500},
+            )
+            if listing_data.get("code") not in (None, 0):
+                raise RuntimeError(
+                    f"领星Listing读取失败: {store_name} / {listing_data.get('code')} "
+                    f"{listing_data.get('message') or listing_data.get('msg') or ''}"
+                )
+            rows = listing_data.get("data") or []
+            if isinstance(rows, dict):
+                rows = rows.get("list") or rows.get("items") or []
+            rows = rows if isinstance(rows, list) else []
+            for row in rows:
+                if not isinstance(row, dict) or int(row.get("is_delete") or 0) != 0:
+                    continue
+                asin = _text(row.get("asin")).upper()
+                if asin not in wanted_asins:
+                    continue
+                for principal in row.get("principal_info") or []:
+                    owner = _text((principal or {}).get("principal_name"))
+                    if owner:
+                        owners_by_key[(store_name, asin)].add(owner)
+            if len(rows) < 500:
+                break
+            offset += 500
+
+    return {
+        key: next(iter(owners))
+        for key, owners in owners_by_key.items()
+        if len(owners) == 1
+    }
+
+
 async def _fetch_lingxing_issues(limit: int = 50) -> list[dict]:
     """Fetch raw review / feedback rows through the existing Lingxing proxy.
 
@@ -1025,6 +1094,56 @@ async def daily_digest(mode: str = "dry_run", notify: bool = False, limit: int =
         records = await _list_audit_records([STATE_NEW, STATE_SUBMITTED, STATE_RECHECK_FAIL], limit=limit)
         issues = [fields_to_issue(rec.get("record_id", ""), rec.get("fields") or {}) for rec in records]
         issues = [issue for issue in issues if not _is_test_issue(issue)]
+        current_owners = await _fetch_current_listing_owners(issues)
+        changes = []
+        unresolved_items = []
+        for issue in issues:
+            old_owner = issue.get("owner") or "未分配"
+            key = _current_owner_key(issue)
+            current_owner = current_owners.get(key)
+            if not current_owner:
+                unresolved_items.append({
+                    "record_id": issue.get("record_id") or "",
+                    "store_name": key[0],
+                    "asin": key[1],
+                    "stored_owner": old_owner,
+                })
+                issue["owner"] = "待确认负责人"
+                continue
+            if current_owner == old_owner:
+                continue
+            issue["owner"] = current_owner
+            changes.append({
+                "record_id": issue.get("record_id") or "",
+                "issue_key": issue.get("issue_key") or "",
+                "store_name": issue.get("store_name") or "",
+                "representative_asin": issue.get("representative_asin") or issue.get("asin") or "",
+                "old_owner": old_owner,
+                "new_owner": current_owner,
+            })
+        if mode == "commit":
+            for change in changes:
+                if change["record_id"]:
+                    await _update_audit(change["record_id"], {"负责人": change["new_owner"]})
+        owner_refresh = {
+            "checked": len(issues),
+            "resolved": len(current_owners),
+            "unresolved": len(unresolved_items),
+            "changed": len(changes),
+            "persisted": len(changes) if mode == "commit" else 0,
+            "changes": changes,
+            "unresolved_items": unresolved_items,
+        }
+    if mode == "dry_run" and sample:
+        owner_refresh = {
+            "checked": 0,
+            "resolved": 0,
+            "unresolved": 0,
+            "changed": 0,
+            "persisted": 0,
+            "changes": [],
+            "unresolved_items": [],
+        }
     grouped: dict[str, list[dict]] = defaultdict(list)
     for issue in issues:
         grouped[issue.get("owner") or "未分配"].append(issue)
@@ -1036,7 +1155,7 @@ async def daily_digest(mode: str = "dry_run", notify: bool = False, limit: int =
         if mode == "commit" and notify:
             msg_id = await _send_union(await _owner_union(owner), card)
             sent += 1 if msg_id else 0
-    return {"mode": mode, "owners": len(grouped), "issues": len(issues), "sent": sent, "cards": cards}
+    return {"mode": mode, "owners": len(grouped), "issues": len(issues), "sent": sent, "cards": cards, "owner_refresh": owner_refresh}
 
 
 async def _homepage_check(issue: dict) -> dict:
