@@ -7,11 +7,43 @@ from app import main
 class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         main.config.INTERNAL_TOKEN = "test-token"
+        self._orig_kol_key = main.config.KOL_DEEPSEEK_API_KEY
+        main.config.KOL_DEEPSEEK_API_KEY = "test-key"
         main._draft_regen_jobs.clear()
         self._orig_regen = main.draft_regen.regen_draft
+        self._orig_card_update = main.feishu.update_card_message_with_app
+
+    async def test_health_reports_kol_ai_unconfigured(self):
+        original = main.config.KOL_DEEPSEEK_API_KEY
+        try:
+            main.config.KOL_DEEPSEEK_API_KEY = ""
+            result = await main.health()
+        finally:
+            main.config.KOL_DEEPSEEK_API_KEY = original
+
+        self.assertEqual("degraded", result["status"])
+        self.assertFalse(result["kol_ai_configured"])
+
+    async def test_regen_rejects_before_accepting_when_kol_ai_is_unconfigured(self):
+        original = main.config.KOL_DEEPSEEK_API_KEY
+        try:
+            main.config.KOL_DEEPSEEK_API_KEY = ""
+            with self.assertRaises(main.HTTPException) as caught:
+                await main.run_draft_regen(
+                    record_id="rec_old",
+                    feedback="make it warmer",
+                    authorization="Bearer test-token",
+                )
+        finally:
+            main.config.KOL_DEEPSEEK_API_KEY = original
+
+        self.assertEqual(503, caught.exception.status_code)
+        self.assertEqual(0, len(main._draft_regen_jobs))
 
     async def asyncTearDown(self):
         main.draft_regen.regen_draft = self._orig_regen
+        main.feishu.update_card_message_with_app = self._orig_card_update
+        main.config.KOL_DEEPSEEK_API_KEY = self._orig_kol_key
         main._draft_regen_jobs.clear()
 
     async def test_default_async_returns_job_and_finishes_in_background(self):
@@ -62,6 +94,7 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(first["already_running"])
         self.assertTrue(second["already_running"])
+        self.assertTrue(second["suppress_reply"])
         self.assertEqual(first["job_id"], second["job_id"])
         self.assertEqual(1, len(main._draft_regen_jobs))
 
@@ -70,3 +103,101 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
             if main._draft_regen_jobs[first["job_id"]]["status"] != "running":
                 break
             await asyncio.sleep(0.01)
+
+    async def test_duplicate_after_completion_reuses_terminal_job(self):
+        calls = 0
+
+        async def fake_regen(record_id, feedback=""):
+            nonlocal calls
+            calls += 1
+            return {"ok": True, "old_rid": record_id, "new_rid": "rec_new", "retries": 1}
+
+        main.draft_regen.regen_draft = fake_regen
+        first = await main.run_draft_regen(
+            record_id="rec_old",
+            feedback="make it warmer",
+            authorization="Bearer test-token",
+        )
+        for _ in range(20):
+            if main._draft_regen_jobs[first["job_id"]]["status"] != "running":
+                break
+            await asyncio.sleep(0.01)
+
+        second = await main.run_draft_regen(
+            record_id="rec_old",
+            feedback="make it warmer",
+            authorization="Bearer test-token",
+        )
+
+        self.assertEqual(1, calls)
+        self.assertEqual(first["job_id"], second["job_id"])
+        self.assertTrue(second["already_processed"])
+        self.assertTrue(second["suppress_reply"])
+        self.assertEqual("success", second["status"])
+        self.assertEqual("rec_new", second["result"]["new_rid"])
+
+    async def test_successful_background_regen_patches_original_card_to_success(self):
+        updates = []
+
+        async def fake_regen(record_id, feedback=""):
+            return {"ok": True, "old_rid": record_id, "new_rid": "rec_new", "retries": 1}
+
+        async def fake_update(message_id, card, *, which):
+            updates.append((message_id, card, which))
+            return True
+
+        main.draft_regen.regen_draft = fake_regen
+        main.feishu.update_card_message_with_app = fake_update
+
+        response = await main.run_draft_regen(
+            record_id="rec_old",
+            feedback="make it warmer",
+            message_id="om_test",
+            approver="测试人",
+            authorization="Bearer test-token",
+        )
+        for _ in range(20):
+            if main._draft_regen_jobs[response["job_id"]]["status"] != "running":
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertEqual(1, len(updates))
+        message_id, card, which = updates[0]
+        self.assertEqual("om_test", message_id)
+        self.assertEqual("app3", which)
+        self.assertEqual("green", card["header"]["template"])
+        self.assertIn("重生完成", card["header"]["title"]["content"])
+        self.assertIn("rec_new", card["elements"][0]["text"]["content"])
+
+    async def test_failed_background_regen_patches_original_card_to_failure(self):
+        updates = []
+
+        async def fake_regen(record_id, feedback=""):
+            return {"ok": False, "error": "deepseek fail: missing KOL_DEEPSEEK_API_KEY"}
+
+        async def fake_update(message_id, card, *, which):
+            updates.append((message_id, card, which))
+            return True
+
+        main.draft_regen.regen_draft = fake_regen
+        main.feishu.update_card_message_with_app = fake_update
+
+        response = await main.run_draft_regen(
+            record_id="rec_old",
+            feedback="make it warmer",
+            message_id="om_test",
+            approver="测试人",
+            authorization="Bearer test-token",
+        )
+        for _ in range(20):
+            if main._draft_regen_jobs[response["job_id"]]["status"] != "running":
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertEqual("done_with_issue", main._draft_regen_jobs[response["job_id"]]["status"])
+        self.assertEqual(1, len(updates))
+        _, card, which = updates[0]
+        self.assertEqual("app3", which)
+        self.assertEqual("red", card["header"]["template"])
+        self.assertIn("重生失败", card["header"]["title"]["content"])
+        self.assertIn("KOL AI 配置缺失", card["elements"][0]["text"]["content"])

@@ -365,10 +365,10 @@ def _cleanup_draft_regen_jobs():
             _draft_regen_jobs.pop(job_id, None)
 
 
-def _running_draft_regen_job(record_id: str):
+def _draft_regen_job_for_record(record_id: str):
     _cleanup_draft_regen_jobs()
     for job_id, job in _draft_regen_jobs.items():
-        if job.get("status") == "running" and job.get("record_id") == record_id:
+        if job.get("record_id") == record_id:
             return job_id, job
     return "", None
 
@@ -380,7 +380,8 @@ def _compact_draft_regen_result(result: dict) -> dict:
     return {k: result.get(k) for k in keep if k in result}
 
 
-async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str):
+async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str,
+                               message_id: str = "", approver: str = ""):
     try:
         result = await draft_regen.regen_draft(record_id, feedback=feedback or "")
         _draft_regen_jobs[job_id].update(
@@ -388,6 +389,59 @@ async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str):
             finished_at=datetime_now_string(),
             result=_compact_draft_regen_result(result),
         )
+        if result.get("ok") and message_id:
+            new_rid = str(result.get("new_rid") or "")
+            card = {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "template": "green",
+                    "title": {"tag": "plain_text", "content": "✅ [重生完成] 新草稿已生成"},
+                },
+                "elements": [{
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f"新版草稿已生成：`{new_rid}`\n\n"
+                            "新的审核卡会按正常流程发出；本卡无需再次点击。"
+                            + (f"\n\n处理人：{approver[:40]}" if approver else "")
+                        ),
+                    },
+                }],
+            }
+            card_updated = await feishu.update_card_message_with_app(
+                message_id, card, which="app3",
+            )
+            _draft_regen_jobs[job_id]["card_updated"] = bool(card_updated)
+        elif message_id:
+            raw_error = str(result.get("error") or result.get("skip") or "后台未生成新版草稿")
+            if "missing KOL_DEEPSEEK_API_KEY" in raw_error:
+                reason = "KOL AI 配置缺失，未生成新草稿；请联系系统管理员处理。"
+            elif "HTTP 401" in raw_error or "HTTP 402" in raw_error:
+                reason = "KOL AI 授权或余额不可用，未生成新草稿；请联系系统管理员处理。"
+            else:
+                reason = f"后台未生成新版草稿：{raw_error[:160]}"
+            card = {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "template": "red",
+                    "title": {"tag": "plain_text", "content": "⚠️ [重生失败] 未生成新草稿"},
+                },
+                "elements": [{
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f"{reason}\n\n原草稿未被替换，本卡无需重复点击。"
+                            + (f"\n\n处理人：{approver[:40]}" if approver else "")
+                        ),
+                    },
+                }],
+            }
+            card_updated = await feishu.update_card_message_with_app(
+                message_id, card, which="app3",
+            )
+            _draft_regen_jobs[job_id]["card_updated"] = bool(card_updated)
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         _draft_regen_jobs[job_id].update(
@@ -410,8 +464,10 @@ async def root():
 
 @app.get("/health")
 async def health():
+    kol_ai_configured = bool(config.KOL_DEEPSEEK_API_KEY.strip())
     return {
-        "status": "ok",
+        "status": "ok" if kol_ai_configured else "degraded",
+        "kol_ai_configured": kol_ai_configured,
         "dtc_weekly_ai_configured": bool(os.environ.get("DTC_WEEKLY_DEEPSEEK_API_KEY", "").strip()),
     }
 
@@ -1056,6 +1112,7 @@ async def run_talking_points(authorization: str = Header(default=""),
 @app.post("/draft/regen")
 async def run_draft_regen(record_id: str = Query(...), feedback: str = Query(""),
                           async_mode: bool = Query(True),
+                          message_id: str = Query(""), approver: str = Query(""),
                           authorization: str = Header(default="")):
     """退回重生 方案A: 给指定草稿真重生一版(3信号: 上一版+评分理由 / 运营方向feedback / 当前阶段),
     旧草稿置已否决, 新草稿强制人审重新走卡。n8n 卡片「退回重生」按钮调此端点。
@@ -1065,17 +1122,28 @@ async def run_draft_regen(record_id: str = Query(...), feedback: str = Query("")
     """
     _check_auth(authorization)
     if async_mode:
-        running_id, running_job = _running_draft_regen_job(record_id)
-        if running_job:
-            return {
-                "ok": True,
-                "accepted": True,
-                "already_running": True,
-                "job_id": running_id,
-                "status": running_job.get("status"),
-                "started_at": running_job.get("started_at"),
+        existing_id, existing_job = _draft_regen_job_for_record(record_id)
+        if existing_job:
+            status = existing_job.get("status") or "running"
+            response = {
+                "ok": status == "success" or status == "running",
+                "accepted": status == "running",
+                "already_running": status == "running",
+                "already_processed": status != "running",
+                "duplicate": True,
+                "suppress_reply": True,
+                "job_id": existing_id,
+                "status": status,
+                "started_at": existing_job.get("started_at"),
                 "record_id": record_id,
             }
+            if existing_job.get("result") is not None:
+                response["result"] = existing_job.get("result")
+            if existing_job.get("error"):
+                response["error"] = existing_job.get("error")
+            return response
+        if not config.KOL_DEEPSEEK_API_KEY.strip():
+            raise HTTPException(503, "KOL AI is not configured")
         job_id = "draftregen-" + uuid.uuid4().hex[:12]
         _draft_regen_jobs[job_id] = {
             "status": "running",
@@ -1084,9 +1152,17 @@ async def run_draft_regen(record_id: str = Query(...), feedback: str = Query("")
             "record_id": record_id,
             "params": {"feedback_present": bool((feedback or "").strip())},
         }
-        asyncio.create_task(_run_draft_regen_job(job_id, record_id, feedback or ""))
+        safe_message_id = (
+            message_id if isinstance(message_id, str) and message_id.startswith("om_") else ""
+        )
+        safe_approver = approver if isinstance(approver, str) else ""
+        asyncio.create_task(_run_draft_regen_job(
+            job_id, record_id, feedback or "", safe_message_id, safe_approver,
+        ))
         return {"ok": True, "accepted": True, "already_running": False,
                 "job_id": job_id, "record_id": record_id}
+    if not config.KOL_DEEPSEEK_API_KEY.strip():
+        raise HTTPException(503, "KOL AI is not configured")
     try:
         result = await draft_regen.regen_draft(record_id, feedback=feedback or "")
         return {"ok": True, **result}
