@@ -252,6 +252,34 @@ class LaunchReplyAttributionTests(unittest.TestCase):
         self.assertEqual(1, len(source["load_warnings"]))
         self.assertIn("draft:cold-1", source["load_warnings"][0])
 
+    def test_targeted_scan_keeps_load_warnings_out_of_case_collector(self):
+        source = {
+            "activities": [self._activity()],
+            "participants": [self._participant()],
+            "drafts": [self._reply()],
+            "contacts": {
+                "kol-1": {"record_id": "kol-1", "fields": {"账号名": "Just the Gems"}},
+            },
+            "products": {
+                "product-1": {"record_id": "product-1", "fields": {"产品名": "食人花二代"}},
+            },
+            "load_warnings": ["draft:cold-1:RuntimeError"],
+        }
+
+        with patch.object(attribution, "_load_source", AsyncMock(return_value=source)):
+            result = asyncio.run(attribution.scan_and_send(
+                dry_run=True,
+                frankie_only=True,
+                campaign_id="launch-piranha",
+                reply_record_id="reply-1",
+                limit=1,
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, result["matched_cases"])
+        self.assertEqual(["draft:cold-1:RuntimeError"], result["load_warnings"])
+        self.assertEqual("reply-1", result["items"][0]["reply_record_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

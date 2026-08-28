@@ -644,7 +644,16 @@ async def scan_and_send(
     limit: int = 10,
 ) -> dict:
     source = await _load_source(reply_record_id=reply_record_id)
-    cases = collect_unmatched_reply_cases(**source)
+    # `_load_source` also returns read-only diagnostic metadata such as
+    # `load_warnings`.  Pass only business inputs to the collector so a stale
+    # optional link can be reported without turning a valid scan into HTTP 500.
+    cases = collect_unmatched_reply_cases(
+        activities=source["activities"],
+        participants=source["participants"],
+        drafts=source["drafts"],
+        contacts=source.get("contacts") or {},
+        products=source.get("products") or {},
+    )
     if campaign_id:
         cases = [
             case for case in cases
