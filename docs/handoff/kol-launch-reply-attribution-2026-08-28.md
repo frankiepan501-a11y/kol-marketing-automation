@@ -69,3 +69,11 @@
 - `docs/handoff/kol-launch-reply-attribution-2026-08-28.md`
 - `.codex/plan/kol-reply-attribution-p0-20260828/progress.md`
 - `.codex/plan/kol-reply-attribution-p0-20260828/decision-log.md`
+
+## 2026-08-28 样卡纠正发布结果
+
+- 生产版本：`c49f1a9`；Zeabur deployment `6a91a61313d3d467215e69c2` 已为 `RUNNING`，`/health` HTTP 200、`status=ok`。
+- 定向 dry-run 只命中 `recvtk1FNL7zcN`，确认目标仍是原卡 `om_x100b662d972b70a4c4257eb092f24c1`，且执行路径为 PATCH 原卡。
+- 内容核验：`Awesome` 与 `Tracking #` 只出现在“系统建议回复草稿（供审核，不是 KOL 来信）”区域；“KOL 来信原文”区域不含这些系统文案，并明确提示历史原文未保存。
+- 生产提交结果：`patched_existing_card=true`、`same_original_message=true`，响应中没有新发卡字段；没有发送新卡或 KOL 邮件。
+- 安全闸未变：`LAUNCH_REPLY_ATTRIBUTION_ENABLED` 仍关闭。下一步只需 Frankie 在真实飞书客户端核看原卡显示；确认无误后再单独授权回调验收和自动运营派发。
