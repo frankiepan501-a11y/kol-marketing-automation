@@ -8,7 +8,7 @@ import uuid
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_evidence_author_import, launch_participation, launch_outcomes, launch_outreach, launch_runtime, media_archive_controller
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_evidence_author_import, launch_participation, launch_outcomes, launch_outreach, launch_runtime, media_archive_controller, discord_tester_role_sync
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
@@ -30,6 +30,27 @@ app = FastAPI(title="KOL Marketing Automation", version="0.3")
 app.include_router(invest.router)
 app.include_router(x_history.router)
 app.include_router(discord_tester_routes.router)
+
+
+@app.on_event("startup")
+async def start_discord_tester_role_sync():
+    runtime = None
+    error = ""
+    try:
+        runtime = discord_tester_role_sync.build_runtime()
+    except Exception as exc:
+        error = type(exc).__name__
+    app.state.discord_tester_role_sync_runtime = runtime
+    app.state.discord_tester_role_sync_error = error
+    if runtime is not None:
+        await runtime.start()
+
+
+@app.on_event("shutdown")
+async def stop_discord_tester_role_sync():
+    runtime = getattr(app.state, "discord_tester_role_sync_runtime", None)
+    if runtime is not None:
+        await runtime.stop()
 
 # Endpoint 失败告警 dedup: {endpoint: last_alert_ts} (60 min 内同 endpoint 只告 1 次)
 _alert_last = {}

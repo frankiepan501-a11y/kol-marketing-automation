@@ -286,6 +286,38 @@ def _check_internal_auth(authorization: str) -> None:
         raise HTTPException(401, "Invalid internal token")
 
 
+@router.get("/admin/role-sync/health")
+async def selected_role_sync_health(request: Request):
+    if os.environ.get("DISCORD_TESTER_ROLE_SYNC_ENABLED", "0") != "1":
+        return {"status": "disabled", "enabled": False}
+    runtime = getattr(request.app.state, "discord_tester_role_sync_runtime", None)
+    startup_error = getattr(request.app.state, "discord_tester_role_sync_error", "")
+    if runtime is None:
+        raise HTTPException(503, {
+            "status": "degraded", "enabled": True,
+            "last_error": startup_error or "runtime_unavailable",
+        })
+    payload = {
+        "status": "degraded" if runtime.last_error else "ok",
+        "enabled": True,
+        "last_success_ms": runtime.last_success_ms,
+        "last_error": runtime.last_error,
+        "last_result": runtime.last_result,
+    }
+    if runtime.last_error:
+        raise HTTPException(503, payload)
+    return payload
+
+
+@router.post("/admin/role-sync/run")
+async def run_selected_role_sync(request: Request, authorization: str = Header(default="")):
+    _check_internal_auth(authorization)
+    runtime = getattr(request.app.state, "discord_tester_role_sync_runtime", None)
+    if runtime is None:
+        raise HTTPException(503, "Discord tester role sync is unavailable")
+    return {"ok": True, **(await runtime.run_once())}
+
+
 async def _validate_current_form_access(kind: str, claims: dict) -> dict:
     ledger = discord_tester_program.DiscordTesterLedger()
     fields = await ledger.get_application(str(claims.get("record_id") or ""))
