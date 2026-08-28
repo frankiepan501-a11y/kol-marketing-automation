@@ -322,13 +322,18 @@ def build_attribution_card(case: dict) -> dict:
         )
     reply_body = re.sub(r"^\[MID:[^\]]+\]\s*", "", case.get("reply_body") or "")[:500]
     suggested_reply_body = (case.get("suggested_reply_body") or "")[:500]
+    reply_target_message_id = case.get("reply_target_message_id") or "未记录"
+    reply_record_id = case.get("reply_record_id") or "未记录"
     inbound_panel = (
         f"**KOL 来信原文**\n> {reply_body}"
         if reply_body
         else (
             "**KOL 来信原文**\n"
             "> ⚠️ 历史记录未保存 KOL 来信原文。"
-            "请查看原邮件线程；不要把下方系统草稿当作 KOL 原话。"
+            "不要把下方系统草稿当作 KOL 原话。\n"
+            f"> 原始消息ID：`{reply_target_message_id}`；回复记录ID：`{reply_record_id}`。\n"
+            "> 若现有 KOL、产品和候选活动仍不足以判断，请先打开下方回复草稿查看现有证据；"
+            "由系统管理员从原邮件补回 `回复原文` 后，再按本回复记录单条刷新原卡。"
         )
     )
     suggested_panel = (
@@ -376,7 +381,7 @@ def build_attribution_card(case: dict) -> dict:
             ]},
             {"tag": "action", "actions": [{
                 "tag": "button",
-                "text": {"tag": "plain_text", "content": "打开回复草稿"},
+                "text": {"tag": "plain_text", "content": "打开回复草稿（现有证据）"},
                 "url": _record_url(config.T_DRAFT, case.get("reply_record_id") or ""),
                 "type": "default",
             }]},

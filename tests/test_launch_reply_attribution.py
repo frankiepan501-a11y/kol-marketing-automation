@@ -138,6 +138,9 @@ class LaunchReplyAttributionTests(unittest.TestCase):
 
         self.assertNotIn("[TRACKING#]", inbound)
         self.assertIn("历史记录未保存", inbound)
+        self.assertIn("orphan-mid", inbound)
+        self.assertIn("reply-1", inbound)
+        self.assertIn("补回 `回复原文`", inbound)
         self.assertIn("[TRACKING#]", suggested)
         self.assertEqual("", case["reply_body"])
         self.assertEqual(outbound_draft, case["suggested_reply_body"])

@@ -54,7 +54,17 @@
 - 问题：历史回复 `recvtk1FNL7zcN` 没有单独保存 `回复原文`，卡片错误使用 `邮件正文` 兜底，并标为“KOL 原话”。但 `邮件正文` 是我方系统建议回复草稿，含运单号、物流商和购买链接占位符。
 - 根因：入站字段和出站字段在展示层做了错误的跨字段降级。
 - 修复：`回复原文` 为空时明确显示“历史记录未保存 KOL 来信原文”，绝不再用 `邮件正文` 代替；`邮件正文` 单独标为“系统建议回复草稿（供审核，不是 KOL 来信）”。
+- 缺失证据处理：卡片同时显示原始消息 ID、回复记录 ID 和可直接打开的草稿记录；若仍不足以判断，明确要求由系统管理员从原邮件补回 `回复原文` 后，按该回复记录单条刷新原卡。
 - 兼容：新回复仍由 `reply_drafter.py` 分别持久化 `回复原文` 与 `邮件正文`；旧记录不猜测、不伪造原文。
 - 样卡修正：扫描端点增加仅用于已存在卡片的原卡刷新开关，强制指定单条 `reply_record_id`；没有旧 message_id 时只跳过，固定使用聪哥分身3号 PATCH 原卡，任何分支都不发送新卡。
 - 回归：新增旧记录字段缺失、“更新原卡、不重发”、缺旧卡 ID 不补发和禁止批量刷新测试；集中宣发相关回归通过。
 - 安全状态：自动运营派发仍关闭；修正后的 Frankie-only 原卡经真实客户端确认后，再继续回调验收。
+
+本次纠错改动文件：
+
+- `app/launch_reply_attribution.py`
+- `app/main.py`
+- `tests/test_launch_reply_attribution.py`
+- `docs/handoff/kol-launch-reply-attribution-2026-08-28.md`
+- `.codex/plan/kol-reply-attribution-p0-20260828/progress.md`
+- `.codex/plan/kol-reply-attribution-p0-20260828/decision-log.md`
