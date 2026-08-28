@@ -259,7 +259,12 @@ def collect_unmatched_reply_cases(
         out.append({
             "reply_record_id": reply.get("record_id", ""),
             "reply_subject": _text(fields.get("邮件主题")),
-            "reply_body": _text(fields.get("回复原文")) or _text(fields.get("邮件正文")),
+            # `回复原文` is the inbound KOL email. `邮件正文` is our outbound
+            # reply suggestion. Never fall back from the former to the latter:
+            # legacy records may not have persisted the inbound body, and that
+            # fallback would falsely present our draft as the KOL's own words.
+            "reply_body": _text(fields.get("回复原文")),
+            "suggested_reply_body": _text(fields.get("邮件正文")),
             "reply_intent": _text(fields.get("回复意图")) or "不明意图",
             "reply_target_message_id": _text(fields.get("回复目标MsgID")),
             "kol_record_id": contact_ids[0] if len(contact_ids) == 1 else "",
@@ -316,6 +321,21 @@ def build_attribution_card(case: dict) -> dict:
             f"{candidate.get('object_type')}；{deadline_label}；匹配依据：{candidate.get('match_reason')}"
         )
     reply_body = re.sub(r"^\[MID:[^\]]+\]\s*", "", case.get("reply_body") or "")[:500]
+    suggested_reply_body = (case.get("suggested_reply_body") or "")[:500]
+    inbound_panel = (
+        f"**KOL 来信原文**\n> {reply_body}"
+        if reply_body
+        else (
+            "**KOL 来信原文**\n"
+            "> ⚠️ 历史记录未保存 KOL 来信原文。"
+            "请查看原邮件线程；不要把下方系统草稿当作 KOL 原话。"
+        )
+    )
+    suggested_panel = (
+        f"**系统建议回复草稿（供审核，不是 KOL 来信）**\n> {suggested_reply_body}"
+        if suggested_reply_body
+        else "**系统建议回复草稿（供审核，不是 KOL 来信）**\n> 当前记录没有建议草稿。"
+    )
     return {
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
@@ -331,7 +351,8 @@ def build_attribution_card(case: dict) -> dict:
                 "系统没有猜活动，也没有停止回复流程。请只确认该回复属于哪个正在执行的活动；"
                 "确认后，原回复审核卡继续处理。"
             )}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**KOL 原话**\n> {reply_body or '-'}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": inbound_panel}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": suggested_panel}},
             {"tag": "div", "text": {"tag": "lark_md", "content": "**当前可选活动与任务要求**\n" + "\n".join(candidate_lines)}},
             {"tag": "form", "name": f"launch_reply_attr_{case.get('reply_record_id')}", "elements": [
                 {
@@ -392,7 +413,10 @@ def validate_attribution_card(card: dict) -> list[str]:
     if len(selects) != 1:
         errors.append("卡片缺少唯一活动选择器")
     rendered = json.dumps(card, ensure_ascii=False)
-    for required in ("任务性质", "规定时间上稿", "活动归属待确认", ACTION_CONFIRM):
+    for required in (
+        "任务性质", "规定时间上稿", "活动归属待确认",
+        "KOL 来信原文", "系统建议回复草稿", ACTION_CONFIRM,
+    ):
         if required not in rendered:
             errors.append(f"卡片缺少必要内容：{required}")
     return errors
@@ -642,7 +666,10 @@ async def scan_and_send(
     campaign_id: str = "",
     reply_record_id: str = "",
     limit: int = 10,
+    refresh_existing_card: bool = False,
 ) -> dict:
+    if refresh_existing_card and not reply_record_id:
+        raise ValueError("刷新现有归属卡必须指定 reply_record_id，禁止批量刷新或补发新卡")
     source = await _load_source(reply_record_id=reply_record_id)
     # `_load_source` also returns read-only diagnostic metadata such as
     # `load_warnings`.  Pass only business inputs to the collector so a stale
@@ -661,16 +688,32 @@ async def scan_and_send(
         ]
     items = []
     for case in cases[:max(0, int(limit or 0))]:
-        if case.get("card_message_id"):
-            items.append({
-                "reply_record_id": case["reply_record_id"], "skipped": "card_already_sent",
-                "message_id": case["card_message_id"],
-            })
-            continue
         card = build_attribution_card(case)
         errors = validate_attribution_card(card)
         if errors:
             raise ValueError("活动归属卡结构不合格：" + "；".join(errors))
+        if case.get("card_message_id"):
+            item = {
+                "reply_record_id": case["reply_record_id"],
+                "message_id": case["card_message_id"],
+            }
+            if not refresh_existing_card:
+                item["skipped"] = "card_already_sent"
+            elif dry_run:
+                item["dry_run_card"] = card
+                item["would_patch_existing_card"] = True
+            else:
+                item["patched_existing_card"] = await feishu.update_card_message_with_app(
+                    case["card_message_id"], card, which="app3",
+                )
+            items.append(item)
+            continue
+        if refresh_existing_card:
+            items.append({
+                "reply_record_id": case["reply_record_id"],
+                "skipped": "no_existing_card_to_refresh",
+            })
+            continue
         item = {
             "reply_record_id": case["reply_record_id"],
             "kol_name": case["kol_name"],
@@ -693,6 +736,7 @@ async def scan_and_send(
     return {
         "ok": True, "dry_run": dry_run, "frankie_only": frankie_only,
         "campaign_id": campaign_id, "reply_record_id": reply_record_id,
+        "refresh_existing_card": refresh_existing_card,
         "matched_cases": len(cases),
         "processed": len(items), "load_warnings": source.get("load_warnings") or [],
         "items": items,

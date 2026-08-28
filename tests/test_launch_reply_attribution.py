@@ -111,6 +111,37 @@ class LaunchReplyAttributionTests(unittest.TestCase):
             if node.get("tag") == "button" and node.get("action_type") == "form_submit"
         ))
 
+    def test_legacy_reply_never_labels_outbound_draft_as_kol_original(self):
+        reply = self._reply()
+        reply["fields"].pop("回复原文")
+        outbound_draft = (
+            "Awesome — got the address! Tracking #: [TRACKING#] "
+            "Carrier: [CARRIER] [PURCHASE_LINKS]"
+        )
+        reply["fields"]["邮件正文"] = outbound_draft
+
+        case = attribution.collect_unmatched_reply_cases(
+            activities=[self._activity()],
+            participants=[self._participant()],
+            drafts=[reply],
+            contacts={"kol-1": {"record_id": "kol-1", "fields": {"账号名": "Just the Gems"}}},
+            products={"product-1": {"record_id": "product-1", "fields": {"产品名": "食人花二代"}}},
+        )[0]
+        card = attribution.build_attribution_card(case)
+        contents = [
+            (node.get("text") or {}).get("content", "")
+            for node in attribution.card_nodes(card)
+            if node.get("tag") == "div"
+        ]
+        inbound = next(content for content in contents if "KOL 来信原文" in content)
+        suggested = next(content for content in contents if "系统建议回复草稿" in content)
+
+        self.assertNotIn("[TRACKING#]", inbound)
+        self.assertIn("历史记录未保存", inbound)
+        self.assertIn("[TRACKING#]", suggested)
+        self.assertEqual("", case["reply_body"])
+        self.assertEqual(outbound_draft, case["suggested_reply_body"])
+
     def test_callback_is_idempotent_and_patches_original_card(self):
         event = {
             "operator": {"name": "张佳烨", "open_id": "ou_operator"},
@@ -279,6 +310,76 @@ class LaunchReplyAttributionTests(unittest.TestCase):
         self.assertEqual(1, result["matched_cases"])
         self.assertEqual(["draft:cold-1:RuntimeError"], result["load_warnings"])
         self.assertEqual("reply-1", result["items"][0]["reply_record_id"])
+
+    def test_targeted_scan_can_patch_existing_card_without_resending(self):
+        reply = self._reply()
+        reply["fields"]["活动归属卡片消息ID"] = "om_existing"
+        source = {
+            "activities": [self._activity()],
+            "participants": [self._participant()],
+            "drafts": [reply],
+            "contacts": {
+                "kol-1": {"record_id": "kol-1", "fields": {"账号名": "Just the Gems"}},
+            },
+            "products": {
+                "product-1": {"record_id": "product-1", "fields": {"产品名": "食人花二代"}},
+            },
+            "load_warnings": [],
+        }
+        patch_card = AsyncMock(return_value=True)
+
+        with patch.object(attribution, "_load_source", AsyncMock(return_value=source)), \
+             patch.object(attribution.feishu, "update_card_message_with_app", patch_card), \
+             patch.object(attribution, "_send_card", AsyncMock()) as send_card:
+            result = asyncio.run(attribution.scan_and_send(
+                dry_run=False,
+                frankie_only=True,
+                campaign_id="launch-piranha",
+                reply_record_id="reply-1",
+                limit=1,
+                refresh_existing_card=True,
+            ))
+
+        self.assertTrue(result["items"][0]["patched_existing_card"])
+        patch_card.assert_awaited_once()
+        self.assertEqual("om_existing", patch_card.await_args.args[0])
+        self.assertEqual("app3", patch_card.await_args.kwargs["which"])
+        send_card.assert_not_awaited()
+
+    def test_refresh_mode_never_sends_when_existing_card_id_is_missing(self):
+        source = {
+            "activities": [self._activity()],
+            "participants": [self._participant()],
+            "drafts": [self._reply()],
+            "contacts": {
+                "kol-1": {"record_id": "kol-1", "fields": {"账号名": "Just the Gems"}},
+            },
+            "products": {
+                "product-1": {"record_id": "product-1", "fields": {"产品名": "食人花二代"}},
+            },
+            "load_warnings": [],
+        }
+
+        with patch.object(attribution, "_load_source", AsyncMock(return_value=source)), \
+             patch.object(attribution, "_send_card", AsyncMock()) as send_card:
+            result = asyncio.run(attribution.scan_and_send(
+                dry_run=False,
+                frankie_only=True,
+                campaign_id="launch-piranha",
+                reply_record_id="reply-1",
+                limit=1,
+                refresh_existing_card=True,
+            ))
+
+        self.assertEqual("no_existing_card_to_refresh", result["items"][0]["skipped"])
+        send_card.assert_not_awaited()
+
+    def test_refresh_mode_requires_one_reply_record(self):
+        with self.assertRaisesRegex(ValueError, "必须指定 reply_record_id"):
+            asyncio.run(attribution.scan_and_send(
+                dry_run=True,
+                refresh_existing_card=True,
+            ))
 
 
 if __name__ == "__main__":
