@@ -2119,6 +2119,7 @@ async def run_launch_reply_attribution_scan(
     dry_run: bool = True,
     frankie_only: bool = True,
     campaign_id: str = "",
+    reply_record_id: str = "",
     limit: int = 10,
 ):
     """扫描无法唯一归属的实时回复；默认只演练且只允许 Frankie 样卡。"""
@@ -2127,6 +2128,7 @@ async def run_launch_reply_attribution_scan(
         dry_run=dry_run,
         frankie_only=frankie_only,
         campaign_id=campaign_id,
+        reply_record_id=reply_record_id,
         limit=limit,
     )
 

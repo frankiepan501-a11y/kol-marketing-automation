@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -514,13 +515,71 @@ async def handle_callback(event: dict) -> dict:
     }
 
 
-async def _load_source() -> dict:
-    activities = await feishu.fetch_all_records(
-        config.T_LAUNCH_CAMPAIGN, field_names=ACTIVITY_FIELDS, page_size=100,
+def _candidate_source_draft_ids(
+    reply: dict,
+    *,
+    activities: list[dict],
+    participants: list[dict],
+) -> list[str]:
+    """只取可能与目标回复有关的活动原草稿，避免扫描整张草稿表。"""
+    active_campaigns = set(_campaign_rows(activities))
+    fields = reply.get("fields") or {}
+    contact_ids = set(_ids(fields.get("关联KOL")))
+    product_ids = set(_ids(fields.get("关联产品")))
+    draft_ids: set[str] = set()
+    for participant in participants:
+        if not launch_daily_report._is_active_participant(participant):
+            continue
+        pf = participant.get("fields") or {}
+        if _text(pf.get("活动ID")) not in active_campaigns:
+            continue
+        participant_contacts = set(_ids(pf.get("关联KOL")))
+        participant_product = _text(pf.get("产品家族ID"))
+        contact_match = bool(contact_ids and participant_contacts and contact_ids == participant_contacts)
+        product_match = bool(product_ids and participant_product in product_ids)
+        if contact_match or product_match:
+            draft_ids.update(_ids(pf.get("关联邮件草稿")))
+    return sorted(draft_ids)
+
+
+async def _load_source(*, reply_record_id: str = "") -> dict:
+    activities, participants = await asyncio.gather(
+        feishu.fetch_all_records(
+            config.T_LAUNCH_CAMPAIGN, field_names=ACTIVITY_FIELDS, page_size=100,
+        ),
+        feishu.fetch_all_records(
+            config.T_LAUNCH_PARTICIPANT, field_names=PARTICIPANT_FIELDS, page_size=500,
+        ),
     )
-    participants = await feishu.fetch_all_records(
-        config.T_LAUNCH_PARTICIPANT, field_names=PARTICIPANT_FIELDS, page_size=500,
-    )
+    if reply_record_id:
+        reply = await feishu.get_record(config.T_DRAFT, reply_record_id)
+        source_draft_ids = _candidate_source_draft_ids(
+            reply, activities=activities, participants=participants,
+        )
+        source_drafts = await asyncio.gather(*(
+            feishu.get_record(config.T_DRAFT, record_id)
+            for record_id in source_draft_ids
+            if record_id != reply_record_id
+        ))
+        fields = reply.get("fields") or {}
+        contact_ids = sorted(set(_ids(fields.get("关联KOL"))))
+        product_ids = sorted(set(_ids(fields.get("关联产品"))))
+        contact_rows, product_rows = await asyncio.gather(
+            asyncio.gather(*(
+                feishu.get_record(config.T_KOL, record_id) for record_id in contact_ids
+            )),
+            asyncio.gather(*(
+                feishu.get_record(config.T_PRODUCT, record_id) for record_id in product_ids
+            )),
+        )
+        return {
+            "activities": activities,
+            "participants": participants,
+            "drafts": [reply, *source_drafts],
+            "contacts": {row.get("record_id"): row for row in contact_rows if row.get("record_id")},
+            "products": {row.get("record_id"): row for row in product_rows if row.get("record_id")},
+        }
+
     drafts = await feishu.fetch_all_records(
         config.T_DRAFT, field_names=DRAFT_FIELDS, page_size=500,
     )
@@ -567,9 +626,10 @@ async def scan_and_send(
     dry_run: bool = True,
     frankie_only: bool = True,
     campaign_id: str = "",
+    reply_record_id: str = "",
     limit: int = 10,
 ) -> dict:
-    source = await _load_source()
+    source = await _load_source(reply_record_id=reply_record_id)
     cases = collect_unmatched_reply_cases(**source)
     if campaign_id:
         cases = [
@@ -609,6 +669,7 @@ async def scan_and_send(
         items.append(item)
     return {
         "ok": True, "dry_run": dry_run, "frankie_only": frankie_only,
-        "campaign_id": campaign_id, "matched_cases": len(cases),
+        "campaign_id": campaign_id, "reply_record_id": reply_record_id,
+        "matched_cases": len(cases),
         "processed": len(items), "items": items,
     }

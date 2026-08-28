@@ -901,7 +901,8 @@ async def run():
                             attribution_result = await launch_reply_attribution.scan_and_send(
                                 dry_run=False,
                                 frankie_only=False,
-                                limit=10,
+                                reply_record_id=reply_rid,
+                                limit=1,
                             )
                             print(
                                 "[reply_monitor] launch attribution scan "

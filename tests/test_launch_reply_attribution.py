@@ -36,6 +36,7 @@ class LaunchReplyAttributionTests(unittest.TestCase):
                 "对象类型": "KOL",
                 "计划上稿时间": 1788364800000,
                 "承诺上稿时间": 1788451200000,
+                "关联邮件草稿": ["cold-1"],
             },
         }
 
@@ -173,6 +174,52 @@ class LaunchReplyAttributionTests(unittest.TestCase):
         written = update.await_args.args[2]
         self.assertEqual("张佳烨", written["活动归属确认人"])
         patch_card.assert_awaited_once()
+
+    def test_targeted_load_avoids_full_draft_table_scan(self):
+        reply = self._reply()
+        cold = {
+            "record_id": "cold-1",
+            "fields": {
+                "邮件草稿来源": "cold",
+                "关联KOL": ["kol-1"],
+                "关联产品": ["product-1"],
+                "是否回复": True,
+                "回复原文": "[MID:source-mid]",
+            },
+        }
+        activity = self._activity()
+        participant = self._participant()
+
+        async def fetch_all(table_id, **_kwargs):
+            if table_id == attribution.config.T_LAUNCH_CAMPAIGN:
+                return [activity]
+            if table_id == attribution.config.T_LAUNCH_PARTICIPANT:
+                return [participant]
+            self.fail(f"targeted load must not scan full table: {table_id}")
+
+        records = {
+            (attribution.config.T_DRAFT, "reply-1"): reply,
+            (attribution.config.T_DRAFT, "cold-1"): cold,
+            (attribution.config.T_KOL, "kol-1"): {
+                "record_id": "kol-1", "fields": {"账号名": "Just the Gems"},
+            },
+            (attribution.config.T_PRODUCT, "product-1"): {
+                "record_id": "product-1", "fields": {"产品名": "食人花二代"},
+            },
+        }
+
+        async def get_record(table_id, record_id):
+            return records[(table_id, record_id)]
+
+        with patch.object(attribution.feishu, "fetch_all_records", side_effect=fetch_all), \
+             patch.object(attribution.feishu, "get_record", side_effect=get_record):
+            source = asyncio.run(attribution._load_source(reply_record_id="reply-1"))
+
+        self.assertEqual({"reply-1", "cold-1"}, {
+            row["record_id"] for row in source["drafts"]
+        })
+        self.assertEqual("Just the Gems", source["contacts"]["kol-1"]["fields"]["账号名"])
+        self.assertEqual("食人花二代", source["products"]["product-1"]["fields"]["产品名"])
 
 
 if __name__ == "__main__":
