@@ -815,6 +815,10 @@ async def draft_reply(
         "重生次数": 0,
         "收件邮箱": feishu.clean_email(ext(cf.get("邮箱")))[0] or "",
         "UTM 链接": product_link,
+        # 给集中宣发活动归属卡保留业务证据。该字段只用于运营判断，
+        # 不改变原回复草稿的审核/发送状态。
+        "回复意图": intent_type,
+        "回复原文": (original_body or "")[:500],
     }
     if related_prod_rid:
         fields["关联产品"] = [related_prod_rid]

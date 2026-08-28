@@ -49,6 +49,7 @@ DRAFT_FIELDS = [
     "邮件草稿来源", "邮件草稿状态", "发送状态", "建议发送时间",
     "生成时间", "发送时间", "是否回复", "回复日期", "回复意图", "寄样阶段",
     "回复原文", "回复目标MsgID", "审核路径", "卡片已标记已审", "关联KOL", "关联产品",
+    "集中宣发活动ID", "活动归属状态",
 ]
 POSITIVE_REPLY_INTENTS = {"感兴趣", "要报价"}
 SHIPPED_STAGES = {"已发货", "在途", "已签收", "已产出"}
@@ -249,7 +250,15 @@ def _is_live_human_reply_draft(record: dict) -> bool:
 def _reply_matches_campaign(
     record: dict,
     evidence: dict[str, Any],
+    campaign_id: str = "",
 ) -> bool:
+    fields = record.get("fields") or {}
+    explicit_campaign = _text(fields.get("集中宣发活动ID"))
+    explicit_status = _text(fields.get("活动归属状态"))
+    if explicit_status in {"已确认", "自动确认"}:
+        return bool(campaign_id and explicit_campaign == campaign_id)
+    if explicit_status == "无需归属":
+        return False
     keys = _draft_identity_keys(record)
     if len(keys) != 1:
         return False
@@ -407,7 +416,7 @@ def summarize_campaign(
         for draft_id, draft in drafts_by_id.items()
         if draft_id not in excluded
         and _is_live_human_reply_draft(draft)
-        and _reply_matches_campaign(draft, campaign_evidence)
+        and _reply_matches_campaign(draft, campaign_evidence, campaign_id)
     )
 
     draft_ids.difference_update(excluded_draft_ids or set())
@@ -938,6 +947,14 @@ async def run(*, day: date | str | None = None, notify: bool = False, frankie_on
     }
     for draft_id, draft in drafts.items():
         if not _is_live_human_reply_draft(draft):
+            continue
+        draft_fields = draft.get("fields") or {}
+        explicit_campaign = _text(draft_fields.get("集中宣发活动ID"))
+        explicit_status = _text(draft_fields.get("活动归属状态"))
+        if explicit_status == "无需归属":
+            continue
+        if explicit_status in {"已确认", "自动确认"} and explicit_campaign in active_campaign_ids:
+            draft_campaigns.setdefault(draft_id, set()).add(explicit_campaign)
             continue
         reply_keys = _draft_identity_keys(draft)
         reply_message_id = _reply_target_message_id(draft)

@@ -87,6 +87,11 @@ LAUNCH_PARTICIPATION_WRITE_ENABLED = (
 LAUNCH_ACTIVITY_QUEUE_ENABLED = (
     env("LAUNCH_ACTIVITY_QUEUE_ENABLED", "0") or "0"
 ) == "1"
+# 无法用原邮件 MID 唯一归属到当前活动时，发运营选择活动卡。默认关闭；
+# 先 Frankie-only 样卡验证回调与原卡更新，再在生产环境显式开启。
+LAUNCH_REPLY_ATTRIBUTION_ENABLED = (
+    env("LAUNCH_REPLY_ATTRIBUTION_ENABLED", "0") or "0"
+) == "1"
 
 # SKU 产品库 (采购治理源, 独立 wiki) — 产品英文名引用拼接用 (2026-06-02).
 # 非 secret, 给默认值避免漏配; 聪哥2号(bitable app)已是该库协作者.

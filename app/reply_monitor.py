@@ -895,6 +895,22 @@ async def run():
                 )
                 if reply_rid:
                     print(f"[reply_monitor] reply draft generated rid={reply_rid}")
+                    if config.LAUNCH_REPLY_ATTRIBUTION_ENABLED:
+                        try:
+                            from . import launch_reply_attribution
+                            attribution_result = await launch_reply_attribution.scan_and_send(
+                                dry_run=False,
+                                frankie_only=False,
+                                limit=10,
+                            )
+                            print(
+                                "[reply_monitor] launch attribution scan "
+                                f"matched={attribution_result.get('matched_cases', 0)} "
+                                f"processed={attribution_result.get('processed', 0)}"
+                            )
+                        except Exception as attribution_error:
+                            # 归属卡失败不能吞掉已生成的原回复审核卡；下轮扫描可幂等补发。
+                            print(f"[reply_monitor] launch attribution card fail: {attribution_error}")
             except Exception as e:
                 print(f"[reply_monitor] draft_reply fail: {e}")
 

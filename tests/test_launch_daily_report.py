@@ -475,6 +475,38 @@ class LaunchDailyReportTests(unittest.TestCase):
         self.assertEqual(0, snapshot["reply_pending"])
         self.assertTrue(any("活动cold归属不一致" in error for error in snapshot["data_errors"]))
 
+    def test_operator_confirmed_attribution_restores_unknown_mid_to_campaign(self):
+        source = {
+            "activities": [self.activity],
+            "participants": [self._participant("p1", **{
+                "关联KOL": ["k1"], "产品家族ID": "product1",
+                "关联邮件草稿": ["cold1"],
+            })],
+            "drafts": {
+                "cold1": {"record_id": "cold1", "fields": {
+                    "邮件草稿来源": "cold", "发送状态": "已发",
+                    "回复原文": "[MID:mid-current] Current reply",
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                }},
+                "reply1": {"record_id": "reply1", "fields": {
+                    "邮件草稿来源": "reply", "邮件草稿状态": "待审",
+                    "审核路径": "待人审", "卡片已标记已审": False,
+                    "关联KOL": ["k1"], "关联产品": ["product1"],
+                    "回复目标MsgID": "mid-orphan",
+                    "集中宣发活动ID": "launch-dave",
+                    "活动归属状态": "已确认",
+                }},
+            },
+            "quotas": {"FUNLAB": {"sent_24h": 1, "cap": 80}},
+            "quota_errors": {},
+        }
+        with patch.object(self.report, "_load_report_source", new=AsyncMock(return_value=source)):
+            result = asyncio.run(self.report.run(day=self.day))
+
+        snapshot = result["snapshots"][0]
+        self.assertEqual(1, snapshot["reply_pending"])
+        self.assertEqual([], snapshot["data_errors"])
+
     def test_live_reply_mid_identity_conflict_is_excluded_and_reported(self):
         source = {
             "activities": [self.activity],

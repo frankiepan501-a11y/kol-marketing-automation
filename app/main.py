@@ -24,6 +24,7 @@ from . import b2b_outreach_email  # B2B LinkedIn 转 Email 开发信队列 + dry
 from . import invest  # 投资助手: X 帖子抓取 → A股观察映射 → 投资助手 App 推送
 from . import x_history  # 竞品 X 历史补采: 独立只读探测/分窗采集，不触碰 KOL 主表
 from . import kol_roi_mapping  # KOL ROI 归因缺口卡 + 映射回填
+from . import launch_reply_attribution  # 集中宣发未归属回复：运营选活动后继续原回复流程
 from . import discord_tester_routes  # FUN Bot 新品体验官：Discord Modal + 安全表单
 
 app = FastAPI(title="KOL Marketing Automation", version="0.3")
@@ -2110,6 +2111,36 @@ async def kol_roi_mapping_callback(request: Request, authorization: str = Header
     payload = await request.json()
     event = payload.get("event", payload)
     return await kol_roi_mapping.handle_callback(event)
+
+
+@app.post("/launch/reply-attribution/scan")
+async def run_launch_reply_attribution_scan(
+    authorization: str = Header(default=""),
+    dry_run: bool = True,
+    frankie_only: bool = True,
+    campaign_id: str = "",
+    limit: int = 10,
+):
+    """扫描无法唯一归属的实时回复；默认只演练且只允许 Frankie 样卡。"""
+    _check_auth(authorization)
+    return await launch_reply_attribution.scan_and_send(
+        dry_run=dry_run,
+        frankie_only=frankie_only,
+        campaign_id=campaign_id,
+        limit=limit,
+    )
+
+
+@app.post("/launch/reply-attribution/callback")
+async def launch_reply_attribution_callback(
+    request: Request,
+    authorization: str = Header(default=""),
+):
+    """聪哥分身3号的活动归属卡回调：写归属并 PATCH 原卡。"""
+    _check_auth(authorization)
+    payload = await request.json()
+    event = payload.get("event", payload)
+    return await launch_reply_attribution.handle_callback(event)
 
 
 @app.get("/amazon/oauth/start")
