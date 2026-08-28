@@ -221,6 +221,37 @@ class LaunchReplyAttributionTests(unittest.TestCase):
         self.assertEqual("Just the Gems", source["contacts"]["kol-1"]["fields"]["账号名"])
         self.assertEqual("食人花二代", source["products"]["product-1"]["fields"]["产品名"])
 
+    def test_targeted_load_tolerates_deleted_related_source_draft(self):
+        reply = self._reply()
+        activity = self._activity()
+        participant = self._participant()
+
+        async def fetch_all(table_id, **_kwargs):
+            if table_id == attribution.config.T_LAUNCH_CAMPAIGN:
+                return [activity]
+            if table_id == attribution.config.T_LAUNCH_PARTICIPANT:
+                return [participant]
+            self.fail(f"targeted load must not scan full table: {table_id}")
+
+        async def get_record(table_id, record_id):
+            if table_id == attribution.config.T_DRAFT and record_id == "reply-1":
+                return reply
+            if table_id == attribution.config.T_DRAFT and record_id == "cold-1":
+                raise RuntimeError("record deleted: 404")
+            if table_id == attribution.config.T_KOL:
+                return {"record_id": record_id, "fields": {"账号名": "Just the Gems"}}
+            if table_id == attribution.config.T_PRODUCT:
+                return {"record_id": record_id, "fields": {"产品名": "食人花二代"}}
+            self.fail(f"unexpected record read: {table_id}/{record_id}")
+
+        with patch.object(attribution.feishu, "fetch_all_records", side_effect=fetch_all), \
+             patch.object(attribution.feishu, "get_record", side_effect=get_record):
+            source = asyncio.run(attribution._load_source(reply_record_id="reply-1"))
+
+        self.assertEqual(["reply-1"], [row["record_id"] for row in source["drafts"]])
+        self.assertEqual(1, len(source["load_warnings"]))
+        self.assertIn("draft:cold-1", source["load_warnings"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

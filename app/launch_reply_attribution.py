@@ -553,11 +553,21 @@ async def _load_source(*, reply_record_id: str = "") -> dict:
     )
     if reply_record_id:
         reply = await feishu.get_record(config.T_DRAFT, reply_record_id)
+        load_warnings: list[str] = []
+
+        async def optional_record(table_id: str, record_id: str, kind: str):
+            try:
+                return await feishu.get_record(table_id, record_id)
+            except Exception as exc:
+                # 旧活动可能仍关联已归档/删除记录；这类缺口不能让回复归属流程再次卡死。
+                load_warnings.append(f"{kind}:{record_id}:{type(exc).__name__}")
+                return None
+
         source_draft_ids = _candidate_source_draft_ids(
             reply, activities=activities, participants=participants,
         )
         source_drafts = await asyncio.gather(*(
-            feishu.get_record(config.T_DRAFT, record_id)
+            optional_record(config.T_DRAFT, record_id, "draft")
             for record_id in source_draft_ids
             if record_id != reply_record_id
         ))
@@ -566,18 +576,22 @@ async def _load_source(*, reply_record_id: str = "") -> dict:
         product_ids = sorted(set(_ids(fields.get("关联产品"))))
         contact_rows, product_rows = await asyncio.gather(
             asyncio.gather(*(
-                feishu.get_record(config.T_KOL, record_id) for record_id in contact_ids
+                optional_record(config.T_KOL, record_id, "contact") for record_id in contact_ids
             )),
             asyncio.gather(*(
-                feishu.get_record(config.T_PRODUCT, record_id) for record_id in product_ids
+                optional_record(config.T_PRODUCT, record_id, "product") for record_id in product_ids
             )),
         )
+        source_drafts = [row for row in source_drafts if row]
+        contact_rows = [row for row in contact_rows if row]
+        product_rows = [row for row in product_rows if row]
         return {
             "activities": activities,
             "participants": participants,
             "drafts": [reply, *source_drafts],
             "contacts": {row.get("record_id"): row for row in contact_rows if row.get("record_id")},
             "products": {row.get("record_id"): row for row in product_rows if row.get("record_id")},
+            "load_warnings": load_warnings,
         }
 
     drafts = await feishu.fetch_all_records(
@@ -671,5 +685,6 @@ async def scan_and_send(
         "ok": True, "dry_run": dry_run, "frankie_only": frankie_only,
         "campaign_id": campaign_id, "reply_record_id": reply_record_id,
         "matched_cases": len(cases),
-        "processed": len(items), "items": items,
+        "processed": len(items), "load_warnings": source.get("load_warnings") or [],
+        "items": items,
     }
