@@ -32,6 +32,11 @@ LOW_YIELD_MIN_COMPLETED_FOR_CONVERSION = 6
 LOW_YIELD_MIN_EMAILS_PER_TASK = 0.25
 LOW_YIELD_MIN_APPROVED_PER_TASK = 0.10
 DAVE_KEYWORD_PILOT_CAMPAIGN_ID = "launch-20260915-funlab-dave-ys11-5"
+PIRANHA_SOURCE_BACKFILL_CAMPAIGN_ID = "launch-20260915-powkong-piranha-v2"
+P0_SOURCE_BACKFILL_CAMPAIGNS = {
+    DAVE_KEYWORD_PILOT_CAMPAIGN_ID,
+    PIRANHA_SOURCE_BACKFILL_CAMPAIGN_ID,
+}
 DAVE_KEYWORD_PILOT_TAG = "[灰度:dave-keyword-v1]"
 DAVE_KEYWORD_PILOT_V2_TAG = "[灰度:dave-keyword-v2]"
 DAVE_KEYWORD_PILOT_MAX_TASKS = 4
@@ -549,6 +554,99 @@ def _task_source(fields: dict) -> str:
     return "legacy_fixed" if keyword in legacy_words else ""
 
 
+def plan_campaign_source_metadata_backfill(rows: list[dict], *, campaign_id: str) -> dict:
+    """只按明确标签或受控固定词表，规划历史任务词源元数据回填。"""
+    prefix = f"[活动补池:{campaign_id}]"
+    updates = []
+    already_attributed = 0
+    unattributed_tasks = 0
+    missing_output_signal = 0
+    for row in rows:
+        fields = row.get("fields") or {}
+        name = ext(fields.get("任务名"))
+        if (
+            not name.startswith(prefix)
+            or ext(fields.get("任务状态")) != "3-已完成"
+        ):
+            continue
+        if re.search(r"\[词源:[^\]]+\]", name):
+            already_attributed += 1
+            continue
+        source = _task_source(fields)
+        if not source:
+            unattributed_tasks += 1
+            continue
+        log = ext(fields.get("执行日志"))
+        if _valid_email_output(fields) is None:
+            missing_output_signal += 1
+        marker = f"词源元数据回填: {source}（依据:受控固定词表精确命中）"
+        updated_log = log if marker in log else "\n".join(
+            part for part in (log.rstrip(), marker) if part
+        )
+        updates.append({
+            "record_id": str(row.get("record_id") or ""),
+            "source": source,
+            "evidence": "controlled_fixed_keyword_exact_match",
+            "fields": {
+                "任务名": name.replace(prefix, f"{prefix}[词源:{source}]", 1),
+                "执行日志": updated_log,
+            },
+        })
+    return {
+        "campaign_id": campaign_id,
+        "planned_updates": len(updates),
+        "updates": updates,
+        "already_attributed": already_attributed,
+        "unattributed_tasks": unattributed_tasks,
+        "missing_output_signal": missing_output_signal,
+        "guessed_attributions": 0,
+    }
+
+
+async def backfill_campaign_source_metadata(*, campaign_ids: list[str],
+                                            dry_run: bool = True) -> dict:
+    """受控 P0 回填；不建爬虫任务、不改筛选、不触发草稿或邮件。"""
+    requested = list(dict.fromkeys(str(value or "").strip() for value in campaign_ids))
+    unsupported = [value for value in requested if value not in P0_SOURCE_BACKFILL_CAMPAIGNS]
+    if not requested or unsupported:
+        raise ValueError(
+            "campaign_ids 仅允许当前 Dave 与食人花集中宣发活动"
+        )
+    rows = await feishu.fetch_all_records(T_CRAWLER, automatic_fields=True)
+    plans = [
+        plan_campaign_source_metadata_backfill(rows, campaign_id=campaign_id)
+        for campaign_id in requested
+    ]
+    applied = 0
+    errors = []
+    if not dry_run:
+        for plan in plans:
+            for update in plan["updates"]:
+                try:
+                    await feishu.update_record(
+                        T_CRAWLER, update["record_id"], update["fields"],
+                    )
+                    applied += 1
+                except Exception as exc:
+                    errors.append({
+                        "record_id": update["record_id"],
+                        "error": str(exc)[:160],
+                    })
+    return {
+        "ok": not errors,
+        "dry_run": bool(dry_run),
+        "campaigns": plans,
+        "planned_updates": sum(plan["planned_updates"] for plan in plans),
+        "applied_updates": applied,
+        "errors": errors[:10],
+        "crawler_tasks_created": 0,
+        "drafts_created": 0,
+        "emails_sent": 0,
+        "quality_filters_lowered": False,
+        "guessed_attributions": 0,
+    }
+
+
 def _task_matches_history_key(fields: dict, key: tuple) -> bool:
     keyword, countries, language = key
     if _normalize_discovery_keyword(fields.get("关键词列表")) != keyword:
@@ -710,30 +808,45 @@ def _source_health(rows: list[dict], *, prefix: str, now_ms: int,
     return result
 
 
-def _campaign_source_signal(rows: list[dict], *, prefix: str) -> dict:
-    """检查已完成任务是否具备来源、完成时间和执行日志三个审计信号。"""
+def _campaign_source_signal(rows: list[dict], *, prefix: str,
+                            candidate_sources: set[str] | None = None) -> dict:
+    """按来源检查审计信号；旧脏记录只能隔离自身，不能冻结整个活动。"""
     completed = [
         row for row in rows
         if ext((row.get("fields") or {}).get("任务名")).startswith(prefix)
         and ext((row.get("fields") or {}).get("任务状态")) == "3-已完成"
     ]
     missing = []
-    # 任何历史已完成轮次缺审计信号，都不能被“最新两条正常”掩盖。
-    # 这是活动级失败关闭；来源冷却本身仍只看各来源最近两轮。
+    isolated: dict[str, int] = Counter()
+    observed_sources = set()
+    unattributed_tasks = 0
     for row in completed:
         fields = row.get("fields") or {}
+        source = _task_source(fields)
         reasons = []
-        if not _task_source(fields):
+        if not source:
             reasons.append("source")
+            unattributed_tasks += 1
+            isolated["unattributed_legacy"] += 1
+        else:
+            observed_sources.add(source)
         if not _last_modified_ms(row):
             reasons.append("last_modified_time")
         if _valid_email_output(fields) is None:
             reasons.append("execution_log")
         if reasons:
             missing.append({"record_id": row.get("record_id", ""), "missing": reasons})
+            if source:
+                isolated[source] += 1
+    sources = set(candidate_sources or observed_sources)
+    available_sources = sorted(sources - set(isolated))
     return {
-        "available": not missing,
+        "available": bool(available_sources) if sources else not missing,
         "missing_tasks": len(missing),
+        "unattributed_tasks": unattributed_tasks,
+        "available_sources": available_sources,
+        "isolated_sources": sorted(isolated),
+        "isolated_source_tasks": dict(isolated),
         "details": missing[:5],
     }
 
@@ -910,7 +1023,12 @@ def _select_deterministic_external_candidates(
     source_health = _source_health(
         rows, prefix=prefix, now_ms=now_ms, source_outcomes=source_outcomes,
     )
-    source_signal = _campaign_source_signal(rows, prefix=prefix)
+    candidate_sources = {
+        item["source"] for item in fixed + structured if item.get("source")
+    }
+    source_signal = _campaign_source_signal(
+        rows, prefix=prefix, candidate_sources=candidate_sources,
+    )
     active_sources = _active_sources(rows, prefix=prefix)
     history_state = Counter({
         "unseen": 0, "active_duplicate": 0, "recently_executed": 0,
@@ -955,6 +1073,9 @@ def _select_deterministic_external_candidates(
             "active_duplicate", "recently_executed", "history_signal_unavailable",
         }:
             continue
+        if item["source"] in set(source_signal.get("isolated_sources") or []):
+            history_state["source_signal_unavailable"] += 1
+            continue
         health = source_health.get(item["source"]) or {"mode": "healthy"}
         if health.get("mode") == "cooldown":
             history_state["source_cooling"] += 1
@@ -978,8 +1099,8 @@ def _select_deterministic_external_candidates(
     ordered = unseen + _round_robin_sources(reusable, source_health)
     effective_limit = max(0, int(limit))
     if theme == "dave" and not source_signal["available"]:
-        # 历史已完成任务缺来源/日志/完成时间时，失败关闭为全活动单探测；
-        # 若已有任何带来源的在途任务，则本轮不再追加。
+        # 只有所有候选来源都被隔离时才保留全活动单探测；
+        # 单个来源或无归属旧记录异常不再压住其他健康来源。
         effective_limit = 0 if active_sources else min(1, effective_limit)
     selected = ordered[:effective_limit]
     history_state["deterministic_combinations_exhausted"] = max(

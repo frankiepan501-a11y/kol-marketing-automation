@@ -16,6 +16,40 @@ class FakeRequest:
 
 
 class LaunchRouteTests(unittest.TestCase):
+    def test_source_metadata_backfill_defaults_to_dry_run(self):
+        campaigns = sorted(main.keyword_supply.P0_SOURCE_BACKFILL_CAMPAIGNS)
+        result = {
+            "dry_run": True, "planned_updates": 3, "applied_updates": 0,
+            "crawler_tasks_created": 0, "drafts_created": 0, "emails_sent": 0,
+        }
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+            main.keyword_supply, "backfill_campaign_source_metadata",
+            new=AsyncMock(return_value=result),
+        ) as backfill:
+            response = asyncio.run(main.launch_source_metadata_backfill(
+                FakeRequest({"campaign_ids": campaigns}),
+                authorization="Bearer secret",
+            ))
+
+        self.assertTrue(response["dry_run"])
+        self.assertEqual(0, response["applied_updates"])
+        backfill.assert_awaited_once_with(campaign_ids=campaigns, dry_run=True)
+
+    def test_source_metadata_backfill_commit_requires_exact_confirmation(self):
+        campaigns = sorted(main.keyword_supply.P0_SOURCE_BACKFILL_CAMPAIGNS)
+        with patch.object(main.config, "INTERNAL_TOKEN", "secret"), patch.object(
+            main.keyword_supply, "backfill_campaign_source_metadata",
+            new=AsyncMock(),
+        ) as backfill:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(main.launch_source_metadata_backfill(
+                    FakeRequest({"campaign_ids": campaigns, "dry_run": False}),
+                    authorization="Bearer secret",
+                ))
+
+        self.assertEqual(400, ctx.exception.status_code)
+        backfill.assert_not_awaited()
+
     def test_evidence_author_continuation_defaults_to_server_side_dry_run(self):
         async def exercise():
             main._launch_runtime_jobs.clear()

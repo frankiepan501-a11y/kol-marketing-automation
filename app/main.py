@@ -3457,6 +3457,35 @@ async def launch_keyword_supply_pilot(
     )
 
 
+@app.post("/launch/runtime/source-metadata-backfill")
+async def launch_source_metadata_backfill(
+    request: Request, authorization: str = Header(default=""),
+):
+    """只回填两条集中宣发活动中有确定证据的历史任务词源；不建任务、不发信。"""
+    _check_auth(authorization)
+    payload = await _launch_json(request)
+    campaign_ids = payload.get("campaign_ids")
+    if not isinstance(campaign_ids, list):
+        raise HTTPException(status_code=422, detail="campaign_ids 必须是数组")
+    dry_run = payload.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        raise HTTPException(status_code=422, detail="dry_run 必须是 JSON 布尔值")
+    if (
+        not dry_run
+        and payload.get("confirm") != "BACKFILL_VERIFIED_SOURCE_METADATA"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="真实回填需明确确认 BACKFILL_VERIFIED_SOURCE_METADATA",
+        )
+    return await _run_launch_write(
+        "/launch/runtime/source-metadata-backfill",
+        lambda: keyword_supply.backfill_campaign_source_metadata(
+            campaign_ids=campaign_ids, dry_run=dry_run,
+        ),
+    )
+
+
 @app.post("/launch/runtime/keyword-pilot/replay")
 async def launch_keyword_supply_pilot_replay(
     request: Request, authorization: str = Header(default=""),

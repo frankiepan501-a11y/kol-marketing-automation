@@ -802,7 +802,7 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
         self.assertEqual("probe", result["source_health"]["competitor"]["mode"])
         self.assertNotIn("competitor", {item["source"] for item in result["keywords"]})
 
-    def test_missing_source_signal_fails_closed_to_one_campaign_probe(self):
+    def test_untagged_legacy_task_is_isolated_without_blocking_healthy_sources(self):
         now_ms = 1_800_000_000_000
         rows = [{"last_modified_time": (now_ms - 60_000) // 1000, "fields": {
             "任务名": "[活动补池:campaign1] YT KOL - old untagged",
@@ -829,8 +829,50 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
                 required_candidates=200, max_tasks=9, dry_run=True,
             ))
 
-        self.assertEqual("source_signal_unavailable", result["skipped"])
-        self.assertEqual(1, result["would_create"])
+        self.assertNotEqual("source_signal_unavailable", result["skipped"])
+        self.assertGreater(result["would_create"], 1)
+        self.assertTrue(result["source_signal"]["available"])
+        self.assertEqual(1, result["source_signal"]["unattributed_tasks"])
+        self.assertIn("unattributed_legacy", result["source_signal"]["isolated_sources"])
+
+    def test_source_missing_its_log_is_isolated_while_other_sources_continue(self):
+        now_ms = 1_800_000_000_000
+        rows = [{"record_id": "bad-competitor",
+                 "last_modified_time": (now_ms - 60_000) // 1000, "fields": {
+            "任务名": (
+                "[活动补池:campaign1][词源:competitor] "
+                "YT KOL - nyxi switch 2 controller review"
+            ),
+            "关键词列表": "nyxi switch 2 controller review",
+            "任务状态": "3-已完成",
+            "筛选-国家": ["US"], "筛选-语言": ["en"],
+            "执行日志": "crawler output format changed",
+        }}]
+        activity = {"fields": {
+            "活动目标语言": ["en"], "活动目标国家": ["US"],
+            "竞品证据模式": "引用历史证据", "竞品分析状态": "已就绪",
+            "竞品品牌": "NYXI",
+        }}
+        product = {"fields": {
+            "产品英文名": "FUNLAB Dave the Diver Controller",
+            "适配IP": ["Dave the Diver"], "适配主机": ["Switch 2"],
+            "品类": "手柄",
+        }}
+
+        with patch.object(keyword_supply.time, "time", return_value=now_ms / 1000), \
+             patch.object(
+                 keyword_supply.feishu, "fetch_all_records",
+                 new=AsyncMock(return_value=rows),
+             ):
+            result = asyncio.run(keyword_supply.ensure_campaign_supply(
+                campaign_id="campaign1", activity=activity, product=product,
+                required_candidates=200, max_tasks=4, dry_run=True,
+            ))
+
+        self.assertTrue(result["source_signal"]["available"])
+        self.assertIn("competitor", result["source_signal"]["isolated_sources"])
+        self.assertNotIn("competitor", {item["source"] for item in result["keywords"]})
+        self.assertGreater(result["would_create"], 1)
 
     def test_source_signal_scan_does_not_ignore_older_completed_missing_task(self):
         now_ms = 1_800_000_000_000
@@ -860,9 +902,92 @@ class KeywordSupplyBrazilTests(unittest.TestCase):
             rows, prefix="[活动补池:campaign1]",
         )
 
-        self.assertFalse(signal["available"])
+        self.assertTrue(signal["available"])
         self.assertEqual(1, signal["missing_tasks"])
+        self.assertEqual(1, signal["unattributed_tasks"])
+        self.assertIn("unattributed_legacy", signal["isolated_sources"])
         self.assertEqual("older-missing-source", signal["details"][0]["record_id"])
+
+    def test_source_metadata_backfill_only_uses_exact_controlled_keyword_evidence(self):
+        prefix = "[活动补池:campaign1]"
+        legacy_word = keyword_supply._CAMPAIGN_KEYWORDS["dave"]["en"][0]
+        rows = [
+            {"record_id": "verified", "fields": {
+                "任务名": f"{prefix} YT KOL - {legacy_word}",
+                "关键词列表": legacy_word, "任务状态": "3-已完成",
+                "执行日志": "原始发现: 4\n其中有邮箱: 2",
+            }},
+            {"record_id": "unknown", "fields": {
+                "任务名": f"{prefix} YT KOL - guessed keyword",
+                "关键词列表": "guessed keyword", "任务状态": "3-已完成",
+                "执行日志": "原始发现: 4\n其中有邮箱: 2",
+            }},
+        ]
+
+        plan = keyword_supply.plan_campaign_source_metadata_backfill(
+            rows, campaign_id="campaign1",
+        )
+
+        self.assertEqual(1, plan["planned_updates"])
+        self.assertEqual("verified", plan["updates"][0]["record_id"])
+        update = plan["updates"][0]["fields"]
+        self.assertIn("[词源:legacy_fixed]", update["任务名"])
+        self.assertIn("其中有邮箱: 2", update["执行日志"])
+        self.assertIn("词源元数据回填: legacy_fixed", update["执行日志"])
+        self.assertEqual(1, plan["unattributed_tasks"])
+
+    def test_source_metadata_backfill_is_idempotent(self):
+        prefix = "[活动补池:campaign1]"
+        legacy_word = keyword_supply._CAMPAIGN_KEYWORDS["dave"]["en"][0]
+        rows = [{"record_id": "done", "fields": {
+            "任务名": f"{prefix}[词源:legacy_fixed] YT KOL - {legacy_word}",
+            "关键词列表": legacy_word, "任务状态": "3-已完成",
+            "执行日志": (
+                "原始发现: 4\n其中有邮箱: 2\n"
+                "词源元数据回填: legacy_fixed（依据:受控固定词表精确命中）"
+            ),
+        }}]
+
+        plan = keyword_supply.plan_campaign_source_metadata_backfill(
+            rows, campaign_id="campaign1",
+        )
+
+        self.assertEqual(0, plan["planned_updates"])
+        self.assertEqual(1, plan["already_attributed"])
+
+    def test_source_metadata_backfill_rejects_campaign_outside_allowlist(self):
+        with self.assertRaisesRegex(ValueError, "仅允许"):
+            asyncio.run(keyword_supply.backfill_campaign_source_metadata(
+                campaign_ids=["launch-unrelated"], dry_run=True,
+            ))
+
+    def test_source_metadata_backfill_commit_only_applies_planned_fields(self):
+        campaign_id = keyword_supply.DAVE_KEYWORD_PILOT_CAMPAIGN_ID
+        legacy_word = keyword_supply._CAMPAIGN_KEYWORDS["dave"]["en"][0]
+        rows = [{"record_id": "verified", "fields": {
+            "任务名": f"[活动补池:{campaign_id}] YT KOL - {legacy_word}",
+            "关键词列表": legacy_word, "任务状态": "3-已完成",
+            "执行日志": "原始发现: 4\n其中有邮箱: 2",
+        }}]
+
+        with patch.object(
+            keyword_supply.feishu, "fetch_all_records",
+            new=AsyncMock(return_value=rows),
+        ), patch.object(
+            keyword_supply.feishu, "update_record", new=AsyncMock(),
+        ) as update_record:
+            result = asyncio.run(keyword_supply.backfill_campaign_source_metadata(
+                campaign_ids=[campaign_id], dry_run=False,
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, result["applied_updates"])
+        self.assertEqual(0, result["crawler_tasks_created"])
+        self.assertEqual(0, result["drafts_created"])
+        self.assertEqual(0, result["emails_sent"])
+        fields = update_record.await_args.args[2]
+        self.assertEqual({"任务名", "执行日志"}, set(fields))
+        self.assertIn("[词源:legacy_fixed]", fields["任务名"])
 
     def test_reusable_keyword_prefers_positive_then_unknown_then_zero(self):
         positive_word, zero_word = keyword_supply._CAMPAIGN_KEYWORDS["dave"]["en"][:2]
