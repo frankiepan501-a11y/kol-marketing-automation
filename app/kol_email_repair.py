@@ -9,25 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from urllib.parse import urlparse
 
-from . import config, feishu, relabel, snov
-
-
-def _profile_url(fields: dict) -> str:
-    return str(feishu.ext_url(fields.get("主链接")) or "").strip()
+from . import config, feishu, kol_email_sources, snov
 
 
-def _youtube_lookup_value(profile_url: str) -> str:
-    parsed = urlparse(str(profile_url or "").strip())
-    if "youtube.com" not in parsed.netloc.casefold():
-        return ""
-    path = parsed.path.strip("/")
-    if path.startswith("@"):
-        return path.split("/", 1)[0]
-    if path.startswith("channel/"):
-        return path.split("/", 1)[1].split("/", 1)[0]
-    return ""
+BLOCKING_STATUSES = {
+    "processing_error", "owner_index_error", "concurrent_change",
+    "readback_mismatch", "write_error",
+}
 
 
 def _domain(email: str) -> str:
@@ -43,43 +32,51 @@ async def inspect_record(record: dict) -> dict:
     record_id = str(record.get("record_id") or "")
     name = str(feishu.ext(fields.get("账号名")) or "").strip()
     original_raw = str(feishu.ext(fields.get("邮箱")) or "").strip()
-    original_email, _ = feishu.clean_email(original_raw)
-    candidate = original_email
-    source = "current_email" if candidate else ""
-    profile_url = _profile_url(fields)
-
-    if not candidate:
-        youtube_value = _youtube_lookup_value(profile_url)
-        if not youtube_value:
-            return {
-                "record_id": record_id, "status": "no_verifiable_source",
-                "source": "unsupported_or_missing_profile", "planned_fields": {},
-                "original_raw": original_raw,
-            }
-        public_profile = await relabel.fetch_youtube_public_profile(youtube_value)
-        candidate, _ = feishu.clean_email(public_profile.get("email") or "")
-        if not candidate:
-            return {
-                "record_id": record_id, "status": "no_public_email",
-                "source": "youtube_about", "planned_fields": {},
-                "original_raw": original_raw,
-            }
-        source = "youtube_about"
-
-    verification = await snov.find_email(name, _domain(candidate))
-    if verification.get("status") != "valid":
+    if original_raw:
         return {
-            "record_id": record_id,
-            "status": f"verification_{verification.get('status') or 'unavailable'}",
-            "source": source, "planned_fields": {},
+            "record_id": record_id, "status": "existing_email_skipped",
+            "source": "master_email", "planned_fields": {},
             "original_raw": original_raw,
-            "email_fingerprint": _fingerprint(candidate),
         }
-    verified, _ = feishu.clean_email(verification.get("email") or "")
-    if not verified:
+    candidates = await kol_email_sources.discover_public_email_candidates(fields)
+    if not candidates:
         return {
-            "record_id": record_id, "status": "verification_invalid_response",
-            "source": source, "planned_fields": {}, "original_raw": original_raw,
+            "record_id": record_id, "status": "no_public_email",
+            "source": "bounded_public_sources", "planned_fields": {},
+            "original_raw": original_raw,
+        }
+    verification_statuses = []
+    verified = ""
+    source = ""
+    source_url = ""
+    candidate = ""
+    for item in candidates:
+        candidate, _ = feishu.clean_email(item.get("email") or "")
+        if not candidate:
+            continue
+        verification = await snov.find_email(name, _domain(candidate))
+        status = verification.get("status") or "unavailable"
+        verification_statuses.append(status)
+        if status != "valid":
+            continue
+        verified, _ = feishu.clean_email(verification.get("email") or "")
+        if verified and verified.casefold() == candidate.casefold():
+            source = item.get("source") or "public_source"
+            source_url = item.get("source_url") or ""
+            break
+        verified = ""
+        verification_statuses.append("mismatch")
+    if not verified:
+        final_status = ("not_valid" if "not_valid" in verification_statuses else
+                        "mismatch" if "mismatch" in verification_statuses else
+                        "unknown" if "unknown" in verification_statuses else
+                        "unavailable" if "unavailable" in verification_statuses else
+                        "not_found")
+        return {
+            "record_id": record_id, "status": f"verification_{final_status}",
+            "source": "bounded_public_sources", "planned_fields": {},
+            "original_raw": original_raw,
+            "candidate_count": len(candidates),
         }
     return {
         "record_id": record_id, "status": "verified_valid", "source": source,
@@ -87,6 +84,8 @@ async def inspect_record(record: dict) -> dict:
         "original_raw": original_raw,
         "original_status": str(feishu.ext(fields.get("邮箱验真状态")) or ""),
         "email_fingerprint": _fingerprint(verified),
+        "candidate_count": len(candidates),
+        "source_url": source_url,
     }
 
 
@@ -95,14 +94,6 @@ async def run_email_repair(record_ids: list[str], *, dry_run: bool = True,
     unique_ids = list(dict.fromkeys(
         str(record_id).strip() for record_id in record_ids if str(record_id).strip()
     ))[:max(1, min(int(limit), 50))]
-    all_rows = await feishu.fetch_all_records(
-        config.T_KOL, field_names=["邮箱"], page_size=500,
-    )
-    owners: dict[str, set[str]] = {}
-    for row in all_rows:
-        email, _ = feishu.clean_email(feishu.ext((row.get("fields") or {}).get("邮箱")))
-        if email:
-            owners.setdefault(email.casefold(), set()).add(str(row.get("record_id") or ""))
 
     semaphore = asyncio.Semaphore(3)
 
@@ -118,43 +109,107 @@ async def run_email_repair(record_ids: list[str], *, dry_run: bool = True,
 
     results = await asyncio.gather(*(one(record_id) for record_id in unique_ids))
     writes = 0
+    abort_reason = ""
+    if any(result.get("status") == "processing_error" for result in results):
+        abort_reason = "inspection_error"
+
+    # Build the duplicate-owner index from the stable list endpoint before the
+    # first write.  The search endpoint has no stable pagination guarantee.
+    owners: dict[str, set[str]] = {}
+    if not abort_reason:
+        try:
+            all_rows = await feishu.fetch_all_records(
+                config.T_KOL, field_names=["邮箱"], page_size=500,
+            )
+            for row in all_rows:
+                email, _ = feishu.clean_email(
+                    feishu.ext((row.get("fields") or {}).get("邮箱"))
+                )
+                if email:
+                    owners.setdefault(email.casefold(), set()).add(
+                        str(row.get("record_id") or "")
+                    )
+        except Exception as exc:
+            abort_reason = "owner_index_error"
+            for result in results:
+                if result.get("planned_fields"):
+                    result["status"] = "owner_index_error"
+                    result["error"] = type(exc).__name__
+
+    # Complete all ownership checks before the first write.  Any index failure
+    # therefore aborts the whole bounded batch without partial writes.
+    claimed: dict[str, str] = {}
     for result in results:
+        if abort_reason:
+            break
         planned = dict(result.get("planned_fields") or {})
         email = str(planned.get("邮箱") or "").casefold()
         if not email:
             continue
         other_owners = owners.get(email, set()) - {result["record_id"]}
+        if email in claimed and claimed[email] != result["record_id"]:
+            other_owners.add(claimed[email])
         if other_owners:
             result["status"] = "duplicate_email_owner"
             result["planned_fields"] = {}
             continue
-        owners.setdefault(email, set()).add(result["record_id"])
-        if dry_run:
-            result["status"] = "would_write_valid"
-            continue
+        claimed[email] = result["record_id"]
 
-        latest = await feishu.get_record(config.T_KOL, result["record_id"])
-        latest_fields = latest.get("fields") or {}
-        if (
-            str(feishu.ext(latest_fields.get("邮箱")) or "").strip() != result.get("original_raw", "")
-            or str(feishu.ext(latest_fields.get("邮箱验真状态")) or "")
-            != result.get("original_status", "")
-        ):
-            result["status"] = "concurrent_change"
-            result["planned_fields"] = {}
-            continue
-        await feishu.update_record(config.T_KOL, result["record_id"], planned)
-        readback = await feishu.get_record(config.T_KOL, result["record_id"])
-        readback_fields = readback.get("fields") or {}
-        readback_email, _ = feishu.clean_email(feishu.ext(readback_fields.get("邮箱")))
-        if (
-            readback_email.casefold() != email
-            or str(feishu.ext(readback_fields.get("邮箱验真状态")) or "") != "有效"
-        ):
-            result["status"] = "readback_mismatch"
-            continue
-        result["status"] = "written_valid"
-        writes += 1
+    if abort_reason:
+        for result in results:
+            if result.get("planned_fields"):
+                result["status"] = "not_written_after_failure"
+                result["planned_fields"] = {}
+    elif dry_run:
+        for result in results:
+            if result.get("planned_fields"):
+                result["status"] = "would_write_valid"
+    else:
+        for index, result in enumerate(results):
+            planned = dict(result.get("planned_fields") or {})
+            email = str(planned.get("邮箱") or "").casefold()
+            if not email:
+                continue
+            try:
+                latest = await feishu.get_record(config.T_KOL, result["record_id"])
+                latest_fields = latest.get("fields") or {}
+                if (
+                    str(feishu.ext(latest_fields.get("邮箱")) or "").strip()
+                    != result.get("original_raw", "")
+                    or str(feishu.ext(latest_fields.get("邮箱验真状态")) or "")
+                    != result.get("original_status", "")
+                ):
+                    result["status"] = "concurrent_change"
+                    result["planned_fields"] = {}
+                    abort_reason = "concurrent_change"
+                else:
+                    await feishu.update_record(config.T_KOL, result["record_id"], planned)
+                    readback = await feishu.get_record(config.T_KOL, result["record_id"])
+                    readback_fields = readback.get("fields") or {}
+                    readback_email, _ = feishu.clean_email(
+                        feishu.ext(readback_fields.get("邮箱"))
+                    )
+                    if (
+                        readback_email.casefold() != email
+                        or str(feishu.ext(readback_fields.get("邮箱验真状态")) or "")
+                        != "有效"
+                    ):
+                        result["status"] = "readback_mismatch"
+                        abort_reason = "readback_mismatch"
+                    else:
+                        result["status"] = "written_valid"
+                        writes += 1
+            except Exception as exc:
+                result["status"] = "write_error"
+                result["planned_fields"] = {}
+                result["error"] = type(exc).__name__
+                abort_reason = "write_error"
+            if abort_reason:
+                for pending in results[index + 1:]:
+                    if pending.get("planned_fields"):
+                        pending["status"] = "not_written_after_failure"
+                        pending["planned_fields"] = {}
+                break
 
     counts: dict[str, int] = {}
     for result in results:
@@ -165,5 +220,6 @@ async def run_email_repair(record_ids: list[str], *, dry_run: bool = True,
             result["planned_fields"]["邮箱"] = "<verified>"
     return {
         "dry_run": dry_run, "requested": len(unique_ids), "processed": len(results),
-        "writes": writes, "by_status": counts, "results": results,
+        "writes": writes, "safe_to_continue": not abort_reason,
+        "abort_reason": abort_reason, "by_status": counts, "results": results,
     }
