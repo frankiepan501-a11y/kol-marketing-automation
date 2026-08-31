@@ -258,6 +258,74 @@ class LaunchRuntimeTests(unittest.TestCase):
         self.assertEqual("KOL运营审核", fields["系统审核分流"])
         self.assertIn("硬件/配件内容不足", fields["系统审核说明"])
 
+    def test_pending_review_reconcile_routes_existing_pipeline_out_of_operator_queue(self):
+        participant = {"record_id": "part1", "fields": {
+            "参与状态": "已入围", "审核结论": "待审核",
+            "关联KOL": {"link_record_ids": ["kol1"]},
+            "关联邮件草稿": [], "排序快照历史": "[]",
+        }}
+        candidate = {
+            "contact_id": "kol1", "decision": "hold_active_or_recent",
+            "base_filter_passed": True, "review_decision": "待审核",
+            "review_route": "KOL运营审核",
+            "review_instruction": "同品牌近期已有触达，应沿用原线程",
+            "profile_url": "https://youtube.com/@one",
+        }
+
+        with patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[participant]),
+        ), patch.object(
+            launch_runtime.launch_participation, "_update_and_confirm",
+            new=AsyncMock(return_value={"record_id": "part1"}),
+        ) as update:
+            result = asyncio.run(launch_runtime.reconcile_pending_participant_reviews(
+                campaign_id="campaign1", ranking_version="v1",
+                preview={"candidates": [candidate], "profile_refresh_candidates": []},
+            ))
+
+        self.assertEqual(0, result["actionable_pending"])
+        self.assertEqual(1, result["existing_thread_routed"])
+        fields = update.await_args.args[2]
+        self.assertEqual("已取消", fields["参与状态"])
+        self.assertEqual("排除", fields["审核结论"])
+        self.assertEqual("自动排除", fields["系统审核分流"])
+        self.assertEqual("不再符合", fields["取消原因代码"])
+        self.assertIn("原邮件线程", fields["系统审核说明"])
+
+    def test_pending_review_reconcile_system_excludes_blocked_contact(self):
+        participant = {"record_id": "part1", "fields": {
+            "参与状态": "已入围", "审核结论": "待审核",
+            "关联KOL": {"link_record_ids": ["kol1"]},
+            "关联邮件草稿": [], "排序快照历史": "[]",
+        }}
+        candidate = {
+            "contact_id": "kol1", "decision": "blocked",
+            "base_filter_passed": False, "review_decision": "排除",
+            "review_route": "系统排除",
+            "review_instruction": "主表已标记不合适，无需运营复审",
+            "profile_url": "https://youtube.com/@one",
+        }
+
+        with patch.object(
+            launch_runtime, "_participants", new=AsyncMock(return_value=[participant]),
+        ), patch.object(
+            launch_runtime.launch_participation, "_update_and_confirm",
+            new=AsyncMock(return_value={"record_id": "part1"}),
+        ) as update:
+            result = asyncio.run(launch_runtime.reconcile_pending_participant_reviews(
+                campaign_id="campaign1", ranking_version="v1",
+                preview={"candidates": [candidate], "profile_refresh_candidates": []},
+            ))
+
+        self.assertEqual(0, result["actionable_pending"])
+        self.assertEqual(1, result["system_excluded"])
+        fields = update.await_args.args[2]
+        self.assertEqual("已取消", fields["参与状态"])
+        self.assertEqual("排除", fields["审核结论"])
+        self.assertEqual("自动排除", fields["系统审核分流"])
+        self.assertEqual("不再符合", fields["取消原因代码"])
+        self.assertIn("确定性排除", fields["系统审核说明"])
+
     def test_pending_review_contacts_are_prioritized_for_profile_refresh(self):
         participants = [
             {"record_id": "p1", "fields": {

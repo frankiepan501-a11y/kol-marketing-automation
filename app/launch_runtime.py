@@ -491,6 +491,24 @@ def _is_deterministic_system_pass(candidate: dict) -> bool:
     )
 
 
+def _pending_review_terminal_route(candidate: dict) -> str:
+    """Only eligible new-cold candidates may remain in the operator queue."""
+    decision = str(candidate.get("decision") or "").strip()
+    if decision in {
+        "existing_pipeline_same_thread",
+        "hold_active_or_recent",
+        "republish_requires_commitment",
+    }:
+        return "existing_thread"
+    if (
+        decision and decision != "eligible_new_cold"
+    ) or candidate.get("review_route") == "系统排除" or (
+        candidate.get("review_decision") == "排除"
+    ):
+        return "system_excluded"
+    return ""
+
+
 async def reconcile_pending_participant_reviews(*, campaign_id: str,
                                                 ranking_version: str,
                                                 preview: dict) -> dict:
@@ -507,6 +525,7 @@ async def reconcile_pending_participant_reviews(*, campaign_id: str,
     result = {
         "campaign_id": campaign_id, "checked": 0, "updated": 0,
         "auto_passed": 0, "actionable_pending": 0, "missing_snapshot": 0,
+        "existing_thread_routed": 0, "system_excluded": 0,
         "details": [],
     }
     for row in participants:
@@ -540,6 +559,44 @@ async def reconcile_pending_participant_reviews(*, campaign_id: str,
         ranking_fields = launch_participation._ranking_fields(
             candidate, ranking_version,
         )
+        terminal_route = _pending_review_terminal_route(candidate)
+        if terminal_route:
+            existing_thread = terminal_route == "existing_thread"
+            ranking_fields.update({
+                "参与状态": "已取消",
+                "审核结论": "排除",
+                "审核时间": int(time.time() * 1000),
+                "系统审核分流": "自动排除",
+                "系统审核说明": (
+                    (
+                        "该对象已有活动中的原邮件线程；已退出新开发待审，继续走原线程。"
+                        if existing_thread else
+                        "该对象命中确定性排除规则；已退出运营待审，无需人工复核。"
+                    )
+                    + (
+                        f" 依据：{candidate.get('review_instruction')}"
+                        if candidate.get("review_instruction") else ""
+                    )
+                ),
+                "取消原因代码": "不再符合",
+                "审核原因代码": reason_codes,
+                "排序快照历史": launch_participation._with_snapshot(
+                    fields, candidate, ranking_version,
+                ),
+            })
+            await launch_participation._update_and_confirm(
+                config.T_LAUNCH_PARTICIPANT, participant_id, ranking_fields,
+            )
+            result["updated"] += 1
+            result["existing_thread_routed" if existing_thread else "system_excluded"] += 1
+            result["details"].append({
+                "participant_id": participant_id, "contact_id": contact_id,
+                "result": (
+                    "existing_thread_routed" if existing_thread else "system_excluded"
+                ),
+                "review_instruction": ext(ranking_fields.get("系统审核说明"))[:240],
+            })
+            continue
         ranking_fields["审核结论"] = "通过" if deterministic_pass else (
             "待补资料"
             if candidate.get("review_decision") == "待补资料"
