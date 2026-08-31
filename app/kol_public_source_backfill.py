@@ -12,13 +12,14 @@ from . import config, feishu, kol_email_sources
 
 
 TARGET_FIELDS = ("聚合页URL", "其他链接")
+SNAPSHOT_FIELDS = ("主链接",) + TARGET_FIELDS
 SUPPORTED_PLATFORMS = ("YouTube", "Instagram", "TikTok")
 BLOCKING_STATUSES = {"processing_error", "concurrent_change", "readback_mismatch"}
 
 
 def _current_value(fields: dict, field_name: str) -> str:
     value = fields.get(field_name)
-    if field_name == "聚合页URL":
+    if field_name in {"主链接", "聚合页URL"}:
         return str(feishu.ext_url(value) or "").strip()
     return str(feishu.ext(value) or "").strip()
 
@@ -95,7 +96,7 @@ async def inspect_record(record: dict, *, field_types: dict[str, int]) -> dict:
         "status": "candidate_found" if planned else "no_new_public_source",
         "planned_fields": planned,
         "original_values": {
-            name: _current_value(fields, name) for name in TARGET_FIELDS
+            name: _current_value(fields, name) for name in SNAPSHOT_FIELDS
         },
         "candidate_kinds": sorted({
             str(item.get("kind") or "") for item in candidates if item.get("kind")
@@ -115,10 +116,38 @@ async def run_public_source_backfill(
     # repair run does not turn temporary read pressure into skipped records.
     semaphore = asyncio.Semaphore(2)
 
+    try:
+        snapshot_rows = await feishu.fetch_all_records(
+            config.T_KOL, field_names=list(SNAPSHOT_FIELDS), page_size=500,
+        )
+        snapshot_by_id = {
+            str(row.get("record_id") or ""): row for row in snapshot_rows
+            if str(row.get("record_id") or "") in unique_ids
+        }
+    except Exception as exc:
+        results = [{
+            "record_id": record_id,
+            "status": "processing_error",
+            "planned_fields": {},
+            "error": type(exc).__name__,
+        } for record_id in unique_ids]
+        return {
+            "dry_run": dry_run,
+            "requested": len(unique_ids),
+            "processed": len(results),
+            "writes": 0,
+            "safe_to_continue": False,
+            "abort_reason": "inspection_error",
+            "by_status": {"processing_error": len(results)},
+            "results": results,
+        }
+
     async def one(record_id: str) -> dict:
         async with semaphore:
             try:
-                record = await feishu.get_record(config.T_KOL, record_id)
+                record = snapshot_by_id.get(record_id)
+                if not record:
+                    raise LookupError("record missing from master snapshot")
                 return await inspect_record(record, field_types=field_types)
             except Exception as exc:
                 return {
@@ -151,7 +180,7 @@ async def run_public_source_backfill(
         changed = any(
             _current_value(latest_fields, name)
             != (result.get("original_values") or {}).get(name, "")
-            for name in TARGET_FIELDS
+            for name in SNAPSHOT_FIELDS
         )
         if changed:
             result["status"] = "concurrent_change"
