@@ -257,6 +257,83 @@ class KolEmailRepairTests(unittest.TestCase):
         self.assertEqual(1, result["by_status"]["verification_unknown"])
         update.assert_not_awaited()
 
+    def test_insufficient_kol_name_is_not_reported_as_provider_unavailable(self):
+        initial = row(email="", status="未验", name="GamerTag")
+        with patch.object(
+            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
+            new=AsyncMock(return_value=[{
+                "email": "hello@example.com", "source": "public_contact",
+            }]),
+        ), patch.object(
+            kol_email_repair.snov, "find_email",
+            new=AsyncMock(return_value={
+                "status": "unavailable", "email": None, "raw": "name/domain 不足",
+            }),
+        ):
+            result = asyncio.run(kol_email_repair.inspect_record(initial))
+
+        self.assertEqual("verification_input_insufficient", result["status"])
+        self.assertEqual({}, result["planned_fields"])
+
+    def test_oauth_failure_is_reported_as_verifier_auth_unavailable(self):
+        initial = row(email="", status="未验")
+        with patch.object(
+            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
+            new=AsyncMock(return_value=[{
+                "email": "jane@example.com", "source": "public_contact",
+            }]),
+        ), patch.object(
+            kol_email_repair.snov, "find_email",
+            new=AsyncMock(return_value={
+                "status": "unavailable", "email": None,
+                "raw": "oauth: 401 invalid_client",
+            }),
+        ):
+            result = asyncio.run(kol_email_repair.inspect_record(initial))
+
+        self.assertEqual("verification_auth_unavailable", result["status"])
+        self.assertEqual({}, result["planned_fields"])
+
+    def test_finder_http_failure_keeps_safe_status_code(self):
+        initial = row(email="", status="未验")
+        with patch.object(
+            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
+            new=AsyncMock(return_value=[{
+                "email": "jane@example.com", "source": "public_contact",
+            }]),
+        ), patch.object(
+            kol_email_repair.snov, "find_email",
+            new=AsyncMock(return_value={
+                "status": "unavailable", "email": None,
+                "raw": "finder: Client error '403 Forbidden' for url",
+            }),
+        ):
+            result = asyncio.run(kol_email_repair.inspect_record(initial))
+
+        self.assertEqual("verification_provider_http_403", result["status"])
+        self.assertEqual({}, result["planned_fields"])
+
+    def test_finder_network_failure_is_reported_without_raw_detail(self):
+        initial = row(email="", status="未验")
+        with patch.object(
+            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
+            new=AsyncMock(return_value=[{
+                "email": "jane@example.com", "source": "public_contact",
+            }]),
+        ), patch.object(
+            kol_email_repair.snov, "find_email",
+            new=AsyncMock(return_value={
+                "status": "unavailable", "email": None,
+                "raw": "finder: ConnectError: connection reset",
+            }),
+        ):
+            result = asyncio.run(kol_email_repair.inspect_record(initial))
+
+        self.assertEqual(
+            "verification_provider_network_unavailable", result["status"],
+        )
+        self.assertEqual({}, result["planned_fields"])
+
     def test_not_valid_verification_is_reported_without_write(self):
         initial = row(email="", status="未验")
         with patch.object(

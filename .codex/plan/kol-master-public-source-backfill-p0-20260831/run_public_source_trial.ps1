@@ -3,7 +3,9 @@ param(
     [switch]$CommitEmails,
     [int]$Limit = 30,
     [string]$IdsFile = 'C:/tmp/kol-public-source-trial-ids-20260831.json',
-    [string]$EvidenceFile = 'C:/tmp/kol-public-source-trial-evidence-20260831.json'
+    [string]$EvidenceFile = 'C:/tmp/kol-public-source-trial-evidence-20260831.json',
+    [string]$ExcludeIdsFile = '',
+    [switch]$EmptyEmailPublicSource
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,6 +54,8 @@ $arguments = @(
 )
 if ($CommitLinks) { $arguments += '--commit-links' }
 if ($CommitEmails) { $arguments += '--commit-emails' }
+if ($ExcludeIdsFile) { $arguments += @('--exclude-ids-file', $ExcludeIdsFile) }
+if ($EmptyEmailPublicSource) { $arguments += '--empty-email-public-source' }
 
 & 'C:/tmp/py311-embed/python.exe' @arguments
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

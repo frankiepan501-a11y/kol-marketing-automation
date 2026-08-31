@@ -73,3 +73,13 @@
 - 回归：相关 34 项 + 5 个子测试通过；完整 915 项 + 31 个子测试通过。唯一失败仍是既有固定日期 Zeabur 看门狗用例，与本次改动无关。
 - 证据文件：`C:/tmp/kol-empty-email-public-source-bulk-10-20260901-evidence.json`、`C:/tmp/kol-empty-email-public-source-bulk-30-20260901-evidence.json`、`C:/tmp/kol-empty-email-public-source-bulk-50-20260901-evidence.json`。
 - 当前边界：本次改动尚未部署，也没有授权正式批量回填邮箱或公开来源字段。
+
+## 2026-09-01 验真状态纠偏与下一批 50 条
+
+- 纠偏：上一轮“10 条验真服务暂不可用”全部是单词型账号名无法拆成姓+名，不是 Snov 授权或接口整体故障。
+- 报告修复：现已分别显示 `no_public_email`、`verification_input_insufficient`、OAuth、Finder HTTP、网络和超时；只改变可观测性，不改变邮箱写入条件。
+- 下一批 50 条生产只读结果：42 条没有公开邮箱、4 条姓名输入不足、2 条 Finder HTTP 400、2 条 Finder 超时。
+- 安全结果：邮箱写入 0、公开来源写入 0、邮件 0、飞书卡片 0；`safe_to_continue=true`。
+- 能力边界：当前 OAuth 正常、Finder 非整体失权；少量请求被上游拒绝或未在 28 秒内完成。它们继续保持邮箱为空，可在后续单条重试，不需要全表重跑，也不能降低 `valid` 标准。
+- 证据：`C:/tmp/kol-email-verification-diagnostic-original50-20260901-evidence.json`、`C:/tmp/kol-empty-email-public-source-next50-20260901-replay-evidence.json`。证据只含汇总及 `record_id + 状态`，不含完整邮箱或凭据。
+- 发布边界：本节的失败原因分类与脱敏证据改动当前仅在本地候选分支验证，尚未推送或部署；生产主表、环境变量、凭据和 n8n 均未修改。

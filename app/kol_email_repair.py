@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 
 from . import config, feishu, kol_email_sources, snov
 
@@ -37,6 +38,30 @@ def _domain(email: str) -> str:
 
 def _fingerprint(email: str) -> str:
     return hashlib.sha256(email.casefold().encode("utf-8")).hexdigest()[:12]
+
+
+def _verification_outcome(status: str, raw: object) -> str:
+    """Return a safe, aggregate-ready reason without exposing provider detail."""
+    normalized = str(status or "unavailable").strip().casefold()
+    if normalized != "unavailable":
+        return normalized
+    detail = str(raw or "").strip().casefold()
+    if detail.startswith("name/domain"):
+        return "input_insufficient"
+    if detail.startswith("oauth:"):
+        return "auth_unavailable"
+    if "timeout" in detail or "超时" in detail:
+        return "provider_timeout"
+    if detail.startswith("finder:"):
+        http_status = re.search(r"\b([45]\d{2})\b", detail)
+        if http_status:
+            return f"provider_http_{http_status.group(1)}"
+        if any(marker in detail for marker in (
+            "connecterror", "connection", "network", "dns",
+        )):
+            return "provider_network_unavailable"
+        return "provider_unavailable"
+    return "unavailable"
 
 
 async def inspect_record(record: dict) -> dict:
@@ -68,7 +93,8 @@ async def inspect_record(record: dict) -> dict:
             continue
         verification = await snov.find_email(name, _domain(candidate))
         status = verification.get("status") or "unavailable"
-        verification_statuses.append(status)
+        outcome = _verification_outcome(status, verification.get("raw"))
+        verification_statuses.append(outcome)
         if status != "valid":
             continue
         verified, _ = feishu.clean_email(verification.get("email") or "")
@@ -79,11 +105,24 @@ async def inspect_record(record: dict) -> dict:
         verified = ""
         verification_statuses.append("mismatch")
     if not verified:
-        final_status = ("not_valid" if "not_valid" in verification_statuses else
-                        "mismatch" if "mismatch" in verification_statuses else
-                        "unknown" if "unknown" in verification_statuses else
-                        "unavailable" if "unavailable" in verification_statuses else
-                        "not_found")
+        priority = (
+            "not_valid", "mismatch", "unknown", "auth_unavailable",
+            "provider_timeout", "provider_network_unavailable",
+        )
+        final_status = next((item for item in priority if item in verification_statuses), "")
+        if not final_status:
+            final_status = next(
+                (item for item in verification_statuses if item.startswith("provider_http_")),
+                "",
+            )
+        if not final_status:
+            fallback_priority = (
+                "provider_unavailable", "input_insufficient", "unavailable", "not_found",
+            )
+            final_status = next(
+                (item for item in fallback_priority if item in verification_statuses),
+                "not_found",
+            )
         return {
             "record_id": record_id, "status": f"verification_{final_status}",
             "source": "bounded_public_sources", "planned_fields": {},
