@@ -17,6 +17,9 @@ BLOCKING_STATUSES = {
     "processing_error", "owner_index_error", "concurrent_change",
     "readback_mismatch", "write_error",
 }
+BULK_READ_FIELDS = [
+    "账号名", "邮箱", "邮箱验真状态", "主链接", "聚合页URL", "其他链接",
+]
 
 
 def _domain(email: str) -> str:
@@ -95,12 +98,46 @@ async def run_email_repair(record_ids: list[str], *, dry_run: bool = True,
         str(record_id).strip() for record_id in record_ids if str(record_id).strip()
     ))[:max(1, min(int(limit), 50))]
 
+    try:
+        all_rows = await feishu.fetch_all_records(
+            config.T_KOL, field_names=BULK_READ_FIELDS, page_size=500,
+        )
+        rows_by_id = {
+            str(row.get("record_id") or ""): row
+            for row in all_rows if str(row.get("record_id") or "")
+        }
+    except Exception as exc:
+        results = [{
+            "record_id": record_id,
+            "status": "processing_error",
+            "planned_fields": {},
+            "error": type(exc).__name__,
+        } for record_id in unique_ids]
+        return {
+            "dry_run": dry_run,
+            "requested": len(unique_ids),
+            "processed": len(results),
+            "writes": 0,
+            "safe_to_continue": False,
+            "abort_reason": "inspection_error",
+            "by_status": {"processing_error": len(results)} if results else {},
+            "results": results,
+        }
+
     semaphore = asyncio.Semaphore(3)
 
     async def one(record_id: str) -> dict:
         async with semaphore:
             try:
-                return await inspect_record(await feishu.get_record(config.T_KOL, record_id))
+                record = rows_by_id.get(record_id)
+                if record is None:
+                    return {
+                        "record_id": record_id,
+                        "status": "processing_error",
+                        "planned_fields": {},
+                        "error": "RecordNotFound",
+                    }
+                return await inspect_record(record)
             except Exception as exc:
                 return {
                     "record_id": record_id, "status": "processing_error",
@@ -113,14 +150,12 @@ async def run_email_repair(record_ids: list[str], *, dry_run: bool = True,
     if any(result.get("status") == "processing_error" for result in results):
         abort_reason = "inspection_error"
 
-    # Build the duplicate-owner index from the stable list endpoint before the
-    # first write.  The search endpoint has no stable pagination guarantee.
+    # Build the duplicate-owner index from the same stable bulk read used for
+    # inspection.  This avoids the flaky single-record endpoint and ensures
+    # inspection plus ownership checks share one consistent table snapshot.
     owners: dict[str, set[str]] = {}
     if not abort_reason:
         try:
-            all_rows = await feishu.fetch_all_records(
-                config.T_KOL, field_names=["邮箱"], page_size=500,
-            )
             for row in all_rows:
                 email, _ = feishu.clean_email(
                     feishu.ext((row.get("fields") or {}).get("邮箱"))
