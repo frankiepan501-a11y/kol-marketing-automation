@@ -153,6 +153,68 @@ class KolEmailRepairTests(unittest.TestCase):
             update.await_args.args[2],
         )
 
+    def test_source_fields_changed_after_inspection_abort_before_write(self):
+        initial = row(email="", status="未验")
+        initial["fields"]["其他链接"] = "https://creator.example/contact"
+        changed = row(email="", status="未验")
+        changed["fields"]["其他链接"] = "https://creator.example/updated"
+        with patch.object(
+            kol_email_repair.feishu, "fetch_all_records",
+            new=AsyncMock(side_effect=[[initial], [initial]]),
+        ), patch.object(
+            kol_email_repair.feishu, "get_record", new=AsyncMock(return_value=changed),
+        ), patch.object(
+            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
+            new=AsyncMock(return_value=[{
+                "email": "jane@example.com", "source": "public_contact",
+            }]),
+        ), patch.object(
+            kol_email_repair.snov, "find_email",
+            new=AsyncMock(return_value={"status": "valid", "email": "jane@example.com"}),
+        ), patch.object(
+            kol_email_repair.feishu, "update_record", new=AsyncMock(),
+        ) as update:
+            result = asyncio.run(kol_email_repair.run_email_repair(
+                ["k1"], dry_run=False,
+            ))
+
+        self.assertFalse(result["safe_to_continue"])
+        self.assertEqual("concurrent_change", result["abort_reason"])
+        self.assertEqual(0, result["writes"])
+        self.assertEqual(1, result["by_status"]["concurrent_change"])
+        update.assert_not_awaited()
+
+    def test_new_duplicate_owner_after_inspection_blocks_first_write(self):
+        initial = row(email="", status="未验")
+        late_owner = row("other", email="jane@example.com", status="有效")
+        bulk_read = AsyncMock(side_effect=[[initial], [initial, late_owner]])
+        with patch.object(
+            kol_email_repair.feishu, "fetch_all_records", new=bulk_read,
+        ), patch.object(
+            kol_email_repair.feishu, "get_record", new=AsyncMock(),
+        ) as get_record, patch.object(
+            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
+            new=AsyncMock(return_value=[{
+                "email": "jane@example.com", "source": "youtube_about",
+            }]),
+        ), patch.object(
+            kol_email_repair.snov, "find_email",
+            new=AsyncMock(return_value={"status": "valid", "email": "jane@example.com"}),
+        ), patch.object(
+            kol_email_repair.feishu, "update_record", new=AsyncMock(),
+        ) as update:
+            result = asyncio.run(kol_email_repair.run_email_repair(
+                ["k1"], dry_run=False,
+            ))
+
+        self.assertTrue(result["safe_to_continue"])
+        self.assertEqual(0, result["writes"])
+        self.assertEqual(1, result["by_status"]["duplicate_email_owner"])
+        self.assertEqual(2, bulk_read.await_count)
+        self.assertEqual(["邮箱"], bulk_read.await_args_list[1].kwargs["field_names"])
+        get_record.assert_not_awaited()
+        update.assert_not_awaited()
+
     def test_multiple_public_candidates_stop_only_on_explicit_valid(self):
         initial = row(email="", status="未验")
         with patch.object(

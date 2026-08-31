@@ -22,6 +22,15 @@ BULK_READ_FIELDS = [
 ]
 
 
+def _source_evidence_state(fields: dict) -> dict[str, str]:
+    return {
+        "账号名": str(feishu.ext(fields.get("账号名")) or "").strip(),
+        "主链接": str(feishu.ext_url(fields.get("主链接")) or "").strip(),
+        "聚合页URL": str(feishu.ext_url(fields.get("聚合页URL")) or "").strip(),
+        "其他链接": str(feishu.ext(fields.get("其他链接")) or "").strip(),
+    }
+
+
 def _domain(email: str) -> str:
     return email.rsplit("@", 1)[1].casefold() if "@" in email else ""
 
@@ -86,6 +95,7 @@ async def inspect_record(record: dict) -> dict:
         "planned_fields": {"邮箱": verified, "邮箱验真状态": "有效"},
         "original_raw": original_raw,
         "original_status": str(feishu.ext(fields.get("邮箱验真状态")) or ""),
+        "original_source_evidence": _source_evidence_state(fields),
         "email_fingerprint": _fingerprint(verified),
         "candidate_count": len(candidates),
         "source_url": source_url,
@@ -150,13 +160,29 @@ async def run_email_repair(record_ids: list[str], *, dry_run: bool = True,
     if any(result.get("status") == "processing_error" for result in results):
         abort_reason = "inspection_error"
 
-    # Build the duplicate-owner index from the same stable bulk read used for
-    # inspection.  This avoids the flaky single-record endpoint and ensures
-    # inspection plus ownership checks share one consistent table snapshot.
+    # Dry-run reuses the stable inspection snapshot.  Commit mode refreshes the
+    # owner snapshot after all external discovery/verification work and before
+    # the first write, so a newly claimed email cannot slip through unnoticed.
+    owner_rows = all_rows
+    if (
+        not abort_reason and not dry_run
+        and any(result.get("planned_fields") for result in results)
+    ):
+        try:
+            owner_rows = await feishu.fetch_all_records(
+                config.T_KOL, field_names=["邮箱"], page_size=500,
+            )
+        except Exception as exc:
+            abort_reason = "owner_index_error"
+            for result in results:
+                if result.get("planned_fields"):
+                    result["status"] = "owner_index_error"
+                    result["error"] = type(exc).__name__
+
     owners: dict[str, set[str]] = {}
     if not abort_reason:
         try:
-            for row in all_rows:
+            for row in owner_rows:
                 email, _ = feishu.clean_email(
                     feishu.ext((row.get("fields") or {}).get("邮箱"))
                 )
@@ -213,6 +239,8 @@ async def run_email_repair(record_ids: list[str], *, dry_run: bool = True,
                     != result.get("original_raw", "")
                     or str(feishu.ext(latest_fields.get("邮箱验真状态")) or "")
                     != result.get("original_status", "")
+                    or _source_evidence_state(latest_fields)
+                    != result.get("original_source_evidence", {})
                 ):
                     result["status"] = "concurrent_change"
                     result["planned_fields"] = {}
@@ -251,6 +279,7 @@ async def run_email_repair(record_ids: list[str], *, dry_run: bool = True,
         counts[result["status"]] = counts.get(result["status"], 0) + 1
         result.pop("original_raw", None)
         result.pop("original_status", None)
+        result.pop("original_source_evidence", None)
         if result.get("planned_fields", {}).get("邮箱"):
             result["planned_fields"]["邮箱"] = "<verified>"
     return {
