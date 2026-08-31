@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +36,12 @@ def _normalized(value):
         return str(
             value.get("link") or value.get("text") or value.get("name") or ""
         )
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return ("number", Decimal(str(value)))
+    if isinstance(value, str) and re.fullmatch(r"-?\d+(?:\.\d+)?", value.strip()):
+        return ("number", Decimal(value.strip()))
     return value
 
 

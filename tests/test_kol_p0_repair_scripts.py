@@ -50,6 +50,7 @@ class KolP0RepairScriptTests(unittest.TestCase):
             _normalized(["Switch", "PC"]),
             _normalized(["PC", "Switch"]),
         )
+        self.assertEqual(_normalized(2), _normalized("2"))
 
 
 if __name__ == "__main__":
