@@ -49,9 +49,6 @@ function New-MainEdge {
 }
 
 $workflow = Invoke-N8n -Method GET -Path "/workflows/$WorkflowId"
-if ($workflow.name -ne '飞书事件中心 - Event Hub') {
-    throw "Workflow ID $WorkflowId belongs to '$($workflow.name)'."
-}
 if (-not $workflow.active) {
     throw 'Refusing to patch an inactive Event Hub workflow.'
 }
@@ -63,96 +60,65 @@ foreach ($node in @($workflow.nodes)) {
     $nodeByName[$node.name] = $node
 }
 
-$required = @(
-    'Is KOL ROI Action', 'KOL ROI Callback',
-    'Is Launch Reply Attribution?', 'Launch Reply Attribution Callback',
-    'Is ML Profit Action'
-)
-foreach ($name in $required) {
-    if (-not $nodeByName.ContainsKey($name)) { throw "Missing expected node: $name" }
+$sourceName = 'Is FBIG Daily Confirm?'
+$nextName = 'Is Draft Action?'
+$ifName = 'Is KOL Contact Acquisition?'
+$callbackName = 'KOL Contact Acquisition Callback'
+foreach ($name in @($sourceName, $nextName, $ifName, $callbackName)) {
+    if (-not $nodeByName.ContainsKey($name)) { throw "Missing required node: $name" }
 }
 
-$sourceName = 'Is Launch Reply Attribution?'
 $sourceConnection = $workflow.connections.$sourceName.main
-if (@($sourceConnection).Count -ne 2 -or
-    @($sourceConnection[1]).Count -ne 1 -or
-    $sourceConnection[1][0].node -notin @('Is ML Profit Action', 'Is KOL No Email Outreach?')) {
-    throw 'Unexpected false branch after launch attribution; refusing a blind full-workflow PUT.'
+$routeConnection = $workflow.connections.$ifName.main
+if (@($sourceConnection).Count -ne 2 -or $sourceConnection[1][0].node -ne $ifName) {
+    throw 'Existing contact-acquisition entry branch drifted; refusing to patch.'
+}
+if (@($routeConnection).Count -ne 2 -or
+    $routeConnection[0][0].node -ne $callbackName -or
+    $routeConnection[1][0].node -ne $nextName) {
+    throw 'Existing contact-acquisition result branches drifted; refusing to patch.'
 }
 
-$ifName = 'Is KOL No Email Outreach?'
-$callbackName = 'KOL No Email Outreach Callback'
 $ifNode = $nodeByName[$ifName]
 $callbackNode = $nodeByName[$callbackName]
 
-if (-not $ifNode) {
-    $actions = @(
-        'kol_no_email_email_captured',
-        'kol_no_email_platform_ongoing',
-        'kol_no_email_not_fit',
-        'kol_no_email_no_response'
-    )
-    $conditions = @()
-    for ($i = 0; $i -lt $actions.Count; $i++) {
-        $conditions += @{
-            id = "kol-no-email-c$($i + 1)"
-            leftValue = '={{ $json.card_action && $json.card_action.action ? $json.card_action.action : "" }}'
-            rightValue = $actions[$i]
-            operator = @{ type = 'string'; operation = 'equals' }
-        }
-    }
-    $ifNode = @{
-        id = [guid]::NewGuid().ToString()
-        name = $ifName
-        type = 'n8n-nodes-base.if'
-        typeVersion = 2
-        position = @(1450, 720)
-        parameters = @{
-            conditions = @{
-                options = @{ caseSensitive = $true; leftValue = ''; typeValidation = 'strict' }
-                conditions = $conditions
-                combinator = 'or'
-            }
-            options = @{}
-        }
-    }
-    $workflow.nodes += $ifNode
-}
-
-if (-not $callbackNode) {
-    $authHeaders = $nodeByName['KOL ROI Callback'].parameters.headerParameters
-    if (-not $authHeaders -or @($authHeaders.parameters).Count -lt 1) {
-        throw 'Could not reuse the existing kol-auto Authorization headers.'
-    }
-    $callbackNode = @{
-        id = [guid]::NewGuid().ToString()
-        name = $callbackName
-        type = 'n8n-nodes-base.httpRequest'
-        typeVersion = 4.2
-        position = @(1670, 720)
-        parameters = @{
-            method = 'POST'
-            url = "$($ServiceBase.TrimEnd('/'))/kol/no-email-outreach/callback"
-            sendHeaders = $true
-            headerParameters = $authHeaders
-            sendBody = $true
-            specifyBody = 'json'
-            jsonBody = '={{ JSON.stringify({ event: { action: { value: $json.card_action || {}, form_value: $json.card_form_value || {} }, operator: { open_id: $json.sender_open_id || "", name: $json.sender_name || "" }, operator_open_id: $json.sender_open_id || "", open_id: $json.sender_open_id || "", message_id: $json.message_id || "", open_message_id: $json.message_id || "", chat_id: $json.chat_id || "", open_chat_id: $json.chat_id || "", chat_type: $json.chat_type || "p2p" } }) }}'
-            options = @{ timeout = 300000 }
-        }
-    }
-    $workflow.nodes += $callbackNode
-}
-
-$workflow.connections.$sourceName.main = @(
-    @((New-MainEdge -Target 'Launch Reply Attribution Callback')),
-    @((New-MainEdge -Target $ifName))
+$actions = @(
+    'kol_no_email_email_captured',
+    'kol_no_email_platform_ongoing',
+    'kol_no_email_not_fit',
+    'kol_no_email_no_response'
 )
-$workflow.connections | Add-Member -Force -NotePropertyName $ifName -NotePropertyValue @{
-    main = @(
-        @((New-MainEdge -Target $callbackName)),
-        @((New-MainEdge -Target 'Is ML Profit Action'))
-    )
+$conditions = @()
+for ($i = 0; $i -lt $actions.Count; $i++) {
+    $conditions += @{
+        id = "kol-no-email-c$($i + 1)"
+        leftValue = '={{ $json.card_action && $json.card_action.action ? $json.card_action.action : "" }}'
+        rightValue = $actions[$i]
+        operator = @{ type = 'string'; operation = 'equals' }
+    }
+}
+$ifNode.parameters = @{
+    conditions = @{
+        options = @{ caseSensitive = $true; leftValue = ''; typeValidation = 'strict' }
+        conditions = $conditions
+        combinator = 'or'
+    }
+    options = @{}
+}
+
+$authHeaders = $callbackNode.parameters.headerParameters
+if (-not $authHeaders -or @($authHeaders.parameters).Count -lt 1) {
+    throw 'Existing contact callback has no Authorization header; refusing to patch.'
+}
+$callbackNode.parameters = @{
+    method = 'POST'
+    url = "$($ServiceBase.TrimEnd('/'))/kol/no-email-outreach/callback"
+    sendHeaders = $true
+    headerParameters = $authHeaders
+    sendBody = $true
+    specifyBody = 'json'
+    jsonBody = '={{ JSON.stringify({ event: { action: { value: $json.card_action || {}, form_value: $json.card_form_value || {} }, operator: { open_id: $json.sender_open_id || "", name: $json.sender_name || "" }, operator_open_id: $json.sender_open_id || "", open_id: $json.sender_open_id || "", message_id: $json.message_id || "", open_message_id: $json.message_id || "", chat_id: $json.chat_id || "", open_chat_id: $json.chat_id || "", chat_type: $json.chat_type || "p2p" } }) }}'
+    options = @{ timeout = 300000 }
 }
 
 $backupDir = Join-Path $env:TEMP 'kol-event-hub-backups'
@@ -169,14 +135,15 @@ $body = @{
 $null = Invoke-N8n -Method PUT -Path "/workflows/$WorkflowId" -Body $body
 $after = Invoke-N8n -Method GET -Path "/workflows/$WorkflowId"
 
-$afterNames = @($after.nodes | ForEach-Object { $_.name })
-if ($ifName -notin $afterNames -or $callbackName -notin $afterNames) {
-    throw 'Readback failed: new no-email nodes are missing.'
-}
 if (-not $after.active) { throw 'Readback failed: Event Hub is no longer active.' }
-$afterIf = $after.connections.$ifName.main
-if ($afterIf[0][0].node -ne $callbackName -or $afterIf[1][0].node -ne 'Is ML Profit Action') {
-    throw 'Readback failed: no-email branch connections drifted.'
+$afterIf = @($after.nodes | Where-Object { $_.name -eq $ifName })[0]
+$afterCallback = @($after.nodes | Where-Object { $_.name -eq $callbackName })[0]
+$afterActions = @($afterIf.parameters.conditions.conditions | ForEach-Object { $_.rightValue })
+if (($afterActions -join '|') -ne ($actions -join '|')) {
+    throw 'Readback failed: no-email action routes drifted.'
+}
+if ($afterCallback.parameters.url -ne "$($ServiceBase.TrimEnd('/'))/kol/no-email-outreach/callback") {
+    throw 'Readback failed: no-email callback URL drifted.'
 }
 
 [pscustomobject]@{
@@ -184,12 +151,8 @@ if ($afterIf[0][0].node -ne $callbackName -or $afterIf[1][0].node -ne 'Is ML Pro
     active = $after.active
     before_node_count = $beforeCount
     after_node_count = @($after.nodes).Count
-    route_actions = @(
-        'kol_no_email_email_captured',
-        'kol_no_email_platform_ongoing',
-        'kol_no_email_not_fit',
-        'kol_no_email_no_response'
-    )
+    reused_existing_branch = $true
+    route_actions = $afterActions
     callback_path = '/kol/no-email-outreach/callback'
     backup_created = (Test-Path -LiteralPath $backupPath)
 } | ConvertTo-Json -Compress
