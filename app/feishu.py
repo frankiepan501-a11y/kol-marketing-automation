@@ -9,6 +9,46 @@ from . import config
 _tokens = {}  # {"bitable": (token, expiry_ts), "notify": ...}
 
 
+class FeishuAPIError(RuntimeError):
+    """Structured API failure without exposing authorization headers."""
+
+    def __init__(self, *, method: str, path: str, status_code: int,
+                 feishu_code=None, feishu_msg: str = "", response_text: str = ""):
+        self.method = method
+        self.path = path
+        self.status_code = int(status_code)
+        self.feishu_code = feishu_code
+        self.feishu_msg = feishu_msg or ""
+        self.response_text = response_text or ""
+        super().__init__(
+            f"{method} {path} -> HTTP {self.status_code}, "
+            f"Feishu code={self.feishu_code}, msg={self.feishu_msg or self.response_text[:160]}"
+        )
+
+
+class FeishuReadError(RuntimeError):
+    """A complete-table read could not finish safely."""
+
+
+class FeishuPaginationError(FeishuReadError):
+    """The API claimed there was another page but returned no continuation token."""
+
+
+def _is_page_size_compat_error(exc: FeishuAPIError) -> bool:
+    """Only retry smaller pages when Feishu explicitly rejects the page size."""
+    if exc.status_code != 400:
+        return False
+    detail = f"{exc.feishu_msg} {exc.response_text}".lower()
+    return any(marker in detail for marker in (
+        "page_size",
+        "page size",
+        "page-size",
+        "page limit",
+        "record limit",
+        "too many records",
+    ))
+
+
 async def _refresh_token(which: str):
     if which == "bitable":
         aid, sec = config.FEISHU_BITABLE_APP_ID, config.FEISHU_BITABLE_APP_SECRET
@@ -84,7 +124,18 @@ async def api(method: str, path: str, body=None, which: str = "bitable",
                         await asyncio.sleep(retry_delays[attempt])
                         continue
                 if r.status_code >= 400:
-                    raise Exception(f"{method} {path} → {r.status_code}: {r.text[:300]}")
+                    try:
+                        error_payload = r.json()
+                    except Exception:
+                        error_payload = {}
+                    raise FeishuAPIError(
+                        method=method,
+                        path=path,
+                        status_code=r.status_code,
+                        feishu_code=error_payload.get("code"),
+                        feishu_msg=error_payload.get("msg") or error_payload.get("message") or "",
+                        response_text=r.text[:300],
+                    )
                 return r.json()
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             # 网络层瞬态错误也重试 (同 5xx, 前 2 档)
@@ -221,30 +272,98 @@ def xrid(f):
 
 async def fetch_all_records(table_id: str, field_names: list = None, page_size: int = 100,
                             automatic_fields: bool = False):
-    items = []
-    page_token = ""
     try:
         page_size_i = int(page_size)
     except (TypeError, ValueError):
         page_size_i = 100
     page_size_i = max(1, min(page_size_i, 500))
-    while True:
-        params = {"page_size": page_size_i}
-        if automatic_fields:
-            params["automatic_fields"] = "true"
-        if field_names:
-            params["field_names"] = json.dumps(list(field_names), ensure_ascii=False, separators=(",", ":"))
-        if page_token:
-            params["page_token"] = page_token
-        query = urllib.parse.urlencode(params)
-        path = f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records?{query}"
-        r = await api("GET", path)
-        d = r.get("data") or {}
-        items.extend(d.get("items") or [])
-        if not d.get("has_more"): break
-        page_token = d.get("page_token", "")
-        if not page_token: break
-    return items
+    page_sizes = [page_size_i]
+    for smaller_size in (200, 100, 50):
+        if smaller_size < page_size_i and smaller_size not in page_sizes:
+            page_sizes.append(smaller_size)
+
+    def token_label(value: str) -> str:
+        if not value:
+            return "<missing>"
+        return repr(str(value))
+
+    for size_index, active_page_size in enumerate(page_sizes):
+        items = []
+        page_token = ""
+        page_number = 1
+        seen_page_tokens = set()
+        seen_record_ids = set()
+        while True:
+            params = {"page_size": active_page_size}
+            if automatic_fields:
+                params["automatic_fields"] = "true"
+            if field_names:
+                params["field_names"] = json.dumps(
+                    list(field_names), ensure_ascii=False, separators=(",", ":"),
+                )
+            if page_token:
+                params["page_token"] = page_token
+            query = urllib.parse.urlencode(params)
+            path = f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records?{query}"
+            try:
+                r = await api("GET", path)
+            except FeishuAPIError as exc:
+                context = (
+                    f"table={table_id} page={page_number} page_size={active_page_size} "
+                    f"page_token={token_label(page_token)} status={exc.status_code} "
+                    f"code={exc.feishu_code} msg={exc.feishu_msg or exc.response_text[:160]}"
+                )
+                can_shrink = (
+                    _is_page_size_compat_error(exc)
+                    and size_index + 1 < len(page_sizes)
+                )
+                if can_shrink:
+                    next_size = page_sizes[size_index + 1]
+                    print(
+                        f"[feishu.fetch_all_records] {context}; "
+                        f"restart full scan with page_size={next_size}"
+                    )
+                    break
+                raise FeishuReadError(
+                    f"Feishu complete-table read failed: {context}"
+                ) from exc
+
+            d = r.get("data") or {}
+            page_items = d.get("items") or []
+            for item in page_items:
+                record_id = item.get("record_id") if isinstance(item, dict) else None
+                if record_id and record_id in seen_record_ids:
+                    raise FeishuPaginationError(
+                        f"Feishu complete-table pagination repeated a record: "
+                        f"table={table_id} page={page_number} "
+                        f"page_size={active_page_size} record_id={record_id!r}"
+                    )
+                if record_id:
+                    seen_record_ids.add(record_id)
+            items.extend(page_items)
+            if not d.get("has_more"):
+                return items
+            next_page_token = d.get("page_token") or ""
+            if not next_page_token:
+                raise FeishuPaginationError(
+                    f"Feishu complete-table pagination incomplete: table={table_id} "
+                    f"page={page_number} page_size={active_page_size} "
+                    "page_token=<missing> has_more=true"
+                )
+            if next_page_token in seen_page_tokens:
+                raise FeishuPaginationError(
+                    f"Feishu complete-table pagination repeated a token: "
+                    f"table={table_id} page={page_number} "
+                    f"page_size={active_page_size} "
+                    f"page_token={token_label(next_page_token)} has_more=true"
+                )
+            seen_page_tokens.add(next_page_token)
+            page_token = next_page_token
+            page_number += 1
+
+    raise FeishuReadError(
+        f"Feishu complete-table read failed: table={table_id} exhausted page-size fallbacks"
+    )
 
 
 async def search_records(table_id: str, filters: list, field_names: list = None):
