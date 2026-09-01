@@ -1,4 +1,4 @@
-"""Run a capped, valid-only email repair batch from an audited cohort file."""
+"""Run a capped public-contact email repair batch from an audited cohort file."""
 from __future__ import annotations
 
 import argparse
@@ -11,6 +11,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from app.kol_email_repair import run_email_repair
+
+
+COMMIT_CONFIRMATION = "EMAIL_REPAIR_PUBLIC_CONTACT_UNVERIFIED"
 
 
 def selected_ids(path: str, limit: int) -> list[str]:
@@ -29,8 +32,8 @@ def main() -> int:
     parser.add_argument("--confirm", default="")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    if args.commit and args.confirm != "EMAIL_REPAIR_VALID_ONLY":
-        raise SystemExit("commit requires --confirm EMAIL_REPAIR_VALID_ONLY")
+    if args.commit and args.confirm != COMMIT_CONFIRMATION:
+        raise SystemExit(f"commit requires --confirm {COMMIT_CONFIRMATION}")
     limit = max(1, min(args.limit, 50))
     result = asyncio.run(run_email_repair(
         selected_ids(args.cohorts, limit), dry_run=not args.commit, limit=limit,

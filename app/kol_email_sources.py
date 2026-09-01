@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import html
 import ipaddress
 import json
 import re
+import secrets
 import socket
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
@@ -38,6 +40,9 @@ _AGGREGATOR_HOSTS = (
     "campsite.bio", "allmylinks.com", "linkin.bio", "bio.site",
     "carrd.co", "hoo.be", "stan.store", "milkshake.app", "direct.me",
 )
+_SEARCH_HOSTS = (
+    "google.com", "bing.com", "yahoo.com", "duckduckgo.com", "baidu.com",
+)
 _PROXY_FAKE_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; KOLPublicContactAudit/1.0)",
@@ -49,6 +54,16 @@ _CONTACT_LINK_TOKENS = (
     "work with", "work-with", "work_with", "get in touch", "get-in-touch",
     "email",
 )
+_CONTACT_LABEL_TOKENS = (
+    "business", "collab", "collaboration", "sponsor", "partnership",
+    "press", "media", "work with", "work-with", "work_with",
+    "get in touch", "get-in-touch", "inquiry", "inquiries", "contact",
+)
+_NON_KOL_CONTACT_TOKENS = (
+    "customer support", "platform support", "help center", "privacy",
+    "terms of service", "webmaster", "copyright", "abuse report",
+)
+_DISCOVERY_SIGNING_KEY = secrets.token_bytes(32)
 
 
 def _flatten(value) -> str:
@@ -103,12 +118,86 @@ def extract_public_emails(source: str) -> list[str]:
     return emails
 
 
+def _visible_text(source: str) -> str:
+    text = re.sub(r"(?is)<(?:script|style)\b.*?</(?:script|style)>", " ", str(source or ""))
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    return " ".join(html.unescape(text).split())
+
+
+def _explicit_contact_context(value: str) -> bool:
+    context = " ".join(str(value or "").casefold().split())
+    if any(token in context for token in _NON_KOL_CONTACT_TOKENS):
+        return False
+    return any(token in context for token in _CONTACT_LABEL_TOKENS)
+
+
+def extract_explicit_contact_emails(source: str, page_url: str) -> list[str]:
+    """Return addresses presented as creator/business contact information.
+
+    An address merely present in a footer is not enough.  On link-in-bio roots
+    it needs an explicit business/collaboration/contact label.  On a dedicated
+    contact page, a mailto link or visible address is itself bounded evidence.
+    """
+    decoded = html.unescape(str(source or ""))
+    dedicated_contact_page = (
+        not _is_aggregator(page_url)
+        and _is_contact_evidence_page(page_url, "")
+    )
+    accepted = []
+
+    def belongs_to_aggregator_platform(email_address: str) -> bool:
+        if not _is_aggregator(page_url):
+            return False
+        page_host = _site_host(urlparse(page_url).hostname or "")
+        email_domain = _site_host(email_address.rsplit("@", 1)[-1])
+        return email_domain == page_host
+
+    for match in _ANCHOR_RE.finditer(decoded):
+        href = _HREF_ATTR_RE.search(match.group("attrs") or "")
+        raw_href = html.unescape(href.group(2) if href else "").strip()
+        if not raw_href.casefold().startswith("mailto:"):
+            continue
+        label = _visible_text(match.group("label") or "")
+        address_text = unquote(raw_href[7:]).split("?", 1)[0]
+        for email_address in extract_public_emails(address_text):
+            if belongs_to_aggregator_platform(email_address):
+                continue
+            local_part = email_address.split("@", 1)[0].replace(".", " ").replace("_", " ")
+            if not (
+                dedicated_contact_page
+                or _explicit_contact_context(label)
+                or _explicit_contact_context(local_part)
+                or label.casefold().strip() == "email"
+            ):
+                continue
+            if email_address not in accepted:
+                accepted.append(email_address)
+
+    visible = _visible_text(decoded)
+    for match in _EMAIL_RE.finditer(visible):
+        email_address = extract_public_emails(match.group(1))
+        if not email_address:
+            continue
+        if belongs_to_aggregator_platform(email_address[0]):
+            continue
+        start = max(0, match.start() - 120)
+        end = min(len(visible), match.end() + 120)
+        context = visible[start:end]
+        if not (dedicated_contact_page or _explicit_contact_context(context)):
+            continue
+        if any(token in context.casefold() for token in _NON_KOL_CONTACT_TOKENS):
+            continue
+        if email_address[0] not in accepted:
+            accepted.append(email_address[0])
+    return accepted
+
+
 def master_source_urls(fields: dict) -> list[dict]:
     """Read only the Base fields explicitly intended as extra public sources."""
     results = []
     for field, source in (("聚合页URL", "master_aggregate"), ("其他链接", "master_other")):
         for url in _urls_from_value(fields.get(field)):
-            if not any(item["url"] == url for item in results):
+            if not _is_search_url(url) and not any(item["url"] == url for item in results):
                 results.append({"url": url, "source": source})
     return results
 
@@ -150,9 +239,11 @@ def contact_page_urls(source: str, base_url: str, *, limit: int = 2) -> list[str
         parsed = urlparse(url)
         if _site_host(parsed.hostname or "") != _site_host(base.hostname or "") or url == base_url:
             continue
-        target = f"{parsed.path} {parsed.query} {label}".casefold()
+        if _is_search_url(url):
+            continue
+        target = f"{parsed.path} {label}".casefold()
         rank = next((index for index, token in enumerate(
-            _CONTACT_LINK_TOKENS + ("about",)
+            _CONTACT_LINK_TOKENS
         ) if token in target), None)
         if rank is not None:
             candidates.append((rank, order, url))
@@ -169,11 +260,19 @@ def _is_aggregator(url: str) -> bool:
     return any(host == value or host.endswith(f".{value}") for value in _AGGREGATOR_HOSTS)
 
 
+def _is_search_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").casefold()
+    return any(host == value or host.endswith(f".{value}") for value in _SEARCH_HOSTS)
+
+
 def classify_public_source_url(url: str) -> str:
     """Classify an explicit public profile link without guessing its purpose."""
     cleaned = _clean_url(url)
     host = (urlparse(cleaned).hostname or "").casefold()
-    if not cleaned or _is_social(cleaned) or host == "localhost" or host.endswith(".local"):
+    if (
+        not cleaned or _is_social(cleaned) or _is_search_url(cleaned)
+        or host == "localhost" or host.endswith(".local")
+    ):
         return ""
     try:
         if not ipaddress.ip_address(host).is_global:
@@ -287,9 +386,86 @@ def _is_contact_evidence_page(url: str, source: str) -> bool:
     careers or a web vendor.  Official Link-in-bio pages and explicit contact /
     business / press pages are the bounded evidence accepted by this repair.
     """
+    if _is_search_url(url):
+        return False
     parsed = urlparse(url)
-    context = f"{parsed.path} {parsed.query} {source}".casefold()
-    return _is_aggregator(url) or any(token in context for token in _CONTACT_TOKENS)
+    context = parsed.path.casefold()
+    return _is_aggregator(url) or any(
+        token in context for token in _CONTACT_LINK_TOKENS
+    )
+
+
+def _trusted_public_source_roots(fields: dict) -> set[str]:
+    roots = {
+        item["url"] for item in master_source_urls(fields) if item.get("url")
+    }
+    profile_url = _clean_url(feishu.ext_url(fields.get("主链接")))
+    if profile_url:
+        roots.add(profile_url)
+    return roots
+
+
+def _candidate_proof_payload(candidate: dict) -> bytes:
+    payload = {
+        key: str(candidate.get(key) or "")
+        for key in (
+            "email", "source", "source_url", "provenance_url", "evidence_kind",
+        )
+    }
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _make_candidate(*, email: str, source: str, source_url: str,
+                    provenance_url: str, evidence_kind: str) -> dict:
+    candidate = {
+        "email": email,
+        "source": source,
+        "source_url": source_url,
+        "provenance_url": provenance_url,
+        "evidence_kind": evidence_kind,
+    }
+    candidate["discovery_proof"] = hmac.new(
+        _DISCOVERY_SIGNING_KEY,
+        _candidate_proof_payload(candidate),
+        hashlib.sha256,
+    ).hexdigest()
+    return candidate
+
+
+def is_trusted_public_contact_candidate(candidate: dict, fields: dict) -> bool:
+    """Fail closed unless the candidate carries owned, explicit provenance."""
+    expected_proof = hmac.new(
+        _DISCOVERY_SIGNING_KEY,
+        _candidate_proof_payload(candidate),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(
+        str(candidate.get("discovery_proof") or ""), expected_proof,
+    ):
+        return False
+    source = str(candidate.get("source") or "")
+    evidence_kind = str(candidate.get("evidence_kind") or "")
+    profile_url = _clean_url(feishu.ext_url(fields.get("主链接")))
+    source_url = _clean_url(candidate.get("source_url") or "")
+    provenance_url = _clean_url(candidate.get("provenance_url") or "")
+
+    trusted_roots = _trusted_public_source_roots(fields)
+    if not provenance_url or provenance_url not in trusted_roots:
+        return False
+    if evidence_kind == "youtube_about":
+        return (
+            source == "youtube_about"
+            and provenance_url == profile_url
+            and source_url == profile_url
+            and bool(_youtube_lookup_value(profile_url))
+        )
+    if evidence_kind == "owned_aggregator":
+        return bool(source_url and _is_aggregator(source_url))
+    if evidence_kind == "explicit_contact_page":
+        return bool(source_url and _is_contact_evidence_page(source_url, ""))
+    return False
 
 
 def _aggregator_external_urls(source: str, base_url: str, *, limit: int = 2) -> list[str]:
@@ -299,7 +475,9 @@ def _aggregator_external_urls(source: str, base_url: str, *, limit: int = 2) -> 
         host = (urlparse(url).hostname or "").casefold()
         if not host or _site_host(host) == base_host or _is_social(url):
             continue
-        target = f"{urlparse(url).path} {urlparse(url).query} {label}".casefold()
+        if _is_search_url(url):
+            continue
+        target = f"{urlparse(url).path} {label}".casefold()
         contact_rank = next((index for index, token in enumerate(
             _CONTACT_LINK_TOKENS
         ) if token in target), None)
@@ -481,16 +659,23 @@ async def discover_public_email_candidates_with_trace(
     a replay report can be shared without copying KOL business data.
     """
     candidates = []
-    queue = list(master_source_urls(fields))
+    queue = [
+        {**item, "root_url": item["url"]}
+        for item in master_source_urls(fields)
+    ]
     queued_urls = {item["url"] for item in queue}
     trace = []
 
-    def enqueue(url: str, source: str, *, front: bool = False) -> None:
+    def enqueue(url: str, source: str, *, root_url: str,
+                front: bool = False) -> None:
         cleaned = _clean_url(url)
-        if not cleaned or cleaned in queued_urls:
+        if not cleaned or _is_search_url(cleaned) or cleaned in queued_urls:
             return
         queued_urls.add(cleaned)
-        item = {"url": cleaned, "source": source}
+        root = _clean_url(root_url)
+        if not root:
+            return
+        item = {"url": cleaned, "source": source, "root_url": root}
         if front:
             queue.insert(0, item)
         else:
@@ -498,23 +683,25 @@ async def discover_public_email_candidates_with_trace(
 
     profile_url = str(feishu.ext_url(fields.get("主链接")) or "").strip()
     if _is_aggregator(profile_url):
-        enqueue(profile_url, "primary_aggregate")
+        enqueue(profile_url, "primary_aggregate", root_url=profile_url)
     youtube_value = _youtube_lookup_value(profile_url)
     if youtube_value:
         profile = await relabel.fetch_youtube_public_profile(youtube_value)
         profile_candidate_count = 0
         for email_value in profile.get("emails") or ([profile.get("email")] if profile.get("email") else []):
             for email_address in extract_public_emails(email_value):
-                candidates.append({
-                    "email": email_address,
-                    "source": "youtube_about",
-                    "source_url": profile_url,
-                })
+                candidates.append(_make_candidate(
+                    email=email_address,
+                    source="youtube_about",
+                    source_url=profile_url,
+                    provenance_url=profile_url,
+                    evidence_kind="youtube_about",
+                ))
                 profile_candidate_count += 1
         for item in profile.get("external_links") or []:
             url = _clean_url((item or {}).get("url") if isinstance(item, dict) else item)
             if url and not _is_social(url):
-                enqueue(url, "youtube_external")
+                enqueue(url, "youtube_external", root_url=profile_url)
         trace.append({
             "stage": "social_profile",
             "source": "youtube_about",
@@ -540,7 +727,7 @@ async def discover_public_email_candidates_with_trace(
             )
             external_urls = social_profile_external_urls(social_page["text"], profile_url)
             for url in external_urls:
-                enqueue(url, source_name)
+                enqueue(url, source_name, root_url=profile_url)
             trace.append({
                 "stage": "social_profile",
                 "source": source_name,
@@ -582,12 +769,17 @@ async def discover_public_email_candidates_with_trace(
         page_text = page["text"]
         page_candidates = []
         if _is_contact_evidence_page(final_url, item["source"]):
-            for email_address in extract_public_emails(page_text):
-                candidate = {
-                    "email": email_address,
-                    "source": item["source"],
-                    "source_url": final_url,
-                }
+            for email_address in extract_explicit_contact_emails(page_text, final_url):
+                candidate = _make_candidate(
+                    email=email_address,
+                    source=item["source"],
+                    source_url=final_url,
+                    provenance_url=item["root_url"],
+                    evidence_kind=(
+                        "owned_aggregator" if _is_aggregator(final_url)
+                        else "explicit_contact_page"
+                    ),
+                )
                 candidates.append(candidate)
                 page_candidates.append(candidate)
         contact_urls = contact_page_urls(page_text, final_url, limit=2)
@@ -612,7 +804,7 @@ async def discover_public_email_candidates_with_trace(
             (value, f"{item['source']}_linked") for value in linked_urls
         ]
         for value, source in reversed(priority_items):
-            enqueue(value, source, front=True)
+            enqueue(value, source, root_url=item["root_url"], front=True)
 
     if queue:
         for pending in queue:

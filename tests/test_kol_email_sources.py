@@ -4,6 +4,16 @@ from unittest.mock import AsyncMock, patch
 from app import kol_email_sources
 
 
+def trusted_candidate(*, email, source, source_url, provenance_url, evidence_kind):
+    return kol_email_sources._make_candidate(
+        email=email,
+        source=source,
+        source_url=source_url,
+        provenance_url=provenance_url,
+        evidence_kind=evidence_kind,
+    )
+
+
 class KolEmailSourcesTests(unittest.TestCase):
     def test_public_source_url_classification_separates_aggregator_and_website(self):
         self.assertEqual(
@@ -64,9 +74,13 @@ class KolEmailSourcesTests(unittest.TestCase):
 
         self.assertEqual([
             "https://creator.example/contact",
-            "https://creator.example/about-us",
         ], kol_email_sources.contact_page_urls(
             html, "https://creator.example/home", limit=2,
+        ))
+
+    def test_about_page_is_not_explicit_contact_evidence(self):
+        self.assertFalse(kol_email_sources._is_contact_evidence_page(
+            "https://creator.example/about-us", "youtube_external_contact",
         ))
 
     def test_contact_links_accept_explicit_work_with_me_text_on_www_alias(self):
@@ -119,6 +133,81 @@ class KolEmailSourcesTests(unittest.TestCase):
         self.assertTrue(kol_email_sources._is_contact_evidence_page(
             "https://linktr.ee/creator", "master_aggregate",
         ))
+
+    def test_search_url_query_cannot_become_contact_evidence(self):
+        url = "https://www.google.com/search?q=creator+business+email+contact"
+
+        self.assertFalse(kol_email_sources._is_contact_evidence_page(
+            url, "master_other",
+        ))
+        self.assertEqual("", kol_email_sources.classify_public_source_url(url))
+
+    def test_candidate_gate_requires_owned_root_and_explicit_contact_context(self):
+        fields = {
+            "主链接": {"link": "https://www.youtube.com/@creator"},
+            "聚合页URL": {"link": "https://linktr.ee/creator"},
+        }
+        self.assertTrue(kol_email_sources.is_trusted_public_contact_candidate(
+            trusted_candidate(
+                email="business@creator.example",
+                source="master_aggregate",
+                source_url="https://linktr.ee/creator",
+                provenance_url="https://linktr.ee/creator",
+                evidence_kind="owned_aggregator",
+            ), fields,
+        ))
+        self.assertTrue(kol_email_sources.is_trusted_public_contact_candidate(
+            trusted_candidate(
+                email="business@creator.example",
+                source="youtube_external_contact",
+                source_url="https://creator.example/work-with-me",
+                provenance_url="https://www.youtube.com/@creator",
+                evidence_kind="explicit_contact_page",
+            ), fields,
+        ))
+        for candidate in (
+            {
+                "email": "footer@creator.example",
+                "source": "public_website",
+                "source_url": "https://creator.example/",
+            },
+            {
+                "email": "snippet@creator.example",
+                "source": "search_summary",
+                "source_url": "https://search.example/result",
+                "provenance_url": "https://search.example/result",
+                "evidence_kind": "explicit_contact_page",
+            },
+            {
+                "email": "about@creator.example",
+                "source": "youtube_external_contact",
+                "source_url": "https://creator.example/about",
+                "provenance_url": "https://www.youtube.com/@creator",
+                "evidence_kind": "explicit_contact_page",
+            },
+        ):
+            with self.subTest(candidate=candidate["source"]):
+                self.assertFalse(
+                    kol_email_sources.is_trusted_public_contact_candidate(
+                        candidate, fields,
+                    )
+                )
+
+    def test_candidate_gate_rejects_forged_owned_root_and_unrelated_page(self):
+        fields = {
+            "主链接": {"link": "https://www.youtube.com/@creator"},
+        }
+        forged = {
+            "email": "someone@unrelated.example",
+            "source": "youtube_external_contact",
+            "source_url": "https://unrelated.example/contact",
+            "provenance_url": "https://www.youtube.com/@creator",
+            "evidence_kind": "explicit_contact_page",
+        }
+
+        self.assertFalse(
+            kol_email_sources.is_trusted_public_contact_candidate(forged, fields)
+        )
 
     def test_common_link_in_bio_hosts_are_explicitly_allowlisted(self):
         for url in (
@@ -276,11 +365,20 @@ class KolEmailSourcesNetworkTests(unittest.IsolatedAsyncioTestCase):
                 "其他链接": "",
             })
 
-        self.assertEqual([{
+        expected = [{
             "email": "business@creator.test",
             "source": "instagram_external",
             "source_url": "https://beacons.ai/creator",
-        }], result)
+            "provenance_url": "https://www.instagram.com/creator/",
+            "evidence_kind": "owned_aggregator",
+        }]
+        self.assertEqual(expected, [
+            {key: value for key, value in item.items() if key != "discovery_proof"}
+            for item in result
+        ])
+        self.assertTrue(kol_email_sources.is_trusted_public_contact_candidate(
+            result[0], {"主链接": {"link": "https://www.instagram.com/creator/"}},
+        ))
         self.assertEqual(2, fetch.await_count)
 
     async def test_primary_link_in_bio_is_treated_as_public_source(self):
@@ -297,12 +395,37 @@ class KolEmailSourcesNetworkTests(unittest.IsolatedAsyncioTestCase):
                 "其他链接": "",
             })
 
-        self.assertEqual([{
+        expected = [{
             "email": "collab@creator.test",
             "source": "primary_aggregate",
             "source_url": "https://linktr.ee/creator",
-        }], result)
+            "provenance_url": "https://linktr.ee/creator",
+            "evidence_kind": "owned_aggregator",
+        }]
+        self.assertEqual(expected, [
+            {key: value for key, value in item.items() if key != "discovery_proof"}
+            for item in result
+        ])
         fetch.assert_awaited_once_with("https://linktr.ee/creator")
+
+    async def test_aggregator_generic_footer_email_is_not_discovered(self):
+        landing_page = {
+            "ok": True,
+            "url": "https://linktr.ee/creator",
+            "text": (
+                '<footer>Contact us: '
+                '<a href="mailto:support@linktr.ee">Email</a></footer>'
+            ),
+        }
+        with patch.object(
+            kol_email_sources, "fetch_public_page",
+            new=AsyncMock(return_value=landing_page),
+        ):
+            result = await kol_email_sources.discover_public_email_candidates({
+                "主链接": {"link": "https://linktr.ee/creator"},
+            })
+
+        self.assertEqual([], result)
 
     async def test_contact_page_uses_next_page_budget_before_unrelated_seed(self):
         homepage = {
@@ -326,11 +449,17 @@ class KolEmailSourcesNetworkTests(unittest.IsolatedAsyncioTestCase):
                 ),
             }, max_pages=2)
 
-        self.assertEqual([{
+        expected = [{
             "email": "collab@creator.test",
             "source": "master_other_contact",
             "source_url": "https://creator.example/contact",
-        }], result)
+            "provenance_url": "https://creator.example/",
+            "evidence_kind": "explicit_contact_page",
+        }]
+        self.assertEqual(expected, [
+            {key: value for key, value in item.items() if key != "discovery_proof"}
+            for item in result
+        ])
         self.assertEqual([
             unittest.mock.call("https://creator.example/"),
             unittest.mock.call("https://creator.example/contact"),

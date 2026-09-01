@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app import kol_email_repair, snov
+from app import kol_email_repair, kol_email_sources, snov
 
 
 def row(record_id="k1", *, name="Jane Smith", email="jane@example.com",
@@ -13,13 +13,27 @@ def row(record_id="k1", *, name="Jane Smith", email="jane@example.com",
     }}
 
 
+def trusted_candidate(email="jane@example.com", *, source="youtube_about",
+                      source_url="https://www.youtube.com/@janesmith",
+                      provenance_url="https://www.youtube.com/@janesmith",
+                      evidence_kind="youtube_about"):
+    return kol_email_sources._make_candidate(
+        email=email,
+        source=source,
+        source_url=source_url,
+        provenance_url=provenance_url,
+        evidence_kind=evidence_kind,
+    )
+
+
 class KolEmailRepairTests(unittest.TestCase):
     def test_public_contact_candidate_is_accepted_without_snov(self):
-        candidate = {
-            "email": "business@creator.example",
-            "source": "master_other_contact",
-            "source_url": "https://creator.example/contact",
-        }
+        candidate = trusted_candidate(
+            "business@creator.example",
+            source="youtube_external_contact",
+            source_url="https://creator.example/contact",
+            evidence_kind="explicit_contact_page",
+        )
         with patch.object(
             snov, "find_email",
             new=AsyncMock(side_effect=AssertionError("public contact must not call Snov")),
@@ -44,11 +58,13 @@ class KolEmailRepairTests(unittest.TestCase):
                 "https://linktr.ee/new-source",
                 kol_email_repair.feishu.ext_url(fields.get("聚合页URL")),
             )
-            return [{
-                "email": "business@creator.example",
-                "source": "master_aggregate",
-                "source_url": "https://linktr.ee/new-source",
-            }]
+            return [trusted_candidate(
+                "business@creator.example",
+                source="master_aggregate",
+                source_url="https://linktr.ee/new-source",
+                provenance_url="https://linktr.ee/new-source",
+                evidence_kind="owned_aggregator",
+            )]
 
         with patch.object(
             kol_email_repair.feishu, "fetch_all_records",
@@ -72,13 +88,18 @@ class KolEmailRepairTests(unittest.TestCase):
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
             new=discover,
         ):
+            initial = row(email="", status="未验")
+            initial["fields"]["聚合页URL"] = {
+                "link": "https://linktr.ee/jane",
+            }
             result = asyncio.run(kol_email_repair.inspect_record(
-                row(email="", status="未验"),
-                candidates=[{
-                    "email": "jane@example.com",
-                    "source": "master_aggregate",
-                    "source_url": "https://linktr.ee/jane",
-                }],
+                initial,
+                candidates=[trusted_candidate(
+                    source="master_aggregate",
+                    source_url="https://linktr.ee/jane",
+                    provenance_url="https://linktr.ee/jane",
+                    evidence_kind="owned_aggregator",
+                )],
             ))
 
         self.assertEqual("public_contact_found", result["status"])
@@ -121,9 +142,7 @@ class KolEmailRepairTests(unittest.TestCase):
             new=AsyncMock(return_value=[initial]),
         ), patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "jane@example.com", "source": "youtube_about",
-            }]),
+            new=AsyncMock(return_value=[trusted_candidate()]),
         ), patch.object(
             kol_email_repair.feishu, "update_record", new=AsyncMock(),
         ) as update:
@@ -167,7 +186,7 @@ class KolEmailRepairTests(unittest.TestCase):
         with patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
             new=AsyncMock(side_effect=[
-                [{"email": "jane@example.com", "source": "youtube_about"}],
+                [trusted_candidate()],
                 RuntimeError("temporary"),
             ]),
         ), patch.object(
@@ -198,9 +217,7 @@ class KolEmailRepairTests(unittest.TestCase):
             kol_email_repair.feishu, "get_record", new=get_record,
         ), patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "jane@example.com", "source": "youtube_about",
-            }]),
+            new=AsyncMock(return_value=[trusted_candidate()]),
         ), patch.object(
             kol_email_repair.feishu, "update_record", new=AsyncMock(),
         ) as update:
@@ -225,9 +242,12 @@ class KolEmailRepairTests(unittest.TestCase):
             kol_email_repair.feishu, "get_record", new=AsyncMock(return_value=changed),
         ), patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "jane@example.com", "source": "public_contact",
-            }]),
+            new=AsyncMock(return_value=[trusted_candidate(
+                source="master_other",
+                source_url="https://creator.example/contact",
+                provenance_url="https://creator.example/contact",
+                evidence_kind="explicit_contact_page",
+            )]),
         ), patch.object(
             kol_email_repair.feishu, "update_record", new=AsyncMock(),
         ) as update:
@@ -251,9 +271,7 @@ class KolEmailRepairTests(unittest.TestCase):
             kol_email_repair.feishu, "get_record", new=AsyncMock(),
         ) as get_record, patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "jane@example.com", "source": "youtube_about",
-            }]),
+            new=AsyncMock(return_value=[trusted_candidate()]),
         ), patch.object(
             kol_email_repair.feishu, "update_record", new=AsyncMock(),
         ) as update:
@@ -268,28 +286,53 @@ class KolEmailRepairTests(unittest.TestCase):
         get_record.assert_not_awaited()
         update.assert_not_awaited()
 
-    def test_first_clean_public_candidate_is_used(self):
+    def test_untrusted_candidate_is_skipped_before_first_trusted_contact(self):
         initial = row(email="", status="未验")
         with patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
             new=AsyncMock(return_value=[
-                {"email": "hello@creator.com", "source": "public_website"},
-                {"email": "jane@creator.com", "source": "public_contact"},
+                {
+                    "email": "hello@creator.com",
+                    "source": "public_website",
+                    "source_url": "https://creator.example/",
+                },
+                trusted_candidate(
+                    "jane@creator.com",
+                    source="youtube_external_contact",
+                    source_url="https://creator.example/contact",
+                    evidence_kind="explicit_contact_page",
+                ),
             ]),
         ):
             result = asyncio.run(kol_email_repair.inspect_record(initial))
 
         self.assertEqual("public_contact_found", result["status"])
-        self.assertEqual("public_website", result["source"])
-        self.assertEqual("hello@creator.com", result["planned_fields"]["邮箱"])
+        self.assertEqual("youtube_external_contact", result["source"])
+        self.assertEqual("jane@creator.com", result["planned_fields"]["邮箱"])
+
+    def test_only_untrusted_candidate_is_not_planned(self):
+        result = asyncio.run(kol_email_repair.inspect_record(
+            row(email="", status="未验"),
+            candidates=[{
+                "email": "footer@creator.example",
+                "source": "public_website",
+                "source_url": "https://creator.example/",
+            }],
+        ))
+
+        self.assertEqual("no_public_email", result["status"])
+        self.assertEqual({}, result["planned_fields"])
 
     def test_single_token_kol_name_does_not_block_public_contact(self):
         initial = row(email="", status="未验", name="GamerTag")
         with patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "hello@example.com", "source": "public_contact",
-            }]),
+            new=AsyncMock(return_value=[trusted_candidate(
+                "hello@example.com",
+                source="youtube_external_contact",
+                source_url="https://creator.example/contact",
+                evidence_kind="explicit_contact_page",
+            )]),
         ):
             result = asyncio.run(kol_email_repair.inspect_record(initial))
 
@@ -304,9 +347,7 @@ class KolEmailRepairTests(unittest.TestCase):
             new=AsyncMock(return_value=[initial, *ownership]),
         ), patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "jane@example.com", "source": "youtube_about",
-            }]),
+            new=AsyncMock(return_value=[trusted_candidate()]),
         ), patch.object(
             kol_email_repair.feishu, "update_record", new=AsyncMock(),
         ) as update:
@@ -323,9 +364,7 @@ class KolEmailRepairTests(unittest.TestCase):
             kol_email_repair.feishu, "fetch_all_records", new=search,
         ), patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "jane@example.com", "source": "youtube_about",
-            }]),
+            new=AsyncMock(return_value=[trusted_candidate()]),
         ):
             asyncio.run(kol_email_repair.run_email_repair(["k1"], dry_run=True))
 

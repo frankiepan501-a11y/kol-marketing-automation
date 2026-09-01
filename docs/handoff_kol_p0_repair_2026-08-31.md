@@ -21,7 +21,7 @@
 - `app/launch_runtime.py`：新增待审终态分流，未来同类对象自动退出运营队列。
 - `scripts/reconcile_launch_review_routes.py`：只处理审计锁定的 8 条存量参与记录，并逐条回读。
 - `scripts/refresh_kol_profile_quality.py`：只刷新食人花 YouTube 画像；Instagram 明确排除，并在正式写入后逐字段回读。
-- `app/kol_email_repair.py`、`scripts/repair_kol_email_quality.py`：邮箱修复仅接受验证结果为 `valid` 的地址，带重复邮箱、并发变化和写后回读保护。
+- `app/kol_email_repair.py`、`scripts/repair_kol_email_quality.py`：邮箱修复只接受 KOL 自有公开来源中的明确联系邮箱，写入状态为`未验`；不调用 Snov，并保留重复邮箱、并发变化和写后回读保护。
 - `scripts/run_kol_p0_repair_with_production_env.ps1`：只读生产服务配置到当前进程，不修改云端环境变量。
 
 ## 上线前验证

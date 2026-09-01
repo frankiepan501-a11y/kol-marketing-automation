@@ -7,7 +7,10 @@ from scripts.refresh_kol_profile_quality import (
     _normalized,
     selected_ids as profile_ids,
 )
-from scripts.repair_kol_email_quality import selected_ids as email_ids
+from scripts.repair_kol_email_quality import (
+    COMMIT_CONFIRMATION as email_commit_confirmation,
+    selected_ids as email_ids,
+)
 
 
 class KolP0RepairScriptTests(unittest.TestCase):
@@ -39,6 +42,12 @@ class KolP0RepairScriptTests(unittest.TestCase):
     def test_email_selection_prioritizes_small_piranha_cohort(self):
         self.assertEqual(
             ["p-email", "d-email"], email_ids(self._cohorts(), limit=2),
+        )
+
+    def test_email_commit_confirmation_names_unverified_public_contact_scope(self):
+        self.assertEqual(
+            "EMAIL_REPAIR_PUBLIC_CONTACT_UNVERIFIED",
+            email_commit_confirmation,
         )
 
     def test_profile_readback_normalizes_bitable_text_and_multiselect_shapes(self):

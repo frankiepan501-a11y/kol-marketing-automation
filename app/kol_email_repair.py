@@ -58,6 +58,8 @@ async def inspect_record(record: dict, *, candidates: list[dict] | None = None) 
     source = "bounded_public_sources"
     source_url = ""
     for item in candidates:
+        if not kol_email_sources.is_trusted_public_contact_candidate(item, fields):
+            continue
         candidate, _ = feishu.clean_email(item.get("email") or "")
         if not candidate:
             continue
