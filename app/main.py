@@ -25,6 +25,7 @@ from . import invest  # 投资助手: X 帖子抓取 → A股观察映射 → �
 from . import x_history  # 竞品 X 历史补采: 独立只读探测/分窗采集，不触碰 KOL 主表
 from . import kol_roi_mapping  # KOL ROI 归因缺口卡 + 映射回填
 from . import launch_reply_attribution  # 集中宣发未归属回复：运营选活动后继续原回复流程
+from . import kol_contact_acquisition  # P0-3A：无邮箱 KOL 首触达卡与回填
 from . import discord_tester_routes  # FUN Bot 新品体验官：Discord Modal + 安全表单
 
 app = FastAPI(title="KOL Marketing Automation", version="0.3")
@@ -2111,6 +2112,28 @@ async def kol_roi_mapping_callback(request: Request, authorization: str = Header
     payload = await request.json()
     event = payload.get("event", payload)
     return await kol_roi_mapping.handle_callback(event)
+
+
+@app.post("/kol/contact-acquisition/test-card")
+async def kol_contact_acquisition_test_card(
+    record_id: str,
+    authorization: str = Header(default=""),
+):
+    """Send exactly one Frankie-only, no-write P0-3A test card."""
+    _check_auth(authorization)
+    return {"ok": True, **(await kol_contact_acquisition.send_frankie_test_card(record_id))}
+
+
+@app.post("/kol/contact-acquisition/callback")
+async def kol_contact_acquisition_callback(
+    request: Request,
+    authorization: str = Header(default=""),
+):
+    """Handle normalized App3 card.action.trigger payload forwarded by Event Hub."""
+    _check_auth(authorization)
+    payload = await request.json()
+    event = payload.get("event", payload)
+    return await kol_contact_acquisition.handle_callback(event)
 
 
 @app.post("/launch/reply-attribution/scan")
