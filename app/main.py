@@ -179,7 +179,11 @@ def _execute_backfill(job_id: str, request: BackfillRequest) -> None:
         logger.exception("backfill failed id=%s type=%s", job_id, type(error).__name__)
         if request.mode == "commit" and collector is not None and resolved_config_record_id:
             try:
-                collector.mark_failure(error, config_record_id=resolved_config_record_id, job_id=job_id)
+                collector.mark_backfill_failure(
+                    error,
+                    config_record_id=resolved_config_record_id,
+                    job_id=job_id,
+                )
             except Exception:
                 logger.exception("failed to record backfill failure id=%s", job_id)
         _jobs[job_id] = {
@@ -314,11 +318,7 @@ def assert_finished(
         configs = FeishuClient().list_records(
             BASE_TOKEN, TABLES["keyword_config"], field_names=CONFIG_READ_FIELDS
         )
-        matching = [
-            row for row in configs
-            if f"job={job_id}" in str(row.get("YouTube历史进度") or "")
-        ]
-        job = durable_job_snapshot_many(job_id, matching)
+        job = durable_job_snapshot_many(job_id, configs)
     status_code, payload = finished_status(job)
     if status_code != 200:
         raise HTTPException(status_code=status_code, detail=payload["detail"])

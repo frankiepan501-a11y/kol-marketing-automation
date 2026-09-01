@@ -25,24 +25,37 @@ def durable_job_snapshot(
 ) -> dict[str, Any] | None:
     """Recover one job's terminal state from Feishu after a service restart."""
     summary = str(config.get("YouTube历史进度") or "")
+    raw_backfill = str(config.get("YouTube历史游标") or "")
+    if not raw_backfill and summary.lstrip().startswith("{"):
+        raw_backfill = summary
     try:
-        parsed = json.loads(summary)
+        backfill = json.loads(raw_backfill)
     except (TypeError, ValueError):
-        parsed = None
+        backfill = None
     if (
-        isinstance(parsed, dict)
-        and parsed.get("version") == "yt-backfill-v1"
-        and parsed.get("last_job_id") == job_id
+        isinstance(backfill, dict)
+        and backfill.get("version") == "yt-backfill-v1"
+        and backfill.get("last_job_id") == job_id
     ):
+        if backfill.get("status") == "failed":
+            return {
+                "job_id": job_id,
+                "status": "failed",
+                "durable": True,
+                "operation": "backfill",
+                "summary": raw_backfill,
+                "error_type": str(backfill.get("error_type") or "backfill_failure"),
+                "next_end": backfill.get("next_end"),
+            }
         return {
             "job_id": job_id,
             "status": "completed",
             "ok": True,
             "durable": True,
             "operation": "backfill",
-            "summary": summary,
-            "history_complete": parsed.get("status") == "complete",
-            "next_end": parsed.get("next_end"),
+            "summary": raw_backfill,
+            "history_complete": backfill.get("status") == "complete",
+            "next_end": backfill.get("next_end"),
         }
     if f"job={job_id}；" not in summary:
         return None

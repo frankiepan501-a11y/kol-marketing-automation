@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 BEIJING = timezone(timedelta(hours=8), name="Asia/Shanghai")
 VIDEO_ID = re.compile(r"^[0-9A-Za-z_-]{11}$")
+BACKFILL_STATE_VERSION = "yt-backfill-v1"
 
 
 def split_terms(value: Any) -> list[str]:
@@ -69,7 +70,7 @@ def incremental_window(config: dict[str, Any], now: datetime) -> tuple[datetime,
 
 
 def parse_backfill_progress(value: Any) -> dict[str, Any]:
-    """Read the resumable history cursor without disturbing legacy progress text."""
+    """Read the resumable history cursor from its dedicated field."""
     value = scalar(value)
     if not isinstance(value, str) or not value.strip():
         return {}
@@ -77,7 +78,11 @@ def parse_backfill_progress(value: Any) -> dict[str, Any]:
         parsed = json.loads(value)
     except (TypeError, ValueError):
         return {}
-    return parsed if isinstance(parsed, dict) and parsed.get("version") == "yt-backfill-v1" else {}
+    return (
+        parsed
+        if isinstance(parsed, dict) and parsed.get("version") == BACKFILL_STATE_VERSION
+        else {}
+    )
 
 
 def backfill_window(
@@ -96,7 +101,9 @@ def backfill_window(
     if window_days < 1 or window_days > 31:
         raise ValueError("window_days must be between 1 and 31")
     history_start = parse_datetime(config.get("历史回溯起始日期"), fallback=None).astimezone(timezone.utc)
-    progress = parse_backfill_progress(config.get("YouTube历史进度"))
+    progress = parse_backfill_progress(
+        config.get("YouTube历史游标") or config.get("YouTube历史进度")
+    )
     cursor_end = parse_datetime(progress.get("next_end"), fallback=now).astimezone(timezone.utc)
     end = min(cursor_end, now.astimezone(timezone.utc))
     start = max(history_start, end - timedelta(days=window_days))

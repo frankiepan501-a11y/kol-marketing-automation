@@ -68,6 +68,38 @@ class FakeJobTests(unittest.TestCase):
         self.assertEqual(snapshot["status"], "completed")
         self.assertEqual(snapshot["operation"], "backfill")
 
+    def test_durable_assert_recovers_both_jobs_from_separate_fields(self):
+        from app.job_status import durable_job_snapshot
+
+        config = {
+            "YouTube历史进度": "云端增量跳过；job=ytinc-new；原因=no_confirmed_launch_window；",
+            "YouTube历史游标": (
+                '{"version":"yt-backfill-v1","last_job_id":"ytbackfill-abc",'
+                '"status":"ready","next_end":"2026-08-17T11:00:42Z"}'
+            ),
+        }
+
+        incremental = durable_job_snapshot("ytinc-new", config)
+        backfill = durable_job_snapshot("ytbackfill-abc", config)
+        self.assertEqual(incremental["status"], "skipped")
+        self.assertEqual(backfill["status"], "completed")
+
+    def test_durable_assert_recovers_backfill_failure_without_hiding_incremental(self):
+        from app.job_status import durable_job_snapshot, finished_status
+
+        config = {
+            "YouTube历史进度": "云端增量完成；job=ytinc-old；新增=12",
+            "YouTube历史游标": (
+                '{"version":"yt-backfill-v1","last_job_id":"ytbackfill-failed",'
+                '"status":"failed","error_type":"quotaExceeded",'
+                '"next_end":"2026-08-17T11:00:42Z"}'
+            ),
+        }
+        failed = durable_job_snapshot("ytbackfill-failed", config)
+        incremental = durable_job_snapshot("ytinc-old", config)
+        self.assertEqual(finished_status(failed)[0], 500)
+        self.assertEqual(incremental["status"], "completed")
+
     def test_durable_assert_aggregates_multi_brand_config_rows(self):
         from app.job_status import durable_job_snapshot_many
 
@@ -135,6 +167,21 @@ class ScheduleTests(unittest.TestCase):
 
 
 class IncrementalTests(unittest.TestCase):
+    def test_backfill_window_uses_dedicated_cursor_and_ignores_daily_summary(self):
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        config = {
+            "历史回溯起始日期": "2020-01-01T00:00:00Z",
+            "YouTube历史进度": "云端增量跳过；job=ytinc-new；原因=no_confirmed_launch_window；",
+            "YouTube历史游标": (
+                '{"version":"yt-backfill-v1","last_job_id":"ytbackfill-old",'
+                '"status":"ready","next_end":"2026-08-17T11:00:42Z"}'
+            ),
+        }
+        start, end, _, _, _ = backfill_window(config, now, window_days=7)
+
+        self.assertEqual(end, datetime(2026, 8, 17, 11, 0, 42, tzinfo=timezone.utc))
+        self.assertEqual(start, datetime(2026, 8, 10, 11, 0, 42, tzinfo=timezone.utc))
+
     def test_backfill_window_moves_backward_from_now(self):
         now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
         start, end, history_start, done, progress = backfill_window(

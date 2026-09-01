@@ -20,6 +20,7 @@ from .core import (
     backfill_window,
     incremental_window,
     is_youtube_video_id,
+    parse_backfill_progress,
     parse_datetime,
     query_groups,
     rfc3339,
@@ -649,13 +650,21 @@ class IncrementalCollector:
                 "last_new_posts": result.get("new_posts", 0),
                 "last_updated": rfc3339(now),
             }
-            self.mark_success(
-                config_record_id,
-                {
-                    "运行状态": "正常",
-                    "YouTube历史进度": json.dumps(progress_fields, ensure_ascii=False, separators=(",", ":")),
-                    "错误摘要": "",
-                },
+            self.feishu.batch_update(
+                BASE_TOKEN,
+                TABLES["keyword_config"],
+                [
+                    (
+                        config_record_id,
+                        {
+                            "YouTube历史游标": json.dumps(
+                                progress_fields,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                        },
+                    )
+                ],
             )
         result.update(
             {
@@ -1059,4 +1068,41 @@ class IncrementalCollector:
             BASE_TOKEN,
             TABLES["keyword_config"],
             [(config_record_id, {"运行状态": "失败"})],
+        )
+
+    def mark_backfill_failure(
+        self,
+        error: Exception,
+        *,
+        config_record_id: str,
+        job_id: str,
+    ) -> None:
+        code = error.code if isinstance(error, ApiError) else type(error).__name__
+        current = self.feishu.get_record(
+            BASE_TOKEN, TABLES["keyword_config"], config_record_id
+        )
+        progress = parse_backfill_progress(
+            current.get("YouTube历史游标") or current.get("YouTube历史进度")
+        )
+        failure = {
+            **progress,
+            "version": "yt-backfill-v1",
+            "status": "failed",
+            "last_job_id": job_id,
+            "error_type": str(code),
+            "last_updated": rfc3339(datetime.now(timezone.utc)),
+        }
+        self.feishu.batch_update(
+            BASE_TOKEN,
+            TABLES["keyword_config"],
+            [
+                (
+                    config_record_id,
+                    {
+                        "YouTube历史游标": json.dumps(
+                            failure, ensure_ascii=False, separators=(",", ":")
+                        )
+                    },
+                )
+            ],
         )
