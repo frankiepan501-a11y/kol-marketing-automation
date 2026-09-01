@@ -141,7 +141,7 @@
 - 脱敏汇总证据：`C:/tmp/kol-empty-email-public-source-p1-next100-aggregate-64ab2dc-20260901-evidence.json`；不含邮箱明文、完整 URL、页面正文或凭据。
 - 本轮不需要陈翔宇操作；生产仍运行 `64ab2dcddfe95d0f3b5eae41793c69bba93b6a7e`，没有新部署。
 
-## 2026-09-01 P1 公开联系邮箱新口径与交接修复（待发布）
+## 2026-09-01 P1 公开联系邮箱新口径与交接修复（已发布）
 
 ### 结论
 
@@ -166,5 +166,8 @@
 
 ### 当前边界与剩余动作
 
-- 本次仅在本地候选分支修复和验证；没有推送、部署、写生产主表、发邮件、发卡片、改环境变量或改 n8n。
-- 生产仍运行 `64ab2dcddfe95d0f3b5eae41793c69bba93b6a7e`。下一步需单独授权发布，再先做部署后同 100 条只读复核，最后才可另行授权逐条回填 2 条净新增候选。
+- 已在 n8n、飞书爬虫、Dave 和食人花全部自然排空后，仅用 fast-forward 把 `705797a0debacc9595c263cb7d5be1ac8497e5c1` 推到 `master`；未强推、未停止生产任务、未改环境变量或 n8n。
+- Zeabur deployment `6a969e820c6b9d6a226d9fc3` 已精确运行该提交；`/health` HTTP 200、`status=ok`、`kol_ai_configured=true`。
+- 部署后对同一固定 100 条再次只读复核：95 条无合格公开联系邮箱；2 条为可新增公开联系邮箱计划，3 条被重复归属检查拦截；24 条可补公开落地页来源。链接写入 0、邮箱写入 0、邮件 0、飞书卡片 0。
+- 部署后脱敏证据：`C:/tmp/kol-empty-email-public-source-p1-next100-part1-postdeploy-705797a-20260901-evidence.json`、`C:/tmp/kol-empty-email-public-source-p1-next100-part2-postdeploy-705797a-20260901-evidence.json`；两文件各 50 条，均不含 `@`、HTTP(S) URL 或 `handoff_fields`。
+- 本次云端发布不需要陈翔宇操作。剩余 P0 只有“逐条真实回填 2 条净新增候选”，该动作会写生产主表，仍需单独授权；写入后仍不自动发邮件或卡片。
