@@ -2114,28 +2114,6 @@ async def kol_roi_mapping_callback(request: Request, authorization: str = Header
     return await kol_roi_mapping.handle_callback(event)
 
 
-@app.post("/kol/contact-acquisition/test-card")
-async def kol_contact_acquisition_test_card(
-    record_id: str,
-    authorization: str = Header(default=""),
-):
-    """Send exactly one Frankie-only, no-write P0-3A test card."""
-    _check_auth(authorization)
-    return {"ok": True, **(await kol_contact_acquisition.send_frankie_test_card(record_id))}
-
-
-@app.post("/kol/contact-acquisition/callback")
-async def kol_contact_acquisition_callback(
-    request: Request,
-    authorization: str = Header(default=""),
-):
-    """Handle normalized App3 card.action.trigger payload forwarded by Event Hub."""
-    _check_auth(authorization)
-    payload = await request.json()
-    event = payload.get("event", payload)
-    return await kol_contact_acquisition.handle_callback(event)
-
-
 @app.post("/launch/reply-attribution/scan")
 async def run_launch_reply_attribution_scan(
     authorization: str = Header(default=""),
