@@ -106,7 +106,7 @@ async def inspect_record(record: dict, *, field_types: dict[str, int]) -> dict:
 
 async def run_public_source_backfill(
     record_ids: list[str], *, field_types: dict[str, int], dry_run: bool = True,
-    limit: int = 50,
+    limit: int = 50, include_handoff_fields: bool = False,
 ) -> dict:
     unique_ids = list(dict.fromkeys(
         str(record_id).strip() for record_id in record_ids if str(record_id).strip()
@@ -212,6 +212,10 @@ async def run_public_source_backfill(
         result["status"] = "written_public_source"
         writes += 1
 
+    handoff_fields = {
+        str(result.get("record_id") or ""): dict(result.get("planned_fields") or {})
+        for result in results if result.get("planned_fields")
+    }
     counts: dict[str, int] = {}
     for result in results:
         counts[result["status"]] = counts.get(result["status"], 0) + 1
@@ -220,7 +224,7 @@ async def run_public_source_backfill(
             result["planned_fields"] = {
                 name: "<public-url>" for name in result["planned_fields"]
             }
-    return {
+    response = {
         "dry_run": dry_run,
         "requested": len(unique_ids),
         "processed": len(results),
@@ -230,3 +234,6 @@ async def run_public_source_backfill(
         "by_status": counts,
         "results": results,
     }
+    if include_handoff_fields:
+        response["handoff_fields"] = handoff_fields
+    return response

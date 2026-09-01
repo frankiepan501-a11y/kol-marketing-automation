@@ -1,4 +1,4 @@
-"""Run a bounded public-source + strict-email trial against the KOL master."""
+"""Run a bounded public-source + public-contact trial against the KOL master."""
 from __future__ import annotations
 
 import argparse
@@ -125,12 +125,15 @@ async def main(args) -> dict:
         field_types=field_types,
         dry_run=not args.commit_links,
         limit=args.limit,
+        include_handoff_fields=True,
     )
+    source_overrides = dict(link_result.pop("handoff_fields", {}) or {})
     if link_result.get("safe_to_continue"):
         email_result = await kol_email_repair.run_email_repair(
             record_ids,
             dry_run=not args.commit_emails,
             limit=min(args.limit, 50),
+            source_overrides=source_overrides,
         )
     else:
         email_result = {

@@ -1,8 +1,9 @@
 """Bounded discovery of emails explicitly published by a KOL.
 
 This module discovers evidence only.  It never guesses an address and never
-decides deliverability; ``kol_email_repair`` still requires an explicit Snov
-``valid`` result before any write is possible.
+decides deliverability.  ``kol_email_repair`` may accept an address explicitly
+published on the KOL's owned public sources as a contact email, while retaining
+the unverified status and downstream bounce/domain safeguards.
 """
 from __future__ import annotations
 

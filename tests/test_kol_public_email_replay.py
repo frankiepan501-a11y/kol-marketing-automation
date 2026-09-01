@@ -38,10 +38,10 @@ class KolPublicEmailReplayTests(unittest.TestCase):
         }
         inspection = {
             "record_id": "rec1",
-            "status": "verified_valid",
+            "status": "public_contact_found",
             "planned_fields": {
                 "邮箱": "creator@example.com",
-                "邮箱验真状态": "有效",
+                "邮箱验真状态": "未验",
             },
             "source_url": "https://linktr.ee/creator",
             "candidate_count": 1,
@@ -68,7 +68,7 @@ class KolPublicEmailReplayTests(unittest.TestCase):
             "mode": "read_only",
             "write_attempted": False,
             "public_candidate_count": 1,
-            "verification_status": "verified_valid",
+            "verification_status": "public_contact_found",
             "verification_candidate_count": 1,
             "public_trace": [{
                 "stage": "public_page",

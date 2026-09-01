@@ -33,7 +33,7 @@ if ($response.errors) { throw 'Unable to read production service configuration.'
 
 $allowed = @(
     'FEISHU_BITABLE_APP_ID', 'FEISHU_BITABLE_APP_SECRET',
-    'FEISHU_APP_TOKEN', 'T_KOL', 'SNOV_CLIENT_ID', 'SNOV_CLIENT_SECRET'
+    'FEISHU_APP_TOKEN', 'T_KOL'
 )
 foreach ($variable in @($response.data.service.variables)) {
     if ($allowed -contains [string]$variable.key) {

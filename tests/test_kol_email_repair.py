@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app import kol_email_repair
+from app import kol_email_repair, snov
 
 
 def row(record_id="k1", *, name="Jane Smith", email="jane@example.com",
@@ -14,14 +14,63 @@ def row(record_id="k1", *, name="Jane Smith", email="jane@example.com",
 
 
 class KolEmailRepairTests(unittest.TestCase):
+    def test_public_contact_candidate_is_accepted_without_snov(self):
+        candidate = {
+            "email": "business@creator.example",
+            "source": "master_other_contact",
+            "source_url": "https://creator.example/contact",
+        }
+        with patch.object(
+            snov, "find_email",
+            new=AsyncMock(side_effect=AssertionError("public contact must not call Snov")),
+        ) as finder:
+            result = asyncio.run(kol_email_repair.inspect_record(
+                row(email="", status="未验", name="CreatorHandle"),
+                candidates=[candidate],
+            ))
+
+        self.assertEqual("public_contact_found", result["status"])
+        self.assertEqual(
+            {"邮箱": "business@creator.example", "邮箱验真状态": "未验"},
+            result["planned_fields"],
+        )
+        finder.assert_not_awaited()
+
+    def test_source_overrides_are_used_by_email_discovery_in_same_run(self):
+        initial = row(email="", status="未验")
+
+        async def discover(fields):
+            self.assertEqual(
+                "https://linktr.ee/new-source",
+                kol_email_repair.feishu.ext_url(fields.get("聚合页URL")),
+            )
+            return [{
+                "email": "business@creator.example",
+                "source": "master_aggregate",
+                "source_url": "https://linktr.ee/new-source",
+            }]
+
+        with patch.object(
+            kol_email_repair.feishu, "fetch_all_records",
+            new=AsyncMock(return_value=[initial]),
+        ), patch.object(
+            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
+            new=AsyncMock(side_effect=discover),
+        ):
+            result = asyncio.run(kol_email_repair.run_email_repair(
+                ["k1"], dry_run=True,
+                source_overrides={
+                    "k1": {"聚合页URL": {"link": "https://linktr.ee/new-source"}},
+                },
+            ))
+
+        self.assertEqual(1, result["by_status"]["would_write_public_contact"])
+
     def test_inspect_record_accepts_pre_discovered_candidates_for_single_replay(self):
         discover = AsyncMock(side_effect=AssertionError("must not rediscover"))
         with patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
             new=discover,
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={"status": "not_found"}),
         ):
             result = asyncio.run(kol_email_repair.inspect_record(
                 row(email="", status="未验"),
@@ -32,7 +81,7 @@ class KolEmailRepairTests(unittest.TestCase):
                 }],
             ))
 
-        self.assertEqual("verification_not_found", result["status"])
+        self.assertEqual("public_contact_found", result["status"])
         self.assertEqual(1, result["candidate_count"])
         discover.assert_not_awaited()
 
@@ -59,56 +108,51 @@ class KolEmailRepairTests(unittest.TestCase):
         self.assertEqual(0, result["writes"])
         bulk_read.assert_awaited_once_with(
             kol_email_repair.config.T_KOL,
-            field_names=[
-                "账号名", "邮箱", "邮箱验真状态", "主链接", "聚合页URL", "其他链接",
-            ],
+            field_names=kol_email_repair.BULK_READ_FIELDS,
             page_size=500,
         )
         single_read.assert_not_awaited()
         update.assert_not_awaited()
 
-    def test_dry_run_only_plans_snov_valid_result(self):
+    def test_dry_run_plans_public_contact_as_unverified(self):
         initial = row(email="", status="未验")
         with patch.object(
-            kol_email_repair.feishu, "fetch_all_records", new=AsyncMock(return_value=[initial]),
+            kol_email_repair.feishu, "fetch_all_records",
+            new=AsyncMock(return_value=[initial]),
         ), patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
             new=AsyncMock(return_value=[{
                 "email": "jane@example.com", "source": "youtube_about",
             }]),
         ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={"status": "valid", "email": "jane@example.com"}),
-        ), patch.object(
             kol_email_repair.feishu, "update_record", new=AsyncMock(),
         ) as update:
             result = asyncio.run(kol_email_repair.run_email_repair(["k1"], dry_run=True))
 
         self.assertEqual(0, result["writes"])
-        self.assertEqual(1, result["by_status"]["would_write_valid"])
+        self.assertEqual(1, result["by_status"]["would_write_public_contact"])
+        self.assertEqual(
+            {"邮箱": "<public-contact>", "邮箱验真状态": "未验"},
+            result["results"][0]["planned_fields"],
+        )
         update.assert_not_awaited()
 
-    def test_existing_email_is_never_reverified_or_planned(self):
+    def test_existing_email_is_never_rediscovered_or_planned(self):
         with patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
             new=AsyncMock(),
-        ) as discover, patch.object(
-            kol_email_repair.snov, "find_email", new=AsyncMock(),
-        ) as verifier:
+        ) as discover:
             result = asyncio.run(kol_email_repair.inspect_record(row()))
 
         self.assertEqual("existing_email_skipped", result["status"])
         self.assertEqual({}, result["planned_fields"])
         discover.assert_not_awaited()
-        verifier.assert_not_awaited()
 
     def test_existing_invalid_email_text_is_also_never_overwritten(self):
         with patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
             new=AsyncMock(),
-        ) as discover, patch.object(
-            kol_email_repair.snov, "find_email", new=AsyncMock(),
-        ) as verifier:
+        ) as discover:
             result = asyncio.run(kol_email_repair.inspect_record(
                 row(email="not-an-email", status="未验"),
             ))
@@ -116,7 +160,6 @@ class KolEmailRepairTests(unittest.TestCase):
         self.assertEqual("existing_email_skipped", result["status"])
         self.assertEqual({}, result["planned_fields"])
         discover.assert_not_awaited()
-        verifier.assert_not_awaited()
 
     def test_inspection_error_aborts_all_email_writes(self):
         good = row("good", email="", status="未验")
@@ -127,9 +170,6 @@ class KolEmailRepairTests(unittest.TestCase):
                 [{"email": "jane@example.com", "source": "youtube_about"}],
                 RuntimeError("temporary"),
             ]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={"status": "valid", "email": "jane@example.com"}),
         ), patch.object(
             kol_email_repair.feishu, "fetch_all_records",
             new=AsyncMock(return_value=[good, bad]),
@@ -147,12 +187,13 @@ class KolEmailRepairTests(unittest.TestCase):
         self.assertEqual(1, result["by_status"]["not_written_after_failure"])
         update.assert_not_awaited()
 
-    def test_missing_email_uses_youtube_evidence_then_validates_before_write(self):
+    def test_missing_email_uses_public_evidence_and_writes_unverified(self):
         initial = row(email="", status="未验")
-        written = row(email="jane@example.com", status="有效")
+        written = row(email="jane@example.com", status="未验")
         get_record = AsyncMock(side_effect=[initial, written])
         with patch.object(
-            kol_email_repair.feishu, "fetch_all_records", new=AsyncMock(return_value=[initial]),
+            kol_email_repair.feishu, "fetch_all_records",
+            new=AsyncMock(side_effect=[[initial], [initial]]),
         ), patch.object(
             kol_email_repair.feishu, "get_record", new=get_record,
         ), patch.object(
@@ -161,17 +202,14 @@ class KolEmailRepairTests(unittest.TestCase):
                 "email": "jane@example.com", "source": "youtube_about",
             }]),
         ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={"status": "valid", "email": "jane@example.com"}),
-        ), patch.object(
             kol_email_repair.feishu, "update_record", new=AsyncMock(),
         ) as update:
             result = asyncio.run(kol_email_repair.run_email_repair(["k1"], dry_run=False))
 
         self.assertEqual(1, result["writes"])
-        self.assertEqual(1, result["by_status"]["written_valid"])
+        self.assertEqual(1, result["by_status"]["written_public_contact"])
         self.assertEqual(
-            {"邮箱": "jane@example.com", "邮箱验真状态": "有效"},
+            {"邮箱": "jane@example.com", "邮箱验真状态": "未验"},
             update.await_args.args[2],
         )
 
@@ -190,9 +228,6 @@ class KolEmailRepairTests(unittest.TestCase):
             new=AsyncMock(return_value=[{
                 "email": "jane@example.com", "source": "public_contact",
             }]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={"status": "valid", "email": "jane@example.com"}),
         ), patch.object(
             kol_email_repair.feishu, "update_record", new=AsyncMock(),
         ) as update:
@@ -220,9 +255,6 @@ class KolEmailRepairTests(unittest.TestCase):
                 "email": "jane@example.com", "source": "youtube_about",
             }]),
         ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={"status": "valid", "email": "jane@example.com"}),
-        ), patch.object(
             kol_email_repair.feishu, "update_record", new=AsyncMock(),
         ) as update:
             result = asyncio.run(kol_email_repair.run_email_repair(
@@ -233,11 +265,10 @@ class KolEmailRepairTests(unittest.TestCase):
         self.assertEqual(0, result["writes"])
         self.assertEqual(1, result["by_status"]["duplicate_email_owner"])
         self.assertEqual(2, bulk_read.await_count)
-        self.assertEqual(["邮箱"], bulk_read.await_args_list[1].kwargs["field_names"])
         get_record.assert_not_awaited()
         update.assert_not_awaited()
 
-    def test_multiple_public_candidates_stop_only_on_explicit_valid(self):
+    def test_first_clean_public_candidate_is_used(self):
         initial = row(email="", status="未验")
         with patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
@@ -245,137 +276,25 @@ class KolEmailRepairTests(unittest.TestCase):
                 {"email": "hello@creator.com", "source": "public_website"},
                 {"email": "jane@creator.com", "source": "public_contact"},
             ]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email", new=AsyncMock(side_effect=[
-                {"status": "unknown", "email": "hello@creator.com"},
-                {"status": "valid", "email": "jane@creator.com"},
-            ]),
-        ) as finder:
+        ):
             result = asyncio.run(kol_email_repair.inspect_record(initial))
 
-        self.assertEqual("verified_valid", result["status"])
-        self.assertEqual("public_contact", result["source"])
-        self.assertEqual("jane@creator.com", result["planned_fields"]["邮箱"])
-        self.assertEqual(2, finder.await_count)
+        self.assertEqual("public_contact_found", result["status"])
+        self.assertEqual("public_website", result["source"])
+        self.assertEqual("hello@creator.com", result["planned_fields"]["邮箱"])
 
-    def test_unknown_verification_never_writes(self):
-        initial = row(email="", status="未验")
-        with patch.object(
-            kol_email_repair.feishu, "fetch_all_records", new=AsyncMock(return_value=[initial]),
-        ), patch.object(
-            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "jane@example.com", "source": "youtube_about",
-            }]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={"status": "unknown", "email": "jane@example.com"}),
-        ), patch.object(
-            kol_email_repair.feishu, "update_record", new=AsyncMock(),
-        ) as update:
-            result = asyncio.run(kol_email_repair.run_email_repair(["k1"], dry_run=False))
-
-        self.assertEqual(0, result["writes"])
-        self.assertEqual(1, result["by_status"]["verification_unknown"])
-        update.assert_not_awaited()
-
-    def test_insufficient_kol_name_is_not_reported_as_provider_unavailable(self):
+    def test_single_token_kol_name_does_not_block_public_contact(self):
         initial = row(email="", status="未验", name="GamerTag")
         with patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
             new=AsyncMock(return_value=[{
                 "email": "hello@example.com", "source": "public_contact",
             }]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={
-                "status": "unavailable", "email": None, "raw": "name/domain 不足",
-            }),
         ):
             result = asyncio.run(kol_email_repair.inspect_record(initial))
 
-        self.assertEqual("verification_input_insufficient", result["status"])
-        self.assertEqual({}, result["planned_fields"])
-
-    def test_oauth_failure_is_reported_as_verifier_auth_unavailable(self):
-        initial = row(email="", status="未验")
-        with patch.object(
-            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "jane@example.com", "source": "public_contact",
-            }]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={
-                "status": "unavailable", "email": None,
-                "raw": "oauth: 401 invalid_client",
-            }),
-        ):
-            result = asyncio.run(kol_email_repair.inspect_record(initial))
-
-        self.assertEqual("verification_auth_unavailable", result["status"])
-        self.assertEqual({}, result["planned_fields"])
-
-    def test_finder_http_failure_keeps_safe_status_code(self):
-        initial = row(email="", status="未验")
-        with patch.object(
-            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "jane@example.com", "source": "public_contact",
-            }]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={
-                "status": "unavailable", "email": None,
-                "raw": "finder: Client error '403 Forbidden' for url",
-            }),
-        ):
-            result = asyncio.run(kol_email_repair.inspect_record(initial))
-
-        self.assertEqual("verification_provider_http_403", result["status"])
-        self.assertEqual({}, result["planned_fields"])
-
-    def test_finder_network_failure_is_reported_without_raw_detail(self):
-        initial = row(email="", status="未验")
-        with patch.object(
-            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "jane@example.com", "source": "public_contact",
-            }]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={
-                "status": "unavailable", "email": None,
-                "raw": "finder: ConnectError: connection reset",
-            }),
-        ):
-            result = asyncio.run(kol_email_repair.inspect_record(initial))
-
-        self.assertEqual(
-            "verification_provider_network_unavailable", result["status"],
-        )
-        self.assertEqual({}, result["planned_fields"])
-
-    def test_not_valid_verification_is_reported_without_write(self):
-        initial = row(email="", status="未验")
-        with patch.object(
-            kol_email_repair.feishu, "fetch_all_records", new=AsyncMock(return_value=[initial]),
-        ), patch.object(
-            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "jane@example.com", "source": "youtube_about",
-            }]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={"status": "not_valid", "email": "jane@example.com"}),
-        ), patch.object(
-            kol_email_repair.feishu, "update_record", new=AsyncMock(),
-        ) as update:
-            result = asyncio.run(kol_email_repair.run_email_repair(["k1"], dry_run=False))
-
-        self.assertEqual(0, result["writes"])
-        self.assertEqual(1, result["by_status"]["verification_not_valid"])
-        update.assert_not_awaited()
+        self.assertEqual("public_contact_found", result["status"])
+        self.assertEqual("hello@example.com", result["planned_fields"]["邮箱"])
 
     def test_duplicate_owner_blocks_write(self):
         initial = row(email="", status="未验")
@@ -388,9 +307,6 @@ class KolEmailRepairTests(unittest.TestCase):
             new=AsyncMock(return_value=[{
                 "email": "jane@example.com", "source": "youtube_about",
             }]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={"status": "valid", "email": "jane@example.com"}),
         ), patch.object(
             kol_email_repair.feishu, "update_record", new=AsyncMock(),
         ) as update:
@@ -410,9 +326,6 @@ class KolEmailRepairTests(unittest.TestCase):
             new=AsyncMock(return_value=[{
                 "email": "jane@example.com", "source": "youtube_about",
             }]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={"status": "valid", "email": "jane@example.com"}),
         ):
             asyncio.run(kol_email_repair.run_email_repair(["k1"], dry_run=True))
 
@@ -420,22 +333,3 @@ class KolEmailRepairTests(unittest.TestCase):
             kol_email_repair.config.T_KOL,
             field_names=kol_email_repair.BULK_READ_FIELDS, page_size=500,
         )
-
-    def test_exact_public_email_must_match_finder_result(self):
-        initial = row(email="", status="未验", name="Arcade Leo")
-        with patch.object(
-            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(return_value=[{
-                "email": "business@arcadeleo.com", "source": "youtube_about",
-            }]),
-        ), patch.object(
-            kol_email_repair.snov, "find_email",
-            new=AsyncMock(return_value={
-                "status": "valid", "email": "business@arcadeleo.com",
-            }),
-        ) as verifier:
-            result = asyncio.run(kol_email_repair.inspect_record(initial))
-
-        self.assertEqual("verified_valid", result["status"])
-        self.assertEqual("business@arcadeleo.com", result["planned_fields"]["邮箱"])
-        verifier.assert_awaited_once_with("Arcade Leo", "arcadeleo.com")

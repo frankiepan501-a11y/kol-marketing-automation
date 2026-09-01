@@ -10,6 +10,52 @@ from scripts import run_kol_public_source_trial as trial
 
 
 class KolPublicSourceTrialTests(unittest.TestCase):
+    def test_main_passes_public_source_handoff_to_email_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ids_file = Path(tmp) / "ids.json"
+            ids_file.write_text(json.dumps(["k1"]), encoding="utf-8")
+            args = argparse.Namespace(
+                limit=1,
+                ids_file=str(ids_file),
+                evidence_file="",
+                commit_links=False,
+                commit_emails=False,
+            )
+            handoff = {
+                "k1": {"聚合页URL": {"link": "https://linktr.ee/new-source"}},
+            }
+            links = {
+                "dry_run": True, "requested": 1, "processed": 1, "writes": 0,
+                "safe_to_continue": True, "abort_reason": "",
+                "by_status": {"would_write_public_source": 1},
+                "handoff_fields": handoff,
+                "results": [{
+                    "record_id": "k1", "status": "would_write_public_source",
+                }],
+            }
+            emails = {
+                "dry_run": True, "requested": 1, "processed": 1, "writes": 0,
+                "safe_to_continue": True, "abort_reason": "",
+                "by_status": {"would_write_public_contact": 1},
+                "results": [{
+                    "record_id": "k1", "status": "would_write_public_contact",
+                }],
+            }
+            with patch.object(
+                trial, "_field_types",
+                new=AsyncMock(return_value={"聚合页URL": 15, "其他链接": 1}),
+            ), patch.object(
+                trial.kol_public_source_backfill, "run_public_source_backfill",
+                new=AsyncMock(return_value=links),
+            ) as source_backfill, patch.object(
+                trial.kol_email_repair, "run_email_repair",
+                new=AsyncMock(return_value=emails),
+            ) as email_repair:
+                asyncio.run(trial.main(args))
+
+        self.assertTrue(source_backfill.await_args.kwargs["include_handoff_fields"])
+        self.assertEqual(handoff, email_repair.await_args.kwargs["source_overrides"])
+
     def test_selects_next_empty_email_public_source_batch_with_exclusions(self):
         def item(record_id, platform, *, email="", aggregate="", other=""):
             return {"record_id": record_id, "fields": {
@@ -95,10 +141,10 @@ class KolPublicSourceTrialTests(unittest.TestCase):
             }
             emails = {
                 "dry_run": True, "requested": 1, "processed": 1, "writes": 0,
-                "by_status": {"verification_provider_http_403": 1},
+                "by_status": {"would_write_public_contact": 1},
                 "results": [{
                     "record_id": "k1",
-                    "status": "verification_provider_http_403",
+                    "status": "would_write_public_contact",
                     "email_fingerprint": "not-written-to-evidence",
                 }],
             }
@@ -117,7 +163,7 @@ class KolPublicSourceTrialTests(unittest.TestCase):
             evidence = json.loads(evidence_file.read_text(encoding="utf-8"))
 
         self.assertEqual(
-            [{"record_id": "k1", "status": "verification_provider_http_403"}],
+            [{"record_id": "k1", "status": "would_write_public_contact"}],
             evidence["email_record_status"],
         )
         self.assertNotIn("email_fingerprint", evidence["email_record_status"][0])

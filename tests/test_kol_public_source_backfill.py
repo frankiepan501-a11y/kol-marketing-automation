@@ -150,6 +150,34 @@ class KolPublicSourceBackfillTests(unittest.TestCase):
         fetch_all.assert_awaited_once()
         get_record.assert_not_awaited()
 
+    def test_optional_handoff_keeps_real_value_separate_from_redacted_results(self):
+        row = {"record_id": "good", "fields": {
+            "主平台": "YouTube", "主链接": {"link": "https://youtube.com/@good"},
+            "聚合页URL": "", "其他链接": "",
+        }}
+        with patch.object(
+            kol_public_source_backfill.feishu, "fetch_all_records",
+            new=AsyncMock(return_value=[row]),
+        ), patch.object(
+            kol_public_source_backfill.kol_email_sources,
+            "discover_public_landing_page_candidates",
+            new=AsyncMock(return_value=[{
+                "url": "https://linktr.ee/good", "kind": "aggregate",
+            }]),
+        ):
+            result = asyncio.run(kol_public_source_backfill.run_public_source_backfill(
+                ["good"], field_types={"聚合页URL": 15, "其他链接": 1},
+                dry_run=True, include_handoff_fields=True,
+            ))
+
+        self.assertEqual(
+            {"link": "https://linktr.ee/good", "text": "linktr.ee"},
+            result["handoff_fields"]["good"]["聚合页URL"],
+        )
+        self.assertEqual(
+            "<public-url>", result["results"][0]["planned_fields"]["聚合页URL"],
+        )
+
     def test_production_write_keeps_per_record_precheck_and_readback(self):
         before = {"record_id": "good", "fields": {
             "主平台": "YouTube", "主链接": {"link": "https://youtube.com/@good"},
