@@ -123,3 +123,14 @@
 - 部署后使用原固定两批各 50 条只读复核：第一批 46 条无公开邮箱、3 条重复归属、1 条可新增；第二批 49 条无公开邮箱、1 条可新增。公开来源阶段合计 24 条可补来源、76 条无新来源。
 - 两批 `links.writes=0`、`emails.writes=0`、`safe_to_continue=true`；没有发邮件、飞书卡片，也没有手动触发补池、爬虫或活动任务。
 - 部署后证据均通过脱敏检查，不含 `@`、HTTP(S) URL 或 `handoff_fields`。剩余生产 P0 是逐条回填 2 条净新增候选，需另行授权。
+
+## 2026-09-01 最终唯一 P0：2 条公开联系邮箱正式回填
+
+- 用户已授权生产写入。固定 2 条候选在写入前重新抓取公开页面、核对当前主表字段并刷新全表邮箱归属索引；dry-run 为`processed=2`、`would_write_public_contact=2`、`writes=0`。
+- 正式写入为`processed=2`、`writes=2`、`written_public_contact=2`、`safe_to_continue=true`；仅写空邮箱及`邮箱验真状态=未验`，每条写后均回读一致。
+- 飞书两次短暂返回`1254607 Data not ready`，程序按既有有界重试恢复，没有跳过检查或重复写入。
+- 独立只读复查为`processed=2`、`existing_email_skipped=2`、`writes=0`，证明两条已经生效且重复执行会安全跳过。
+- 证据：`C:/tmp/kol-public-contact-final-p0-dryrun-20260901.json`、`C:/tmp/kol-public-contact-final-p0-commit-20260901.json`、`C:/tmp/kol-public-contact-final-p0-postcheck-20260901.json`。不在交接文档记录邮箱明文或 record_id。
+- 首次临时 cohort 因使用脚本不识别的自定义分组名而处理 0 条、写入 0；正式运行前已通过`processed == 2`闸门发现并纠正。该防错规则已写入候选教训。
+- 本次没有发邮件或飞书卡片，没有创建/触发业务任务，没有改环境变量或 n8n，也不需要陈翔宇操作。19:50 开始的食人花任务是固定自然轮次，与本次回填无触发关系。
+- 当前 P0 清单已清空。Dave 最新`error`和食人花历史`degraded`是另一个生产健康问题，后续应独立审计，不把它误报为本次 P0 未完成。
