@@ -129,6 +129,17 @@
 - 已 fast-forward 推送 `b7e283e..64ab2dc`；Zeabur deployment `6a9657e62aa889148228e4d9` 精确运行目标 commit，`/health` HTTP 200、`status=ok`。
 - 部署后同批 50 条逐条状态与部署前完全一致，链接和邮箱写入均为 0，`quality_filters_lowered=false`。
 
+### O. P1 新样本 100 条生产只读试跑 — completed
+
+- 从“邮箱为空且已有官网、Linktree、Beacons 或其他公开落地页”的记录中，排除上一批 50 条后均衡选择 100 条新样本。
+- 100 条全部检查公开来源与严格邮箱候选；现有入口单次邮箱上限为 50，因此按同一固定名单拆成两个 50 条邮箱批次，避免只检查前半批。
+- 全程不传 `--commit-links` / `--commit-emails`，不写主表、不发邮件或飞书卡片、不改环境变量或 n8n。
+- 结果只保存汇总与 `record_id + status`，并确认 `quality_filters_lowered=false`。
+- 两批固定 50 条均完成：100 条 record_id 唯一，且与上一批 50 条重叠 0。
+- 公开来源：24 条 `would_write_public_source`、76 条 `no_new_public_source`；严格邮箱：83 条 `no_public_email`、17 条 `verification_input_insufficient`、0 条严格有效候选。
+- 链接写入 0、邮箱写入 0，`safe_to_continue=true`、`quality_filters_lowered=false`。
+- 同一后 50 条在整批与独立回放间有 2 条公开来源状态波动；最终口径以两批固定 50 条独立结果合并为准，并把外部页面偶发访问差异列为剩余风险。
+
 ## 错误记录
 
 | 时间 | 错误 | 处理 |
@@ -141,4 +152,5 @@
 | 2026-09-01 | 首次运行邮箱专项测试时，嵌入式 Python 从旧目录 `C:/tmp/ml-data-sync` 导入了同名 `app` 包 | 判定为本机 `PYTHONPATH` 污染；后续测试显式把当前仓库置于模块搜索首位，不修改系统环境变量。 |
 | 2026-09-01 P1 | PowerShell 临时设置 `PYTHONPATH` 后，嵌入式 Python 仍从 `C:/tmp/ml-data-sync` 导入同名 `app` | 该运行时使用固定 `._pth`，环境变量不足以纠正；改用同一 Python 进程先执行 `sys.path.insert(0, repo_root)` 再调用 pytest。 |
 | 2026-09-01 P1 | 首次生产单条回放仍调用飞书单记录接口，连续 3 次返回 `1254607 Data not ready` | 先用测试复现，再改成列表接口读取最小字段并按 `record_id` 本地定位；同一条生产只读回放复测成功。 |
+| 2026-09-01 P1 100 条 | 同一后 50 条在整批 100 条与独立 50 条回放中有 2 条公开来源状态不同 | 没有据此写表；改用固定两批 50 条独立结果作为最终口径，并将外部页面瞬时可访问性列入下一轮重试验证。 |
 

@@ -88,3 +88,10 @@
 - Zeabur deployment `6a9657e62aa889148228e4d9` 已精确运行 `64ab2dcddfe95d0f3b5eae41793c69bba93b6a7e`；`/health` HTTP 200、`status=ok`、`kol_ai_configured=true`。未改环境变量、未手动重启或重部署。
 - 部署后复用同一批 50 条生产只读回归：公开来源候选 12、无新来源 38；邮箱为 42 条无公开邮箱、4 条输入不足、2 条 Finder HTTP 400、2 条 Finder 超时。与部署前逐条 `record_id + 状态` 完全一致，链接写入 0、邮箱写入 0、`safe_to_continue=true`、`quality_filters_lowered=false`。
 - 部署后证据：`C:/tmp/kol-empty-email-public-source-p1-postdeploy50-64ab2dc-20260901-evidence.json`。本轮未发送邮件或飞书卡片，未手动触发补池/爬虫，也不需要陈翔宇终端操作。
+- 用户继续授权 P1 试跑 100 条。阶段 O 开始：使用排除上一批 50 条的新样本，只读检查公开来源与严格邮箱候选；考虑现有试跑入口邮箱阶段每次最多 50 条，固定 100 条名单后拆成两个 50 条邮箱批次，确保 100/100 都被检查。
+- P1 100 条新样本只读试跑完成：样本 100 条、record_id 唯一 100 条、与上一批 50 条重叠 0。两个固定 50 条批次均完成公开来源和邮箱检查。
+- 公开来源汇总：24 条 `would_write_public_source`、76 条 `no_new_public_source`；链接写入 0、`safe_to_continue=true`。
+- 严格邮箱汇总：83 条 `no_public_email`、17 条 `verification_input_insufficient`、0 条 `would_write_valid`；邮箱写入 0、`safe_to_continue=true`、`quality_filters_lowered=false`。
+- 同一后 50 条在整批 100 条与独立回放之间有 2 条公开来源状态波动，说明外部页面存在瞬时访问差异。最终业务口径以固定两批 50 条独立结果合并为准；任何后续正式写回前仍需重读并回放候选。
+- 脱敏汇总证据：`C:/tmp/kol-empty-email-public-source-p1-next100-aggregate-64ab2dc-20260901-evidence.json`；分批证据：`C:/tmp/kol-empty-email-public-source-p1-next100-part1b-64ab2dc-20260901-evidence.json`、`C:/tmp/kol-empty-email-public-source-p1-next100-part2-64ab2dc-20260901-evidence.json`。
+- 本轮没有写主表、没有发送邮件或飞书卡片、没有修改环境变量或 n8n，也没有手动触发补池、爬虫或活动任务。阶段 O 收口。
