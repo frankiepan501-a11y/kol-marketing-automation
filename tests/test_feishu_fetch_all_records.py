@@ -6,9 +6,10 @@ import urllib.parse
 import unittest
 
 
-REPO_ROOT = os.environ.get("KOL_TEST_REPO_ROOT")
-if REPO_ROOT:
-    sys.path.insert(0, REPO_ROOT)
+REPO_ROOT = os.environ.get("KOL_TEST_REPO_ROOT") or os.path.join(
+    os.path.dirname(__file__), ".."
+)
+sys.path.insert(0, os.path.abspath(REPO_ROOT))
 
 for key in [
     "FEISHU_NOTIFY_APP_ID",
