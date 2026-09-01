@@ -60,3 +60,8 @@
 - 最终验证：相关 45 项及 5 个子测试通过；完整回归 926 项及 31 个子测试通过，唯一失败仍是固定在 2026-07-07 的既有 Zeabur 看门狗时间窗口用例。`git diff --check` 通过。
 - 人工复核确认：改动只影响失败原因分类、只读取样和脱敏证据；没有放宽 `valid` 门槛，没有新增邮箱/卡片/任务写入，也没有修改生产环境变量、凭据或 n8n。
 - 陈翔宇部署终端回传验收截图：本地 daemon 已 fast-forward 到 `0a03fc4`；重启后仅 2 个父子 Python OS 进程（PID 15864 → 14868），构成 1 个逻辑 daemon，启动时间同为 2026-09-01 10:06:07。截图中的 HTTP 400/Traceback 均在 09:00–09:01，早于本次启动；10:06 新启动后的日志未见 Traceback。部署终端验收通过，当前无需陈翔宇继续操作。
+- 用户确认云端发布后，发布前再次确认工作区干净、`origin/master=c794784` 未前进且为当前 HEAD 的祖先；相关目标测试 45 项及 5 个子测试通过。
+- 仅 fast-forward 推送 `c794784..b7e283e` 到 `origin/master`；未强推、未改环境变量、未启停或改写 n8n，也未触发补池、爬虫、卡片或邮件。
+- Zeabur 自动 deployment `6a963b7b9ed7d65609e28e46` 已精确运行 commit `b7e283ebbbf9b580c375cf4b4aee4fd9f4ada5d4`；`https://kol-auto.zeabur.app/health` 返回 HTTP 200、`status=ok`、`kol_ai_configured=true`。
+- 部署后复用同一批 50 条做生产只读对照：42 条无公开邮箱、4 条姓名输入不足、2 条 Finder HTTP 400、2 条 Finder 超时；链接和邮箱写入均为 0，`safe_to_continue=true`，结果与部署前完全一致。
+- 部署后证据：`C:/tmp/kol-empty-email-public-source-postdeploy50-b7e283e-20260901-evidence.json`。阶段 J 的 P0 发布与验收已完成；剩余是 P1 提升公开来源覆盖率，不属于生产故障。

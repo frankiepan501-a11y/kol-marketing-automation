@@ -91,3 +91,14 @@
 - 两个进程启动时间：2026-09-01 10:06:07，同一次计划任务启动。
 - 日志判断：截图中的 HTTP 400/Traceback 发生于 09:00–09:01，属于本次重启前的历史任务；10:06 新启动后未见 Traceback。
 - 结论：部署终端验收通过，当前不需要陈翔宇继续操作。后续云端失败原因分类提交 `67d5579` 的推送/部署是独立发布步骤，不由陈翔宇终端执行。
+
+## 2026-09-01 云端发布与部署后验收
+
+- 最终云端发布 commit：`b7e283ebbbf9b580c375cf4b4aee4fd9f4ada5d4`（含核心分类修复 `67d5579`）。
+- 发布方式：只做 fast-forward 推送；未改环境变量、凭据或 n8n，未手动重启或重部署。
+- Zeabur deployment：`6a963b7b9ed7d65609e28e46`，状态 `RUNNING`，精确 commit 与目标一致。
+- 健康检查：`/health` HTTP 200、`status=ok`、`kol_ai_configured=true`。
+- 部署后 50 条只读对照：`no_public_email=42`、`verification_input_insufficient=4`、`verification_provider_http_400=2`、`verification_provider_timeout=2`；链接写入 0、邮箱写入 0。
+- 对照结论：部署前后分类完全一致；系统没有把第三方验证失败误写成“无邮箱”，也没有因本次核验产生业务写入、邮件或飞书卡片。
+- 证据文件：`C:/tmp/kol-empty-email-public-source-postdeploy50-b7e283e-20260901-evidence.json`。
+- 当前 P0 已收口。后续 P1 应提升公开来源覆盖率和单条回放能力，不能通过降低邮箱 `valid` 门槛换数量。
