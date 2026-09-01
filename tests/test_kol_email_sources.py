@@ -69,6 +69,18 @@ class KolEmailSourcesTests(unittest.TestCase):
             html, "https://creator.example/home", limit=2,
         ))
 
+    def test_contact_links_accept_explicit_work_with_me_text_on_www_alias(self):
+        html = '''
+        <a href="https://www.creator.example/pages/work">Work with me</a>
+        <a href="https://shop.example/product">Shop</a>
+        '''
+
+        self.assertEqual([
+            "https://www.creator.example/pages/work",
+        ], kol_email_sources.contact_page_urls(
+            html, "https://creator.example/", limit=2,
+        ))
+
     def test_aggregator_external_links_ignore_stylesheet_and_asset_hrefs(self):
         html = '''
         <link rel="stylesheet" href="https://cdn.assets.example/site.css">
@@ -81,6 +93,21 @@ class KolEmailSourcesTests(unittest.TestCase):
                 html, "https://linktr.ee/creator", limit=2,
             ),
         )
+
+    def test_aggregator_external_links_prioritize_official_and_contact_pages(self):
+        html = '''
+        <a href="https://shop.example/product">Shop my gear</a>
+        <a href="https://patreon.example/creator">Support me</a>
+        <a href="https://creator.example/">Official website</a>
+        <a href="https://creator.example/work-with-me">Work with me</a>
+        '''
+
+        self.assertEqual([
+            "https://creator.example/work-with-me",
+            "https://creator.example/",
+        ], kol_email_sources._aggregator_external_urls(
+            html, "https://linktr.ee/creator", limit=2,
+        ))
 
     def test_generic_homepage_is_not_contact_evidence(self):
         self.assertFalse(kol_email_sources._is_contact_evidence_page(
@@ -276,6 +303,62 @@ class KolEmailSourcesNetworkTests(unittest.IsolatedAsyncioTestCase):
             "source_url": "https://linktr.ee/creator",
         }], result)
         fetch.assert_awaited_once_with("https://linktr.ee/creator")
+
+    async def test_contact_page_uses_next_page_budget_before_unrelated_seed(self):
+        homepage = {
+            "ok": True,
+            "url": "https://creator.example/",
+            "text": '<a href="/contact">Business contact</a>',
+        }
+        contact_page = {
+            "ok": True,
+            "url": "https://creator.example/contact",
+            "text": '<a href="mailto:collab@creator.test">Email</a>',
+        }
+        fetch = AsyncMock(side_effect=[homepage, contact_page])
+        with patch.object(kol_email_sources, "fetch_public_page", new=fetch):
+            result = await kol_email_sources.discover_public_email_candidates({
+                "主链接": "",
+                "聚合页URL": "",
+                "其他链接": (
+                    "https://creator.example/\n"
+                    "https://unrelated.example/"
+                ),
+            }, max_pages=2)
+
+        self.assertEqual([{
+            "email": "collab@creator.test",
+            "source": "master_other_contact",
+            "source_url": "https://creator.example/contact",
+        }], result)
+        self.assertEqual([
+            unittest.mock.call("https://creator.example/"),
+            unittest.mock.call("https://creator.example/contact"),
+        ], fetch.await_args_list)
+
+    async def test_discovery_trace_explains_fetch_failure_without_urls_or_emails(self):
+        fetch = AsyncMock(return_value={"ok": False, "reason": "http_403"})
+        with patch.object(kol_email_sources, "fetch_public_page", new=fetch):
+            result = await kol_email_sources.discover_public_email_candidates_with_trace({
+                "主链接": "",
+                "聚合页URL": "",
+                "其他链接": "https://creator.example/contact",
+            })
+
+        self.assertEqual([], result["candidates"])
+        self.assertEqual([{
+            "stage": "public_page",
+            "source": "master_other",
+            "source_kind": "website",
+            "host": "creator.example",
+            "url_fingerprint": result["trace"][0]["url_fingerprint"],
+            "status": "http_403",
+            "contact_pages_found": 0,
+            "linked_pages_found": 0,
+            "email_candidates_found": 0,
+        }], result["trace"])
+        self.assertNotIn("url", result["trace"][0])
+        self.assertNotIn("email", result["trace"][0])
 
 
 if __name__ == "__main__":

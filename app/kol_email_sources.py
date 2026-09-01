@@ -7,6 +7,7 @@ decides deliverability; ``kol_email_repair`` still requires an explicit Snov
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import ipaddress
 import json
@@ -24,6 +25,8 @@ _EMAIL_RE = re.compile(
 )
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _HREF_RE = re.compile(r"(?is)<a\b[^>]*\bhref\s*=\s*(['\"])(.*?)\1")
+_ANCHOR_RE = re.compile(r"(?is)<a\b(?P<attrs>[^>]*)>(?P<label>.*?)</a>")
+_HREF_ATTR_RE = re.compile(r"(?is)\bhref\s*=\s*(['\"])(.*?)\1")
 _RESERVED_DOMAINS = {"example.com", "example.net", "example.org"}
 _SOCIAL_HOSTS = (
     "youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com",
@@ -40,6 +43,11 @@ _HEADERS = {
     "Accept": "text/html,text/plain;q=0.9,*/*;q=0.1",
 }
 _CONTACT_TOKENS = ("contact", "business", "collab", "sponsor", "brand", "press", "media")
+_CONTACT_LINK_TOKENS = (
+    "contact", "business", "collab", "sponsor", "press", "media",
+    "work with", "work-with", "work_with", "get in touch", "get-in-touch",
+    "email",
+)
 
 
 def _flatten(value) -> str:
@@ -113,20 +121,41 @@ def _hrefs(source: str, base_url: str) -> list[str]:
     return results
 
 
+def _anchors(source: str, base_url: str) -> list[tuple[str, str]]:
+    results = []
+    for match in _ANCHOR_RE.finditer(str(source or "")):
+        href = _HREF_ATTR_RE.search(match.group("attrs") or "")
+        if not href:
+            continue
+        cleaned = _clean_url(href.group(2), base_url=base_url)
+        if not cleaned:
+            continue
+        label = html.unescape(re.sub(r"(?is)<[^>]+>", " ", match.group("label") or ""))
+        label = " ".join(label.split())
+        if not any(item[0] == cleaned for item in results):
+            results.append((cleaned, label))
+    return results
+
+
+def _site_host(value: str) -> str:
+    host = (value or "").casefold().rstrip(".")
+    return host[4:] if host.startswith("www.") else host
+
+
 def contact_page_urls(source: str, base_url: str, *, limit: int = 2) -> list[str]:
     base = urlparse(base_url)
     candidates = []
-    for url in _hrefs(source, base_url):
+    for order, (url, label) in enumerate(_anchors(source, base_url)):
         parsed = urlparse(url)
-        if parsed.hostname != base.hostname or url == base_url:
+        if _site_host(parsed.hostname or "") != _site_host(base.hostname or "") or url == base_url:
             continue
-        target = f"{parsed.path} {parsed.query}".casefold()
+        target = f"{parsed.path} {parsed.query} {label}".casefold()
         rank = next((index for index, token in enumerate(
-            ("contact", "business", "about", "press", "media")
+            _CONTACT_LINK_TOKENS + ("about",)
         ) if token in target), None)
         if rank is not None:
-            candidates.append((rank, url))
-    return [url for _, url in sorted(candidates, key=lambda item: item[0])[:limit]]
+            candidates.append((rank, order, url))
+    return [url for _, _, url in sorted(candidates)[:limit]]
 
 
 def _is_social(url: str) -> bool:
@@ -263,13 +292,48 @@ def _is_contact_evidence_page(url: str, source: str) -> bool:
 
 
 def _aggregator_external_urls(source: str, base_url: str, *, limit: int = 2) -> list[str]:
-    base_host = (urlparse(base_url).hostname or "").casefold()
-    results = []
-    for url in _hrefs(source, base_url):
+    base_host = _site_host(urlparse(base_url).hostname or "")
+    candidates = []
+    for order, (url, label) in enumerate(_anchors(source, base_url)):
         host = (urlparse(url).hostname or "").casefold()
-        if host and host != base_host and not _is_social(url) and url not in results:
-            results.append(url)
-    return results[:limit]
+        if not host or _site_host(host) == base_host or _is_social(url):
+            continue
+        target = f"{urlparse(url).path} {urlparse(url).query} {label}".casefold()
+        contact_rank = next((index for index, token in enumerate(
+            _CONTACT_LINK_TOKENS
+        ) if token in target), None)
+        if contact_rank is not None:
+            rank = contact_rank
+        elif any(token in target for token in (
+            "official", "website", "homepage", "my site", "our site",
+        )):
+            rank = 100
+        else:
+            rank = 200
+        if not any(item[2] == url for item in candidates):
+            candidates.append((rank, order, url))
+    return [url for _, _, url in sorted(candidates)[:limit]]
+
+
+def _safe_page_trace(url: str, source: str, status: str, *,
+                     contact_pages_found: int = 0,
+                     linked_pages_found: int = 0,
+                     email_candidates_found: int = 0) -> dict:
+    cleaned = _clean_url(url)
+    host = (urlparse(cleaned).hostname or "").casefold()
+    return {
+        "stage": "public_page",
+        "source": source,
+        "source_kind": classify_public_source_url(cleaned) or "unknown",
+        "host": host,
+        "url_fingerprint": hashlib.sha256(
+            cleaned.encode("utf-8")
+        ).hexdigest()[:12] if cleaned else "",
+        "status": status,
+        "contact_pages_found": int(contact_pages_found),
+        "linked_pages_found": int(linked_pages_found),
+        "email_candidates_found": int(email_candidates_found),
+    }
 
 
 async def _public_host(host: str, *, allow_proxy_fake_dns: bool = False) -> bool:
@@ -407,16 +471,37 @@ async def discover_public_landing_page_candidates(
     return results
 
 
-async def discover_public_email_candidates(fields: dict, *, max_pages: int = 4) -> list[dict]:
-    """Discover bounded public candidates; no inference, pattern generation or write."""
+async def discover_public_email_candidates_with_trace(
+    fields: dict, *, max_pages: int = 4,
+) -> dict:
+    """Discover candidates and safe page-level diagnostics for one KOL.
+
+    Trace entries intentionally omit full URLs, page bodies and email values so
+    a replay report can be shared without copying KOL business data.
+    """
     candidates = []
     queue = list(master_source_urls(fields))
+    queued_urls = {item["url"] for item in queue}
+    trace = []
+
+    def enqueue(url: str, source: str, *, front: bool = False) -> None:
+        cleaned = _clean_url(url)
+        if not cleaned or cleaned in queued_urls:
+            return
+        queued_urls.add(cleaned)
+        item = {"url": cleaned, "source": source}
+        if front:
+            queue.insert(0, item)
+        else:
+            queue.append(item)
+
     profile_url = str(feishu.ext_url(fields.get("主链接")) or "").strip()
     if _is_aggregator(profile_url):
-        queue.append({"url": profile_url, "source": "primary_aggregate"})
+        enqueue(profile_url, "primary_aggregate")
     youtube_value = _youtube_lookup_value(profile_url)
     if youtube_value:
         profile = await relabel.fetch_youtube_public_profile(youtube_value)
+        profile_candidate_count = 0
         for email_value in profile.get("emails") or ([profile.get("email")] if profile.get("email") else []):
             for email_address in extract_public_emails(email_value):
                 candidates.append({
@@ -424,10 +509,24 @@ async def discover_public_email_candidates(fields: dict, *, max_pages: int = 4) 
                     "source": "youtube_about",
                     "source_url": profile_url,
                 })
+                profile_candidate_count += 1
         for item in profile.get("external_links") or []:
             url = _clean_url((item or {}).get("url") if isinstance(item, dict) else item)
             if url and not _is_social(url):
-                queue.append({"url": url, "source": "youtube_external"})
+                enqueue(url, "youtube_external")
+        trace.append({
+            "stage": "social_profile",
+            "source": "youtube_about",
+            "source_kind": "social_profile",
+            "host": (urlparse(profile_url).hostname or "").casefold(),
+            "url_fingerprint": hashlib.sha256(
+                profile_url.encode("utf-8")
+            ).hexdigest()[:12] if profile_url else "",
+            "status": "profile_loaded",
+            "contact_pages_found": 0,
+            "linked_pages_found": len(profile.get("external_links") or []),
+            "email_candidates_found": profile_candidate_count,
+        })
     elif profile_url and _is_social(profile_url):
         social_page = await fetch_public_page(
             profile_url, max_bytes=2_000_000, allow_social=True,
@@ -438,12 +537,34 @@ async def discover_public_email_candidates(fields: dict, *, max_pages: int = 4) 
                 else "tiktok_external" if "tiktok.com" in urlparse(profile_url).netloc.casefold()
                 else "social_external"
             )
-            for url in social_profile_external_urls(social_page["text"], profile_url):
-                queue.append({"url": url, "source": source_name})
+            external_urls = social_profile_external_urls(social_page["text"], profile_url)
+            for url in external_urls:
+                enqueue(url, source_name)
+            trace.append({
+                "stage": "social_profile",
+                "source": source_name,
+                "source_kind": "social_profile",
+                "host": (urlparse(profile_url).hostname or "").casefold(),
+                "url_fingerprint": hashlib.sha256(
+                    profile_url.encode("utf-8")
+                ).hexdigest()[:12],
+                "status": "fetched",
+                "contact_pages_found": 0,
+                "linked_pages_found": len(external_urls),
+                "email_candidates_found": 0,
+            })
+        else:
+            event = _safe_page_trace(
+                profile_url, "social_profile", social_page.get("reason") or "fetch_error",
+            )
+            event["stage"] = "social_profile"
+            event["source_kind"] = "social_profile"
+            trace.append(event)
 
     seen_urls = set()
     fetched = 0
-    while queue and fetched < max_pages:
+    page_limit = max(1, min(int(max_pages), 8))
+    while queue and fetched < page_limit:
         item = queue.pop(0)
         url = item["url"]
         if url in seen_urls:
@@ -452,25 +573,65 @@ async def discover_public_email_candidates(fields: dict, *, max_pages: int = 4) 
         page = await fetch_public_page(url)
         fetched += 1
         if not page.get("ok"):
+            trace.append(_safe_page_trace(
+                url, item["source"], page.get("reason") or "fetch_error",
+            ))
             continue
         final_url = page["url"]
         page_text = page["text"]
+        page_candidates = []
         if _is_contact_evidence_page(final_url, item["source"]):
             for email_address in extract_public_emails(page_text):
-                candidates.append({
+                candidate = {
                     "email": email_address,
                     "source": item["source"],
                     "source_url": final_url,
-                })
-        for contact_url in contact_page_urls(page_text, final_url, limit=1):
-            queue.append({"url": contact_url, "source": f"{item['source']}_contact"})
+                }
+                candidates.append(candidate)
+                page_candidates.append(candidate)
+        contact_urls = contact_page_urls(page_text, final_url, limit=2)
+        linked_urls = []
         if _is_aggregator(final_url):
-            for external_url in _aggregator_external_urls(page_text, final_url, limit=2):
-                queue.append({"url": external_url, "source": f"{item['source']}_linked"})
+            linked_urls = _aggregator_external_urls(page_text, final_url, limit=2)
+        trace.append(_safe_page_trace(
+            final_url,
+            item["source"],
+            "fetched",
+            contact_pages_found=len(contact_urls),
+            linked_pages_found=len(linked_urls),
+            email_candidates_found=len(page_candidates),
+        ))
+
+        # Follow explicit contact pages and aggregator links before unrelated
+        # seed URLs.  This spends the existing page budget on the strongest
+        # evidence instead of increasing network volume or timeout exposure.
+        priority_items = [
+            (value, f"{item['source']}_contact") for value in contact_urls
+        ] + [
+            (value, f"{item['source']}_linked") for value in linked_urls
+        ]
+        for value, source in reversed(priority_items):
+            enqueue(value, source, front=True)
+
+    if queue:
+        trace.append({
+            "stage": "page_budget",
+            "status": "page_limit_reached",
+            "remaining_pages": len(queue),
+            "page_limit": page_limit,
+        })
 
     deduped = []
     for item in candidates:
         key = item["email"].casefold()
         if not any(existing["email"].casefold() == key for existing in deduped):
             deduped.append(item)
-    return deduped
+    return {"candidates": deduped, "trace": trace}
+
+
+async def discover_public_email_candidates(fields: dict, *, max_pages: int = 4) -> list[dict]:
+    """Discover bounded public candidates; no inference, pattern generation or write."""
+    result = await discover_public_email_candidates_with_trace(
+        fields, max_pages=max_pages,
+    )
+    return result["candidates"]

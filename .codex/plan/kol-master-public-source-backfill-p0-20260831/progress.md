@@ -65,3 +65,10 @@
 - Zeabur 自动 deployment `6a963b7b9ed7d65609e28e46` 已精确运行 commit `b7e283ebbbf9b580c375cf4b4aee4fd9f4ada5d4`；`https://kol-auto.zeabur.app/health` 返回 HTTP 200、`status=ok`、`kol_ai_configured=true`。
 - 部署后复用同一批 50 条做生产只读对照：42 条无公开邮箱、4 条姓名输入不足、2 条 Finder HTTP 400、2 条 Finder 超时；链接和邮箱写入均为 0，`safe_to_continue=true`，结果与部署前完全一致。
 - 部署后证据：`C:/tmp/kol-empty-email-public-source-postdeploy50-b7e283e-20260901-evidence.json`。阶段 J 的 P0 发布与验收已完成；剩余是 P1 提升公开来源覆盖率，不属于生产故障。
+
+## 2026-09-01 P1
+
+- 用户授权开始 P1。执行边界：提高明确公开来源覆盖率并补单条回放；不写主表、不发邮件/卡片、不改环境变量或 n8n，发布需单独授权。
+- 已读仓库上下文、相关 ADR、飞书 App 台账与 KOL/Zoho 历史边界；确认飞书 KOL 主表仍是业务单一真相源。
+- 已确认测试接缝：公开发现函数 `discover_public_email_candidates()`；操作入口为单条 `record_id` 只读回放 CLI。
+- 初步代码审计：已有官网首页、同域 contact/about 页面和 Linktree/Beacons 外链能力；P1 缺口是逐页诊断不可见，以及聚合页/官网后的联系页探索深度过浅。

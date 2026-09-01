@@ -64,7 +64,7 @@ def _verification_outcome(status: str, raw: object) -> str:
     return "unavailable"
 
 
-async def inspect_record(record: dict) -> dict:
+async def inspect_record(record: dict, *, candidates: list[dict] | None = None) -> dict:
     fields = record.get("fields") or {}
     record_id = str(record.get("record_id") or "")
     name = str(feishu.ext(fields.get("账号名")) or "").strip()
@@ -75,7 +75,8 @@ async def inspect_record(record: dict) -> dict:
             "source": "master_email", "planned_fields": {},
             "original_raw": original_raw,
         }
-    candidates = await kol_email_sources.discover_public_email_candidates(fields)
+    if candidates is None:
+        candidates = await kol_email_sources.discover_public_email_candidates(fields)
     if not candidates:
         return {
             "record_id": record_id, "status": "no_public_email",

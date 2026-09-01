@@ -14,6 +14,28 @@ def row(record_id="k1", *, name="Jane Smith", email="jane@example.com",
 
 
 class KolEmailRepairTests(unittest.TestCase):
+    def test_inspect_record_accepts_pre_discovered_candidates_for_single_replay(self):
+        discover = AsyncMock(side_effect=AssertionError("must not rediscover"))
+        with patch.object(
+            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
+            new=discover,
+        ), patch.object(
+            kol_email_repair.snov, "find_email",
+            new=AsyncMock(return_value={"status": "not_found"}),
+        ):
+            result = asyncio.run(kol_email_repair.inspect_record(
+                row(email="", status="未验"),
+                candidates=[{
+                    "email": "jane@example.com",
+                    "source": "master_aggregate",
+                    "source_url": "https://linktr.ee/jane",
+                }],
+            ))
+
+        self.assertEqual("verification_not_found", result["status"])
+        self.assertEqual(1, result["candidate_count"])
+        discover.assert_not_awaited()
+
     def test_dry_run_uses_one_bulk_read_and_never_calls_single_record_endpoint(self):
         initial = row(email="", status="未验")
         bulk_read = AsyncMock(return_value=[initial])
