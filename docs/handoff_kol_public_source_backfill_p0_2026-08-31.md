@@ -114,3 +114,16 @@
 - 同批 50 条 A/B：公开来源候选 12 条，与 P0 基线一致；邮箱状态仍为 42 条无公开邮箱、4 条输入不足、2 条 Finder HTTP 400、2 条 Finder 超时。链接写入 0、邮箱写入 0、邮件 0、飞书卡片 0。
 - 证据：`C:/tmp/kol-empty-email-public-source-p1-ab50-894c87e-20260901-evidence.json`、`C:/tmp/kol-public-email-p1-replay-recvhwpbzeaYRv-20260901.json`。证据均不含邮箱明文或凭据。
 - 发布边界：P1 当前只在本地候选分支完成；未推送、未部署、未改环境变量或 n8n，也不需要陈翔宇终端操作。若要上线，必须另行授权 fast-forward 发布和部署后只读复核。
+
+## 2026-09-01 P1 生产发布与只读验收
+
+- 用户已单独授权 P1 fast-forward 推送和生产部署。
+- 发布前等待食人花自然轮次、本地爬虫和 n8n execution 全部排空；期间没有停止任务、强制结束进程或手动触发业务流程。
+- 最终生产 commit：`64ab2dcddfe95d0f3b5eae41793c69bba93b6a7e`（含核心实现 `894c87e`）。从 `b7e283e` 仅做 fast-forward 推送，没有强推。
+- Zeabur deployment：`6a9657e62aa889148228e4d9`，状态 `RUNNING`，commit 与目标精确一致。
+- 健康检查：`https://kol-auto.zeabur.app/health` 返回 HTTP 200、`status=ok`、`kol_ai_configured=true`。
+- 部署后复用部署前同一批 50 条生产只读回归。公开来源：12 条具备候选、38 条无新来源；邮箱：42 条无公开邮箱、4 条姓名输入不足、2 条 Finder HTTP 400、2 条 Finder 超时。
+- 部署前后逐条状态完全一致；链接写入 0、邮箱写入 0、邮件 0、飞书卡片 0，`safe_to_continue=true`、`quality_filters_lowered=false`。
+- 证据：`C:/tmp/kol-empty-email-public-source-p1-postdeploy50-64ab2dc-20260901-evidence.json`。
+- 业务判断：P1 已补齐“单条为什么没找到/为什么没写”的追踪与回放能力，但这批 50 条没有新增邮箱产出，不能把可观测性上线误报为邮箱供给量已经提升。后续应换更有代表性的公开落地页样本评估真实增量，不能降低 `valid` 标准。
+- 陈翔宇终端不需要本次云端 P1 操作；本地 daemon 继续保持已验收版本和单实例运行。

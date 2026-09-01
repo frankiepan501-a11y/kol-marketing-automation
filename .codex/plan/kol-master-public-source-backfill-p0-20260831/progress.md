@@ -79,3 +79,12 @@
 - 同批 50 条生产只读 A/B：公开来源候选 12 条，与 P0 基线一致；邮箱仍为 42 条无公开邮箱、4 条输入不足、2 条 Finder HTTP 400、2 条 Finder 超时。链接和邮箱写入均为 0，`safe_to_continue=true`。
 - 单条生产只读回放：`write_attempted=false`，识别 1 条 YouTube 公开资料候选，并准确复现 `verification_provider_http_400`；证据不含邮箱明文、完整 URL、页面正文或上游原始报错。
 - P1 当前仅本地完成，尚未推送或部署；不需要陈翔宇终端操作。发布仍需单独授权。
+- 用户现已单独授权 P1 推送和生产部署。发布阶段 N 开始；继续沿用“不改环境变量/n8n、不手动触发业务任务、部署后只读验收”的边界。
+- 发布前只读检查脚本首次启动时误加载 `C:/tmp/ml-data-sync/app`，在调用生产接口前即因模块不匹配退出；根因是临时脚本目录优先于 `PYTHONPATH`。已把目标仓库绝对路径插到 `sys.path[0]`，随后重跑，不据此放行发布。
+- 12:21 发布前只读闸门：`uvBfJBtGH93FPa6w active=true`，但 n8n 全局 running=1、飞书爬虫 running=1，食人花最新 job `launchruntime-f081afb9e6a6` 仍为 `running`；Dave 最新 job `launchruntime-af1cd83fcbe8` 已为 `degraded` 终态。未推送、未停止任务，等待自然排空。
+- 12:34 食人花 `launchruntime-f081afb9e6a6` 自然完成；最终检查时恰逢 12:35 新自然轮次，发布闸再次拦截，未停止或手动重跑任何任务。
+- 12:43 新轮次 `launchruntime-a4b3157a17d1` 成功且本地爬虫自然排空；最终发布闸确认 `uvBfJBtGH93FPa6w active=true`、n8n running=0、飞书爬虫 running=0、两项活动后台 job 均为终态。
+- 相关目标测试复跑：41 项及 5 个子测试通过。远端 `origin/master=b7e283e` 仍为目标提交祖先；仅 fast-forward 推送 `b7e283e..64ab2dc`，未强推，也未包含本地计划文档改动。
+- Zeabur deployment `6a9657e62aa889148228e4d9` 已精确运行 `64ab2dcddfe95d0f3b5eae41793c69bba93b6a7e`；`/health` HTTP 200、`status=ok`、`kol_ai_configured=true`。未改环境变量、未手动重启或重部署。
+- 部署后复用同一批 50 条生产只读回归：公开来源候选 12、无新来源 38；邮箱为 42 条无公开邮箱、4 条输入不足、2 条 Finder HTTP 400、2 条 Finder 超时。与部署前逐条 `record_id + 状态` 完全一致，链接写入 0、邮箱写入 0、`safe_to_continue=true`、`quality_filters_lowered=false`。
+- 部署后证据：`C:/tmp/kol-empty-email-public-source-p1-postdeploy50-64ab2dc-20260901-evidence.json`。本轮未发送邮件或飞书卡片，未手动触发补池/爬虫，也不需要陈翔宇终端操作。
