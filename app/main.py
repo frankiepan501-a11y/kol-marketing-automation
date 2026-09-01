@@ -25,7 +25,7 @@ from . import invest  # 投资助手: X 帖子抓取 → A股观察映射 → �
 from . import x_history  # 竞品 X 历史补采: 独立只读探测/分窗采集，不触碰 KOL 主表
 from . import kol_roi_mapping  # KOL ROI 归因缺口卡 + 映射回填
 from . import launch_reply_attribution  # 集中宣发未归属回复：运营选活动后继续原回复流程
-from . import kol_contact_acquisition  # P0-3A：无邮箱 KOL 首触达卡与回填
+from . import kol_no_email_outreach  # 无邮箱KOL：运营私信取邮箱→回填主表→回到邮箱质量检查
 from . import discord_tester_routes  # FUN Bot 新品体验官：Discord Modal + 安全表单
 
 app = FastAPI(title="KOL Marketing Automation", version="0.3")
@@ -2168,6 +2168,36 @@ async def launch_reply_attribution_callback(
     payload = await request.json()
     event = payload.get("event", payload)
     return await launch_reply_attribution.handle_callback(event)
+
+
+@app.post("/kol/no-email-outreach/card")
+async def kol_no_email_outreach_card(
+    authorization: str = Header(default=""),
+    kol_record_id: str = "",
+    campaign_id: str = "",
+    dry_run: bool = True,
+    frankie_only: bool = True,
+):
+    """针对单个无邮箱 KOL 生成或发送 Frankie 样卡；不会发送私信/邮件。"""
+    _check_auth(authorization)
+    return await kol_no_email_outreach.send_card(
+        kol_record_id=kol_record_id,
+        campaign_id=campaign_id,
+        dry_run=dry_run,
+        frankie_only=frankie_only,
+    )
+
+
+@app.post("/kol/no-email-outreach/callback")
+async def kol_no_email_outreach_callback(
+    request: Request,
+    authorization: str = Header(default=""),
+):
+    """聪哥分身3号无邮箱卡回调：回填主表并 PATCH 原卡。"""
+    _check_auth(authorization)
+    payload = await request.json()
+    event = payload.get("event", payload)
+    return await kol_no_email_outreach.handle_callback(event)
 
 
 @app.get("/amazon/oauth/start")

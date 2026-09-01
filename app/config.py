@@ -270,6 +270,7 @@ KOL_DRAFT_QUEUE_VIEW_ID = env("KOL_DRAFT_QUEUE_VIEW_ID", "vewMC2JoMf")
 KOL_SLA_CARD_FRANKIE_ONLY = (env("KOL_SLA_CARD_FRANKIE_ONLY", "1") or "1") != "0"
 KOL_FRANKIE_NAME = env("KOL_FRANKIE_NAME", "潘志聪-Frankie")
 KOL_FRANKIE_OPEN_ID = env("KOL_FRANKIE_OPEN_ID", "ou_629ce01f4bc31de078e10fcb038dbf78")
+KOL_NO_EMAIL_OUTREACH_ENABLED = (env("KOL_NO_EMAIL_OUTREACH_ENABLED", "0") or "0") == "1"
 KOL_SLA_STATE_DIR = env("KOL_SLA_STATE_DIR", "/tmp/kol_sla_digest")
 
 # 服务鉴权 (n8n 调用 webhook 时 Header: Authorization: Bearer <INTERNAL_TOKEN>)
