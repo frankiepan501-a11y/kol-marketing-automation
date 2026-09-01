@@ -563,7 +563,7 @@ async def discover_public_email_candidates_with_trace(
 
     seen_urls = set()
     fetched = 0
-    page_limit = max(1, min(int(max_pages), 8))
+    page_limit = max(1, min(int(max_pages), 4))
     while queue and fetched < page_limit:
         item = queue.pop(0)
         url = item["url"]
@@ -614,6 +614,10 @@ async def discover_public_email_candidates_with_trace(
             enqueue(value, source, front=True)
 
     if queue:
+        for pending in queue:
+            trace.append(_safe_page_trace(
+                pending["url"], pending["source"], "skipped_page_limit",
+            ))
         trace.append({
             "stage": "page_budget",
             "status": "page_limit_reached",

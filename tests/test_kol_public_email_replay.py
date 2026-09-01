@@ -7,6 +7,10 @@ from scripts import replay_kol_public_email as replay
 
 
 class KolPublicEmailReplayTests(unittest.TestCase):
+    def test_cli_rejects_page_budget_above_four(self):
+        with self.assertRaises(SystemExit):
+            replay.parse_args(["--record-id", "rec1", "--max-pages", "8"])
+
     def test_single_record_replay_is_read_only_and_redacts_contact_values(self):
         record = {
             "record_id": "rec1",
@@ -44,7 +48,9 @@ class KolPublicEmailReplayTests(unittest.TestCase):
         }
         update = AsyncMock()
         with patch.object(
-            replay.feishu, "get_record", new=AsyncMock(return_value=record),
+            replay.feishu, "fetch_all_records", new=AsyncMock(return_value=[record]),
+        ) as fetch_records, patch.object(
+            replay.feishu, "get_record", new=AsyncMock(),
         ) as get_record, patch.object(
             replay.kol_email_sources,
             "discover_public_email_candidates_with_trace",
@@ -79,7 +85,12 @@ class KolPublicEmailReplayTests(unittest.TestCase):
         serialized = json.dumps(result, ensure_ascii=False)
         self.assertNotIn("creator@example.com", serialized)
         self.assertNotIn("https://linktr.ee/creator", serialized)
-        get_record.assert_awaited_once_with(replay.config.T_KOL, "rec1")
+        fetch_records.assert_awaited_once_with(
+            replay.config.T_KOL,
+            field_names=replay.REPLAY_FIELDS,
+            page_size=500,
+        )
+        get_record.assert_not_awaited()
         discover.assert_awaited_once_with(record["fields"], max_pages=4)
         inspect.assert_awaited_once_with(
             record, candidates=discovery["candidates"],

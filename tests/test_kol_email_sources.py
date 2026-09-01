@@ -360,6 +360,36 @@ class KolEmailSourcesNetworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("url", result["trace"][0])
         self.assertNotIn("email", result["trace"][0])
 
+    async def test_discovery_hard_caps_four_pages_and_traces_each_skipped_page(self):
+        fetch = AsyncMock(return_value={
+            "ok": True,
+            "url": "https://placeholder.invalid/",
+            "text": "<html></html>",
+        })
+        source_urls = "\n".join(
+            f"https://creator{index}.example/contact" for index in range(1, 7)
+        )
+        with patch.object(kol_email_sources, "fetch_public_page", new=fetch):
+            result = await kol_email_sources.discover_public_email_candidates_with_trace({
+                "主链接": "",
+                "聚合页URL": "",
+                "其他链接": source_urls,
+            }, max_pages=8)
+
+        self.assertEqual(4, fetch.await_count)
+        skipped = [
+            item for item in result["trace"]
+            if item.get("status") == "skipped_page_limit"
+        ]
+        self.assertEqual(2, len(skipped))
+        self.assertEqual(
+            {"creator5.example", "creator6.example"},
+            {item["host"] for item in skipped},
+        )
+        self.assertTrue(all(item["url_fingerprint"] for item in skipped))
+        self.assertTrue(all("url" not in item and "email" not in item for item in skipped))
+        self.assertEqual(4, result["trace"][-1]["page_limit"])
+
 
 if __name__ == "__main__":
     unittest.main()

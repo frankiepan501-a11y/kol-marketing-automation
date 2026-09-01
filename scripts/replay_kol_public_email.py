@@ -21,6 +21,7 @@ TRACE_FIELDS = (
     "stage", "source", "source_kind", "host", "url_fingerprint", "status",
     "contact_pages_found", "linked_pages_found", "email_candidates_found",
 )
+REPLAY_FIELDS = list(kol_email_repair.BULK_READ_FIELDS)
 
 
 def _redacted_trace(items: list[dict]) -> list[dict]:
@@ -36,7 +37,15 @@ async def replay_record(record_id: str, *, max_pages: int = 4) -> dict:
     if not record_id:
         raise ValueError("record_id is required")
 
-    record = await feishu.get_record(config.T_KOL, record_id)
+    records = await feishu.fetch_all_records(
+        config.T_KOL, field_names=REPLAY_FIELDS, page_size=500,
+    )
+    record = next((
+        item for item in records
+        if str(item.get("record_id") or "").strip() == record_id
+    ), None)
+    if record is None:
+        raise LookupError("record_id was not found in the KOL master snapshot")
     fields = record.get("fields") or {}
     discovery = await kol_email_sources.discover_public_email_candidates_with_trace(
         fields, max_pages=max_pages,
@@ -73,7 +82,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Replay one KOL public-email record without writing data.",
     )
     parser.add_argument("--record-id", required=True)
-    parser.add_argument("--max-pages", type=int, default=4)
+    parser.add_argument("--max-pages", type=int, choices=range(1, 5), default=4)
     parser.add_argument("--evidence-file", default="")
     return parser.parse_args(argv)
 
