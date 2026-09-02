@@ -120,9 +120,17 @@ def build_case(*, kol: dict, activity: dict, participant: dict | None = None) ->
     pf = (participant or {}).get("fields") or {}
     links = _page_links(kf)
     raw_email = _text(kf.get("邮箱"))
+    email_status = _text(kf.get("邮箱验真状态"))
     clean_email, email_note = feishu.clean_email(raw_email)
-    if clean_email:
+    if clean_email and email_status != "无效":
         raise ValueError("该 KOL 已有可用邮箱，不应进入无邮箱私信卡")
+
+    if clean_email and email_status == "无效":
+        email_gap = "邮箱已标记无效，需要重新寻找公开联系邮箱"
+    else:
+        email_gap = email_note or (
+            f"邮箱字段不可用：{raw_email[:80]}" if raw_email else "公开页面未找到可用邮箱"
+        )
 
     platform = _text(kf.get("主平台")) or "公开社媒平台"
     campaign_id = _text(af.get("活动ID"))
@@ -145,7 +153,7 @@ def build_case(*, kol: dict, activity: dict, participant: dict | None = None) ->
         "followers": _text(kf.get("粉丝数")) or "未记录",
         "recent_content": _text(kf.get("近期视频标题")) or "未记录",
         "public_pages": links,
-        "email_gap": email_note or (f"邮箱字段不可用：{raw_email[:80]}" if raw_email else "公开页面未找到可用邮箱"),
+        "email_gap": email_gap,
         "fit_reason": (
             f"参与状态={_text(pf.get('参与状态')) or '未建参与记录'}；"
             f"审核结论={_text(pf.get('审核结论')) or '未记录'}"
@@ -229,6 +237,7 @@ async def _ensure_youtube_authenticated_check(case: dict, *, dry_run: bool) -> d
         key=lambda row: _ts((row.get("fields") or {}).get("创建日期")),
         reverse=True,
     )
+    verified_master_contact: dict | None = None
     for row in exact_rows:
         fields = row.get("fields") or {}
         status = _text(fields.get("任务状态"))
@@ -246,7 +255,29 @@ async def _ensure_youtube_authenticated_check(case: dict, *, dry_run: bool) -> d
         if status == "3-已完成" and result_status in {
             "written", "already_has_email",
         }:
-            return {**base, "ok": True, "status": "youtube_auth_email_written"}
+            if verified_master_contact is None:
+                current = await feishu.get_record(config.T_KOL, kol_record_id)
+                current_fields = current.get("fields") or {}
+                current_email, _ = feishu.clean_email(_text(current_fields.get("邮箱")))
+                current_status = _text(current_fields.get("邮箱验真状态"))
+                verified_master_contact = {
+                    "email": current_email,
+                    "status": current_status,
+                    "fingerprint": (
+                        kol_email_repair._fingerprint(current_email)
+                        if current_email else ""
+                    ),
+                }
+            if (
+                verified_master_contact["email"]
+                and verified_master_contact["status"] != "无效"
+                and _text(result.get("email_fingerprint"))
+                == verified_master_contact["fingerprint"]
+            ):
+                return {**base, "ok": True, "status": "youtube_auth_email_written"}
+            # A completed task claims success but current master data does not confirm it.
+            # Older tasks must not suppress the fresh verification queued below.
+            break
         if status == "3-已完成" and result_status == "no_visible_email":
             return {**base, "ok": True, "status": "youtube_auth_no_visible_email"}
         if status == "3-已完成":

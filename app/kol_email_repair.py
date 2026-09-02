@@ -40,12 +40,14 @@ async def inspect_record(record: dict, *, candidates: list[dict] | None = None) 
     fields = record.get("fields") or {}
     record_id = str(record.get("record_id") or "")
     original_raw = str(feishu.ext(fields.get("邮箱")) or "").strip()
+    original_status = str(feishu.ext(fields.get("邮箱验真状态")) or "").strip()
     existing_email, _ = feishu.clean_email(original_raw)
-    if existing_email:
+    if existing_email and original_status != "无效":
         return {
             "record_id": record_id, "status": "existing_email_skipped",
             "source": "master_email", "planned_fields": {},
             "original_raw": original_raw,
+            "original_status": original_status,
         }
     if candidates is None:
         candidates = await kol_email_sources.discover_public_email_candidates(fields)
@@ -54,6 +56,7 @@ async def inspect_record(record: dict, *, candidates: list[dict] | None = None) 
             "record_id": record_id, "status": "no_public_email",
             "source": "bounded_public_sources", "planned_fields": {},
             "original_raw": original_raw,
+            "original_status": original_status,
         }
     candidate = ""
     source = "bounded_public_sources"
@@ -72,13 +75,29 @@ async def inspect_record(record: dict, *, candidates: list[dict] | None = None) 
             "record_id": record_id, "status": "no_public_email",
             "source": "bounded_public_sources", "planned_fields": {},
             "original_raw": original_raw,
+            "original_status": original_status,
             "candidate_count": len(candidates),
+        }
+    if (
+        original_status == "无效"
+        and existing_email
+        and candidate.casefold() == existing_email.casefold()
+    ):
+        return {
+            "record_id": record_id,
+            "status": "invalid_email_not_replaced",
+            "source": source,
+            "planned_fields": {},
+            "original_raw": original_raw,
+            "original_status": original_status,
+            "candidate_count": len(candidates),
+            "source_url": source_url,
         }
     return {
         "record_id": record_id, "status": "public_contact_found", "source": source,
         "planned_fields": {"邮箱": candidate, "邮箱验真状态": "未验"},
         "original_raw": original_raw,
-        "original_status": str(feishu.ext(fields.get("邮箱验真状态")) or ""),
+        "original_status": original_status,
         "original_source_evidence": _source_evidence_state(fields),
         "email_fingerprint": _fingerprint(candidate),
         "candidate_count": len(candidates),

@@ -132,6 +132,15 @@ class KolNoEmailOutreachTests(unittest.TestCase):
         ))
         self.assertEqual(1, sum(1 for node in nodes if node.get("tag") == "action"))
 
+    def test_hard_bounced_valid_email_still_enters_repair_flow(self):
+        case = outreach.build_case(
+            kol=self._kol(邮箱="old@creator.example", 邮箱验真状态="无效"),
+            activity=self._activity(),
+            participant=self._participant(),
+        )
+
+        self.assertIn("已标记无效", case["email_gap"])
+
     def test_load_case_runs_public_email_preflight(self):
         preflight = {
             "record_id": "kol-1",
@@ -273,15 +282,20 @@ class KolNoEmailOutreachTests(unittest.TestCase):
     def test_completed_youtube_check_with_email_never_sends_ops_card(self):
         case = self._case()
         case["contact_preflight"] = {"status": "no_public_email"}
+        email = "creator@example.com"
+        fingerprint = outreach.kol_email_repair._fingerprint(email)
         task = self._auth_task(
             status="3-已完成",
             log=(
                 'AUTH_EMAIL_RESULT {"status":"written","record_id":"kol-1",'
-                '"source":"youtube_authenticated_profile","email_fingerprint":"abc123"}'
+                f'"source":"youtube_authenticated_profile","email_fingerprint":"{fingerprint}"}}'
             ),
         )
         with patch.object(outreach, "load_case", AsyncMock(return_value=case)), \
              patch.object(outreach.feishu, "search_records", AsyncMock(return_value=[task])), \
+             patch.object(outreach.feishu, "get_record", AsyncMock(return_value=self._kol(
+                 邮箱=email, 邮箱验真状态="未验",
+             ))), \
              patch.object(outreach, "_send_outreach_card", AsyncMock()) as send:
             result = asyncio.run(outreach.send_card(
                 kol_record_id="kol-1", campaign_id="launch-piranha",
@@ -290,6 +304,65 @@ class KolNoEmailOutreachTests(unittest.TestCase):
 
         self.assertEqual("youtube_auth_email_written", result["status"])
         self.assertFalse(result["card_required"])
+        send.assert_not_awaited()
+
+    def test_completed_youtube_write_missing_from_master_queues_fresh_check(self):
+        case = self._case()
+        case["contact_preflight"] = {"status": "no_public_email"}
+        email = "creator@example.com"
+        fingerprint = outreach.kol_email_repair._fingerprint(email)
+        task = self._auth_task(
+            status="3-已完成",
+            log=(
+                'AUTH_EMAIL_RESULT {"status":"written","record_id":"kol-1",'
+                f'"email_fingerprint":"{fingerprint}"}}'
+            ),
+        )
+        create = AsyncMock(return_value="crawl-fresh")
+        with patch.object(outreach, "load_case", AsyncMock(return_value=case)), \
+             patch.object(outreach.feishu, "search_records", AsyncMock(return_value=[task])), \
+             patch.object(outreach.feishu, "get_record", AsyncMock(return_value=self._kol(
+                 邮箱="", 邮箱验真状态="未验",
+             ))), \
+             patch.object(outreach.feishu, "create_record", create), \
+             patch.object(outreach, "_send_outreach_card", AsyncMock()) as send:
+            result = asyncio.run(outreach.send_card(
+                kol_record_id="kol-1", campaign_id="launch-piranha",
+                dry_run=False, frankie_only=True,
+            ))
+
+        self.assertEqual("youtube_auth_check_queued", result["status"])
+        self.assertEqual("crawl-fresh", result["task_record_id"])
+        create.assert_awaited_once()
+        send.assert_not_awaited()
+
+    def test_completed_youtube_write_marked_invalid_queues_fresh_check(self):
+        case = self._case()
+        case["contact_preflight"] = {"status": "no_public_email"}
+        email = "creator@example.com"
+        fingerprint = outreach.kol_email_repair._fingerprint(email)
+        task = self._auth_task(
+            status="3-已完成",
+            log=(
+                'AUTH_EMAIL_RESULT {"status":"already_has_email","record_id":"kol-1",'
+                f'"email_fingerprint":"{fingerprint}"}}'
+            ),
+        )
+        create = AsyncMock(return_value="crawl-fresh")
+        with patch.object(outreach, "load_case", AsyncMock(return_value=case)), \
+             patch.object(outreach.feishu, "search_records", AsyncMock(return_value=[task])), \
+             patch.object(outreach.feishu, "get_record", AsyncMock(return_value=self._kol(
+                 邮箱=email, 邮箱验真状态="无效",
+             ))), \
+             patch.object(outreach.feishu, "create_record", create), \
+             patch.object(outreach, "_send_outreach_card", AsyncMock()) as send:
+            result = asyncio.run(outreach.send_card(
+                kol_record_id="kol-1", campaign_id="launch-piranha",
+                dry_run=False, frankie_only=True,
+            ))
+
+        self.assertEqual("youtube_auth_check_queued", result["status"])
+        create.assert_awaited_once()
         send.assert_not_awaited()
 
     def test_completed_youtube_check_without_email_allows_concise_exception_card(self):
@@ -317,6 +390,8 @@ class KolNoEmailOutreachTests(unittest.TestCase):
         case = self._case()
         case["contact_preflight"] = {"status": "no_public_email"}
         now_ms = int(time.time() * 1000)
+        email = "creator@example.com"
+        fingerprint = outreach.kol_email_repair._fingerprint(email)
         tasks = [
             self._auth_task(
                 status="4-失败",
@@ -328,7 +403,7 @@ class KolNoEmailOutreachTests(unittest.TestCase):
                 status="3-已完成",
                 log=(
                     'AUTH_EMAIL_RESULT {"status":"written","record_id":"kol-1",'
-                    '"email_fingerprint":"abc123"}'
+                    f'"email_fingerprint":"{fingerprint}"}}'
                 ),
                 record_id="crawl-new",
                 created_at=now_ms,
@@ -336,6 +411,9 @@ class KolNoEmailOutreachTests(unittest.TestCase):
         ]
         with patch.object(outreach, "load_case", AsyncMock(return_value=case)), \
              patch.object(outreach.feishu, "search_records", AsyncMock(return_value=tasks)), \
+             patch.object(outreach.feishu, "get_record", AsyncMock(return_value=self._kol(
+                 邮箱=email, 邮箱验真状态="未验",
+             ))), \
              patch.object(outreach, "_send_outreach_card", AsyncMock()) as send:
             result = asyncio.run(outreach.send_card(
                 kol_record_id="kol-1", campaign_id="launch-piranha",

@@ -161,11 +161,32 @@ class KolEmailRepairTests(unittest.TestCase):
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
             new=AsyncMock(),
         ) as discover:
-            result = asyncio.run(kol_email_repair.inspect_record(row()))
+            result = asyncio.run(kol_email_repair.inspect_record(row(status="未验")))
 
         self.assertEqual("existing_email_skipped", result["status"])
         self.assertEqual({}, result["planned_fields"])
         discover.assert_not_awaited()
+
+    def test_hard_bounced_valid_email_can_be_replaced_by_new_public_contact(self):
+        result = asyncio.run(kol_email_repair.inspect_record(
+            row(email="old@creator.example", status="无效"),
+            candidates=[trusted_candidate("new@creator.example")],
+        ))
+
+        self.assertEqual("public_contact_found", result["status"])
+        self.assertEqual(
+            {"邮箱": "new@creator.example", "邮箱验真状态": "未验"},
+            result["planned_fields"],
+        )
+
+    def test_hard_bounced_email_is_not_restored_from_same_public_evidence(self):
+        result = asyncio.run(kol_email_repair.inspect_record(
+            row(email="old@creator.example", status="无效"),
+            candidates=[trusted_candidate("old@creator.example")],
+        ))
+
+        self.assertEqual("invalid_email_not_replaced", result["status"])
+        self.assertEqual({}, result["planned_fields"])
 
     def test_invalid_email_text_can_be_repaired_from_trusted_public_contact(self):
         result = asyncio.run(kol_email_repair.inspect_record(
@@ -202,6 +223,32 @@ class KolEmailRepairTests(unittest.TestCase):
         self.assertEqual(1, result["by_status"]["written_public_contact"])
         self.assertEqual(
             {"邮箱": "business@creator.example", "邮箱验真状态": "未验"},
+            update.await_args.args[2],
+        )
+
+    def test_hard_bounced_valid_email_repair_is_written_and_read_back(self):
+        initial = row(email="old@creator.example", status="无效")
+        written = row(email="new@creator.example", status="未验")
+        with patch.object(
+            kol_email_repair.feishu, "fetch_all_records",
+            new=AsyncMock(side_effect=[[initial], [initial]]),
+        ), patch.object(
+            kol_email_repair.feishu, "get_record",
+            new=AsyncMock(side_effect=[initial, written]),
+        ), patch.object(
+            kol_email_repair.kol_email_sources, "discover_public_email_candidates",
+            new=AsyncMock(return_value=[trusted_candidate("new@creator.example")]),
+        ), patch.object(
+            kol_email_repair.feishu, "update_record", new=AsyncMock(),
+        ) as update:
+            result = asyncio.run(kol_email_repair.run_email_repair(
+                ["k1"], dry_run=False,
+            ))
+
+        self.assertEqual(1, result["writes"])
+        self.assertEqual(1, result["by_status"]["written_public_contact"])
+        self.assertEqual(
+            {"邮箱": "new@creator.example", "邮箱验真状态": "未验"},
             update.await_args.args[2],
         )
 
