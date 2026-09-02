@@ -327,6 +327,95 @@ def test_complete_job_limits_same_source_backfill_to_anchor_kol_and_product(monk
     assert all(call.args[1] != "tk" for call in update.await_args_list)
 
 
+def test_complete_job_backfills_direct_file_link_to_unified_source_after_all_siblings_finish(monkeypatch):
+    anchor = _row("yt", group="source-group", state="处理中")
+    anchor["fields"].update({"归档任务ID": "archive-1", "来源记录ID": "src-1#YT"})
+    follower = _row(
+        "ig", "Instagram", "https://www.instagram.com/reel/ABC123/",
+        group="source-group",
+    )
+    follower["fields"]["来源记录ID"] = "src-1#IG"
+    source = {
+        "record_id": "src-1",
+        "fields": {
+            "上稿平台链接": (
+                "https://youtu.be/nUkwNTRFJBc\n"
+                "https://www.instagram.com/reel/ABC123/"
+            ),
+            "飞书云盘链接": "",
+            "素材情况": "已上稿",
+        },
+    }
+    monkeypatch.setattr(controller.config, "T_UPLOAD_INTAKE", "source-table")
+    monkeypatch.setattr(
+        controller.feishu,
+        "fetch_all_records",
+        AsyncMock(side_effect=[[anchor, follower], [source]]),
+    )
+    update = AsyncMock(return_value={})
+    monkeypatch.setattr(controller.feishu, "update_record", update)
+
+    result = asyncio.run(controller.complete_job(
+        record_id="yt",
+        source_group="source-group",
+        job_id="archive-1",
+        result_fields={
+            "归档文件名": "YT-Creator-Product-01.mp4",
+            "归档文件链接": "https://u1wpma3xuhr.feishu.cn/file/file123",
+            "飞书file_token": "file123",
+        },
+        commit=True,
+    ))
+
+    source_calls = [call.args for call in update.await_args_list if call.args[0] == "source-table"]
+    assert source_calls == [
+        (
+            "source-table",
+            "src-1",
+            {"飞书云盘链接": {
+                "link": "https://u1wpma3xuhr.feishu.cn/file/file123",
+                "text": "YT-Creator-Product-01.mp4",
+            }},
+        ),
+        ("source-table", "src-1", {"素材情况": "已下载"}),
+    ]
+    assert result["source_backfill"]["updated"] == 1
+
+
+def test_source_backfill_reconciliation_does_not_mark_a_pending_source_complete(monkeypatch):
+    archived = _row("yt", group="group-1", state="已完成", status="已归档")
+    archived["fields"].update({
+        "来源记录ID": "src-1#YT",
+        "归档文件链接": "https://u1wpma3xuhr.feishu.cn/file/file123",
+        "归档文件名": "YT-Creator-Product-01.mp4",
+    })
+    pending = _row(
+        "tk", "TikTok", "https://www.tiktok.com/@creator/video/7491234567890123456",
+        group="group-2", state="", status="待下载",
+    )
+    pending["fields"]["来源记录ID"] = "src-1#TK"
+    monkeypatch.setattr(controller.config, "T_UPLOAD_INTAKE", "source-table")
+    monkeypatch.setattr(
+        controller.feishu,
+        "fetch_all_records",
+        AsyncMock(return_value=[{
+            "record_id": "src-1",
+            "fields": {"上稿平台链接": (
+                "https://youtu.be/nUkwNTRFJBc\n"
+                "https://www.tiktok.com/@creator/video/7491234567890123456"
+            )},
+        }]),
+    )
+    update = AsyncMock(return_value={})
+    monkeypatch.setattr(controller.feishu, "update_record", update)
+
+    result = asyncio.run(controller.reconcile_source_backfills([archived, pending], commit=True))
+
+    assert result["updated"] == 0
+    assert result["pending"] == 1
+    update.assert_not_awaited()
+
+
 def test_complete_job_rejects_a_stale_worker_callback(monkeypatch):
     anchor = _row("yt", group="source-1", state="处理中")
     anchor["fields"]["归档任务ID"] = "archive-current"

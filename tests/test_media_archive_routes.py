@@ -93,6 +93,69 @@ def test_youtube_single_record_commit_uses_metrics_flag_and_filter(monkeypatch):
     refresh.assert_awaited_once_with(commit=True, record_id="rec-1")
 
 
+def test_intake_sync_preview_stays_available_when_write_flag_is_off(monkeypatch):
+    monkeypatch.setattr(main.config, "INTERNAL_TOKEN", "test-token")
+    monkeypatch.setattr(main.config, "UPLOAD_INTAKE_SYNC_ENABLED", False)
+    sync = AsyncMock(return_value={"commit": False, "created": 0})
+    monkeypatch.setattr(main.upload_intake_sync, "sync", sync)
+
+    result = asyncio.run(main.sync_media_archive_intake(
+        authorization="Bearer test-token", commit=False, source_record_id="",
+    ))
+
+    assert result["ok"] is True
+    sync.assert_awaited_once_with(commit=False, source_record_id="", max_creates=1)
+
+
+def test_intake_sync_rejects_commit_when_write_flag_is_off(monkeypatch):
+    monkeypatch.setattr(main.config, "INTERNAL_TOKEN", "test-token")
+    monkeypatch.setattr(main.config, "UPLOAD_INTAKE_SYNC_ENABLED", False)
+    sync = AsyncMock()
+    monkeypatch.setattr(main.upload_intake_sync, "sync", sync)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main.sync_media_archive_intake(
+            authorization="Bearer test-token", commit=True, source_record_id="src-1",
+        ))
+
+    assert exc.value.status_code == 503
+    sync.assert_not_awaited()
+
+
+def test_intake_tick_refuses_batch_write_without_a_nonzero_cutoff(monkeypatch):
+    monkeypatch.setattr(main.config, "INTERNAL_TOKEN", "test-token")
+    monkeypatch.setattr(main.config, "UPLOAD_INTAKE_SYNC_ENABLED", True)
+    monkeypatch.setattr(main.config, "UPLOAD_INTAKE_SYNC_NOT_BEFORE_MS", 0)
+    sync = AsyncMock()
+    monkeypatch.setattr(main.upload_intake_sync, "sync", sync)
+
+    result = asyncio.run(main.tick_media_archive_intake(authorization="Bearer test-token"))
+
+    assert result["skipped"] is True
+    assert result["reason"] == "cutoff_not_configured"
+    sync.assert_not_awaited()
+
+
+def test_intake_tick_passes_cutoff_and_batch_cap_after_both_gates_open(monkeypatch):
+    monkeypatch.setattr(main.config, "INTERNAL_TOKEN", "test-token")
+    monkeypatch.setattr(main.config, "UPLOAD_INTAKE_SYNC_ENABLED", True)
+    monkeypatch.setattr(main.config, "UPLOAD_INTAKE_SYNC_NOT_BEFORE_MS", 123456)
+    monkeypatch.setattr(main.config, "UPLOAD_INTAKE_SYNC_MAX_CREATES", 7)
+    sync = AsyncMock(return_value={"commit": True, "created": 2})
+    monkeypatch.setattr(main.upload_intake_sync, "sync", sync)
+
+    result = asyncio.run(main.tick_media_archive_intake(authorization="Bearer test-token"))
+
+    assert result["created"] == 2
+    sync.assert_awaited_once_with(
+        commit=True,
+        source_record_id="",
+        max_creates=7,
+        created_not_before_ms=123456,
+        allow_batch=True,
+    )
+
+
 def test_scan_commit_cannot_bypass_the_youtube_metrics_flag(monkeypatch):
     monkeypatch.setattr(main.config, "INTERNAL_TOKEN", "test-token")
     monkeypatch.setattr(main.config, "MEDIA_ARCHIVE_ENABLED", True)

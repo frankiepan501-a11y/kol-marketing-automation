@@ -10,7 +10,7 @@ import uuid
 
 import httpx
 
-from . import config, feishu, media_archive
+from . import config, feishu, media_archive, upload_intake_sync
 
 
 WORK_FIELDS = [
@@ -23,6 +23,7 @@ WORK_FIELDS = [
     "音频编码", "视频时长(秒)", "文件大小(字节)", "文件SHA256", "清晰度检查",
     "播放量", "点赞量", "评论数", "数据更新时间", "数据抓取状态",
     "下次数据抓取时间", "数据抓取失败原因",
+    "来源记录ID",
 ]
 
 BRAND_FOLDER_TOKENS = {
@@ -124,6 +125,8 @@ async def scan(commit: bool = False, refresh_metrics: bool = True) -> dict:
                 if media_archive.field_text(follower_fields.get("归档状态")) != "已归档":
                     await _update_status(follower_id, payload)
 
+    source_backfills = await reconcile_source_backfills(records, commit=commit)
+
     metrics_result = None
     if refresh_metrics:
         metrics_result = await refresh_youtube_metrics(commit=commit)
@@ -137,7 +140,86 @@ async def scan(commit: bool = False, refresh_metrics: bool = True) -> dict:
         "invalid_enabled": len(invalid_enabled),
         "plans": [asdict(plan) for plan in plans],
         "invalid_samples": [asdict(result) for result in invalid_enabled[:10]],
+        "source_backfills": source_backfills,
         "metrics": metrics_result,
+    }
+
+
+async def reconcile_source_backfills(records: list[dict], commit: bool = False,
+                                     source_record_ids: set[str] | None = None) -> dict:
+    """Idempotently project completed archive evidence back to the operator table."""
+    if not config.T_UPLOAD_INTAKE:
+        return {"commit": False, "ready": 0, "updated": 0, "unchanged": 0, "pending": 0, "issues": []}
+    source_ids = {
+        upload_intake_sync.source_base_record_id((record.get("fields") or {}).get("来源记录ID"))
+        for record in records
+    }
+    source_ids.discard("")
+    if source_record_ids is not None:
+        source_ids &= set(source_record_ids)
+    if not source_ids:
+        return {"commit": commit, "ready": 0, "updated": 0, "unchanged": 0, "pending": 0, "issues": []}
+
+    source_records = await feishu.fetch_all_records(
+        config.T_UPLOAD_INTAKE,
+        field_names=["上稿平台链接", "飞书云盘链接", "素材情况"],
+        page_size=200,
+    )
+    source_by_id = {
+        str(record.get("record_id") or ""): record for record in source_records
+        if str(record.get("record_id") or "") in source_ids
+    }
+    ready = 0
+    updated = 0
+    unchanged = 0
+    pending = 0
+    issues: list[dict] = []
+    for source_id in sorted(source_ids):
+        current = source_by_id.get(source_id)
+        if not current:
+            issues.append({"source_record_id": source_id, "reason": "source_record_missing"})
+            continue
+        current_fields = current.get("fields") or {}
+        plan = upload_intake_sync.plan_source_backfill(source_id, current_fields, records)
+        if not plan["ready"]:
+            pending += 1
+            if plan["reason"] not in {"source_has_pending_works", "source_has_no_works"}:
+                issues.append({"source_record_id": source_id, "reason": plan["reason"]})
+            continue
+        ready += 1
+        planned_fields = plan["fields"]
+        link_same = (
+            "飞书云盘链接" not in planned_fields
+            or media_archive.field_text(current_fields.get("飞书云盘链接"))
+            == media_archive.field_text(planned_fields.get("飞书云盘链接"))
+        )
+        status_same = (
+            "素材情况" not in planned_fields
+            or media_archive.field_text(current_fields.get("素材情况"))
+            == media_archive.field_text(planned_fields.get("素材情况"))
+        )
+        if link_same and status_same:
+            unchanged += 1
+            continue
+        if commit:
+            if "飞书云盘链接" in planned_fields and not link_same:
+                await feishu.update_record(
+                    config.T_UPLOAD_INTAKE, source_id,
+                    {"飞书云盘链接": planned_fields["飞书云盘链接"]},
+                )
+            if "素材情况" in planned_fields and not status_same:
+                await feishu.update_record(
+                    config.T_UPLOAD_INTAKE, source_id,
+                    {"素材情况": planned_fields["素材情况"]},
+                )
+            updated += 1
+    return {
+        "commit": commit,
+        "ready": ready,
+        "updated": updated,
+        "unchanged": unchanged,
+        "pending": pending,
+        "issues": issues,
     }
 
 
@@ -452,11 +534,49 @@ async def complete_job(record_id: str, source_group: str,
         "归档状态": result_fields.get("归档状态") or "已归档",
         "自动处理状态": result_fields.get("自动处理状态") or "已完成",
     }
+    source_backfill = {"commit": commit, "ready": 0, "updated": 0, "unchanged": 0, "pending": 0, "issues": []}
     if commit:
         for target in targets:
             target_id = str(target.get("record_id") or "")
             await _update_status(target_id, {**result_fields, **status_fields})
-    return {"commit": commit, "updated_records": len(targets), "record_ids": [t.get("record_id") for t in targets]}
+        target_ids = {str(target.get("record_id") or "") for target in targets}
+        source_ids = {
+            upload_intake_sync.source_base_record_id((target.get("fields") or {}).get("来源记录ID"))
+            for target in targets
+        }
+        source_ids.discard("")
+        if source_ids:
+            projected_records = []
+            for record in records:
+                if str(record.get("record_id") or "") in target_ids:
+                    projected_records.append({
+                        **record,
+                        "fields": {**(record.get("fields") or {}), **result_fields, **status_fields},
+                    })
+                else:
+                    projected_records.append(record)
+            try:
+                source_backfill = await reconcile_source_backfills(
+                    projected_records, commit=True, source_record_ids=source_ids,
+                )
+            except Exception as exc:
+                # Work rows are already complete.  The normal scan reconciler can
+                # retry the source projection; do not turn a successful archive
+                # into a stale worker callback that cannot be replayed.
+                source_backfill = {
+                    "commit": True,
+                    "ready": 0,
+                    "updated": 0,
+                    "unchanged": 0,
+                    "pending": 0,
+                    "issues": [{"reason": "source_backfill_failed", "error": str(exc)[:500]}],
+                }
+    return {
+        "commit": commit,
+        "updated_records": len(targets),
+        "record_ids": [t.get("record_id") for t in targets],
+        "source_backfill": source_backfill,
+    }
 
 
 async def fail_job(record_id: str, job_id: str, stage: str, error: str,

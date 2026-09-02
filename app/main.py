@@ -8,7 +8,7 @@ import uuid
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_evidence_author_import, launch_participation, launch_outcomes, launch_outreach, launch_runtime, media_archive_controller, discord_tester_role_sync
+from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_evidence_author_import, launch_participation, launch_outcomes, launch_outreach, launch_runtime, media_archive_controller, upload_intake_sync, discord_tester_role_sync
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
@@ -573,6 +573,12 @@ def _require_youtube_metrics_write_enabled() -> None:
         raise HTTPException(503, "YOUTUBE_METRICS_ENABLED is off; dry-run remains available")
 
 
+def _require_upload_intake_sync_write_enabled() -> None:
+    """Keep source-to-work writes isolated from the already-running archive controller."""
+    if not config.UPLOAD_INTAKE_SYNC_ENABLED:
+        raise HTTPException(503, "UPLOAD_INTAKE_SYNC_ENABLED is off; dry-run remains available")
+
+
 @app.get("/media-archive/status")
 async def media_archive_status(authorization: str = Header(default="")):
     """Read-only n8n gate; never returns credential values."""
@@ -582,10 +588,51 @@ async def media_archive_status(authorization: str = Header(default="")):
         "enabled": config.MEDIA_ARCHIVE_ENABLED,
         "youtube_metrics_enabled": config.YOUTUBE_METRICS_ENABLED,
         "youtube_metrics_configured": bool(config.YOUTUBE_DATA_API_KEY),
+        "upload_intake_sync_enabled": config.UPLOAD_INTAKE_SYNC_ENABLED,
+        "upload_intake_table_configured": bool(config.T_UPLOAD_INTAKE),
+        "upload_intake_cutoff_configured": config.UPLOAD_INTAKE_SYNC_NOT_BEFORE_MS > 0,
         "work_table_configured": bool(config.T_UPLOAD_WORK),
         "snapshot_table_configured": bool(config.T_MEDIA_ARCHIVE_SNAPSHOT),
         "worker_table_configured": bool(config.T_MEDIA_ARCHIVE_WORKER),
     }
+
+
+@app.post("/media-archive/intake/sync")
+async def sync_media_archive_intake(
+    authorization: str = Header(default=""),
+    commit: bool = False,
+    source_record_id: str = Query(default=""),
+):
+    """Preview all rows or grey-write one explicitly selected source record."""
+    _check_auth(authorization)
+    if commit:
+        _require_upload_intake_sync_write_enabled()
+        if not source_record_id:
+            raise HTTPException(400, "commit requires source_record_id during grey release")
+    result = await upload_intake_sync.sync(
+        commit=commit,
+        source_record_id=source_record_id,
+        max_creates=1,
+    )
+    return {"ok": True, **result}
+
+
+@app.post("/media-archive/intake/tick")
+async def tick_media_archive_intake(authorization: str = Header(default="")):
+    """Scheduled entrypoint; never touches the historical backlog without a cutoff."""
+    _check_auth(authorization)
+    if not config.UPLOAD_INTAKE_SYNC_ENABLED:
+        return {"ok": True, "enabled": False, "skipped": True, "reason": "feature_disabled"}
+    if config.UPLOAD_INTAKE_SYNC_NOT_BEFORE_MS <= 0:
+        return {"ok": True, "enabled": True, "skipped": True, "reason": "cutoff_not_configured"}
+    result = await upload_intake_sync.sync(
+        commit=True,
+        source_record_id="",
+        max_creates=config.UPLOAD_INTAKE_SYNC_MAX_CREATES,
+        created_not_before_ms=config.UPLOAD_INTAKE_SYNC_NOT_BEFORE_MS,
+        allow_batch=True,
+    )
+    return {"ok": True, "enabled": True, "skipped": False, **result}
 
 
 @app.post("/media-archive/scan")
