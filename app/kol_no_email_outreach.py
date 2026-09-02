@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""无邮箱 KOL 的人工私信取邮箱闭环。
+"""真正无公开邮箱 KOL 的人工联系闭环。
 
-本模块只把“系统已检查公开页面但没有可用邮箱”的例外变成一张可执行卡片：
+本模块只把“系统已经完成自动邮箱检查，仍没有可用邮箱”的例外变成一张可执行卡片：
 运营复制模板到公开平台私信；KOL 提供邮箱后回填主表并回到邮箱质量检查。
 
 安全边界：
 - 不调用社媒私信 API，不代替运营发送私信；
 - 不发送邮件；取得的邮箱先标记为“未验”，继续走既有邮箱质量检查；
-- 生产扩散默认关闭，只允许给 Frankie 发 1 张样卡；
+- YouTube 在登录态主页检查完成前不允许转给运营；
+- 生产扩散默认关闭，只允许给 Frankie 发样卡；
 - 互动卡由聪哥分身3号发送，回调后由同一 App PATCH 原卡。
 """
 from __future__ import annotations
@@ -19,7 +20,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import config, feishu, launch_daily_report
+from . import config, feishu, kol_email_repair, launch_daily_report
 from .feishu import ext, ext_url
 
 
@@ -35,16 +36,16 @@ ALLOWED_ACTIONS = {
 }
 
 DM_TEMPLATE_EN = (
-    "Hi [Name], we’re reaching out from [Brand] about a possible collaboration "
-    "for [Product]. What’s the best business email for us to send the full brief and timeline?"
-)
-DM_TEMPLATE_ZH = (
-    "你好，[Name]，我们是 [Brand]，想就 [Product] 的潜在合作与你联系。"
-    "请问哪个商务邮箱最适合接收完整合作说明和时间安排？"
+    "Hi [Name], we'd love to discuss a collaboration. "
+    "Could you share your best business email?"
 )
 
 BJ = timezone(timedelta(hours=8))
 EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.I)
+T_CRAWLER_TASK = "tblQnLHnBa1RjJUE"
+YOUTUBE_AUTH_TASK_PREFIX = "[系统邮箱检查:"
+YOUTUBE_AUTH_RESULT_PREFIX = "AUTH_EMAIL_RESULT "
+YOUTUBE_AUTH_PENDING_STATES = {"1-待触发", "2-执行中", "2-运行中"}
 
 ACTIVITY_FIELDS = [
     "活动ID", "活动名称", "品牌", "产品英文名", "ERP SKU", "运行模式", "状态",
@@ -124,13 +125,13 @@ def build_case(*, kol: dict, activity: dict, participant: dict | None = None) ->
     platform = _text(kf.get("主平台")) or "公开社媒平台"
     campaign_id = _text(af.get("活动ID"))
     product = (
-        _text(pf.get("产品家族ID"))
-        or _text(af.get("产品英文名"))
+        _text(af.get("产品英文名"))
+        or _text(pf.get("产品家族ID"))
         or _text(af.get("ERP SKU"))
         or "当前活动产品"
     )
     task_nature = " / ".join(filter(None, [
-        _text(pf.get("进入方式")), _text(pf.get("活动分池")), _text(pf.get("对象类型")),
+        _text(pf.get("进入方式")), _text(pf.get("对象类型")),
     ])) or "活动候选 KOL"
     return {
         "kol_record_id": kol.get("record_id") or "",
@@ -158,54 +159,131 @@ def build_case(*, kol: dict, activity: dict, participant: dict | None = None) ->
     }
 
 
+def _youtube_auth_task_name(kol_record_id: str) -> str:
+    return f"{YOUTUBE_AUTH_TASK_PREFIX}{kol_record_id}] YouTube登录态公开邮箱"
+
+
+def _youtube_auth_result(log_text: Any) -> dict:
+    text = _text(log_text)
+    marker_index = text.rfind(YOUTUBE_AUTH_RESULT_PREFIX)
+    if marker_index < 0:
+        return {}
+    payload = text[marker_index + len(YOUTUBE_AUTH_RESULT_PREFIX):].splitlines()[0].strip()
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+async def _ensure_youtube_authenticated_check(case: dict, *, dry_run: bool) -> dict:
+    """Queue/read one deterministic local authenticated YouTube profile check."""
+    kol_record_id = _text(case.get("kol_record_id"))
+    task_name = _youtube_auth_task_name(kol_record_id)
+    rows = await feishu.search_records(
+        T_CRAWLER_TASK,
+        [{"field_name": "任务名", "operator": "contains", "value": [
+            f"{YOUTUBE_AUTH_TASK_PREFIX}{kol_record_id}]",
+        ]}],
+        field_names=["任务名", "任务状态", "执行日志", "创建日期"],
+    )
+    exact_rows = [
+        row for row in rows
+        if _text((row.get("fields") or {}).get("任务名")) == task_name
+    ]
+    exact_rows.sort(
+        key=lambda row: _ts((row.get("fields") or {}).get("创建日期")),
+        reverse=True,
+    )
+    for row in exact_rows:
+        fields = row.get("fields") or {}
+        status = _text(fields.get("任务状态"))
+        result = _youtube_auth_result(fields.get("执行日志"))
+        result_status = _text(result.get("status"))
+        base = {
+            "task_record_id": row.get("record_id") or "",
+            "task_status": status,
+            "auth_result": result,
+        }
+        if status in YOUTUBE_AUTH_PENDING_STATES:
+            return {**base, "ok": True, "status": "youtube_auth_check_pending"}
+        if status == "4-失败":
+            return {**base, "ok": False, "status": "youtube_auth_check_failed"}
+        if status == "3-已完成" and result_status in {
+            "written", "already_has_email",
+        }:
+            return {**base, "ok": True, "status": "youtube_auth_email_written"}
+        if status == "3-已完成" and result_status == "no_visible_email":
+            return {**base, "ok": True, "status": "youtube_auth_no_visible_email"}
+        if status == "3-已完成":
+            return {**base, "ok": False, "status": "youtube_auth_result_unknown"}
+
+    if dry_run:
+        return {"ok": True, "status": "youtube_auth_check_would_queue"}
+    payload = json.dumps({
+        "kol_record_id": kol_record_id,
+        "channel_url": _text(case.get("main_url")),
+    }, ensure_ascii=False, separators=(",", ":"))
+    task_record_id = await feishu.create_record(T_CRAWLER_TASK, {
+        "任务名": task_name,
+        # Reuse the existing select option; daemon routes this task by its exact name marker.
+        "爬虫类型": "KOL-YouTube",
+        "关键词列表": payload,
+        "每批数量上限": 1,
+        "任务状态": "1-待触发",
+        "触发": True,
+        "创建日期": int(time.time() * 1000),
+    })
+    return {
+        "ok": True,
+        "status": "youtube_auth_check_queued",
+        "task_record_id": task_record_id,
+    }
+
+
 def build_outreach_card(case: dict) -> dict:
     action_base = {
         "kol_record_id": case.get("kol_record_id"),
         "campaign_id": case.get("campaign_id"),
         "platform": case.get("platform"),
     }
-    page_lines = case.get("public_pages") or []
-    pages = "\n".join(f"> {item}" for item in page_lines) or "> 未记录可打开的公开页"
     deadline_label = _fmt_ms(case.get("deadline")) if case.get("timed_upload_required") else "无规定时间"
+    main_url = case.get("main_url") or _record_url(case.get("kol_record_id") or "")
+    checked_sources = (
+        "系统已自动检查公开主页、官网、Linktree/Beacons，"
+        "并用 YouTube 登录态检查了频道“更多信息”，仍未找到可用邮箱。"
+        if case.get("youtube_authenticated_checked")
+        else
+        "系统已自动检查 KOL 主页、简介、官网及 Linktree/Beacons 等公开页，仍未找到可用邮箱。"
+    )
     return {
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "template": "orange",
-            "title": {"tag": "plain_text", "content": "🟠 [KOL·P1] 无邮箱私信获取联系邮箱 · Frankie样卡"},
+            "title": {"tag": "plain_text", "content": "🟠 [KOL·P1] 需要人工联系 1 位 KOL"},
         },
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content": (
-                f"**KOL**：{case.get('kol_name')}\n"
-                f"**平台**：{case.get('platform')}　**国家/语言**：{case.get('country')} / {case.get('language')}\n"
-                f"**粉丝数**：{case.get('followers')}\n"
-                f"**近期内容**：{case.get('recent_content')}\n"
-                f"**适配依据**：{case.get('fit_reason')}\n"
-                f"**缺邮箱原因**：{case.get('email_gap')}"
+                "**你只需要做 1 件事**\n"
+                f"系统已查完公开渠道。请在 {case.get('platform')} 私信 **{case.get('kol_name')}**，"
+                "请对方提供合作邮箱，然后填在下方。\n"
+                f"> 可直接复制：{DM_TEMPLATE_EN}"
             )}},
             {"tag": "div", "text": {"tag": "lark_md", "content": (
-                "**公开页面检查**\n" + pages
+                "**为什么需要人工处理**\n"
+                f"{checked_sources}这是一条例外，不需要运营重新筛选 KOL。"
             )}},
             {"tag": "div", "text": {"tag": "lark_md", "content": (
-                f"**活动**：{case.get('campaign_name')} (`{case.get('campaign_id')}`)\n"
-                f"**品牌/产品**：{case.get('brand')} / {case.get('product')}\n"
+                f"**合作任务**：{case.get('brand')} · {case.get('product')}\n"
                 f"**任务性质**：{case.get('task_nature')}\n"
-                f"**规定时间上稿**：{'是' if case.get('timed_upload_required') else '否'}；截止 {deadline_label}\n"
-                f"**活动目标上稿数**：{case.get('target_uploads')}"
-            )}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": (
-                "**运营要做什么**\n"
-                "1. 打开 KOL 公开主页，在平台里人工发送下面英文模板。\n"
-                "2. KOL 给出邮箱后，填入卡片并提交；系统只回填主表和进入邮箱质量检查。\n"
-                "3. 若对方要求一直在平台沟通，选“继续平台沟通”；系统不会开启自动邮件。\n\n"
-                "**英文私信模板（复制发送）**\n> " + DM_TEMPLATE_EN + "\n\n"
-                "**中文翻译（仅供运营理解）**\n> " + DM_TEMPLATE_ZH + "\n\n"
-                "⚠️ 系统不会代发私信，也不会因本卡直接发送邮件。"
+                f"**上稿截止**：{deadline_label}\n"
+                f"[打开 KOL 主页]({main_url})"
             )}},
             {"tag": "form", "name": f"kol_no_email_{case.get('kol_record_id')}", "elements": [
                 {
                     "tag": "input", "name": "business_email", "width": "fill",
                     "label_position": "top", "required": True,
-                    "label": {"tag": "plain_text", "content": "KOL 本人回复的商务邮箱"},
+                    "label": {"tag": "plain_text", "content": "KOL 提供的合作邮箱"},
                     "placeholder": {"tag": "plain_text", "content": "例如 creator@example.com"},
                     "max_length": 254,
                 },
@@ -215,21 +293,23 @@ def build_outreach_card(case: dict) -> dict:
                     "value": {**action_base, "action": ACTION_EMAIL_CAPTURED},
                 },
             ]},
-            {"tag": "action", "actions": [{
-                "tag": "button", "type": "default",
-                "text": {"tag": "plain_text", "content": "对方要求继续平台沟通"},
-                "value": {**action_base, "action": ACTION_PLATFORM_ONGOING},
-            }]},
-            {"tag": "action", "actions": [{
-                "tag": "button", "type": "danger",
-                "text": {"tag": "plain_text", "content": "拒绝/不相关，停止开发"},
-                "value": {**action_base, "action": ACTION_NOT_FIT},
-            }]},
-            {"tag": "action", "actions": [{
-                "tag": "button", "type": "default",
-                "text": {"tag": "plain_text", "content": "已提醒仍无回复"},
-                "value": {**action_base, "action": ACTION_NO_RESPONSE},
-            }]},
+            {"tag": "action", "actions": [
+                {
+                    "tag": "button", "type": "default",
+                    "text": {"tag": "plain_text", "content": "只愿在平台沟通"},
+                    "value": {**action_base, "action": ACTION_PLATFORM_ONGOING},
+                },
+                {
+                    "tag": "button", "type": "danger",
+                    "text": {"tag": "plain_text", "content": "拒绝/不适合"},
+                    "value": {**action_base, "action": ACTION_NOT_FIT},
+                },
+                {
+                    "tag": "button", "type": "default",
+                    "text": {"tag": "plain_text", "content": "仍未回复"},
+                    "value": {**action_base, "action": ACTION_NO_RESPONSE},
+                },
+            ]},
             {"tag": "div", "text": {"tag": "lark_md", "content": (
                 f"[打开 KOL 主表记录]({_record_url(case.get('kol_record_id') or '')})"
             )}},
@@ -269,8 +349,8 @@ def validate_outreach_card(card: dict) -> list[str]:
         errors.append("禁止 form -> action 嵌套")
     rendered = json.dumps(card, ensure_ascii=False)
     for required in (
-        "无邮箱私信获取联系邮箱", "公开页面检查", "规定时间上稿", "系统不会代发私信",
-        DM_TEMPLATE_EN, DM_TEMPLATE_ZH, *sorted(ALLOWED_ACTIONS),
+        "需要人工联系 1 位 KOL", "系统已自动检查", "上稿截止",
+        *sorted(ALLOWED_ACTIONS),
     ):
         if required not in rendered:
             errors.append(f"卡片缺少必要内容：{required}")
@@ -318,7 +398,17 @@ async def load_case(*, kol_record_id: str, campaign_id: str = "") -> dict:
         campaign_id = campaign_ids[0]
         activity = active_activities[campaign_id]
         participant = next(row for row in matches if _text((row.get("fields") or {}).get("活动ID")) == campaign_id)
-    return build_case(kol=kol, activity=activity, participant=participant)
+    preflight_kol = kol
+    raw_email = _text((kol.get("fields") or {}).get("邮箱"))
+    clean_email, _ = feishu.clean_email(raw_email)
+    if raw_email and not clean_email:
+        clean_fields = dict(kol.get("fields") or {})
+        clean_fields["邮箱"] = ""
+        preflight_kol = {**kol, "fields": clean_fields}
+    contact_preflight = await kol_email_repair.inspect_record(preflight_kol)
+    case = build_case(kol=kol, activity=activity, participant=participant)
+    case["contact_preflight"] = contact_preflight
+    return case
 
 
 def _frankie_targets() -> list[tuple[str, str]]:
@@ -354,17 +444,61 @@ async def send_card(
     if not frankie_only and not config.KOL_NO_EMAIL_OUTREACH_ENABLED:
         raise ValueError("生产扩散未开放；当前只允许 Frankie 样卡")
     case = await load_case(kol_record_id=kol_record_id, campaign_id=campaign_id)
+    preflight = case.get("contact_preflight") or {}
+    preflight_status = _text(preflight.get("status"))
+    if preflight_status == "public_contact_found":
+        if dry_run:
+            return {
+                "ok": True, "dry_run": True, "frankie_only": frankie_only,
+                "card_required": False, "status": "public_email_found",
+                "kol_record_id": case["kol_record_id"],
+                "campaign_id": case["campaign_id"],
+                "source": preflight.get("source"),
+                "email_fingerprint": preflight.get("email_fingerprint"),
+            }
+        repair = await kol_email_repair.run_email_repair(
+            [case["kol_record_id"]], dry_run=False, limit=1,
+        )
+        repaired = bool(repair.get("safe_to_continue")) and int(repair.get("writes") or 0) == 1
+        return {
+            "ok": repaired, "dry_run": False, "frankie_only": frankie_only,
+            "card_required": False,
+            "status": "public_email_repaired" if repaired else "public_email_repair_failed",
+            "kol_record_id": case["kol_record_id"],
+            "campaign_id": case["campaign_id"],
+            "repair": repair,
+        }
+    if (
+        case.get("platform", "").casefold() == "youtube"
+        and preflight_status == "no_public_email"
+    ):
+        auth_check = await _ensure_youtube_authenticated_check(case, dry_run=dry_run)
+        if auth_check.get("status") != "youtube_auth_no_visible_email":
+            return {
+                "ok": bool(auth_check.get("ok")),
+                "dry_run": dry_run,
+                "frankie_only": frankie_only,
+                "card_required": False,
+                "kol_record_id": case["kol_record_id"],
+                "campaign_id": case["campaign_id"],
+                **auth_check,
+            }
+        case["youtube_authenticated_checked"] = True
     card = build_outreach_card(case)
     errors = validate_outreach_card(card)
     if errors:
         raise ValueError("无邮箱联系卡结构不合格：" + "；".join(errors))
     if dry_run:
-        return {"ok": True, "dry_run": True, "frankie_only": frankie_only, "case": case, "card": card}
+        return {
+            "ok": True, "dry_run": True, "frankie_only": frankie_only,
+            "card_required": True, "case": case, "card": card,
+        }
     sent = await _send_outreach_card(card, frankie_only=frankie_only)
     return {
         "ok": all(item.get("ok") for item in sent) and bool(sent),
         "dry_run": False,
         "frankie_only": frankie_only,
+        "card_required": True,
         "kol_record_id": case["kol_record_id"],
         "campaign_id": case["campaign_id"],
         "sent": sent,
