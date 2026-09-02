@@ -19,6 +19,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import config, feishu, kol_email_repair, launch_daily_report
 from .feishu import ext, ext_url
@@ -46,6 +47,7 @@ T_CRAWLER_TASK = "tblQnLHnBa1RjJUE"
 YOUTUBE_AUTH_TASK_PREFIX = "[系统邮箱检查:"
 YOUTUBE_AUTH_RESULT_PREFIX = "AUTH_EMAIL_RESULT "
 YOUTUBE_AUTH_PENDING_STATES = {"1-待触发", "2-执行中", "2-运行中"}
+YOUTUBE_AUTH_RESULT_TTL_MS = 24 * 60 * 60 * 1000
 
 ACTIVITY_FIELDS = [
     "活动ID", "活动名称", "品牌", "产品英文名", "ERP SKU", "运行模式", "状态",
@@ -176,6 +178,30 @@ def _youtube_auth_result(log_text: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _normalized_channel_url(value: Any) -> str:
+    raw = _text(value)
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw if "://" in raw else f"https://{raw}")
+    except ValueError:
+        return raw.rstrip("/").casefold()
+    host = (parsed.hostname or "").casefold()
+    if host.startswith("www."):
+        host = host[4:]
+    path = re.sub(r"/+", "/", parsed.path or "").rstrip("/").casefold()
+    return f"{host}{path}"
+
+
+def _youtube_auth_task_input(fields: dict) -> dict:
+    raw = _text(fields.get("关键词列表"))
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 async def _ensure_youtube_authenticated_check(case: dict, *, dry_run: bool) -> dict:
     """Queue/read one deterministic local authenticated YouTube profile check."""
     kol_record_id = _text(case.get("kol_record_id"))
@@ -185,11 +211,19 @@ async def _ensure_youtube_authenticated_check(case: dict, *, dry_run: bool) -> d
         [{"field_name": "任务名", "operator": "contains", "value": [
             f"{YOUTUBE_AUTH_TASK_PREFIX}{kol_record_id}]",
         ]}],
-        field_names=["任务名", "任务状态", "执行日志", "创建日期"],
+        field_names=["任务名", "任务状态", "执行日志", "创建日期", "关键词列表"],
     )
+    current_channel = _normalized_channel_url(case.get("main_url"))
+    fresh_after = int(time.time() * 1000) - YOUTUBE_AUTH_RESULT_TTL_MS
     exact_rows = [
         row for row in rows
-        if _text((row.get("fields") or {}).get("任务名")) == task_name
+        if (
+            _text((row.get("fields") or {}).get("任务名")) == task_name
+            and _normalized_channel_url(
+                _youtube_auth_task_input(row.get("fields") or {}).get("channel_url")
+            ) == current_channel
+            and _ts((row.get("fields") or {}).get("创建日期")) >= fresh_after
+        )
     ]
     exact_rows.sort(
         key=lambda row: _ts((row.get("fields") or {}).get("创建日期")),

@@ -40,7 +40,8 @@ async def inspect_record(record: dict, *, candidates: list[dict] | None = None) 
     fields = record.get("fields") or {}
     record_id = str(record.get("record_id") or "")
     original_raw = str(feishu.ext(fields.get("邮箱")) or "").strip()
-    if original_raw:
+    existing_email, _ = feishu.clean_email(original_raw)
+    if existing_email:
         return {
             "record_id": record_id, "status": "existing_email_skipped",
             "source": "master_email", "planned_fields": {},

@@ -167,18 +167,43 @@ class KolEmailRepairTests(unittest.TestCase):
         self.assertEqual({}, result["planned_fields"])
         discover.assert_not_awaited()
 
-    def test_existing_invalid_email_text_is_also_never_overwritten(self):
+    def test_invalid_email_text_can_be_repaired_from_trusted_public_contact(self):
+        result = asyncio.run(kol_email_repair.inspect_record(
+            row(email="not-an-email", status="无效"),
+            candidates=[trusted_candidate("business@creator.example")],
+        ))
+
+        self.assertEqual("public_contact_found", result["status"])
+        self.assertEqual(
+            {"邮箱": "business@creator.example", "邮箱验真状态": "未验"},
+            result["planned_fields"],
+        )
+
+    def test_invalid_email_repair_is_written_and_read_back(self):
+        initial = row(email="not-an-email", status="无效")
+        written = row(email="business@creator.example", status="未验")
         with patch.object(
+            kol_email_repair.feishu, "fetch_all_records",
+            new=AsyncMock(side_effect=[[initial], [initial]]),
+        ), patch.object(
+            kol_email_repair.feishu, "get_record",
+            new=AsyncMock(side_effect=[initial, written]),
+        ), patch.object(
             kol_email_repair.kol_email_sources, "discover_public_email_candidates",
-            new=AsyncMock(),
-        ) as discover:
-            result = asyncio.run(kol_email_repair.inspect_record(
-                row(email="not-an-email", status="未验"),
+            new=AsyncMock(return_value=[trusted_candidate("business@creator.example")]),
+        ), patch.object(
+            kol_email_repair.feishu, "update_record", new=AsyncMock(),
+        ) as update:
+            result = asyncio.run(kol_email_repair.run_email_repair(
+                ["k1"], dry_run=False,
             ))
 
-        self.assertEqual("existing_email_skipped", result["status"])
-        self.assertEqual({}, result["planned_fields"])
-        discover.assert_not_awaited()
+        self.assertEqual(1, result["writes"])
+        self.assertEqual(1, result["by_status"]["written_public_contact"])
+        self.assertEqual(
+            {"邮箱": "business@creator.example", "邮箱验真状态": "未验"},
+            update.await_args.args[2],
+        )
 
     def test_inspection_error_aborts_all_email_writes(self):
         good = row("good", email="", status="未验")
