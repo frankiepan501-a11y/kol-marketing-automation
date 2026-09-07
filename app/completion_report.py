@@ -12,7 +12,7 @@
 未发过信(未建联) 不计入任务统计。纯读 + 发卡, 不发邮件 / 不写主表。
 """
 import time
-from . import config, feishu
+from . import config, feishu, kol_assistant
 from .feishu import ext, xrid
 
 D60 = 60 * 86400 * 1000
@@ -124,7 +124,18 @@ def _section(spec: dict, c: dict) -> list:
     ]
 
 
-async def run(dry_run: bool = False) -> dict:
+def validate_delivery(delivery_identity: str, frankie_only: bool) -> None:
+    if delivery_identity not in ("legacy", "kol_assistant"):
+        raise ValueError(f"unsupported delivery_identity: {delivery_identity}")
+    if delivery_identity == "kol_assistant" and not frankie_only:
+        raise ValueError("KOL媒体助手 R7 只允许 Frankie-only 发送")
+    if delivery_identity == "legacy" and frankie_only:
+        raise ValueError("legacy 发送路径不支持 Frankie-only 标记")
+
+
+async def run(dry_run: bool = False, *, delivery_identity: str = "legacy",
+              frankie_only: bool = False) -> dict:
+    validate_delivery(delivery_identity, frankie_only)
     now_ms = int(time.time() * 1000)
     drafts = await feishu.fetch_all_records(config.T_DRAFT)
     computed = {}
@@ -147,8 +158,25 @@ async def run(dry_run: bool = False) -> dict:
                    "title": {"tag": "plain_text", "content": f"🟡 [KOL·P2] KOL+媒体人 任务完成情况周报 · {today}"}},
         "elements": elements,
     }
-    sent = 0 if dry_run else await _notify(card)
-    return {"dry_run": dry_run, "report": computed, "notified": sent}
+    message_ids = []
+    if not dry_run:
+        if delivery_identity == "kol_assistant":
+            message_id = await kol_assistant.send_card_to_frankie(
+                card,
+                message_uuid=f"kol-completion-{today.replace('-', '')}-frankie-r7",
+            )
+            message_ids.append(message_id)
+        else:
+            sent = await _notify(card)
+            message_ids.extend([""] * sent)
+    return {
+        "dry_run": dry_run,
+        "report": computed,
+        "delivery_identity": delivery_identity,
+        "frankie_only": bool(frankie_only),
+        "notified": len(message_ids),
+        "message_ids": [message_id for message_id in message_ids if message_id],
+    }
 
 
 async def _notify(card) -> int:

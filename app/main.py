@@ -83,6 +83,9 @@ _AUTO_SEND_JOB_TTL = 24 * 3600
 _reply_monitor_jobs = {}
 _REPLY_MONITOR_JOB_TTL = 24 * 3600
 _REPLY_MONITOR_JOB_TIMEOUT = 10 * 60
+_completion_report_jobs = {}
+_COMPLETION_REPORT_JOB_TTL = 24 * 3600
+_COMPLETION_REPORT_JOB_TIMEOUT = 10 * 60
 _draft_cleanup_jobs = {}
 _DRAFT_CLEANUP_JOB_TTL = 24 * 3600
 
@@ -2553,19 +2556,117 @@ async def run_manual_send_recon(authorization: str = Header(default=""), dry_run
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
 
 
+def _prune_completion_report_jobs() -> None:
+    now = time.time()
+    for job_id in list(_completion_report_jobs):
+        started = _completion_report_jobs[job_id].get("started_ts", 0)
+        if started and now - started > _COMPLETION_REPORT_JOB_TTL:
+            _completion_report_jobs.pop(job_id, None)
+
+
+def _running_completion_report_job(delivery_identity: str, frankie_only: bool):
+    _prune_completion_report_jobs()
+    for job_id, job in _completion_report_jobs.items():
+        if (
+            job.get("status") == "running"
+            and job.get("delivery_identity") == delivery_identity
+            and job.get("frankie_only") == bool(frankie_only)
+        ):
+            return job_id, job
+    return "", None
+
+
+async def _run_completion_report_job(job_id: str, *, delivery_identity: str,
+                                     frankie_only: bool) -> None:
+    from . import completion_report
+    try:
+        result = await asyncio.wait_for(
+            completion_report.run(
+                dry_run=False,
+                delivery_identity=delivery_identity,
+                frankie_only=frankie_only,
+            ),
+            timeout=_COMPLETION_REPORT_JOB_TIMEOUT,
+        )
+        _completion_report_jobs[job_id].update(
+            status="success",
+            finished_at=datetime_now_string(),
+            result={"ok": True, **result},
+        )
+    except asyncio.TimeoutError:
+        error = f"completion report exceeded {_COMPLETION_REPORT_JOB_TIMEOUT} seconds"
+        _completion_report_jobs[job_id].update(
+            status="error", finished_at=datetime_now_string(), error=error,
+        )
+        await _alert_endpoint_failure("/completion-report/run", error, "")
+    except Exception as exc:
+        trace = _tb.format_exc()[-1000:]
+        _completion_report_jobs[job_id].update(
+            status="error",
+            finished_at=datetime_now_string(),
+            error=str(exc),
+            trace=trace,
+        )
+        await _alert_endpoint_failure("/completion-report/run", str(exc), trace)
+
+
 @app.post("/completion-report/run")
 async def run_completion_report(authorization: str = Header(default=""), dry_run: bool = False,
-                                async_mode: bool = True):
-    """KOL 任务完成情况周报: 漏斗转化 + 5 类终态分布 + 卡点清单 → 飞书运营群 + Frankie 私聊.
+                                async_mode: bool = True,
+                                delivery_identity: str = "legacy",
+                                frankie_only: bool = False):
+    """KOL 任务完成情况周报: 漏斗转化 + 5 类终态分布 + 卡点清单。
     终态: 成功=已上稿/无回应=末次发信+14d/寄样未产出=签收+60d。纯读不发邮件不写主表。
-    ?dry_run=true 只算不发卡; ?async_mode=true 默认后台跑, 避开 Zeabur 网关超时。"""
+    ?dry_run=true 只算不发卡; ?async_mode=true 默认后台跑, 避开 Zeabur 网关超时。
+    R7: delivery_identity=kol_assistant 时强制 frankie_only=true，禁止群发与旧 App 回退。"""
     _check_auth(authorization)
     from . import completion_report
+    completion_report.validate_delivery(delivery_identity, frankie_only)
     if async_mode and not dry_run:
+        if delivery_identity == "kol_assistant":
+            running_id, running_job = _running_completion_report_job(
+                delivery_identity, frankie_only
+            )
+            if running_job:
+                return {
+                    "ok": True,
+                    "accepted": True,
+                    "already_running": True,
+                    "job_id": running_id,
+                    "status": "running",
+                }
+            job_id = "completionreport-" + uuid.uuid4().hex[:12]
+            _completion_report_jobs[job_id] = {
+                "status": "running",
+                "started_ts": time.time(),
+                "started_at": datetime_now_string(),
+                "delivery_identity": delivery_identity,
+                "frankie_only": bool(frankie_only),
+            }
+            asyncio.create_task(_run_completion_report_job(
+                job_id,
+                delivery_identity=delivery_identity,
+                frankie_only=frankie_only,
+            ))
+            return {
+                "ok": True,
+                "accepted": True,
+                "already_running": False,
+                "job_id": job_id,
+                "status": "running",
+            }
         async def _job():
             try:
-                res = await completion_report.run(dry_run=False)
-                print(f"[completion_report] background done notified={res.get('notified')}")
+                res = await completion_report.run(
+                    dry_run=False,
+                    delivery_identity=delivery_identity,
+                    frankie_only=frankie_only,
+                )
+                print(
+                    "[completion_report] background done "
+                    f"identity={delivery_identity} frankie_only={frankie_only} "
+                    f"notified={res.get('notified')}"
+                )
             except Exception as e:
                 import traceback
                 await _alert_endpoint_failure("/completion-report/run", str(e), traceback.format_exc()[-1200:])
@@ -2573,10 +2674,26 @@ async def run_completion_report(authorization: str = Header(default=""), dry_run
         return {"ok": True, "started": "background",
                 "msg": "completion report run started, will push to feishu when done"}
     try:
-        return {"ok": True, **(await completion_report.run(dry_run=dry_run))}
+        return {"ok": True, **(await completion_report.run(
+            dry_run=dry_run,
+            delivery_identity=delivery_identity,
+            frankie_only=frankie_only,
+        ))}
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()[-1000:]}
+
+
+@app.get("/completion-report/jobs/{job_id}")
+async def get_completion_report_job(job_id: str, authorization: str = Header(default="")):
+    """读取 R7 周报后台任务的最终发送结果，包括唯一 message_id。"""
+    _check_auth(authorization)
+    _prune_completion_report_jobs()
+    job = _completion_report_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "completion report job not found")
+    public = {key: value for key, value in job.items() if key not in {"started_ts", "trace"}}
+    return {"ok": True, "job_id": job_id, **public}
 
 
 @app.post("/upload-register/scan")
