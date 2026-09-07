@@ -37,13 +37,20 @@ class CompletionReportKolAssistantTests(unittest.TestCase):
         self.assertEqual(result["message_ids"], ["om_r7_once"])
         sender.assert_awaited_once()
 
-    def test_kol_assistant_route_rejects_group_delivery(self):
-        with self.assertRaisesRegex(ValueError, "Frankie-only"):
-            asyncio.run(completion_report.run(
-                dry_run=True,
+    def test_kol_assistant_route_allows_r8_operational_delivery(self):
+        async def fetch_records(_table_id, **_kwargs):
+            return []
+
+        with patch.object(completion_report.feishu, "fetch_all_records", new=fetch_records), \
+             patch.object(completion_report, "_notify", new=AsyncMock(return_value=3)) as notify:
+            result = asyncio.run(completion_report.run(
+                dry_run=False,
                 delivery_identity="kol_assistant",
                 frankie_only=False,
             ))
+
+        self.assertEqual(3, result["notified"])
+        notify.assert_awaited_once()
 
     def test_legacy_route_rejects_false_frankie_only_label(self):
         with self.assertRaisesRegex(ValueError, "legacy"):

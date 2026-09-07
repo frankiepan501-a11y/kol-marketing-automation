@@ -54,10 +54,15 @@ async def _refresh_token(which: str):
         aid, sec = config.FEISHU_BITABLE_APP_ID, config.FEISHU_BITABLE_APP_SECRET
     elif which == "app3":
         aid, sec = config.FEISHU_APP3_ID, config.FEISHU_APP3_SECRET
+    elif which == "kol_assistant":
+        aid = config.FEISHU_KOL_ASSISTANT_APP_ID
+        sec = config.FEISHU_KOL_ASSISTANT_APP_SECRET
     elif which == "b2b_assistant":
         aid, sec = config.FEISHU_B2B_ASSISTANT_APP_ID, config.FEISHU_B2B_ASSISTANT_APP_SECRET
     else:
         aid, sec = config.FEISHU_NOTIFY_APP_ID, config.FEISHU_NOTIFY_APP_SECRET
+    if not aid or not sec:
+        raise RuntimeError(f"Feishu identity {which!r} is not configured")
     async with httpx.AsyncClient() as cli:
         r = await cli.post(
             "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
@@ -95,6 +100,7 @@ async def api(method: str, path: str, body=None, which: str = "bitable",
     不重试其他 4xx (auth/permission/业务错误).
     """
     import asyncio
+    which = _resolve_identity(path, which)
     tok = await token(which)
     url = f"https://open.feishu.cn/open-apis{path}"
     headers = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json; charset=utf-8"}
@@ -149,6 +155,22 @@ async def api(method: str, path: str, body=None, which: str = "bitable",
     if last_exc:
         raise last_exc
     raise Exception(f"{method} {path} → exhausted retries")
+
+
+def _resolve_identity(path: str, which: str) -> str:
+    """Route only the KOL Base namespace to KOL媒体助手.
+
+    Explicit non-bitable identities always win. This keeps B2B/AMZ and historic
+    card operations unchanged while R8 migrates the KOL Base behind the shared
+    helper.
+    """
+    if which != "bitable":
+        return which
+    app_token = str(getattr(config, "FEISHU_APP_TOKEN", "") or "")
+    if (config.KOL_FEISHU_BASE_ENABLED and app_token
+            and f"/bitable/v1/apps/{app_token}/" in str(path or "")):
+        return "kol_assistant"
+    return which
 
 
 # ===== Helpers =====
@@ -507,8 +529,12 @@ def _format_card_title(card: dict, biz: str = "KOL", level: str = "P1") -> dict:
 async def send_card_message(receive_type: str, receive_id: str, card: dict,
                             biz: str = "KOL", level: str = "P1",
                             format_title: bool = True,
-                            message_uuid: str = "") -> str:
-    """用聪哥分身1号发飞书互动卡片. 2026-05-17 返回 message_id (供 A5 后续 update).
+                            message_uuid: str = "",
+                            which: str = "") -> str:
+    """发送飞书互动卡片；KOL 业务在 R8 默认由 KOL媒体助手发送。
+
+    非 KOL 业务仍沿用聪哥分身1号；显式 ``which`` 可锁定历史卡片身份。
+    2026-05-17 返回 message_id (供 A5 后续 update).
     返回空字符串 = 拿不到 msg_id (不影响主流程)
     2026-05-22 Phase 1: 自动给卡片标题加 {emoji} [{biz}·{level}] 统一前缀.
       - KOL 业务通知 (草稿/SLA/寄样/回复) 默认 biz=KOL level=P1
@@ -518,6 +544,16 @@ async def send_card_message(receive_type: str, receive_id: str, card: dict,
     import json
     if format_title:
         card = _format_card_title(card, biz, level)
+    identity = which or (
+        "kol_assistant" if biz == "KOL" and config.KOL_FEISHU_CARDS_ENABLED else "notify"
+    )
+    if identity == "kol_assistant" and receive_type == "open_id":
+        # Existing recipient lists are in App 1's namespace. Resolve through its
+        # read-only contact identity, then send through the dedicated App.
+        union_id = await open_id_to_union_id(receive_id, which="notify")
+        if not union_id:
+            raise RuntimeError("KOL媒体助手无法把旧 open_id 解析为 union_id")
+        receive_type, receive_id = "union_id", union_id
     body = {
         "receive_id": receive_id,
         "msg_type": "interactive",
@@ -525,7 +561,7 @@ async def send_card_message(receive_type: str, receive_id: str, card: dict,
     }
     if message_uuid:
         body["uuid"] = message_uuid[:50]
-    resp = await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="notify")
+    resp = await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which=identity)
     return (resp.get("data") or {}).get("message_id") or ""
 
 
@@ -535,20 +571,21 @@ async def send_card_message(receive_type: str, receive_id: str, card: dict,
 _union_cache = {}  # open_id(聪哥1号 namespace) -> union_id(跨 app 稳定)
 
 
-async def open_id_to_union_id(open_id: str) -> str:
+async def open_id_to_union_id(open_id: str, *, which: str = "notify") -> str:
     """聪哥1号 contact API 把 open_id 换成 union_id (跨 app 稳定, 供聪哥3号发卡用).
     1h 进程缓存; 查不到返回空字符串 (调用方应跳过该 target).
     """
     if not open_id:
         return ""
-    cached = _union_cache.get(open_id)
+    cache_key = (which, open_id)
+    cached = _union_cache.get(cache_key)
     if cached:
         return cached
     try:
-        r = await api("GET", f"/contact/v3/users/{open_id}?user_id_type=open_id", which="notify")
+        r = await api("GET", f"/contact/v3/users/{open_id}?user_id_type=open_id", which=which)
         uid = (((r.get("data") or {}).get("user") or {}).get("union_id")) or ""
         if uid:
-            _union_cache[open_id] = uid
+            _union_cache[cache_key] = uid
         return uid
     except Exception as e:
         print(f"[feishu.open_id_to_union_id] {open_id} fail: {e}")
@@ -556,17 +593,44 @@ async def open_id_to_union_id(open_id: str) -> str:
 
 
 async def send_card_via_app3(receive_type: str, receive_id: str, card: dict) -> str:
-    """用聪哥3号发交互卡 (form 卡, 回调走 n8n event-hub). receive_type 通常 union_id.
-    返回 message_id (失败抛异常, 调用方 catch).
-    不套 _format_card_title — warm_recap 卡自带 header, 不需要 KOL 业务前缀.
+    """R8 compatibility alias: new KOL cards are sent by KOL媒体助手.
+
+    The public name remains until R9 so existing callers and rollback tests stay
+    stable. It must not send through App 3 anymore.
     """
+    if config.KOL_FEISHU_CARDS_ENABLED:
+        return await send_card_via_kol_assistant(receive_type, receive_id, card)
     import json
     body = {
         "receive_id": receive_id,
         "msg_type": "interactive",
         "content": json.dumps(card, ensure_ascii=False),
     }
-    resp = await api("POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="app3")
+    resp = await api(
+        "POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="app3",
+    )
+    return (resp.get("data") or {}).get("message_id") or ""
+
+
+async def send_card_via_kol_assistant(receive_type: str, receive_id: str, card: dict) -> str:
+    """Use KOL媒体助手 for an interactive KOL card and its callback namespace."""
+    import json
+    if receive_type == "open_id":
+        union_id = await open_id_to_union_id(receive_id, which="notify")
+        if not union_id:
+            raise RuntimeError("KOL媒体助手无法把旧 open_id 解析为 union_id")
+        receive_type, receive_id = "union_id", union_id
+    body = {
+        "receive_id": receive_id,
+        "msg_type": "interactive",
+        "content": json.dumps(card, ensure_ascii=False),
+    }
+    resp = await api(
+        "POST",
+        f"/im/v1/messages?receive_id_type={receive_type}",
+        body,
+        which="kol_assistant",
+    )
     return (resp.get("data") or {}).get("message_id") or ""
 
 
@@ -612,6 +676,30 @@ async def update_b2b_assistant_card(message_id: str, new_card: dict) -> bool:
     return await update_card_message_with_app(message_id, new_card, which="b2b_assistant")
 
 
+def kol_callback_identity(event: dict) -> str:
+    """Pick the sender App for PATCH; unmarked historical cards stay on App 3."""
+    action = event.get("action") or {}
+    value = action.get("value") or event.get("card_action") or event.get("value") or {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = {}
+    return "kol_assistant" if value.get("_delivery_identity") == "kol_assistant" else "app3"
+
+
+async def update_kol_card(message_id: str, new_card: dict, *, event: dict = None) -> bool:
+    """PATCH a new KOL card with KOL媒体助手; preserve old App 3 cards in R8."""
+    if event is not None:
+        return await update_card_message_with_app(
+            message_id, new_card, which=kol_callback_identity(event),
+        )
+    ok = await update_card_message_with_app(message_id, new_card, which="kol_assistant")
+    if not ok:
+        ok = await update_card_message_with_app(message_id, new_card, which="app3")
+    return ok
+
+
 async def mark_card_resolved(draft_rid: str, result_label: str, table_id: str = None):
     """草稿状态结束 (已发送/已否决/退回重生) 时, 把原群卡片标题前缀加 [✅已审-xxx]
     让群里其他 reviewer 不会再点开作废卡片. 2026-05-17 A5.
@@ -652,7 +740,11 @@ async def mark_card_resolved(draft_rid: str, result_label: str, table_id: str = 
                 "content": f"**主题**: {subject}\n\n**结果**: {result_label}\n\n_此卡片已作废, 无需再审_"}},
         ],
     }
-    ok = await update_card_message(msg_id, resolved_card)
+    # New R8 cards are sent by KOL媒体助手. If this row references a historical
+    # card, retain a bounded App 3 fallback until R9 removes old card ownership.
+    ok = await update_card_message_with_app(msg_id, resolved_card, which="kol_assistant")
+    if not ok:
+        ok = await update_card_message_with_app(msg_id, resolved_card, which="app3")
     if ok:
         try:
             await update_record(table_id, draft_rid, {"卡片已标记已审": True})

@@ -26,12 +26,18 @@ from . import x_history  # 竞品 X 历史补采: 独立只读探测/分窗采�
 from . import kol_roi_mapping  # KOL ROI 归因缺口卡 + 映射回填
 from . import launch_reply_attribution  # 集中宣发未归属回复：运营选活动后继续原回复流程
 from . import kol_no_email_outreach  # 无邮箱KOL：运营私信取邮箱→回填主表→回到邮箱质量检查
+from . import kol_callback  # KOL媒体助手长连接回调 → 现有 n8n Event Hub
 from . import discord_tester_routes  # FUN Bot 新品体验官：Discord Modal + 安全表单
 
 app = FastAPI(title="KOL Marketing Automation", version="0.3")
 app.include_router(invest.router)
 app.include_router(x_history.router)
 app.include_router(discord_tester_routes.router)
+
+
+@app.on_event("startup")
+async def start_kol_assistant_callback():
+    kol_callback.start()
 
 
 @app.on_event("startup")
@@ -473,14 +479,17 @@ def _draft_regen_terminal_card(*, ok: bool, record_id: str = "", approver: str =
 
 
 async def _update_draft_regen_terminal_card(job_id: str, message_id: str, card: dict,
-                                            operator_open_id: str = "") -> bool:
+                                            operator_open_id: str = "",
+                                            delivery_identity: str = "app3") -> bool:
     if not message_id:
         return False
     updated = False
     last_error = ""
     for attempt in range(2):
         try:
-            updated = await feishu.update_card_message_with_app(message_id, card, which="app3")
+            updated = await feishu.update_card_message_with_app(
+                message_id, card, which=delivery_identity,
+            )
         except Exception as exc:
             last_error = str(exc)[:160]
             updated = False
@@ -491,9 +500,14 @@ async def _update_draft_regen_terminal_card(job_id: str, message_id: str, card: 
     _draft_regen_jobs[job_id]["card_updated"] = bool(updated)
     if not updated and operator_open_id:
         try:
-            fallback_message_id = await feishu.send_card_via_app3(
-                "open_id", operator_open_id, card,
+            operator_union_id = await feishu.open_id_to_union_id(
+                operator_open_id, which=delivery_identity,
             )
+            fallback_message_id = ""
+            if operator_union_id:
+                fallback_message_id = await feishu.send_card_message(
+                    "union_id", operator_union_id, card, which=delivery_identity,
+                )
         except Exception as exc:
             fallback_message_id = ""
             last_error = str(exc)[:160]
@@ -503,7 +517,7 @@ async def _update_draft_regen_terminal_card(job_id: str, message_id: str, card: 
     if not updated:
         await _alert_endpoint_failure(
             "/draft/regen/card",
-            last_error or "App3 PATCH returned false twice and fallback delivery failed",
+            last_error or f"{delivery_identity} PATCH returned false twice and fallback failed",
             "",
         )
     return bool(updated)
@@ -511,7 +525,8 @@ async def _update_draft_regen_terminal_card(job_id: str, message_id: str, card: 
 
 async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str,
                                message_id: str = "", approver: str = "",
-                               operator_open_id: str = ""):
+                               operator_open_id: str = "",
+                               delivery_identity: str = "app3"):
     try:
         result = await draft_regen.regen_draft(record_id, feedback=feedback or "")
         _draft_regen_jobs[job_id].update(
@@ -528,7 +543,7 @@ async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str,
             error=str(result.get("error") or result.get("skip") or ""),
         )
         await _update_draft_regen_terminal_card(
-            job_id, message_id, card, operator_open_id,
+            job_id, message_id, card, operator_open_id, delivery_identity,
         )
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
@@ -543,7 +558,7 @@ async def _run_draft_regen_job(job_id: str, record_id: str, feedback: str,
             ok=False, record_id=record_id, approver=approver, error=str(e),
         )
         await _update_draft_regen_terminal_card(
-            job_id, message_id, card, operator_open_id,
+            job_id, message_id, card, operator_open_id, delivery_identity,
         )
         await _alert_endpoint_failure("/draft/regen", str(e), tr)
 
@@ -563,6 +578,7 @@ async def health():
     return {
         "status": "ok" if kol_ai_configured else "degraded",
         "kol_ai_configured": kol_ai_configured,
+        "kol_assistant_callback": kol_callback.snapshot(),
         "dtc_weekly_ai_configured": bool(os.environ.get("DTC_WEEKLY_DEEPSEEK_API_KEY", "").strip()),
     }
 
@@ -1361,6 +1377,7 @@ async def run_draft_regen(record_id: str = Query(...), feedback: str = Query("")
                           async_mode: bool = Query(True),
                           message_id: str = Query(""), approver: str = Query(""),
                           operator_open_id: str = Query(""),
+                          delivery_identity: str = Query("app3"),
                           authorization: str = Header(default="")):
     """退回重生 方案A: 给指定草稿真重生一版(3信号: 上一版+评分理由 / 运营方向feedback / 当前阶段),
     旧草稿置已否决, 新草稿强制人审重新走卡。n8n 卡片「退回重生」按钮调此端点。
@@ -1422,9 +1439,12 @@ async def run_draft_regen(record_id: str = Query(...), feedback: str = Query("")
             if isinstance(operator_open_id, str) and operator_open_id.startswith("ou_")
             else ""
         )
+        safe_delivery_identity = (
+            "kol_assistant" if delivery_identity == "kol_assistant" else "app3"
+        )
         asyncio.create_task(_run_draft_regen_job(
             job_id, record_id, feedback or "", safe_message_id, safe_approver,
-            safe_operator_open_id,
+            safe_operator_open_id, safe_delivery_identity,
         ))
         return {"ok": True, "accepted": True, "already_running": False,
                 "job_id": job_id, "record_id": record_id}
@@ -2618,7 +2638,7 @@ async def run_completion_report(authorization: str = Header(default=""), dry_run
     """KOL 任务完成情况周报: 漏斗转化 + 5 类终态分布 + 卡点清单。
     终态: 成功=已上稿/无回应=末次发信+14d/寄样未产出=签收+60d。纯读不发邮件不写主表。
     ?dry_run=true 只算不发卡; ?async_mode=true 默认后台跑, 避开 Zeabur 网关超时。
-    R7: delivery_identity=kol_assistant 时强制 frankie_only=true，禁止群发与旧 App 回退。"""
+    R8: delivery_identity=kol_assistant 由专属 App 发；frankie_only=true 仍可做单人验证。"""
     _check_auth(authorization)
     from . import completion_report
     completion_report.validate_delivery(delivery_identity, frankie_only)

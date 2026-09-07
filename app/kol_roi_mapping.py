@@ -244,7 +244,7 @@ async def handle_callback(event: dict) -> dict:
             await feishu.update_card_message_with_app(
                 msg_id,
                 build_processed_card("KOL ROI 缺口已忽略", f"**缺口ID**: {gap_id}\n**操作人**: {operator}", "grey"),
-                which="app3",
+                which=feishu.kol_callback_identity(event),
             )
         return {"ok": True, "action": action, "gap_id": gap_id, "patched": bool(msg_id)}
 
@@ -301,7 +301,7 @@ async def handle_callback(event: dict) -> dict:
                 f"**缺口ID**: {gap_id}\n**映射键**: {mapping_key}\n**KOL**: {kol_name or kol_record_id}\n**操作人**: {operator}",
                 "green",
             ),
-            which="app3",
+            which=feishu.kol_callback_identity(event),
         )
     return {
         "ok": True,

@@ -1324,7 +1324,7 @@ class LaunchDailyReportTests(unittest.TestCase):
         api = AsyncMock(return_value={"data": {"message_id": "om1"}})
         with patch.object(feishu, "api", new=api):
             asyncio.run(feishu.send_card_message(
-                "open_id", "ou_test", card, format_title=False, message_uuid="stable-uuid",
+                "union_id", "on_test", card, format_title=False, message_uuid="stable-uuid",
             ))
         body = api.await_args.args[2]
         sent = json.loads(body["content"])
@@ -1336,7 +1336,7 @@ class LaunchDailyReportTests(unittest.TestCase):
             "elements": [],
         }
         with patch.object(feishu, "api", new=api):
-            asyncio.run(feishu.send_card_message("open_id", "ou_test", original))
+            asyncio.run(feishu.send_card_message("union_id", "on_test", original))
         body = api.await_args.args[2]
         sent = json.loads(body["content"])
         self.assertTrue(sent["header"]["title"]["content"].startswith("🟠 [KOL·P1]"))

@@ -150,8 +150,6 @@ def _section(spec: dict, c: dict) -> list:
 def validate_delivery(delivery_identity: str, frankie_only: bool) -> None:
     if delivery_identity not in ("legacy", "kol_assistant"):
         raise ValueError(f"unsupported delivery_identity: {delivery_identity}")
-    if delivery_identity == "kol_assistant" and not frankie_only:
-        raise ValueError("KOL媒体助手 R7 只允许 Frankie-only 发送")
     if delivery_identity == "legacy" and frankie_only:
         raise ValueError("legacy 发送路径不支持 Frankie-only 标记")
 
@@ -187,7 +185,7 @@ async def run(dry_run: bool = False, *, delivery_identity: str = "legacy",
     }
     message_ids = []
     if not dry_run:
-        if delivery_identity == "kol_assistant":
+        if delivery_identity == "kol_assistant" and frankie_only:
             message_id = await kol_assistant.send_card_to_frankie(
                 card,
                 message_uuid=f"kol-completion-{today.replace('-', '')}-frankie-r7",

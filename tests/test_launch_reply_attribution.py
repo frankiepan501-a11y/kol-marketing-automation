@@ -346,7 +346,7 @@ class LaunchReplyAttributionTests(unittest.TestCase):
         self.assertTrue(result["items"][0]["patched_existing_card"])
         patch_card.assert_awaited_once()
         self.assertEqual("om_existing", patch_card.await_args.args[0])
-        self.assertEqual("app3", patch_card.await_args.kwargs["which"])
+        self.assertEqual("kol_assistant", patch_card.await_args.kwargs["which"])
         send_card.assert_not_awaited()
 
     def test_refresh_mode_never_sends_when_existing_card_id_is_missing(self):

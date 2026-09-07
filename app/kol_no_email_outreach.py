@@ -701,7 +701,7 @@ async def handle_callback(event: dict) -> dict:
                     action=existing_action, operator=operator,
                     campaign_id=campaign_id, email=existing_email,
                 ),
-                which="app3",
+                which=feishu.kol_callback_identity(event),
             )
         return {
             "ok": True, "idempotent": True, "conflict_ignored": True,
@@ -715,7 +715,7 @@ async def handle_callback(event: dict) -> dict:
             await feishu.update_card_message_with_app(
                 msg_id,
                 build_processed_card(action=action, operator=operator, campaign_id=campaign_id, email=email),
-                which="app3",
+                which=feishu.kol_callback_identity(event),
             )
         return {
             "ok": True, "idempotent": True, "kol_record_id": kol_record_id,
@@ -735,7 +735,7 @@ async def handle_callback(event: dict) -> dict:
         await feishu.update_card_message_with_app(
             msg_id,
             build_processed_card(action=action, operator=operator, campaign_id=campaign_id, email=email),
-            which="app3",
+            which=feishu.kol_callback_identity(event),
         )
     return {
         "ok": True, "idempotent": False, "kol_record_id": kol_record_id,

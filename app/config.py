@@ -46,6 +46,25 @@ FEISHU_NOTIFY_APP_SECRET = env("FEISHU_NOTIFY_APP_SECRET", required=True)
 # ⚠️ repo 公开, secret 只能走 env, 不硬编码默认值.
 FEISHU_APP3_ID = env("FEISHU_APP3_ID", required=True)
 FEISHU_APP3_SECRET = env("FEISHU_APP3_SECRET", required=True)
+# KOL媒体助手（R8 统一承接 KOL Base、通知、交互卡与回调）。
+# R8 仍保留旧 1/2/3 号配置作为历史卡片回退；R9 才删除旧依赖。
+FEISHU_KOL_ASSISTANT_APP_ID = env("FEISHU_KOL_ASSISTANT_APP_ID", "")
+FEISHU_KOL_ASSISTANT_APP_SECRET = env("FEISHU_KOL_ASSISTANT_APP_SECRET", "")
+KOL_ASSISTANT_FRANKIE_UNION_ID = env("KOL_ASSISTANT_FRANKIE_UNION_ID", "")
+KOL_FEISHU_BASE_ENABLED = (env("KOL_FEISHU_BASE_ENABLED", "0") or "0").lower() in {
+    "1", "true", "yes", "on",
+}
+KOL_FEISHU_CARDS_ENABLED = (env("KOL_FEISHU_CARDS_ENABLED", "0") or "0").lower() in {
+    "1", "true", "yes", "on",
+}
+KOL_CALLBACK_ENABLED = (env("KOL_CALLBACK_ENABLED", "0") or "0").lower() in {
+    "1", "true", "yes", "on",
+}
+KOL_EVENT_HUB_URL = env(
+    "KOL_EVENT_HUB_URL",
+    "https://frankiepan501.zeabur.app/webhook/feishu-event-hub",
+)
+KOL_CALLBACK_SPOOL_PATH = env("KOL_CALLBACK_SPOOL_PATH", "/tmp/kol_callback_spool.jsonl")
 # 外贸助手 App (B2B 客户/邮件/LinkedIn 回执卡; 回调回到 b2b-assistant-event)
 FEISHU_B2B_ASSISTANT_APP_ID = env("FEISHU_B2B_ASSISTANT_APP_ID", required=True)
 FEISHU_B2B_ASSISTANT_APP_SECRET = env("FEISHU_B2B_ASSISTANT_APP_SECRET", required=True)

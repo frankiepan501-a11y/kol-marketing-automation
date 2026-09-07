@@ -2,14 +2,14 @@
 """卡片重发端点 - 看板"📨 回到飞书操作"按钮触发.
 
 背景: 飞书 applink 不支持 openMessageId (官方文档+实测确认), 程序化拼 URL 跳到
-特定消息位置不可行. 改走"撤老卡 + 重发卡到私聊底部"路径 — 重发的卡总是出现在
+特定消息位置不可行. 改走"旧卡置灰 + 重发卡到私聊底部"路径 — 重发的卡总是出现在
 最底部 + 永远是最新状态(从 storage 重建).
 
 流程:
   1. 拉草稿, 判终态(已发送/已否决/退回重生/自动通过 → 拒)
-  2. 撤老卡 (DELETE /im/v1/messages/{老 msg_id}, best-effort 失败忽略)
+  2. PATCH 老卡为不可操作的灰卡（best-effort 失败忽略）
   3. 按 source 重建对应卡 (warm_recap/ship_tracking/review_action), 复用现有 builders
-  4. send_card_via_app3 重发给 operator → 拿新 msg_id
+  4. 通过 R8 兼容入口由 KOL媒体助手重发给 operator → 拿新 msg_id
   5. 更新「卡片个人消息IDs」JSON + 「关联运营」User 字段
 
 不发邮件; 仅 IM 卡片操作; fail-safe.
@@ -155,16 +155,30 @@ async def run(draft_rid: str, operator_open_id: str = "",
         return {"ok": True, "dry_run": True, "status": status,
                 "would_resend_to": op_union, "would_revoke": old_msg_id or None}
 
-    # 4. 撤老卡 (best-effort)
+    # 4. 把老卡 PATCH 成不可操作的灰卡。KOL媒体助手没有删除消息权限，
+    #    同 App PATCH 可避免留下两个都能点击的操作入口；历史 App 3 卡走有界回退。
     revoked = False
     if old_msg_id:
         try:
-            await feishu.api("DELETE", f"/im/v1/messages/{old_msg_id}", which="app3")
-            revoked = True
-            print(f"[card_resend] revoked old msg {old_msg_id} → {op_union}")
+            tombstone = {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "template": "grey",
+                    "title": {"tag": "plain_text", "content": "✅ [已重发] 请使用最新卡片"},
+                },
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": "旧卡已失效；最新卡片已发送到会话底部。"},
+                }],
+            }
+            revoked = await feishu.update_kol_card(old_msg_id, tombstone)
+            if revoked:
+                print(f"[card_resend] invalidated old msg {old_msg_id} → {op_union}")
+            else:
+                print("[card_resend] invalidate old card failed for both R8 owners (ignored)")
         except Exception as e:
-            # 老卡可能已撤过/超时/被删, 不影响重发
-            print(f"[card_resend] revoke old fail (ignored): {e}")
+            # 旧卡置灰失败不影响重发；调用方仍会拿到新卡 message_id。
+            print(f"[card_resend] invalidate old fail (ignored): {e}")
 
     # 5. 重建卡 + 重发
     try:

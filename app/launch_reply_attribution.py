@@ -510,7 +510,7 @@ async def handle_callback(event: dict) -> dict:
                     operator=_text(fields.get("活动归属确认人")) or operator,
                     no_campaign=current_status == STATUS_NONE,
                 ),
-                which="app3",
+                which=feishu.kol_callback_identity(event),
             )
         return {
             "ok": True, "idempotent": True, "reply_record_id": reply_record_id,
@@ -535,7 +535,7 @@ async def handle_callback(event: dict) -> dict:
                 operator=operator,
                 no_campaign=no_campaign,
             ),
-            which="app3",
+            which=feishu.kol_callback_identity(event),
         )
     return {
         "ok": True, "idempotent": False, "reply_record_id": reply_record_id,
@@ -708,8 +708,8 @@ async def scan_and_send(
                 item["dry_run_card"] = card
                 item["would_patch_existing_card"] = True
             else:
-                item["patched_existing_card"] = await feishu.update_card_message_with_app(
-                    case["card_message_id"], card, which="app3",
+                item["patched_existing_card"] = await feishu.update_kol_card(
+                    case["card_message_id"], card,
                 )
             items.append(item)
             continue

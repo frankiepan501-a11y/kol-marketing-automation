@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import AsyncMock
 
 from app import main
 
@@ -13,6 +14,8 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
         self._orig_regen = main.draft_regen.regen_draft
         self._orig_card_update = main.feishu.update_card_message_with_app
         self._orig_card_send = main.feishu.send_card_via_app3
+        self._orig_card_send_message = main.feishu.send_card_message
+        self._orig_open_id_to_union_id = main.feishu.open_id_to_union_id
         self._orig_alert = main._alert_endpoint_failure
 
     async def test_health_reports_kol_ai_unconfigured(self):
@@ -54,6 +57,8 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
         main.draft_regen.regen_draft = self._orig_regen
         main.feishu.update_card_message_with_app = self._orig_card_update
         main.feishu.send_card_via_app3 = self._orig_card_send
+        main.feishu.send_card_message = self._orig_card_send_message
+        main.feishu.open_id_to_union_id = self._orig_open_id_to_union_id
         main._alert_endpoint_failure = self._orig_alert
         main.config.KOL_DEEPSEEK_API_KEY = self._orig_kol_key
         main._draft_regen_jobs.clear()
@@ -219,6 +224,7 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
             feedback="make it warmer",
             message_id="om_test",
             approver="测试人",
+            delivery_identity="kol_assistant",
             authorization="Bearer test-token",
         )
         for _ in range(50):
@@ -229,7 +235,7 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(updates))
         message_id, card, which = updates[0]
         self.assertEqual("om_test", message_id)
-        self.assertEqual("app3", which)
+        self.assertEqual("kol_assistant", which)
         self.assertEqual("green", card["header"]["template"])
         self.assertIn("重生完成", card["header"]["title"]["content"])
         self.assertIn("rec_new", card["elements"][0]["text"]["content"])
@@ -252,6 +258,7 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
             feedback="make it warmer",
             message_id="om_test",
             approver="测试人",
+            delivery_identity="kol_assistant",
             authorization="Bearer test-token",
         )
         for _ in range(50):
@@ -262,7 +269,7 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("done_with_issue", main._draft_regen_jobs[response["job_id"]]["status"])
         self.assertEqual(1, len(updates))
         _, card, which = updates[0]
-        self.assertEqual("app3", which)
+        self.assertEqual("kol_assistant", which)
         self.assertEqual("red", card["header"]["template"])
         self.assertIn("重生失败", card["header"]["title"]["content"])
         self.assertIn("KOL AI 配置缺失", card["elements"][0]["text"]["content"])
@@ -289,6 +296,7 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
             feedback="",
             message_id="om_test",
             approver="测试人",
+            delivery_identity="kol_assistant",
             authorization="Bearer test-token",
         )
         for _ in range(50):
@@ -299,7 +307,7 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("error", main._draft_regen_jobs[response["job_id"]]["status"])
         self.assertEqual(1, len(updates))
         _, card, which = updates[0]
-        self.assertEqual("app3", which)
+        self.assertEqual("kol_assistant", which)
         self.assertEqual("red", card["header"]["template"])
         self.assertIn("重生失败", card["header"]["title"]["content"])
 
@@ -314,19 +322,21 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
             update_calls.append((message_id, which))
             return False
 
-        async def fake_send(receive_type, receive_id, card):
-            fallback_calls.append((receive_type, receive_id, card))
+        async def fake_send(receive_type, receive_id, card, **kwargs):
+            fallback_calls.append((receive_type, receive_id, card, kwargs))
             return "om_fallback"
 
         main.draft_regen.regen_draft = fake_regen
         main.feishu.update_card_message_with_app = fake_update
-        main.feishu.send_card_via_app3 = fake_send
+        main.feishu.send_card_message = fake_send
+        main.feishu.open_id_to_union_id = AsyncMock(return_value="on_test")
 
         response = await main.run_draft_regen(
             record_id="rec_old",
             feedback="",
             message_id="om_test",
             operator_open_id="ou_test",
+            delivery_identity="kol_assistant",
             authorization="Bearer test-token",
         )
         for _ in range(50):
@@ -337,6 +347,7 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
         job = main._draft_regen_jobs[response["job_id"]]
         self.assertEqual(2, len(update_calls))
         self.assertEqual(1, len(fallback_calls))
-        self.assertEqual(("open_id", "ou_test"), fallback_calls[0][:2])
+        self.assertEqual(("union_id", "on_test"), fallback_calls[0][:2])
+        self.assertEqual("kol_assistant", fallback_calls[0][3]["which"])
         self.assertFalse(job["card_updated"])
         self.assertEqual("om_fallback", job["fallback_message_id"])
