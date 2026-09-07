@@ -80,6 +80,9 @@ _relabel_profile_jobs = {}
 _RELABEL_PROFILE_JOB_TTL = 24 * 3600
 _auto_send_jobs = {}
 _AUTO_SEND_JOB_TTL = 24 * 3600
+_reply_monitor_jobs = {}
+_REPLY_MONITOR_JOB_TTL = 24 * 3600
+_REPLY_MONITOR_JOB_TIMEOUT = 10 * 60
 _draft_cleanup_jobs = {}
 _DRAFT_CLEANUP_JOB_TTL = 24 * 3600
 
@@ -1186,17 +1189,122 @@ async def get_b2b_linkedin_auto_pool_job(job_id: str, authorization: str = Heade
     return {"ok": True, "job_id": job_id, **job}
 
 
-@app.post("/reply-monitor/run")
-async def run_reply_monitor(authorization: str = Header(default="")):
-    """扫 partner@ 收件箱新回复 → DeepSeek 分类 → 更新数据库 → 飞书通知 + 生成回复草稿"""
-    _check_auth(authorization)
+def _prune_reply_monitor_jobs() -> None:
+    now = time.time()
+    for job_id in list(_reply_monitor_jobs):
+        started = _reply_monitor_jobs[job_id].get("started_ts", 0)
+        if started and now - started > _REPLY_MONITOR_JOB_TTL:
+            _reply_monitor_jobs.pop(job_id, None)
+
+
+def _running_reply_monitor_job():
+    _prune_reply_monitor_jobs()
+    for job_id, job in _reply_monitor_jobs.items():
+        if job.get("status") == "running":
+            return job_id, job
+    return "", None
+
+
+async def _run_reply_monitor_job(job_id: str, *, brand: str = "", sender: str = "") -> None:
     try:
-        result = await reply_monitor.run()
-        return {"ok": True, **result}
+        if brand or sender:
+            work = reply_monitor.run(only_brand=brand, only_sender=sender)
+        else:
+            work = reply_monitor.run()
+        result = await asyncio.wait_for(work, timeout=_REPLY_MONITOR_JOB_TIMEOUT)
+        _reply_monitor_jobs[job_id].update(
+            status="success",
+            finished_at=datetime_now_string(),
+            result={"ok": True, **result},
+        )
+    except asyncio.TimeoutError:
+        error = f"reply monitor exceeded {_REPLY_MONITOR_JOB_TIMEOUT} seconds"
+        _reply_monitor_jobs[job_id].update(
+            status="error",
+            finished_at=datetime_now_string(),
+            error=error,
+        )
+        await _alert_endpoint_failure("/reply-monitor/run", error, "")
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
+        _reply_monitor_jobs[job_id].update(
+            status="error",
+            finished_at=datetime_now_string(),
+            error=str(e),
+            trace=tr,
+        )
         await _alert_endpoint_failure("/reply-monitor/run", str(e), tr)
-        return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/reply-monitor/run")
+async def run_reply_monitor(
+    authorization: str = Header(default=""),
+    async_mode: bool = True,
+    brand: str = "",
+    sender: str = "",
+):
+    """扫描 KOL/媒体回复；brand+sender 可把生产回放收窄为单一发件人。"""
+    _check_auth(authorization)
+    brand = (brand or "").strip().upper()
+    raw_sender = (sender or "").strip()
+    sender = reply_monitor.parse_email(raw_sender)
+    if raw_sender and not sender:
+        raise HTTPException(400, "sender must be a valid email address")
+    if bool(brand) != bool(sender):
+        raise HTTPException(400, "brand and sender must be provided together for a bounded replay")
+    if brand and brand not in config.BRAND_CONFIG:
+        raise HTTPException(400, "unknown brand")
+    if not async_mode:
+        try:
+            if brand or sender:
+                result = await reply_monitor.run(only_brand=brand, only_sender=sender)
+            else:
+                result = await reply_monitor.run()
+            return {"ok": True, **result}
+        except Exception as e:
+            tr = _tb.format_exc()[-1000:]
+            await _alert_endpoint_failure("/reply-monitor/run", str(e), tr)
+            return {"ok": False, "error": str(e), "trace": tr}
+
+    running_id, running_job = _running_reply_monitor_job()
+    if running_job:
+        requested_scope = {"brand": brand, "sender": sender} if brand else {}
+        if running_job.get("scope", {}) != requested_scope:
+            raise HTTPException(409, "reply monitor is already running with a different scope")
+        return {
+            "ok": True,
+            "accepted": True,
+            "already_running": True,
+            "job_id": running_id,
+            "status": "running",
+        }
+
+    job_id = "replymonitor-" + uuid.uuid4().hex[:12]
+    _reply_monitor_jobs[job_id] = {
+        "status": "running",
+        "started_ts": time.time(),
+        "started_at": datetime_now_string(),
+        "scope": {"brand": brand, "sender": sender} if brand else {},
+    }
+    asyncio.create_task(_run_reply_monitor_job(job_id, brand=brand, sender=sender))
+    return {
+        "ok": True,
+        "accepted": True,
+        "already_running": False,
+        "job_id": job_id,
+        "status": "running",
+    }
+
+
+@app.get("/reply-monitor/jobs/{job_id}")
+async def get_reply_monitor_job(job_id: str, authorization: str = Header(default="")):
+    _check_auth(authorization)
+    _prune_reply_monitor_jobs()
+    job = _reply_monitor_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "reply monitor job not found")
+    public = {k: v for k, v in job.items() if k not in {"started_ts", "trace"}}
+    return {"ok": True, "job_id": job_id, **public}
 
 
 @app.post("/keyword-supply/run")

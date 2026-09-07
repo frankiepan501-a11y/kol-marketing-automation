@@ -540,9 +540,17 @@ async def notify_all(card, draft_rid: str = None):
         await feishu.mark_card_receipt(draft_rid, success, fail, errors, group_msg_id=group_msg_id)
 
 
-async def run():
+async def run(only_brand: str = "", only_sender: str = ""):
+    """Scan inbox replies, optionally narrowing one replay to one brand/sender.
+
+    The filters are deliberately exact. They provide a bounded production replay
+    path without changing the normal scheduled scan when both are empty.
+    """
     processed = 0
     results = []
+    replay_match_count = 0
+    only_brand = (only_brand or "").strip().upper()
+    only_sender = parse_email(only_sender or "").lower()
     # Plan A v3 (2026-05-19): 每次 run() 入口强制刷新 _get_sent_drafts cache。
     # A4 的 5min cache 本意是"一轮 cron 内多 sender 共用 1 次全表扫"(轮内有效),
     # 但跨轮 stale → 上一轮 line 381 写的 [MID:] 对本轮 dedup 不可见 → 同一封
@@ -568,10 +576,14 @@ async def run():
         return ""
 
     for brand in config.BRAND_CONFIG.keys():   # 2026-06-08 配置驱动: 自动含白牌, 扫白牌收件箱
+        if only_brand and brand.upper() != only_brand:
+            continue
         primary_alias = config.BRAND_CONFIG[brand]["alias_from"]
         try:
             raw = await zoho.list_inbox(brand, per_folder=60)
         except Exception as e:
+            if only_sender:
+                raise RuntimeError(f"bounded replay inbox read failed for {brand}: {e}") from e
             results.append({"brand": brand, "error": str(e)[:200]})
             continue
         msgs_tagged = [(m, _our_addr_in_to(m)) for m in raw]   # via_alias = 我方收件地址
@@ -590,6 +602,13 @@ async def run():
                 continue
             _newest[_fa] = (_m, _al)
         msgs = list(_newest.values())
+        if only_sender:
+            msgs = [
+                pair for pair in msgs
+                if parse_email(pair[0].get("fromAddress") or pair[0].get("sender") or "").lower()
+                == only_sender
+            ]
+            replay_match_count += len(msgs)
 
         for msg, via_alias in msgs:
             from_addr = parse_email(msg.get("fromAddress") or msg.get("sender") or "")
@@ -649,7 +668,12 @@ async def run():
                 )
             if already_seen:
                 print(f"[reply_monitor] dedup: skip {from_addr} (msgid={msg_id} body_head={new_body_key[:60]!r})")
-                results.append({"brand": brand, "from": from_addr, "skipped": "duplicate_body"})
+                results.append({
+                    "brand": brand,
+                    "from": from_addr,
+                    "message_id": msg_id,
+                    "skipped": "duplicate_body",
+                })
                 continue
 
             # === OOO 自动回复检测 (在 AI 分类前) ===
@@ -916,5 +940,18 @@ async def run():
                 print(f"[reply_monitor] draft_reply fail: {e}")
 
             processed += 1
+            results.append({
+                "brand": brand,
+                "from": from_addr,
+                "message_id": msg_id,
+                "status": "processed",
+            })
 
-    return {"processed": processed, "results": results}
+    if only_sender and replay_match_count != 1:
+        raise ValueError(
+            f"bounded replay matched {replay_match_count} messages for {only_brand}/{only_sender}"
+        )
+    response = {"processed": processed, "results": results}
+    if only_sender:
+        response["replay_match_count"] = replay_match_count
+    return response
