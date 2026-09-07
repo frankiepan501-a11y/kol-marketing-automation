@@ -188,6 +188,17 @@ class KolR8CallbackTests(unittest.TestCase):
         self.assertTrue(result["queued"])
         spool.assert_called_once()
 
+    def test_snapshot_reports_initial_websocket_connection(self):
+        connection = SimpleNamespace(state="idle", ready=False, reconnect_attempts=0)
+        channel = SimpleNamespace(
+            _ws_client=SimpleNamespace(_conn=object()),
+            connection_snapshot=lambda: connection,
+        )
+        with patch.object(kol_callback, "_CHANNEL", channel):
+            result = kol_callback.snapshot()
+        self.assertEqual("connected", result["connection"])
+        self.assertTrue(result["ready"])
+
 
 if __name__ == "__main__":
     unittest.main()

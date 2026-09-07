@@ -284,7 +284,18 @@ def snapshot() -> dict:
     if _CHANNEL is not None:
         try:
             conn = _CHANNEL.connection_snapshot()
-            out.update(connection=conn.state, ready=conn.ready, reconnect_attempts=conn.reconnect_attempts)
+            # lark-channel-sdk 1.4.0 marks the public snapshot ready only after
+            # ``Client.start()`` returns. In websocket mode that call blocks
+            # for the lifetime of the connection, so the first successful
+            # connection otherwise appears as ``idle`` forever. The transport
+            # connection is set only after the websocket handshake succeeds.
+            ws_client = getattr(_CHANNEL, "_ws_client", None)
+            transport_connected = getattr(ws_client, "_conn", None) is not None
+            out.update(
+                connection="connected" if transport_connected else conn.state,
+                ready=bool(conn.ready or transport_connected),
+                reconnect_attempts=conn.reconnect_attempts,
+            )
         except Exception:
             pass
     return out
