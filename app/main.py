@@ -578,6 +578,10 @@ async def health():
     return {
         "status": "ok" if kol_ai_configured else "degraded",
         "kol_ai_configured": kol_ai_configured,
+        "kol_feishu_migration": {
+            "base_enabled": config.KOL_FEISHU_BASE_ENABLED,
+            "cards_enabled": config.KOL_FEISHU_CARDS_ENABLED,
+        },
         "kol_assistant_callback": kol_callback.snapshot(),
         "dtc_weekly_ai_configured": bool(os.environ.get("DTC_WEEKLY_DEEPSEEK_API_KEY", "").strip()),
     }
