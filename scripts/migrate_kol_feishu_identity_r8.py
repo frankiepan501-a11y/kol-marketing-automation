@@ -31,9 +31,9 @@ def _target_token_body() -> str:
     return (
         "={{ { \"app_id\": $env.KOL_FEISHU_BASE_ENABLED === \"1\" ? $env."
         + KOL_APP_ID_ENV
-        + " : $env.FEISHU_APP_ID, \"app_secret\": $env.KOL_FEISHU_BASE_ENABLED === \"1\" ? $env."
+        + " : $env.FEISHU_KOL_LEGACY_BITABLE_APP_ID, \"app_secret\": $env.KOL_FEISHU_BASE_ENABLED === \"1\" ? $env."
         + KOL_APP_SECRET_ENV
-        + " : $env.FEISHU_APP_SECRET } }}"
+        + " : $env.FEISHU_KOL_LEGACY_BITABLE_APP_SECRET } }}"
     )
 
 
@@ -117,17 +117,24 @@ def patch_influencer_sync(workflow: dict) -> list[str]:
 def patch_phase2(workflow: dict) -> list[str]:
     node = _node(workflow, "Insert Crawl Task (Phase 2)")
     code = node["parameters"]["jsCode"]
-    replacement = (
-        "const USE_KOL_ASSISTANT=$env.KOL_FEISHU_BASE_ENABLED === '1';\n"
-        f"const APP_ID=USE_KOL_ASSISTANT ? $env.{KOL_APP_ID_ENV} : $env.FEISHU_APP_ID, "
-        f"APP_SECRET=USE_KOL_ASSISTANT ? $env.{KOL_APP_SECRET_ENV} : $env.FEISHU_APP_SECRET;"
+    app_line = (
+        f"const APP_ID=USE_KOL_ASSISTANT ? $env.{KOL_APP_ID_ENV} : $env.FEISHU_KOL_LEGACY_BITABLE_APP_ID, "
+        f"APP_SECRET=USE_KOL_ASSISTANT ? $env.{KOL_APP_SECRET_ENV} : $env.FEISHU_KOL_LEGACY_BITABLE_APP_SECRET;"
     )
-    updated = _replace_line(
-        code,
-        r"^const APP_ID=\$env\.FEISHU_KOL_ASSISTANT_APP_ID, APP_SECRET=\$env\.FEISHU_KOL_ASSISTANT_APP_SECRET;$",
-        replacement,
-        "phase2 credentials",
-    )
+    if "const USE_KOL_ASSISTANT=" in code:
+        updated = _replace_line(
+            code,
+            r"^const APP_ID=USE_KOL_ASSISTANT \? \$env\.FEISHU_KOL_ASSISTANT_APP_ID : \$env\.FEISHU_APP_ID, APP_SECRET=USE_KOL_ASSISTANT \? \$env\.FEISHU_KOL_ASSISTANT_APP_SECRET : \$env\.FEISHU_APP_SECRET;$",
+            app_line,
+            "phase2 explicit legacy credentials",
+        )
+    else:
+        updated = _replace_line(
+            code,
+            r"^const APP_ID=\$env\.FEISHU_KOL_ASSISTANT_APP_ID, APP_SECRET=\$env\.FEISHU_KOL_ASSISTANT_APP_SECRET;$",
+            "const USE_KOL_ASSISTANT=$env.KOL_FEISHU_BASE_ENABLED === '1';\n" + app_line,
+            "phase2 credentials",
+        )
     if updated == code:
         return []
     node["parameters"]["jsCode"] = updated
@@ -137,17 +144,18 @@ def patch_phase2(workflow: dict) -> list[str]:
 def patch_media_discovery(workflow: dict) -> list[str]:
     node = _node(workflow, "Discover Media")
     code = node["parameters"]["jsCode"]
+    use_line = "const USE_KOL_ASSISTANT=$env.KOL_FEISHU_BASE_ENABLED === '1';"
+    updated = code.replace(use_line + "\n" + use_line, use_line, 1)
     updated = _replace_once(
-        code,
-        "const FEISHU_APP_ID=$env.FEISHU_KOL_ASSISTANT_APP_ID;",
-        "const USE_KOL_ASSISTANT=$env.KOL_FEISHU_BASE_ENABLED === '1';\n"
-        f"const FEISHU_APP_ID=USE_KOL_ASSISTANT ? $env.{KOL_APP_ID_ENV} : $env.FEISHU_APP_ID;",
+        updated,
+        "const FEISHU_APP_ID=USE_KOL_ASSISTANT ? $env.FEISHU_KOL_ASSISTANT_APP_ID : $env.FEISHU_APP_ID;",
+        f"const FEISHU_APP_ID=USE_KOL_ASSISTANT ? $env.{KOL_APP_ID_ENV} : $env.FEISHU_KOL_LEGACY_BITABLE_APP_ID;",
         "media app id",
     )
     updated = _replace_once(
         updated,
-        "const FEISHU_APP_SECRET=$env.FEISHU_KOL_ASSISTANT_APP_SECRET;",
-        f"const FEISHU_APP_SECRET=USE_KOL_ASSISTANT ? $env.{KOL_APP_SECRET_ENV} : $env.FEISHU_APP_SECRET;",
+        "const FEISHU_APP_SECRET=USE_KOL_ASSISTANT ? $env.FEISHU_KOL_ASSISTANT_APP_SECRET : $env.FEISHU_APP_SECRET;",
+        f"const FEISHU_APP_SECRET=USE_KOL_ASSISTANT ? $env.{KOL_APP_SECRET_ENV} : $env.FEISHU_KOL_LEGACY_BITABLE_APP_SECRET;",
         "media app secret",
     )
     updated = _replace_line(
@@ -212,6 +220,33 @@ def _patch_handler(code: str, *, has_base_token: bool, helper: str) -> str:
     return "\n".join(lines)
 
 
+def _patch_parse_message(code: str) -> str:
+    marker = "const kolR8Key = cardAction._kol_idempotency_key || '';"
+    if marker in code:
+        return code
+    guard = """const kolR8Key = cardAction._kol_idempotency_key || '';
+  if (kolR8Key) {
+    const state = $getWorkflowStaticData('global');
+    const now = Date.now();
+    state.kolR8Seen = state.kolR8Seen || {};
+    for (const [key, seenAt] of Object.entries(state.kolR8Seen)) {
+      if (now - Number(seenAt || 0) > 7 * 24 * 3600 * 1000) delete state.kolR8Seen[key];
+    }
+    if (state.kolR8Seen[kolR8Key]) {
+      return [{ json: { command: 'kol_r8_duplicate', duplicate: true, idempotency_key: kolR8Key } }];
+    }
+    state.kolR8Seen[kolR8Key] = now;
+  }
+
+  """
+    return _replace_once(
+        code,
+        "  const actionName = cardAction.action || '';",
+        guard + "const actionName = cardAction.action || '';",
+        "event hub KOL idempotency gate",
+    )
+
+
 def patch_event_hub(workflow: dict) -> list[str]:
     changes = []
     for name, has_base, helper in (
@@ -233,6 +268,12 @@ def patch_event_hub(workflow: dict) -> list[str]:
         if updated != code:
             node["parameters"]["jsCode"] = updated
             changes.append(name)
+    parse_node = _node(workflow, "Parse Message")
+    parse_code = parse_node["parameters"]["jsCode"]
+    parse_updated = _patch_parse_message(parse_code)
+    if parse_updated != parse_code:
+        parse_node["parameters"]["jsCode"] = parse_updated
+        changes.append("Parse Message")
     return changes
 
 

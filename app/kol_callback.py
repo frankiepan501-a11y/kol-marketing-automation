@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import os
 import threading
@@ -52,14 +53,36 @@ def is_allowed_action(action: str) -> bool:
     return action in _EXACT_ACTIONS or action.startswith(_ACTION_PREFIXES)
 
 
+def callback_idempotency_key(event) -> str:
+    raw = getattr(event, "raw", None)
+    if isinstance(raw, dict):
+        header = raw.get("header") or {}
+        event_id = str(header.get("event_id") or raw.get("event_id") or "").strip()
+        if event_id:
+            return "feishu:" + event_id
+    stable = {
+        "message_id": getattr(event, "message_id", "") or "",
+        "chat_id": getattr(event, "chat_id", "") or "",
+        "operator_open_id": getattr(getattr(event, "operator", None), "open_id", "") or "",
+        "action_value": _action_value(event),
+        "form_value": getattr(getattr(event, "action", None), "form_value", None) or {},
+    }
+    raw_key = json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "derived:" + hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
 def build_event_hub_payload(event) -> dict:
     value = _action_value(event)
     value["_delivery_identity"] = "kol_assistant"
+    value["_kol_idempotency_key"] = callback_idempotency_key(event)
     form_value = getattr(getattr(event, "action", None), "form_value", None)
     if not isinstance(form_value, dict):
         form_value = {}
     return {
-        "header": {"event_type": "card.action.trigger"},
+        "header": {
+            "event_type": "card.action.trigger",
+            "event_id": value["_kol_idempotency_key"],
+        },
         "event": {
             "action": {"value": value, "form_value": copy.deepcopy(form_value)},
             "context": {
@@ -115,6 +138,7 @@ def _read_spool() -> list[dict]:
         if not path.exists():
             return []
         rows = []
+        bad_lines = []
         for index, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
             try:
                 row = json.loads(line)
@@ -122,7 +146,13 @@ def _read_spool() -> list[dict]:
                     row.setdefault("queue_id", f"legacy-{row.get('queued_at', 0)}-{index}")
                     rows.append(row)
             except (json.JSONDecodeError, AttributeError):
-                continue
+                bad_lines.append(line)
+        if bad_lines:
+            deadletter = path.with_suffix(path.suffix + ".deadletter")
+            with deadletter.open("a", encoding="utf-8") as handle:
+                for line in bad_lines:
+                    handle.write(json.dumps({"detected_at": int(time.time()), "raw": line}) + "\n")
+            STATE["error"] = f"deadletter:{len(bad_lines)}"
         return rows
 
 
@@ -140,6 +170,8 @@ def _remove_spool(queue_ids: set[str]) -> int:
                 if row.get("queue_id") not in queue_ids and isinstance(row.get("payload"), dict):
                     current.append(row)
             except (json.JSONDecodeError, AttributeError):
+                # _read_spool already copied malformed rows to the persistent
+                # dead-letter file; do not keep retrying an unreadable row.
                 continue
         if not current:
             path.unlink(missing_ok=True)
@@ -169,6 +201,8 @@ async def replay_spool_once() -> dict:
         except Exception:
             pass
     pending = await asyncio.to_thread(_remove_spool, delivered_ids)
+    if delivered and pending == 0:
+        STATE.update(last_relay_ok=True, error=None)
     return {"delivered": delivered, "pending": pending}
 
 

@@ -137,6 +137,7 @@ class KolR8CallbackTests(unittest.TestCase):
             chat_id="oc_test",
             operator=SimpleNamespace(open_id="ou_test"),
             action=SimpleNamespace(value={"action": action, "draft_record_id": "rec1"}, form_value={"note": "ok"}),
+            raw={"header": {"event_id": "evt_test_1"}},
         )
 
     def test_only_kol_actions_are_allowlisted(self):
@@ -150,8 +151,17 @@ class KolR8CallbackTests(unittest.TestCase):
         payload = kol_callback.build_event_hub_payload(self._event())
         self.assertEqual("card.action.trigger", payload["header"]["event_type"])
         self.assertEqual("kol_assistant", payload["event"]["action"]["value"]["_delivery_identity"])
+        self.assertEqual("feishu:evt_test_1", payload["event"]["action"]["value"]["_kol_idempotency_key"])
         self.assertEqual("om_test", payload["event"]["context"]["open_message_id"])
         self.assertEqual("ou_test", payload["event"]["operator"]["open_id"])
+
+    def test_derived_idempotency_key_is_stable_without_event_id(self):
+        event = self._event()
+        event.raw = {}
+        self.assertEqual(
+            kol_callback.callback_idempotency_key(event),
+            kol_callback.callback_idempotency_key(event),
+        )
 
     def test_relay_rejects_non_kol_action_without_http_call(self):
         sender = AsyncMock()

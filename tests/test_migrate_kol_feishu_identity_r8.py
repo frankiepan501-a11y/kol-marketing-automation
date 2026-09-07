@@ -34,6 +34,13 @@ class R8N8nMigrationTests(unittest.TestCase):
         self.assertIn("$env.FEISHU_KOL_ASSISTANT_APP_ID", updated)
         self.assertIn(": 'old3'", updated)
 
+    def test_event_hub_parse_claims_stable_click_key(self):
+        code = "if (data.event_type === 'card.action.trigger') {\n  const actionName = cardAction.action || '';\n}"
+        updated = module._patch_parse_message(code)
+        self.assertIn("_kol_idempotency_key", updated)
+        self.assertIn("$getWorkflowStaticData('global')", updated)
+        self.assertIn("kol_r8_duplicate", updated)
+
     def test_token_node_changes_only_named_kol_token(self):
         workflow = {
             "nodes": [
@@ -44,7 +51,7 @@ class R8N8nMigrationTests(unittest.TestCase):
         self.assertEqual(["HTTP — token KOL"], module._patch_token_node(workflow))
         self.assertEqual("old1", workflow["nodes"][0]["parameters"]["jsonBody"])
         self.assertIn("FEISHU_KOL_ASSISTANT_APP_ID", workflow["nodes"][1]["parameters"]["jsonBody"])
-        self.assertIn("FEISHU_APP_ID", workflow["nodes"][1]["parameters"]["jsonBody"])
+        self.assertIn("FEISHU_KOL_LEGACY_BITABLE_APP_ID", workflow["nodes"][1]["parameters"]["jsonBody"])
 
     def test_full_put_body_preserves_static_data(self):
         workflow = {
