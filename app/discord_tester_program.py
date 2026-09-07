@@ -447,7 +447,7 @@ def _step2_modal(token: str) -> dict:
             "title": "Step 2 Of 2 — Match And Preferences",
             "components": [
                 _text_input("purchase_profile", "Amazon, FUNLAB And Prime Profile", placeholder="COUNT=4-6; FUNLAB=YES; PRIME=YES", max_length=200),
-                _text_input("play_profile", "Weekly Play Profile", placeholder="SWITCH=6-10; PC=2-5; CROSS=YES", max_length=200),
+                _text_input("play_profile", "Weekly Play And Discovery Profile", placeholder="SWITCH=6-10; PC=2-5; CROSS=YES; SOURCE=INSTAGRAM", max_length=200),
                 _text_input("favorite_ips", "Favorite Game IPs Or Franchises", placeholder="Pokémon; Zelda; Mario (max 3)", max_length=240),
                 _text_input("usage", "Games, Platforms And Controllers", placeholder="Games + platform + controller examples", max_length=1500),
                 _text_input("priorities", "What Matters Most In Gaming Accessories?", placeholder="Comfort; low latency; durability (max 3)", max_length=180),
@@ -504,6 +504,20 @@ def _limited_list(value: str, label: str, *, item_max: int, total_max: int) -> t
     return result, ""
 
 
+def _application_source(value: str) -> str:
+    normalized = " ".join(value.strip().casefold().replace("_", " ").split())
+    aliases = {
+        "instagram": "Instagram", "ig": "Instagram",
+        "facebook": "Facebook", "fb": "Facebook",
+        "x": "X", "twitter": "X", "x twitter": "X",
+        "discord": "Discord",
+        "friend": "朋友推荐", "friends": "朋友推荐", "referral": "朋友推荐",
+        "朋友": "朋友推荐", "朋友推荐": "朋友推荐",
+        "other": "其他", "others": "其他", "其他": "其他",
+    }
+    return aliases.get(normalized, "")
+
+
 def _step2_values(values: dict[str, str]) -> tuple[dict, str]:
     purchase = _parse_pair_text(values.get("purchase_profile", ""))
     purchase_count = purchase.get("count", "").replace("–", "-").replace(" ", "")
@@ -525,6 +539,9 @@ def _step2_values(values: dict[str, str]) -> tuple[dict, str]:
     cross_raw = play.get("cross", "").casefold()
     if cross_raw not in {"yes", "no"}:
         return {}, "Use CROSS=YES or CROSS=NO."
+    source = _application_source(play.get("source", ""))
+    if not source:
+        return {}, "Use SOURCE=INSTAGRAM, FACEBOOK, X, DISCORD, FRIEND, or OTHER."
     favorite_ips, error = _limited_list(
         values.get("favorite_ips", ""), "game IP", item_max=80, total_max=240
     )
@@ -547,6 +564,7 @@ def _step2_values(values: dict[str, str]) -> tuple[dict, str]:
         "switch_hours": "Under 2" if switch_hours == "UNDER 2" else _HOUR_CANONICAL.get(switch_hours, switch_hours),
         "pc_hours": "Under 2" if pc_hours == "UNDER 2" else _HOUR_CANONICAL.get(pc_hours, pc_hours),
         "cross": cross_raw == "yes",
+        "source": source,
         "favorite_ips": favorite_ips,
         "usage": usage,
         "priorities": priorities,
@@ -640,6 +658,7 @@ def _application_fields(payload: dict, step1_state: str, step2: dict) -> tuple[d
         "Amazon Prime": step2["prime"],
         "Amazon购买次数": step2["purchase_count"],
         "Amazon购买品类": "",
+        "报名来源": step2["source"],
         "每周Switch游戏时长": step2["switch_hours"],
         "每周PC手柄时长": step2["pc_hours"],
         "游戏与手柄使用经验": step2["usage"],

@@ -91,7 +91,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         labels = [row["components"][0]["label"] for row in outcome.response["data"]["components"]]
         self.assertEqual([
             "Amazon, FUNLAB And Prime Profile",
-            "Weekly Play Profile",
+            "Weekly Play And Discovery Profile",
             "Favorite Game IPs Or Franchises",
             "Games, Platforms And Controllers",
             "What Matters Most In Gaming Accessories?",
@@ -113,7 +113,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
 
         outcome = await program.build_interaction_outcome(_modal_submit(await _open_step2_custom_id(), {
             "purchase_profile": "COUNT=4-6; FUNLAB=YES; PRIME=YES",
-            "play_profile": "SWITCH=6-10; PC=2-5; CROSS=YES",
+            "play_profile": "SWITCH=6-10; PC=2-5; CROSS=YES; SOURCE=INSTAGRAM",
             "favorite_ips": "Pokémon； Zelda, mario; POKÉMON",
             "usage": "Mario Kart World on Switch 2; Hades on Steam Deck; Nintendo Pro Controller",
             "priorities": "Comfort； low latency, durability; COMFORT",
@@ -126,6 +126,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["Switch 2", "Steam Deck"], ledger.saved["设备"])
         self.assertEqual("Pokémon; Zelda; mario", ledger.saved["喜爱游戏IP"])
         self.assertEqual("Comfort; low latency; durability", ledger.saved["配件关注点"])
+        self.assertEqual("Instagram", ledger.saved["报名来源"])
         self.assertEqual(ledger.saved["游戏与手柄使用经验"], ledger.saved["拟测试场景"])
         self.assertEqual("Switch + Steam Deck", ledger.saved["主测试路线"])
         for old_field in ("Amazon购买品类", "断连问题回答", "功能测试回答", "申请理由"):
@@ -142,7 +143,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
 
         outcome = await program.build_interaction_outcome(_modal_submit(await _open_step2_custom_id(), {
             "purchase_profile": "COUNT=1; FUNLAB=NO; PRIME=NO",
-            "play_profile": "SWITCH=2-5; PC=0; CROSS=NO",
+            "play_profile": "SWITCH=2-5; PC=0; CROSS=NO; SOURCE=DISCORD",
             "favorite_ips": "Mario", "usage": "Mario Kart 8 Deluxe on Switch",
             "priorities": "Comfort",
         }), signing_secret="test-secret", ledger=FailingLedger(), completion_notifier=notify)
@@ -155,7 +156,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         step2_custom_id = await _open_step2_custom_id(devices="Switch 2, PC Steam")
         outcome = await program.build_interaction_outcome(_modal_submit(step2_custom_id, {
             "purchase_profile": "COUNT=4-6; FUNLAB=YES; PRIME=YES",
-            "play_profile": "SWITCH=6-10; PC=2-5; CROSS=YES",
+            "play_profile": "SWITCH=6-10; PC=2-5; CROSS=YES; SOURCE=X",
             "favorite_ips": "Mario; Zelda",
             "usage": "Mario Kart World on Switch 2 and Rocket League on PC; Nintendo Pro and Xbox controllers",
             "priorities": "Low latency; comfort",
@@ -167,7 +168,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_preference_lists_reject_more_than_three_unique_items(self):
         outcome = await program.build_interaction_outcome(_modal_submit(await _open_step2_custom_id(), {
             "purchase_profile": "COUNT=2-3; FUNLAB=NO; PRIME=NO",
-            "play_profile": "SWITCH=2-5; PC=0; CROSS=NO",
+            "play_profile": "SWITCH=2-5; PC=0; CROSS=NO; SOURCE=DISCORD",
             "favorite_ips": "Mario; Zelda; Pokémon; Kirby",
             "usage": "Mario Kart 8 Deluxe on Switch", "priorities": "Comfort",
         }), signing_secret="test-secret")
@@ -210,7 +211,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         program._drafts.clear()
         outcome = await program.build_interaction_outcome(_modal_submit(custom_id, {
             "purchase_profile": "COUNT=1; FUNLAB=NO; PRIME=NO",
-            "play_profile": "SWITCH=2-5; PC=0; CROSS=NO",
+            "play_profile": "SWITCH=2-5; PC=0; CROSS=NO; SOURCE=DISCORD",
             "favorite_ips": "Mario", "usage": "Mario Kart 8 Deluxe on Switch",
             "priorities": "Comfort",
         }), signing_secret="test-secret", ledger=ledger)
@@ -237,7 +238,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
     def test_preference_boundaries_reject_empty_item_and_total_overflow(self):
         base = {
             "purchase_profile": "COUNT=2-3; FUNLAB=NO; PRIME=NO",
-            "play_profile": "SWITCH=2-5; PC=0; CROSS=NO",
+            "play_profile": "SWITCH=2-5; PC=0; CROSS=NO; SOURCE=DISCORD",
             "favorite_ips": "Mario", "usage": "Mario Kart 8 Deluxe on Switch",
             "priorities": "Comfort",
         }
@@ -279,6 +280,16 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
             {"purchase_count": "7+", "pc_hours": "10+", "cross": True},
         ))
 
+    def test_application_source_normalizes_supported_channels(self):
+        cases = {
+            "ig": "Instagram", "FACEBOOK": "Facebook", "twitter": "X",
+            "Discord": "Discord", "referral": "朋友推荐", "other": "其他",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(expected, program._application_source(raw))
+        self.assertEqual("", program._application_source("newsletter"))
+
     async def test_ledger_updates_same_record_for_same_user_and_batch(self):
         api = AsyncMock(side_effect=[
             {"code": 0, "data": {"items": []}},
@@ -309,7 +320,7 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         ledger = FakeLedger()
         payload = _modal_submit(await _open_step2_custom_id(), {
             "purchase_profile": "COUNT=1; FUNLAB=NO; PRIME=NO",
-            "play_profile": "SWITCH=2-5; PC=0; CROSS=NO",
+            "play_profile": "SWITCH=2-5; PC=0; CROSS=NO; SOURCE=DISCORD",
             "favorite_ips": "Mario", "usage": "Mario Kart 8 Deluxe on Switch",
             "priorities": "Comfort",
         })
