@@ -11,11 +11,14 @@
   🔄 进行中     = 其余已建联
 未发过信(未建联) 不计入任务统计。纯读 + 发卡, 不发邮件 / 不写主表。
 """
+import asyncio
 import time
 from . import config, feishu, kol_assistant
 from .feishu import ext, xrid
 
 D60 = 60 * 86400 * 1000
+REPORT_READ_TIMEOUT_SECONDS = 180
+DRAFT_FIELDS = ["关联KOL", "关联媒体人", "发送状态", "发送时间", "是否回复"]
 
 # KOL=带货上稿(affiliate) / 媒体人=earned media 报道. 成功口径+无回应阈值不同(方法论 reference-media-relations-playbook)
 SPECS = [
@@ -57,7 +60,28 @@ def _classify(cf: dict, last_send_ms: int, now_ms: int, spec: dict) -> str:
     return "未建联"
 
 
-async def _compute(spec: dict, drafts: list, now_ms: int) -> dict:
+def _contact_fields(spec: dict) -> list:
+    return [
+        spec["name"], spec["date"], "合作状态", "邮箱验真状态",
+        "上次寄样订单号", "寄样次数", "上次寄样日期",
+    ]
+
+
+async def _fetch_report_rows(table_id: str, field_names: list, label: str) -> list:
+    started = time.monotonic()
+    print(f"[completion_report] read start label={label} table={table_id}")
+    rows = await asyncio.wait_for(
+        feishu.fetch_all_records(table_id, field_names=field_names, page_size=500),
+        timeout=REPORT_READ_TIMEOUT_SECONDS,
+    )
+    print(
+        f"[completion_report] read done label={label} rows={len(rows)} "
+        f"elapsed={time.monotonic() - started:.1f}s"
+    )
+    return rows
+
+
+async def _compute(spec: dict, drafts: list, rows: list, now_ms: int) -> dict:
     last_send, replied = {}, set()
     for d in drafts:
         f = d["fields"]
@@ -70,7 +94,6 @@ async def _compute(spec: dict, drafts: list, now_ms: int) -> dict:
                 last_send[crid] = ts
         if f.get("是否回复"):
             replied.add(crid)
-    rows = await feishu.fetch_all_records(spec["table"])
     states = {k: [] for k in ("成功", "拒绝", "无回应", "寄样未产出", "进行中", "未建联")}
     funnel = {"engaged": 0, "replied": 0, "洽谈": 0, "已寄样": 0, "已发布": 0, "已合作": 0}
     for r in rows:
@@ -137,11 +160,15 @@ async def run(dry_run: bool = False, *, delivery_identity: str = "legacy",
               frankie_only: bool = False) -> dict:
     validate_delivery(delivery_identity, frankie_only)
     now_ms = int(time.time() * 1000)
-    drafts = await feishu.fetch_all_records(config.T_DRAFT)
+    drafts = await _fetch_report_rows(config.T_DRAFT, DRAFT_FIELDS, "drafts")
+    contact_rows = await asyncio.gather(*[
+        _fetch_report_rows(spec["table"], _contact_fields(spec), spec["label"])
+        for spec in SPECS
+    ])
     computed = {}
     elements = []
-    for spec in SPECS:
-        c = await _compute(spec, drafts, now_ms)
+    for spec, rows in zip(SPECS, contact_rows):
+        c = await _compute(spec, drafts, rows, now_ms)
         computed[spec["label"]] = {
             "funnel": c["funnel"], "terminal": c["terminal"],
             "reply_rate": round(c["reply_rate"], 1), "post_rate": round(c["post_rate"], 1),

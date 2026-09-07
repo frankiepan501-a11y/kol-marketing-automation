@@ -16,7 +16,7 @@ from app import completion_report, kol_assistant, main
 
 class CompletionReportKolAssistantTests(unittest.TestCase):
     def test_kol_assistant_route_sends_only_one_frankie_card(self):
-        async def fetch_records(_table_id):
+        async def fetch_records(_table_id, **_kwargs):
             return []
 
         with patch.object(completion_report.feishu, "fetch_all_records", new=fetch_records), \
@@ -54,7 +54,7 @@ class CompletionReportKolAssistantTests(unittest.TestCase):
             ))
 
     def test_kol_assistant_dry_run_does_not_send(self):
-        async def fetch_records(_table_id):
+        async def fetch_records(_table_id, **_kwargs):
             return []
 
         with patch.object(completion_report.feishu, "fetch_all_records", new=fetch_records), \
@@ -72,6 +72,28 @@ class CompletionReportKolAssistantTests(unittest.TestCase):
         self.assertEqual(result["notified"], 0)
         self.assertEqual(result["message_ids"], [])
         sender.assert_not_awaited()
+
+    def test_report_reads_only_required_fields_with_large_pages(self):
+        calls = []
+
+        async def fetch_records(table_id, **kwargs):
+            calls.append((table_id, kwargs))
+            return []
+
+        with patch.object(completion_report.feishu, "fetch_all_records", new=fetch_records):
+            result = asyncio.run(completion_report.run(
+                dry_run=True,
+                delivery_identity="kol_assistant",
+                frankie_only=True,
+            ))
+
+        self.assertEqual(result["notified"], 0)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(kwargs["page_size"] == 500 for _, kwargs in calls))
+        draft_call = calls[0][1]
+        self.assertEqual(draft_call["field_names"], completion_report.DRAFT_FIELDS)
+        for spec, (_, contact_call) in zip(completion_report.SPECS, calls[1:]):
+            self.assertEqual(contact_call["field_names"], completion_report._contact_fields(spec))
 
     def test_missing_kol_app_credentials_fail_without_legacy_fallback(self):
         with patch.object(kol_assistant, "APP_ID", ""), \
