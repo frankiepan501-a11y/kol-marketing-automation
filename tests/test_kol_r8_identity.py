@@ -194,10 +194,12 @@ class KolR8CallbackTests(unittest.TestCase):
             _ws_client=SimpleNamespace(_conn=object()),
             connection_snapshot=lambda: connection,
         )
-        with patch.object(kol_callback, "_CHANNEL", channel):
+        with patch.object(kol_callback, "_CHANNEL", channel), \
+             patch.dict(kol_callback.STATE, {"error": "ConnectionError"}):
             result = kol_callback.snapshot()
         self.assertEqual("connected", result["connection"])
         self.assertTrue(result["ready"])
+        self.assertIsNone(result["error"])
 
 
 if __name__ == "__main__":

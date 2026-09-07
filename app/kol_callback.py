@@ -296,6 +296,8 @@ def snapshot() -> dict:
                 ready=bool(conn.ready or transport_connected),
                 reconnect_attempts=conn.reconnect_attempts,
             )
+            if transport_connected:
+                out["error"] = None
         except Exception:
             pass
     return out
