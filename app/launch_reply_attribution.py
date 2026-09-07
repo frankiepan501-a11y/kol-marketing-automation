@@ -256,6 +256,9 @@ def collect_unmatched_reply_cases(
         )
         if not candidates:
             continue
+        card_message_id, card_delivery_identity = feishu.unpack_kol_message_ref(
+            _text(fields.get("活动归属卡片消息ID"))
+        )
         out.append({
             "reply_record_id": reply.get("record_id", ""),
             "reply_subject": _text(fields.get("邮件主题")),
@@ -279,7 +282,8 @@ def collect_unmatched_reply_cases(
                 "原邮件ID没有唯一命中当前活动"
                 if _text(fields.get("回复目标MsgID")) else "回复缺少原邮件ID"
             ),
-            "card_message_id": _text(fields.get("活动归属卡片消息ID")),
+            "card_message_id": card_message_id,
+            "card_delivery_identity": card_delivery_identity,
             "candidates": candidates,
         })
     return out
@@ -499,7 +503,14 @@ async def handle_callback(event: dict) -> dict:
     fields = draft.get("fields") or {}
     current_campaign = _text(fields.get("集中宣发活动ID"))
     current_status = _text(fields.get("活动归属状态"))
-    msg_id = _message_id(event) or _text(fields.get("活动归属卡片消息ID"))
+    stored_msg_id, stored_identity = feishu.unpack_kol_message_ref(
+        _text(fields.get("活动归属卡片消息ID"))
+    )
+    event_msg_id = _message_id(event)
+    msg_id = event_msg_id or stored_msg_id
+    delivery_identity = (
+        feishu.kol_callback_identity(event) if event_msg_id else stored_identity
+    )
     operator = _operator_label(event)
     if current_status in {STATUS_CONFIRMED, STATUS_AUTO, STATUS_NONE}:
         if msg_id:
@@ -510,7 +521,7 @@ async def handle_callback(event: dict) -> dict:
                     operator=_text(fields.get("活动归属确认人")) or operator,
                     no_campaign=current_status == STATUS_NONE,
                 ),
-                which=feishu.kol_callback_identity(event),
+                which=delivery_identity,
             )
         return {
             "ok": True, "idempotent": True, "reply_record_id": reply_record_id,
@@ -525,7 +536,9 @@ async def handle_callback(event: dict) -> dict:
         "活动归属确认时间": int(time.time() * 1000),
     }
     if msg_id:
-        update["活动归属卡片消息ID"] = msg_id
+        update["活动归属卡片消息ID"] = feishu.pack_kol_message_ref(
+            msg_id, delivery_identity
+        )
     await feishu.update_record(config.T_DRAFT, reply_record_id, update)
     if msg_id:
         await feishu.update_card_message_with_app(
@@ -535,7 +548,7 @@ async def handle_callback(event: dict) -> dict:
                 operator=operator,
                 no_campaign=no_campaign,
             ),
-            which=feishu.kol_callback_identity(event),
+            which=delivery_identity,
         )
     return {
         "ok": True, "idempotent": False, "reply_record_id": reply_record_id,
@@ -710,6 +723,7 @@ async def scan_and_send(
             else:
                 item["patched_existing_card"] = await feishu.update_kol_card(
                     case["card_message_id"], card,
+                    which=case.get("card_delivery_identity") or "app3",
                 )
             items.append(item)
             continue
@@ -733,7 +747,7 @@ async def scan_and_send(
             if message_id:
                 await feishu.update_record(config.T_DRAFT, case["reply_record_id"], {
                     "活动归属状态": STATUS_PENDING,
-                    "活动归属卡片消息ID": message_id,
+                    "活动归属卡片消息ID": feishu.pack_kol_message_ref(message_id),
                 })
             item["sent"] = sent
             item["message_id"] = message_id

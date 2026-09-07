@@ -374,18 +374,18 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
     for name, oid in targets:
         try:
             if action_card is not None:
-                # 互动审核卡走聪哥3号(回调到 event-hub) → 负责人 union_id 私聊, 卡上直接审
+                # 互动审核卡走 KOL媒体助手长连接 → 负责人 union_id 私聊，卡上直接审。
                 uid = await feishu.open_id_to_union_id(oid)
                 if uid:
                     msg_id = await feishu.send_card_via_app3("union_id", uid, action_card)
                     if not msg_id:
-                        raise RuntimeError("App3 review card API returned no message_id")
+                        raise RuntimeError("KOL assistant review card API returned no message_id")
                     _unions.append(uid)
                     _mids[uid] = msg_id
                 else:
-                    msg_id = await feishu.send_card_message("open_id", oid, card)  # 拿不到 union_id 降级旧卡
+                    msg_id = await feishu.send_card_message("open_id", oid, card)
                     if not msg_id:
-                        raise RuntimeError("fallback review card API returned no message_id")
+                        raise RuntimeError("review info card API returned no message_id")
             else:
                 msg_id = await feishu.send_card_message("open_id", oid, card)
                 if not msg_id:

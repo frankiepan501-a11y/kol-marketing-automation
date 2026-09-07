@@ -177,7 +177,10 @@ async def _notify(result: Dict[str, Any], sample_limit: int = 5) -> int:
         if not name.startswith("潘"):
             continue
         try:
-            await feishu.send_card_message("open_id", open_id, card, biz="AUDIT", level=level)
+            await feishu.send_card_message(
+                "open_id", open_id, card, biz="AUDIT", level=level,
+                which="kol_assistant",
+            )
             sent += 1
         except Exception as exc:
             print(f"[kol_audit_digest] notify {name} fail: {exc}")

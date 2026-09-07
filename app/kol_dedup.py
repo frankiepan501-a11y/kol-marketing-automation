@@ -101,7 +101,9 @@ async def run(dry_run: bool = False) -> dict:
             # 2026-06-08 告警不进群(Frankie #4): 私聊 Frankie+负责运营(reviewer 角色)。
             for name, oid in await feishu.resolve_notify_targets("reviewer"):
                 try:
-                    await feishu.send_card_message("open_id", oid, card, biz="AUDIT")
+                    await feishu.send_card_message(
+                        "open_id", oid, card, biz="AUDIT", which="kol_assistant"
+                    )
                 except Exception:
                     pass
         except Exception as ex:

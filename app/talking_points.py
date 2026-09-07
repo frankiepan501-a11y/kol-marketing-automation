@@ -198,7 +198,7 @@ Return JSON: {{"talking_points":["...","..."],"shooting_angles":["...","..."]}}"
                     if uid:
                         await feishu.send_card_via_app3("union_id", uid, card)
                     else:
-                        await feishu.send_card_message("open_id", oid, card)  # 降级旧卡(按钮回调走不到,但能看+去表格)
+                        await feishu.send_card_message("open_id", oid, card)
                 except Exception as e:
                     print(f"[talking_points] notify {nm} fail: {e}")
         except Exception as e:

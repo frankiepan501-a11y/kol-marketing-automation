@@ -158,7 +158,7 @@ async def api(method: str, path: str, body=None, which: str = "bitable",
 
 
 def _resolve_identity(path: str, which: str) -> str:
-    """Route only the KOL Base namespace to KOL媒体助手.
+    """Route the KOL Base namespace to KOL媒体助手 without legacy fallback.
 
     Explicit non-bitable identities always win. This keeps B2B/AMZ and historic
     card operations unchanged while R8 migrates the KOL Base behind the shared
@@ -167,8 +167,7 @@ def _resolve_identity(path: str, which: str) -> str:
     if which != "bitable":
         return which
     app_token = str(getattr(config, "FEISHU_APP_TOKEN", "") or "")
-    if (config.KOL_FEISHU_BASE_ENABLED and app_token
-            and f"/bitable/v1/apps/{app_token}/" in str(path or "")):
+    if app_token and f"/bitable/v1/apps/{app_token}/" in str(path or ""):
         return "kol_assistant"
     return which
 
@@ -544,15 +543,11 @@ async def send_card_message(receive_type: str, receive_id: str, card: dict,
     import json
     if format_title:
         card = _format_card_title(card, biz, level)
-    identity = which or (
-        "kol_assistant" if biz == "KOL" and config.KOL_FEISHU_CARDS_ENABLED else "notify"
-    )
+    identity = which or ("kol_assistant" if biz == "KOL" else "notify")
     if identity == "kol_assistant" and receive_type == "open_id":
-        # Existing recipient lists are in App 1's namespace. Resolve through its
-        # read-only contact identity, then send through the dedicated App.
-        union_id = await open_id_to_union_id(receive_id, which="notify")
+        union_id = await open_id_to_union_id(receive_id, which="kol_assistant")
         if not union_id:
-            raise RuntimeError("KOL媒体助手无法把旧 open_id 解析为 union_id")
+            raise RuntimeError("KOL媒体助手专属收件人缺少 union_id 映射")
         receive_type, receive_id = "union_id", union_id
     body = {
         "receive_id": receive_id,
@@ -571,12 +566,39 @@ async def send_card_message(receive_type: str, receive_id: str, card: dict,
 _union_cache = {}  # open_id(聪哥1号 namespace) -> union_id(跨 app 稳定)
 
 
-async def open_id_to_union_id(open_id: str, *, which: str = "notify") -> str:
-    """聪哥1号 contact API 把 open_id 换成 union_id (跨 app 稳定, 供聪哥3号发卡用).
-    1h 进程缓存; 查不到返回空字符串 (调用方应跳过该 target).
+def _normalized_person_name(name: str) -> str:
+    return str(name or "").split("-", 1)[0].strip()
+
+
+def _configured_kol_union_id(recipient_id: str) -> str:
+    if str(recipient_id or "").startswith("on_"):
+        return str(recipient_id)
+    legacy_name = next(
+        (name for name, old_id in config.NOTIFY_USERS if old_id == recipient_id), ""
+    )
+    wanted = _normalized_person_name(legacy_name)
+    if not wanted:
+        return ""
+    for name, union_id in config.KOL_NOTIFY_USERS:
+        if _normalized_person_name(name) == wanted and str(union_id).startswith("on_"):
+            return union_id
+    return ""
+
+
+async def open_id_to_union_id(open_id: str, *, which: str = "kol_assistant") -> str:
+    """Resolve a recipient into union_id inside an explicitly selected App.
+
+    KOL callers default to the dedicated App. Known migration recipients are
+    mapped from ``KOL_NOTIFY_USERS`` without contacting App 1. A callback's own
+    KOL-App open_id may be resolved through the KOL App contact endpoint. Other
+    business domains must pass their identity explicitly.
     """
     if not open_id:
         return ""
+    if which == "kol_assistant":
+        configured = _configured_kol_union_id(open_id)
+        if configured:
+            return configured
     cache_key = (which, open_id)
     cached = _union_cache.get(cache_key)
     if cached:
@@ -593,32 +615,21 @@ async def open_id_to_union_id(open_id: str, *, which: str = "notify") -> str:
 
 
 async def send_card_via_app3(receive_type: str, receive_id: str, card: dict) -> str:
-    """R8 compatibility alias: new KOL cards are sent by KOL媒体助手.
+    """Compatibility alias; R9 sends every new KOL card via KOL媒体助手.
 
     The public name remains until R9 so existing callers and rollback tests stay
     stable. It must not send through App 3 anymore.
     """
-    if config.KOL_FEISHU_CARDS_ENABLED:
-        return await send_card_via_kol_assistant(receive_type, receive_id, card)
-    import json
-    body = {
-        "receive_id": receive_id,
-        "msg_type": "interactive",
-        "content": json.dumps(card, ensure_ascii=False),
-    }
-    resp = await api(
-        "POST", f"/im/v1/messages?receive_id_type={receive_type}", body, which="app3",
-    )
-    return (resp.get("data") or {}).get("message_id") or ""
+    return await send_card_via_kol_assistant(receive_type, receive_id, card)
 
 
 async def send_card_via_kol_assistant(receive_type: str, receive_id: str, card: dict) -> str:
     """Use KOL媒体助手 for an interactive KOL card and its callback namespace."""
     import json
     if receive_type == "open_id":
-        union_id = await open_id_to_union_id(receive_id, which="notify")
+        union_id = await open_id_to_union_id(receive_id, which="kol_assistant")
         if not union_id:
-            raise RuntimeError("KOL媒体助手无法把旧 open_id 解析为 union_id")
+            raise RuntimeError("KOL媒体助手专属收件人缺少 union_id 映射")
         receive_type, receive_id = "union_id", union_id
     body = {
         "receive_id": receive_id,
@@ -671,6 +682,33 @@ async def update_card_message(message_id: str, new_card: dict) -> bool:
     return await update_card_message_with_app(message_id, new_card, which="notify")
 
 
+_KOL_MESSAGE_REF_PREFIXES = {"kol_assistant", "app3"}
+
+
+def pack_kol_message_ref(message_id: str, identity: str = "kol_assistant") -> str:
+    """Persist the exact sender App beside a KOL message id.
+
+    Plain legacy values predate the dedicated App and are interpreted as App 3
+    by :func:`unpack_kol_message_ref`. New writes are always explicit so PATCH
+    never guesses ownership from a transient API failure.
+    """
+    if not message_id:
+        return ""
+    if identity not in _KOL_MESSAGE_REF_PREFIXES:
+        raise ValueError(f"unsupported KOL card identity: {identity}")
+    return f"{identity}:{message_id}"
+
+
+def unpack_kol_message_ref(value: str) -> tuple[str, str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return "", ""
+    prefix, sep, message_id = raw.partition(":")
+    if sep and prefix in _KOL_MESSAGE_REF_PREFIXES and message_id:
+        return message_id, prefix
+    return raw, "app3"
+
+
 async def update_b2b_assistant_card(message_id: str, new_card: dict) -> bool:
     """PATCH an 外贸助手 card. Feishu card callbacks must use the sender app."""
     return await update_card_message_with_app(message_id, new_card, which="b2b_assistant")
@@ -688,16 +726,16 @@ def kol_callback_identity(event: dict) -> str:
     return "kol_assistant" if value.get("_delivery_identity") == "kol_assistant" else "app3"
 
 
-async def update_kol_card(message_id: str, new_card: dict, *, event: dict = None) -> bool:
-    """PATCH a new KOL card with KOL媒体助手; preserve old App 3 cards in R8."""
+async def update_kol_card(message_id: str, new_card: dict, *, event: dict = None,
+                          which: str = "") -> bool:
+    """PATCH new cards with KOL媒体助手 and unmarked historical cards with App 3."""
     if event is not None:
-        return await update_card_message_with_app(
-            message_id, new_card, which=kol_callback_identity(event),
-        )
-    ok = await update_card_message_with_app(message_id, new_card, which="kol_assistant")
-    if not ok:
-        ok = await update_card_message_with_app(message_id, new_card, which="app3")
-    return ok
+        which = kol_callback_identity(event)
+    if which not in _KOL_MESSAGE_REF_PREFIXES:
+        raise ValueError("KOL card owner identity is required")
+    return await update_card_message_with_app(
+        message_id, new_card, which=which,
+    )
 
 
 async def mark_card_resolved(draft_rid: str, result_label: str, table_id: str = None):
@@ -718,7 +756,7 @@ async def mark_card_resolved(draft_rid: str, result_label: str, table_id: str = 
         return
 
     f = rec["fields"]
-    msg_id = ext(f.get("卡片群消息ID"))
+    msg_id, message_identity = unpack_kol_message_ref(ext(f.get("卡片群消息ID")))
     if not msg_id:
         return  # 没存群 msg_id, 不需要 update
     if f.get("卡片已标记已审"):
@@ -740,11 +778,9 @@ async def mark_card_resolved(draft_rid: str, result_label: str, table_id: str = 
                 "content": f"**主题**: {subject}\n\n**结果**: {result_label}\n\n_此卡片已作废, 无需再审_"}},
         ],
     }
-    # New R8 cards are sent by KOL媒体助手. If this row references a historical
-    # card, retain a bounded App 3 fallback until R9 removes old card ownership.
-    ok = await update_card_message_with_app(msg_id, resolved_card, which="kol_assistant")
-    if not ok:
-        ok = await update_card_message_with_app(msg_id, resolved_card, which="app3")
+    ok = await update_card_message_with_app(
+        msg_id, resolved_card, which=message_identity,
+    )
     if ok:
         try:
             await update_record(table_id, draft_rid, {"卡片已标记已审": True})
@@ -782,7 +818,7 @@ async def mark_card_receipt(draft_rid: str, success_count: int, fail_count: int,
     if errors:
         fields["卡片发送错误"] = (" | ".join(errors))[:500]
     if group_msg_id:
-        fields["卡片群消息ID"] = group_msg_id
+        fields["卡片群消息ID"] = pack_kol_message_ref(group_msg_id)
     try:
         await update_record(table_id, draft_rid, fields)
     except Exception as e:
@@ -826,13 +862,14 @@ async def write_card_recipients_msgids(draft_rid: str,
                 mp = {}
             for k, v in msgids.items():
                 if k and v:
-                    mp[k] = v
+                    mp[k] = pack_kol_message_ref(v)
             fields["卡片个人消息IDs"] = _json.dumps(mp, ensure_ascii=False)
         except Exception as e:
             print(f"[feishu.write_card_recipients_msgids] read fail rid={draft_rid}: {e}")
             try:
                 fields["卡片个人消息IDs"] = _json.dumps(
-                    {k: v for k, v in msgids.items() if k and v}, ensure_ascii=False)
+                    {k: pack_kol_message_ref(v) for k, v in msgids.items() if k and v},
+                    ensure_ascii=False)
             except Exception:
                 pass
     if not fields:
@@ -958,7 +995,7 @@ def build_contact_info_block(contact_info: dict = None,
     return {"tag": "div", "fields": fields}
 
 
-# ===== 按职务实时查在职员工 (聪哥1号 contact:contact:readonly) =====
+# ===== 按职务实时查在职员工 (KOL媒体助手 contact:contact.base:readonly) =====
 # 遵守 feishu-people-as-source-of-truth 铁律: 不硬编码 open_id, 按职务实时查飞书人事
 # 缓存 1h: 避免每次发卡片都拉一遍部门列表 (大约 7-10 个部门 + 每部门 1 次 user list)
 _job_title_cache = {}  # {title: (timestamp, [(name, open_id), ...])}
@@ -975,67 +1012,86 @@ async def resolve_notify_targets(role: str) -> list:
       - "ship_main": 寄样确认主审 → 独立站运营专员
       - "ship_cc": 寄样 CC → Frankie + 吴晓丹
 
-    所有 role 在职务查询失败时降级到 NOTIFY_USERS 关键字过滤, 防 contact API 故障漏告警.
+    reviewer/ship_main 在职务查询失败时只降级到 KOL_NOTIFY_USERS 关键字过滤。
     """
     from . import config
     if role == "needs_rewrite":
-        return list(config.NOTIFY_USERS)
+        if not config.KOL_NOTIFY_USERS:
+            raise RuntimeError("KOL_NOTIFY_USERS is empty; refusing silent notification loss")
+        return list(config.KOL_NOTIFY_USERS)
 
     if role == "ship_cc":
-        return [u for u in config.NOTIFY_USERS
-                if u[0].startswith("潘") or "晓丹" in u[0]]
+        targets = [u for u in config.KOL_NOTIFY_USERS
+                   if u[0].startswith("潘") or "晓丹" in u[0]]
+        if not targets:
+            raise RuntimeError("KOL ship_cc recipients are empty")
+        return targets
 
     if role == "frankie":
         # 唯一、显式身份；不能按姓氏模糊筛选，避免误发给其他潘姓同事。
-        return [(config.KOL_FRANKIE_NAME, config.KOL_FRANKIE_OPEN_ID)] if config.KOL_FRANKIE_OPEN_ID else []
+        uid = config.KOL_ASSISTANT_FRANKIE_UNION_ID
+        if not uid:
+            raise RuntimeError("KOL_ASSISTANT_FRANKIE_UNION_ID is missing")
+        return [(config.KOL_FRANKIE_NAME, uid)]
 
     # reviewer / ship_main 都用职务实时查
     by_title = await fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)
     if not by_title:
         # 降级: 用 NOTIFY_USERS 关键字过滤 "独立站"
         print(f"[resolve_notify_targets] WARN: job_title={config.KOL_REVIEWER_JOB_TITLE!r} returned empty, fallback")
-        by_title = [u for u in config.NOTIFY_USERS if "独立站" in u[0]]
+        by_title = [u for u in config.KOL_NOTIFY_USERS if "独立站" in u[0]]
+    if not by_title:
+        raise RuntimeError(
+            f"no active KOL reviewer for job_title={config.KOL_REVIEWER_JOB_TITLE!r}"
+        )
 
     if role == "ship_main":
         return by_title
 
     if role == "reviewer":
         # 独立站运营专员 + Frankie CC, 去重
-        frankie_cc = [u for u in config.NOTIFY_USERS if u[0].startswith("潘")]
+        frankie_cc = [u for u in config.KOL_NOTIFY_USERS if u[0].startswith("潘")]
         seen = set()
         merged = []
         for name, oid in by_title + frankie_cc:
             if oid in seen: continue
             seen.add(oid)
             merged.append((name, oid))
+        if not frankie_cc:
+            raise RuntimeError("KOL reviewer route is missing Frankie CC")
         return merged
 
     raise ValueError(f"unknown role: {role!r}")
 
 
 async def fetch_users_by_job_title(title: str):
-    """按职务名拿当前在职员工 [(name, open_id), ...].
-    用聪哥1号 (notify app) contact API, 已开通 contact:contact:readonly.
+    """按职务名拿当前在职员工 [(name, union_id), ...].
+    用 KOL媒体助手 contact API；个人发送继续留在同一 App namespace。
     1h 缓存. 失败时返回空列表 (调用方应有降级路径).
     """
     cached = _job_title_cache.get(title)
     if cached and (time.time() - cached[0]) < _JOB_TITLE_TTL:
         return cached[1]
 
-    tok = await token("notify")
+    tok = await token("kol_assistant")
     results = []
     try:
-        # 1. 列所有顶级部门 (fetch_child=true 拿全树)
+        # 1. 生产环境直接使用 App 可见范围内的明确部门，避免从根部门枚举报 40004。
         async with httpx.AsyncClient(timeout=30.0) as cli:
-            r = await cli.get(
-                "https://open.feishu.cn/open-apis/contact/v3/departments",
-                params={"page_size": 50, "fetch_child": "true",
-                        "parent_department_id": "0",
-                        "department_id_type": "open_department_id"},
-                headers={"Authorization": f"Bearer {tok}"},
-            )
-            r.raise_for_status()
-            depts = (r.json().get("data") or {}).get("items") or []
+            dept_ids = list(config.KOL_CONTACT_DEPARTMENT_IDS)
+            if dept_ids:
+                depts = [{"open_department_id": dept_id} for dept_id in dept_ids]
+            else:
+                # 仅保留给本地开发/旧测试环境；生产 readiness 会因未配置部门而降级。
+                r = await cli.get(
+                    "https://open.feishu.cn/open-apis/contact/v3/departments",
+                    params={"page_size": 50, "fetch_child": "true",
+                            "parent_department_id": "0",
+                            "department_id_type": "open_department_id"},
+                    headers={"Authorization": f"Bearer {tok}"},
+                )
+                r.raise_for_status()
+                depts = (r.json().get("data") or {}).get("items") or []
 
             # 2. 按部门列用户 (含 job_title + status)
             seen = set()
@@ -1046,7 +1102,7 @@ async def fetch_users_by_job_title(title: str):
                 page_token = ""
                 while True:
                     params = {"department_id": dept_id, "page_size": 50,
-                              "user_id_type": "open_id",
+                              "user_id_type": "union_id",
                               "department_id_type": "open_department_id"}
                     if page_token:
                         params["page_token"] = page_token
@@ -1062,7 +1118,7 @@ async def fetch_users_by_job_title(title: str):
                         break
                     items = (ud.get("data") or {}).get("items") or []
                     for u in items:
-                        oid = u.get("open_id")
+                        oid = u.get("union_id")
                         if not oid or oid in seen:
                             continue
                         seen.add(oid)

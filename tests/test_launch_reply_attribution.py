@@ -182,6 +182,33 @@ class LaunchReplyAttributionTests(unittest.TestCase):
         self.assertTrue(second["idempotent"])
         self.assertEqual(1, update.await_count)
         self.assertGreaterEqual(patch_card.await_count, 1)
+        self.assertEqual(
+            "app3:om_card",
+            update.await_args.args[2]["活动归属卡片消息ID"],
+        )
+
+    def test_target_callback_persists_target_card_owner(self):
+        event = {
+            "message_id": "om_target",
+            "card_action": {
+                "action": attribution.ACTION_CONFIRM,
+                "reply_record_id": "reply-1",
+                "allowed_campaign_ids": ["launch-piranha"],
+                "_delivery_identity": "kol_assistant",
+            },
+            "card_form_value": {"campaign_id": "launch-piranha"},
+        }
+        update = AsyncMock(return_value={"record_id": "reply-1"})
+        with patch.object(attribution.feishu, "get_record", AsyncMock(return_value=self._reply())), \
+             patch.object(attribution.feishu, "update_record", update), \
+             patch.object(attribution.feishu, "update_card_message_with_app", AsyncMock(return_value=True)):
+            result = asyncio.run(attribution.handle_callback(event))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            "kol_assistant:om_target",
+            update.await_args.args[2]["活动归属卡片消息ID"],
+        )
 
     def test_callback_accepts_event_hub_normalized_payload(self):
         event = {
@@ -345,6 +372,40 @@ class LaunchReplyAttributionTests(unittest.TestCase):
 
         self.assertTrue(result["items"][0]["patched_existing_card"])
         patch_card.assert_awaited_once()
+        self.assertEqual("om_existing", patch_card.await_args.args[0])
+        self.assertEqual("app3", patch_card.await_args.kwargs["which"])
+        send_card.assert_not_awaited()
+
+    def test_target_prefixed_existing_card_is_patched_by_target_app(self):
+        reply = self._reply()
+        reply["fields"]["活动归属卡片消息ID"] = "kol_assistant:om_existing"
+        source = {
+            "activities": [self._activity()],
+            "participants": [self._participant()],
+            "drafts": [reply],
+            "contacts": {
+                "kol-1": {"record_id": "kol-1", "fields": {"账号名": "Just the Gems"}},
+            },
+            "products": {
+                "product-1": {"record_id": "product-1", "fields": {"产品名": "食人花二代"}},
+            },
+            "load_warnings": [],
+        }
+        patch_card = AsyncMock(return_value=True)
+
+        with patch.object(attribution, "_load_source", AsyncMock(return_value=source)), \
+             patch.object(attribution.feishu, "update_card_message_with_app", patch_card), \
+             patch.object(attribution, "_send_card", AsyncMock()) as send_card:
+            result = asyncio.run(attribution.scan_and_send(
+                dry_run=False,
+                frankie_only=True,
+                campaign_id="launch-piranha",
+                reply_record_id="reply-1",
+                limit=1,
+                refresh_existing_card=True,
+            ))
+
+        self.assertTrue(result["items"][0]["patched_existing_card"])
         self.assertEqual("om_existing", patch_card.await_args.args[0])
         self.assertEqual("kol_assistant", patch_card.await_args.kwargs["which"])
         send_card.assert_not_awaited()

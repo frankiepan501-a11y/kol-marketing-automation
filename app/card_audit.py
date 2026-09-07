@@ -138,11 +138,12 @@ async def run(days: float = 1.0, dry_run: bool = False, max_list: int = 10) -> d
             fail += 1
             print(f"[card_audit] notify {name} fail: {e}")
 
-    # 抄送 Frankie 汇总 (聪哥1号 namespace open_id, 走 send_card_message)
+    # 抄送 Frankie 汇总（KOL媒体助手 union_id）。
     try:
         fcard = _build_summary_card(overdue, sent, len(reviewers))
         await feishu.send_card_message(
-            "open_id", "ou_629ce01f4bc31de078e10fcb038dbf78", fcard, biz="KOL", level="P2")
+            "union_id", config.KOL_ASSISTANT_FRANKIE_UNION_ID,
+            fcard, biz="KOL", level="P2")
     except Exception as e:
         print(f"[card_audit] notify Frankie fail: {e}")
 

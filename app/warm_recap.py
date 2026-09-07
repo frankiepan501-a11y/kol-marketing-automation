@@ -293,13 +293,13 @@ async def _notify_warm_recap_card(draft_rid: str, kol_name: str, product_name: s
                                   brief_md: str = "", contact_rid: str = "",
                                   is_editor: bool = False, brand: str = "",
                                   email: str = "") -> int:
-    """发暖信卡给 reviewer (独立站运营专员, 按职务实时查→turnover-safe). open_id→union_id→聪哥3号发.
+    """发暖信卡给 reviewer（按职务实时查→turnover-safe），由 KOL媒体助手发送。
     contact_rid/is_editor/brand/email: 调用方传入用于统一信息块 (2026-05-31 字段标准)."""
     ctype = "媒体人" if is_editor else "KOL"
     ci = await feishu.resolve_contact_info(contact_rid, ctype) if contact_rid else {}
     card = _build_warm_recap_card(draft_rid, kol_name, product_name, subject, brief_md,
                                    contact_info=ci, brand=brand, email=email)
-    targets = await feishu.resolve_notify_targets("reviewer")  # [(name, open_id), ...] 聪哥1号 namespace
+    targets = await feishu.resolve_notify_targets("reviewer")  # [(name, union_id), ...]
     sent = 0
     _unions = []  # 看板「关联运营」 + /card/resend 撤老卡用
     _mids = {}

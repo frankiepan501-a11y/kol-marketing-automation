@@ -213,9 +213,32 @@ async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
     try:
         # 2026-06-08 不进群(Frankie #4)。端点失败=infra 故障, 运营无法处理 → 保持只私聊 Frankie
         # (退信/重复才给 Frankie+运营; 此处沿用原"防其他人误以为要处理"设计)。
-        for name, oid in config.NOTIFY_USERS:
+        # The image is shared with B2B / customer-service / Amazon routes. Only
+        # the KOL-owned namespaces may use KOL媒体助手; every other namespace
+        # keeps its existing notification identity.
+        kol_prefixes = (
+            "/reply-monitor", "/keyword-supply", "/bounce-monitor",
+            "/talking-points", "/draft/", "/warm-recap", "/dashboard/",
+            "/followup/", "/dispatch/", "/enrich-task", "/auto-send/",
+            "/negotiation-stall/", "/reviewer/", "/sales-attribution/",
+            "/kol-", "/kol/", "/launch/", "/card/", "/draft-status-audit/",
+            "/draft-duplicate-audit/", "/completion-report/",
+            "/manual-send-recon/", "/upload-register/", "/upload-task-report/",
+            "/decision-feedback/", "/secondary-outreach/", "/relabel/",
+            "/zoho/", "/deepseek/", "/sla/", "/draft-cleanup/",
+            "/ship-recon/", "/weekly-report/", "/media-archive/",
+        )
+        is_kol_endpoint = str(endpoint).startswith(kol_prefixes)
+        identity = "kol_assistant" if is_kol_endpoint else "notify"
+        recipients = config.KOL_NOTIFY_USERS if is_kol_endpoint else config.NOTIFY_USERS
+        receive_type = "union_id" if is_kol_endpoint else "open_id"
+        for name, oid in recipients:
             if name.startswith("潘"):
-                try: await feishu.send_card_message("open_id", oid, card, biz="AUDIT", level=level)
+                try:
+                    await feishu.send_card_message(
+                        receive_type, oid, card, biz="AUDIT", level=level,
+                        which=identity,
+                    )
                 except Exception: pass
     except Exception as e:
         print(f"[_alert_endpoint_failure] {endpoint} self-alert fail: {e}")
@@ -576,11 +599,18 @@ async def root():
 async def health():
     kol_ai_configured = bool(config.KOL_DEEPSEEK_API_KEY.strip())
     return {
-        "status": "ok" if kol_ai_configured else "degraded",
+        "status": "ok" if kol_ai_configured and config.KOL_FEISHU_CONFIG_READY else "degraded",
         "kol_ai_configured": kol_ai_configured,
         "kol_feishu_migration": {
-            "base_enabled": config.KOL_FEISHU_BASE_ENABLED,
-            "cards_enabled": config.KOL_FEISHU_CARDS_ENABLED,
+            "route_mode": "target_only",
+            "credentials_configured": config.KOL_FEISHU_CREDENTIALS_CONFIGURED,
+            "notify_users_count": len(config.KOL_NOTIFY_USERS),
+            "notify_ids_unique": config.KOL_NOTIFY_IDS_UNIQUE,
+            "frankie_mapped": config.KOL_FRANKIE_MAPPED,
+            "ship_cc_mapped": config.KOL_SHIP_CC_MAPPED,
+            "reviewer_fallback_mapped": config.KOL_REVIEWER_FALLBACK_MAPPED,
+            "contact_departments_count": len(config.KOL_CONTACT_DEPARTMENT_IDS),
+            "ready": config.KOL_FEISHU_CONFIG_READY,
         },
         "kol_assistant_callback": kol_callback.snapshot(),
         "dtc_weekly_ai_configured": bool(os.environ.get("DTC_WEEKLY_DEEPSEEK_API_KEY", "").strip()),
@@ -3144,10 +3174,17 @@ async def deepseek_balance_check(authorization: str = Header(default="")):
                 ],
             }
             try:
-                await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card, biz="AUDIT")
-                for name, oid in config.NOTIFY_USERS:
+                await feishu.send_card_message(
+                    "chat_id", config.NOTIFY_CHAT_ID, card, biz="AUDIT",
+                    which="kol_assistant",
+                )
+                for name, oid in config.KOL_NOTIFY_USERS:
                     if name.startswith("潘"):  # 只私聊 Frankie (只有他能充值)
-                        try: await feishu.send_card_message("open_id", oid, card, biz="AUDIT")
+                        try:
+                            await feishu.send_card_message(
+                                "union_id", oid, card, biz="AUDIT",
+                                which="kol_assistant",
+                            )
                         except Exception: pass
             except Exception as e:
                 print(f"[deepseek-balance] alert send fail: {e}")

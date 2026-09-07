@@ -19,8 +19,7 @@ from app import config, feishu, kol_callback
 
 class KolR8IdentityTests(unittest.TestCase):
     def test_kol_base_paths_use_dedicated_identity(self):
-        with patch.object(config, "FEISHU_APP_TOKEN", "kol_test_base"), \
-             patch.object(config, "KOL_FEISHU_BASE_ENABLED", True):
+        with patch.object(config, "FEISHU_APP_TOKEN", "kol_test_base"):
             path = "/bitable/v1/apps/kol_test_base/tables/tbl_test/records"
             self.assertEqual("kol_assistant", feishu._resolve_identity(path, "bitable"))
             self.assertEqual("notify", feishu._resolve_identity(path, "notify"))
@@ -38,8 +37,7 @@ class KolR8IdentityTests(unittest.TestCase):
             calls.append((method, path, body, which))
             return {"data": {"message_id": "om_kol"}}
 
-        with patch.object(config, "KOL_FEISHU_CARDS_ENABLED", True), \
-             patch.object(feishu, "api", new=fake_api):
+        with patch.object(feishu, "api", new=fake_api):
             message_id = asyncio.run(
                 feishu.send_card_message(
                     "union_id", "on_target", {"header": {}, "elements": []}, biz="KOL"
@@ -56,8 +54,7 @@ class KolR8IdentityTests(unittest.TestCase):
             calls.append((path, body, which))
             return {"data": {"message_id": "om_kol"}}
 
-        with patch.object(config, "KOL_FEISHU_CARDS_ENABLED", True), \
-             patch.object(feishu, "open_id_to_union_id", new=AsyncMock(return_value="on_target")), \
+        with patch.object(feishu, "open_id_to_union_id", new=AsyncMock(return_value="on_target")), \
              patch.object(feishu, "api", new=fake_api):
             asyncio.run(
                 feishu.send_card_message(
@@ -85,7 +82,7 @@ class KolR8IdentityTests(unittest.TestCase):
 
         self.assertEqual(["notify"], calls)
 
-    def test_r8_flags_restore_legacy_routes_without_code_rollback(self):
+    def test_r9_target_only_routes_ignore_removed_r8_switches(self):
         path = "/bitable/v1/apps/kol_test_base/tables/tbl/records"
         calls = []
 
@@ -94,13 +91,11 @@ class KolR8IdentityTests(unittest.TestCase):
             return {"data": {"message_id": "om_old"}}
 
         with patch.object(config, "FEISHU_APP_TOKEN", "kol_test_base"), \
-             patch.object(config, "KOL_FEISHU_BASE_ENABLED", False), \
-             patch.object(config, "KOL_FEISHU_CARDS_ENABLED", False), \
              patch.object(feishu, "api", new=fake_api):
-            self.assertEqual("bitable", feishu._resolve_identity(path, "bitable"))
+            self.assertEqual("kol_assistant", feishu._resolve_identity(path, "bitable"))
             asyncio.run(feishu.send_card_via_app3("union_id", "on_test", {"elements": []}))
 
-        self.assertEqual(["app3"], calls)
+        self.assertEqual(["kol_assistant"], calls)
 
     def test_kol_interactive_sender_uses_dedicated_identity(self):
         calls = []

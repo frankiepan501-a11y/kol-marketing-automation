@@ -158,14 +158,14 @@ async def run(dry_run: bool = False, max_days: int = None) -> dict:
     except Exception:
         main = []
     sent_to = []
-    targets = list(main) + [("Frankie", "ou_629ce01f4bc31de078e10fcb038dbf78")]
+    targets = list(main) + [("Frankie", config.KOL_ASSISTANT_FRANKIE_UNION_ID)]
     seen = set()
     for name, oid in targets:
         if not oid or oid in seen:
             continue
         seen.add(oid)
         try:
-            await feishu.send_card_message("open_id", oid, card)
+            await feishu.send_card_message("union_id", oid, card)
             sent_to.append(name)
         except Exception as e:
             print(f"[negotiation_stall] send fail {name}: {e}")

@@ -106,7 +106,9 @@ async def _dryrun_alert_once(dry_to: str):
             "• 期间测邮件用隔离方式(单条合成草稿/纯函数), 别调全表 /auto-send/run。")}}],
     }
     try:
-        await feishu.send_card_message("open_id", "ou_629ce01f4bc31de078e10fcb038dbf78", card)
+        await feishu.send_card_message(
+            "union_id", config.KOL_ASSISTANT_FRANKIE_UNION_ID, card
+        )
     except Exception as e:
         print(f"[auto_send DRY-RUN alert fail] {e}")
 

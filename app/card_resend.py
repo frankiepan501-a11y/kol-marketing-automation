@@ -149,7 +149,9 @@ async def run(draft_rid: str, operator_open_id: str = "",
             mp = {}
     except Exception:
         mp = {}
-    old_msg_id = mp.get(op_union, "") or ""
+    old_msg_id, old_identity = feishu.unpack_kol_message_ref(
+        mp.get(op_union, "") or ""
+    )
 
     if dry_run:
         return {"ok": True, "dry_run": True, "status": status,
@@ -171,11 +173,13 @@ async def run(draft_rid: str, operator_open_id: str = "",
                     "text": {"tag": "lark_md", "content": "旧卡已失效；最新卡片已发送到会话底部。"},
                 }],
             }
-            revoked = await feishu.update_kol_card(old_msg_id, tombstone)
+            revoked = await feishu.update_kol_card(
+                old_msg_id, tombstone, which=old_identity,
+            )
             if revoked:
                 print(f"[card_resend] invalidated old msg {old_msg_id} → {op_union}")
             else:
-                print("[card_resend] invalidate old card failed for both R8 owners (ignored)")
+                print(f"[card_resend] invalidate old card failed via {old_identity} (ignored)")
         except Exception as e:
             # 旧卡置灰失败不影响重发；调用方仍会拿到新卡 message_id。
             print(f"[card_resend] invalidate old fail (ignored): {e}")

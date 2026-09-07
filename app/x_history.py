@@ -989,7 +989,8 @@ async def _send_credits_alert(now: datetime, job_id: str) -> bool:
         if not name.startswith("潘"):
             continue
         await feishu.send_card_message(
-            "open_id", open_id, card, biz="AUDIT", level="P1"
+            "open_id", open_id, card, biz="AUDIT", level="P1",
+            which="kol_assistant",
         )
         sent = True
     return sent

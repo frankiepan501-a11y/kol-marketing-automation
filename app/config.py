@@ -46,17 +46,12 @@ FEISHU_NOTIFY_APP_SECRET = env("FEISHU_NOTIFY_APP_SECRET", required=True)
 # ⚠️ repo 公开, secret 只能走 env, 不硬编码默认值.
 FEISHU_APP3_ID = env("FEISHU_APP3_ID", required=True)
 FEISHU_APP3_SECRET = env("FEISHU_APP3_SECRET", required=True)
-# KOL媒体助手（R8 统一承接 KOL Base、通知、交互卡与回调）。
-# R8 仍保留旧 1/2/3 号配置作为历史卡片回退；R9 才删除旧依赖。
+# KOL媒体助手（R9 起统一承接新的 KOL Base、通知、交互卡与回调）。
+# 旧 1/2/3 号配置仍供同一镜像里的其他业务域和历史卡兼容使用，
+# 但 KOL 新流量不得再用开关回退到这些身份。
 FEISHU_KOL_ASSISTANT_APP_ID = env("FEISHU_KOL_ASSISTANT_APP_ID", "")
 FEISHU_KOL_ASSISTANT_APP_SECRET = env("FEISHU_KOL_ASSISTANT_APP_SECRET", "")
 KOL_ASSISTANT_FRANKIE_UNION_ID = env("KOL_ASSISTANT_FRANKIE_UNION_ID", "")
-KOL_FEISHU_BASE_ENABLED = (env("KOL_FEISHU_BASE_ENABLED", "0") or "0").lower() in {
-    "1", "true", "yes", "on",
-}
-KOL_FEISHU_CARDS_ENABLED = (env("KOL_FEISHU_CARDS_ENABLED", "0") or "0").lower() in {
-    "1", "true", "yes", "on",
-}
 KOL_CALLBACK_ENABLED = (env("KOL_CALLBACK_ENABLED", "0") or "0").lower() in {
     "1", "true", "yes", "on",
 }
@@ -279,6 +274,49 @@ NOTIFY_USERS_STR = env("NOTIFY_USERS",
     "张佳烨-独立站运营:ou_d850dab47bdbaea6736709d354de4b0f"
 )
 NOTIFY_USERS = [(p.split(":", 1)[0], p.split(":", 1)[1]) for p in NOTIFY_USERS_STR.split(",") if ":" in p]
+
+# KOL媒体助手专属个人收件人。值必须是 union_id，不能放旧 App 的 open_id。
+# 名字与 NOTIFY_USERS 对齐，方便迁移期把旧调用参数安全映射到新 App；
+# 若缺少映射，KOL 发送明确失败，不再调用1号联系人接口兜底。
+KOL_NOTIFY_USERS_STR = env("KOL_NOTIFY_USERS", "")
+KOL_NOTIFY_USERS = [
+    (p.split(":", 1)[0], p.split(":", 1)[1])
+    for p in KOL_NOTIFY_USERS_STR.split(",")
+    if ":" in p and p.split(":", 1)[1].startswith("on_")
+]
+
+# KOL媒体助手可见范围内、允许实时查询在职运营人员的部门 ID。
+# 生产环境必须显式配置，避免受限 App 从根部门枚举时报 no dept authority。
+KOL_CONTACT_DEPARTMENT_IDS = [
+    value.strip()
+    for value in env("KOL_CONTACT_DEPARTMENT_IDS", "").split(",")
+    if value.strip().startswith("od-")
+]
+
+
+def _notify_name(value: str) -> str:
+    return str(value or "").split("-", 1)[0].strip()
+
+
+KOL_NOTIFY_NAMES = {_notify_name(name) for name, _ in KOL_NOTIFY_USERS}
+KOL_NOTIFY_IDS_UNIQUE = len({uid for _, uid in KOL_NOTIFY_USERS}) == len(KOL_NOTIFY_USERS)
+KOL_FRANKIE_MAPPED = bool(KOL_ASSISTANT_FRANKIE_UNION_ID) and any(
+    uid == KOL_ASSISTANT_FRANKIE_UNION_ID for _, uid in KOL_NOTIFY_USERS
+)
+KOL_SHIP_CC_MAPPED = any("晓丹" in name for name, _ in KOL_NOTIFY_USERS)
+KOL_REVIEWER_FALLBACK_MAPPED = any("独立站" in name for name, _ in KOL_NOTIFY_USERS)
+KOL_FEISHU_CREDENTIALS_CONFIGURED = bool(
+    FEISHU_KOL_ASSISTANT_APP_ID and FEISHU_KOL_ASSISTANT_APP_SECRET
+)
+KOL_FEISHU_CONFIG_READY = all((
+    KOL_FEISHU_CREDENTIALS_CONFIGURED,
+    bool(KOL_NOTIFY_USERS),
+    KOL_NOTIFY_IDS_UNIQUE,
+    KOL_FRANKIE_MAPPED,
+    KOL_SHIP_CC_MAPPED,
+    KOL_REVIEWER_FALLBACK_MAPPED,
+    bool(KOL_CONTACT_DEPARTMENT_IDS),
+))
 
 # KOL/编辑 草稿待审通知的"主审"职务 (按飞书人事「职务」列原文, feishu-people-as-source-of-truth 铁律)
 # 2026-05-15: draft_router._notify_human_review + sla_check L1 都用此职务实时查在职名单
