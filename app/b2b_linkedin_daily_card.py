@@ -20,6 +20,7 @@ B2B_LINKEDIN_TABLE = os.environ.get("B2B_LINKEDIN_TABLE", "tblN8XszEatuTJgP")
 B2B_LINKEDIN_VIEW = os.environ.get("B2B_LINKEDIN_VIEW", "vew9f7zQ7s")
 B2B_GROUP_CHAT_ID = os.environ.get("B2B_GROUP_CHAT_ID", "oc_2e878553984592d7396401fdd6a37d61")
 B2B_LINKEDIN_FRANKIE_EMAIL = os.environ.get("B2B_LINKEDIN_FRANKIE_EMAIL", "398459272@qq.com")
+B2B_LINKEDIN_POOL_SUMMARY_OWNER = os.environ.get("B2B_LINKEDIN_POOL_SUMMARY_OWNER", "吴晓丹")
 DEFAULT_DISPATCH_OWNERS = ["吴晓丹", "冼浩华", "李桐欣"]
 
 LINKEDIN_FIELD_NAMES = [
@@ -633,14 +634,22 @@ def _target_from_value(value: str) -> tuple[str, str]:
     return "chat_id", value
 
 
-def _notify_target(owner: str, *, frankie_only: bool = False) -> tuple[str, str]:
+def _notify_target(
+    owner: str,
+    *,
+    frankie_only: bool = False,
+    fallback_to_group: bool = True,
+    allow_wildcard: bool = True,
+) -> tuple[str, str]:
     if frankie_only:
         return "email", B2B_LINKEDIN_FRANKIE_EMAIL
     raw = os.environ.get("B2B_LINKEDIN_OWNER_NOTIFY_JSON", "").strip()
     if raw:
         try:
             mapping = json.loads(raw)
-            value = mapping.get(owner) or mapping.get("*")
+            value = mapping.get(owner)
+            if not value and allow_wildcard:
+                value = mapping.get("*")
             if isinstance(value, dict):
                 receive_type = value.get("receive_type") or value.get("type") or ""
                 receive_id = value.get("receive_id") or value.get("id") or ""
@@ -652,7 +661,29 @@ def _notify_target(owner: str, *, frankie_only: bool = False) -> tuple[str, str]
                     return target
         except Exception as exc:
             print(f"[b2b_linkedin_daily_card] bad B2B_LINKEDIN_OWNER_NOTIFY_JSON: {exc}")
-    return "chat_id", B2B_GROUP_CHAT_ID
+    if fallback_to_group:
+        return "chat_id", B2B_GROUP_CHAT_ID
+    return "", ""
+
+
+def _pool_summary_notify_target(*, frankie_only: bool = False) -> tuple[str, str]:
+    owner = os.environ.get(
+        "B2B_LINKEDIN_POOL_SUMMARY_OWNER",
+        B2B_LINKEDIN_POOL_SUMMARY_OWNER,
+    ).strip()
+    receive_type, receive_id = _notify_target(
+        owner,
+        frankie_only=frankie_only,
+        fallback_to_group=False,
+        allow_wildcard=False,
+    )
+    if not receive_type or not receive_id:
+        raise ValueError(f"missing private notify target for pool summary owner: {owner or '-'}")
+    if receive_type not in {"email", "open_id", "union_id"}:
+        raise ValueError(
+            f"private target required for LinkedIn pool summary; got {receive_type or '-'}"
+        )
+    return receive_type, receive_id
 
 
 def _date_window_ms(day: str = "") -> tuple[int, int, str]:
@@ -820,8 +851,8 @@ async def run_pool_summary(
     message_id = ""
     send_error = ""
     if notify:
-        receive_type, receive_id = ("email", B2B_LINKEDIN_FRANKIE_EMAIL) if frankie_only else ("chat_id", B2B_GROUP_CHAT_ID)
         try:
+            receive_type, receive_id = _pool_summary_notify_target(frankie_only=frankie_only)
             message_id = await feishu.send_card_via_b2b_assistant(receive_type, receive_id, card)
         except Exception as exc:
             send_error = f"{type(exc).__name__}: {str(exc)[:240]}"

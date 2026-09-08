@@ -1001,7 +1001,7 @@ async def run_b2b_linkedin_pool_summary(authorization: str = Header(default=""),
     """B2B LinkedIn 线索入池日报.
 
     默认 dry-run 只返回当日新增统计; n8n 生产定时使用
-    ?commit=true&notify=true 发外贸群日报卡。
+    ?commit=true&notify=true 私发汇总负责人。
     """
     _check_auth(authorization)
     try:
