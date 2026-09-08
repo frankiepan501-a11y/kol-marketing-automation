@@ -27,6 +27,7 @@ from . import kol_roi_mapping  # KOL ROI 归因缺口卡 + 映射回填
 from . import launch_reply_attribution  # 集中宣发未归属回复：运营选活动后继续原回复流程
 from . import kol_no_email_outreach  # 无邮箱KOL：运营私信取邮箱→回填主表→回到邮箱质量检查
 from . import kol_callback  # KOL媒体助手长连接回调 → 现有 n8n Event Hub
+from .endpoint_alert_dedup import EndpointAlertDedup
 from . import discord_tester_routes  # FUN Bot 新品体验官：Discord Modal + 安全表单
 
 app = FastAPI(title="KOL Marketing Automation", version="0.3")
@@ -60,9 +61,12 @@ async def stop_discord_tester_role_sync():
     if runtime is not None:
         await runtime.stop()
 
-# Endpoint 失败告警 dedup: {endpoint: last_alert_ts} (60 min 内同 endpoint 只告 1 次)
-_alert_last = {}
 _ALERT_COOLDOWN = 3600
+_alert_last = {}
+_endpoint_alert_dedup = EndpointAlertDedup(
+    config.KOL_ENDPOINT_ALERT_DEDUP_PATH,
+    cooldown_seconds=_ALERT_COOLDOWN,
+)
 _b2b_mail_jobs = {}
 _B2B_MAIL_JOB_TTL = 24 * 3600
 _b2b_auto_pool_jobs = {}
@@ -203,45 +207,54 @@ async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
 
     2026-05-17 加入 (Bug A8): 替代每个 n8n workflow 加 OnError node.
     """
-    now = time.time()
-    last = _alert_last.get(endpoint, 0)
-    if now - last < _ALERT_COOLDOWN:
-        return  # 冷却期内, 跳过
-    _alert_last[endpoint] = now
+    # The helper is shared by several business domains. Persistent suppression
+    # belongs only to KOL in this remediation; other assistants retain the old
+    # in-process behaviour unchanged.
+    kol_prefixes = (
+        "/reply-monitor", "/keyword-supply", "/bounce-monitor",
+        "/talking-points", "/draft/", "/warm-recap", "/dashboard/",
+        "/followup/", "/dispatch/", "/enrich-task", "/auto-send/",
+        "/negotiation-stall/", "/reviewer/", "/sales-attribution/",
+        "/kol-", "/kol/", "/launch/", "/card/", "/draft-status-audit/",
+        "/draft-duplicate-audit/", "/completion-report/",
+        "/manual-send-recon/", "/upload-register/", "/upload-task-report/",
+        "/decision-feedback/", "/secondary-outreach/", "/relabel/",
+        "/zoho/", "/deepseek/", "/sla/", "/draft-cleanup/",
+        "/ship-recon/", "/weekly-report/", "/media-archive/",
+    )
+    is_kol_endpoint = str(endpoint).startswith(kol_prefixes)
+    if is_kol_endpoint:
+        if not _endpoint_alert_dedup.claim(endpoint):
+            return
+    else:
+        now = time.time()
+        last = _alert_last.get(endpoint, 0)
+        if now - last < _ALERT_COOLDOWN:
+            return
+        _alert_last[endpoint] = now
 
     card, level = _build_endpoint_failure_card(endpoint, error, trace)
+    delivered = False
     try:
         # 2026-06-08 不进群(Frankie #4)。端点失败=infra 故障, 运营无法处理 → 保持只私聊 Frankie
         # (退信/重复才给 Frankie+运营; 此处沿用原"防其他人误以为要处理"设计)。
-        # The image is shared with B2B / customer-service / Amazon routes. Only
-        # the KOL-owned namespaces may use KOL媒体助手; every other namespace
-        # keeps its existing notification identity.
-        kol_prefixes = (
-            "/reply-monitor", "/keyword-supply", "/bounce-monitor",
-            "/talking-points", "/draft/", "/warm-recap", "/dashboard/",
-            "/followup/", "/dispatch/", "/enrich-task", "/auto-send/",
-            "/negotiation-stall/", "/reviewer/", "/sales-attribution/",
-            "/kol-", "/kol/", "/launch/", "/card/", "/draft-status-audit/",
-            "/draft-duplicate-audit/", "/completion-report/",
-            "/manual-send-recon/", "/upload-register/", "/upload-task-report/",
-            "/decision-feedback/", "/secondary-outreach/", "/relabel/",
-            "/zoho/", "/deepseek/", "/sla/", "/draft-cleanup/",
-            "/ship-recon/", "/weekly-report/", "/media-archive/",
-        )
-        is_kol_endpoint = str(endpoint).startswith(kol_prefixes)
         identity = "kol_assistant" if is_kol_endpoint else "notify"
         recipients = config.KOL_NOTIFY_USERS if is_kol_endpoint else config.NOTIFY_USERS
         receive_type = "union_id" if is_kol_endpoint else "open_id"
         for name, oid in recipients:
             if name.startswith("潘"):
                 try:
-                    await feishu.send_card_message(
+                    message_id = await feishu.send_card_message(
                         receive_type, oid, card, biz="AUDIT", level=level,
                         which=identity,
                     )
+                    delivered = delivered or bool(message_id)
                 except Exception: pass
     except Exception as e:
         print(f"[_alert_endpoint_failure] {endpoint} self-alert fail: {e}")
+    finally:
+        if is_kol_endpoint and not delivered:
+            _endpoint_alert_dedup.release(endpoint)
 
 
 def _cleanup_b2b_mail_jobs():
@@ -598,8 +611,15 @@ async def root():
 @app.get("/health")
 async def health():
     kol_ai_configured = bool(config.KOL_DEEPSEEK_API_KEY.strip())
+    base_access = await feishu.probe_kol_bitable_access()
+    alert_dedup = _endpoint_alert_dedup.snapshot()
+    kol_feishu_ready = bool(
+        config.KOL_FEISHU_CONFIG_READY
+        and base_access.get("ok")
+        and alert_dedup.get("state_available") is True
+    )
     return {
-        "status": "ok" if kol_ai_configured and config.KOL_FEISHU_CONFIG_READY else "degraded",
+        "status": "ok" if kol_ai_configured and kol_feishu_ready else "degraded",
         "kol_ai_configured": kol_ai_configured,
         "kol_feishu_migration": {
             "route_mode": "target_only",
@@ -610,7 +630,9 @@ async def health():
             "ship_cc_mapped": config.KOL_SHIP_CC_MAPPED,
             "reviewer_fallback_mapped": config.KOL_REVIEWER_FALLBACK_MAPPED,
             "contact_departments_count": len(config.KOL_CONTACT_DEPARTMENT_IDS),
-            "ready": config.KOL_FEISHU_CONFIG_READY,
+            "base_access": base_access,
+            "alert_dedup": alert_dedup,
+            "ready": kol_feishu_ready,
         },
         "kol_assistant_callback": kol_callback.snapshot(),
         "dtc_weekly_ai_configured": bool(os.environ.get("DTC_WEEKLY_DEEPSEEK_API_KEY", "").strip()),

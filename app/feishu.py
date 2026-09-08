@@ -414,6 +414,50 @@ async def get_record(table_id: str, record_id: str):
     return r["data"]["record"]
 
 
+async def probe_kol_bitable_access() -> dict:
+    """Read one page through the exact KOL production App and Base namespace."""
+    path = (
+        f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{config.T_KOL}"
+        "/records?page_size=1"
+    )
+    try:
+        response = await api(
+            "GET", path, which="kol_assistant", retry_transient=False,
+        )
+        code = response.get("code", 0)
+        if code not in (0, None):
+            return {
+                "ok": False,
+                "status_code": 200,
+                "feishu_code": code,
+                "message": str(response.get("msg") or "Feishu API rejected the probe")[:160],
+            }
+        data = response.get("data") or {}
+        items = data.get("items")
+        if not isinstance(items, list):
+            return {
+                "ok": False,
+                "status_code": 200,
+                "feishu_code": None,
+                "message": "Feishu probe response did not contain a records list",
+            }
+        return {"ok": True, "records_visible": bool(items)}
+    except FeishuAPIError as exc:
+        return {
+            "ok": False,
+            "status_code": exc.status_code,
+            "feishu_code": exc.feishu_code,
+            "message": (exc.feishu_msg or "Feishu API rejected the probe")[:160],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status_code": None,
+            "feishu_code": None,
+            "message": f"{type(exc).__name__}: KOL Base probe failed",
+        }
+
+
 async def update_record(table_id: str, record_id: str, fields: dict):
     r = await api("PUT", f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records/{record_id}",
                   {"fields": fields})

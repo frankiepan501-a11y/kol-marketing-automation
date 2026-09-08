@@ -60,6 +60,9 @@ KOL_EVENT_HUB_URL = env(
     "https://frankiepan501.zeabur.app/webhook/feishu-event-hub",
 )
 KOL_CALLBACK_SPOOL_PATH = env("KOL_CALLBACK_SPOOL_PATH", "/data/kol_callback_spool.jsonl")
+KOL_ENDPOINT_ALERT_DEDUP_PATH = env(
+    "KOL_ENDPOINT_ALERT_DEDUP_PATH", "/data/kol_endpoint_alert_dedup.sqlite3"
+)
 # 外贸助手 App (B2B 客户/邮件/LinkedIn 回执卡; 回调回到 b2b-assistant-event)
 FEISHU_B2B_ASSISTANT_APP_ID = env("FEISHU_B2B_ASSISTANT_APP_ID", required=True)
 FEISHU_B2B_ASSISTANT_APP_SECRET = env("FEISHU_B2B_ASSISTANT_APP_SECRET", required=True)

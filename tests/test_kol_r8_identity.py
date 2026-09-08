@@ -18,6 +18,23 @@ from app import config, feishu, kol_callback
 
 
 class KolR8IdentityTests(unittest.TestCase):
+    def test_health_probe_reads_real_kol_table_with_dedicated_identity(self):
+        calls = []
+
+        async def fake_api(method, path, body=None, which="bitable", **kwargs):
+            calls.append((method, path, which, kwargs))
+            return {"code": 0, "data": {"items": [{"record_id": "rec1"}]}}
+
+        with patch.object(config, "FEISHU_APP_TOKEN", "kol_test_base"), \
+             patch.object(config, "T_KOL", "tbl_kol"), \
+             patch.object(feishu, "api", new=fake_api):
+            result = asyncio.run(feishu.probe_kol_bitable_access())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("kol_assistant", calls[0][2])
+        self.assertIn("/apps/kol_test_base/tables/tbl_kol/records", calls[0][1])
+        self.assertFalse(calls[0][3]["retry_transient"])
+
     def test_kol_base_paths_use_dedicated_identity(self):
         with patch.object(config, "FEISHU_APP_TOKEN", "kol_test_base"):
             path = "/bitable/v1/apps/kol_test_base/tables/tbl_test/records"

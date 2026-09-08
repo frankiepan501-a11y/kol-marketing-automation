@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from app import main
 
@@ -22,7 +22,16 @@ class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
         original = main.config.KOL_DEEPSEEK_API_KEY
         try:
             main.config.KOL_DEEPSEEK_API_KEY = ""
-            result = await main.health()
+            with patch.object(
+                main.feishu,
+                "probe_kol_bitable_access",
+                new=AsyncMock(return_value={"ok": True, "records_visible": True}),
+            ), patch.object(
+                main._endpoint_alert_dedup,
+                "snapshot",
+                return_value={"state_available": True, "persistent": True},
+            ):
+                result = await main.health()
         finally:
             main.config.KOL_DEEPSEEK_API_KEY = original
 
