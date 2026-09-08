@@ -7,7 +7,7 @@ import time
 import uuid
 import traceback as _tb
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor, auto_send, draft_router, sla_check, dispatch, relabel, keyword_cron, feishu, ship_recon, draft_cleanup, bounce_monitor, shopify_discount, warm_recap, talking_points, draft_regen, kol_dedup, keyword_supply, draft_status_audit, draft_duplicate_audit, kol_audit_digest, launch_candidate_preview, launch_email_preflight, launch_evidence, launch_evidence_author_import, launch_participation, launch_outcomes, launch_outreach, launch_runtime, media_archive_controller, upload_intake_sync, discord_tester_role_sync
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
@@ -1558,11 +1558,52 @@ async def run_cs_ingest(authorization: str = Header(default=""),
     _check_auth(authorization)
     try:
         result = await cs_ingest.run(source=source, limit=limit, dry_run=dry_run)
+        if result.get("source_errors") or result.get("errors"):
+            reason = (f"source_errors={result.get('source_errors') or {}}; "
+                      f"message_errors={int(result.get('errors') or 0)}")
+            await _alert_endpoint_failure("/cs/ingest", reason, "")
+            return JSONResponse(status_code=424, content={"ok": False, **result})
         return {"ok": True, **result}
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/cs/ingest", str(e), tr)
-        return {"ok": False, "error": str(e), "trace": tr}
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+
+@app.post("/cs/ingest/replay")
+async def replay_cs_ingest(request: Request, authorization: str = Header(default="")):
+    """受控单封回放；message_id 放请求体，避免出现在 URL/网关访问日志。"""
+    _check_auth(authorization)
+    payload = await request.json()
+    message_id = str(payload.get("message_id") or "").strip()
+    if not message_id:
+        raise HTTPException(400, "message_id is required")
+    dry_run = bool(payload.get("dry_run", True))
+    try:
+        scan_limit = max(1, min(int(payload.get("scan_limit") or 500), 2000))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "scan_limit must be an integer from 1 to 2000")
+    try:
+        result = await cs_ingest.run(
+            source="funlab",
+            limit=scan_limit,
+            dry_run=dry_run,
+            message_id=message_id,
+            scan_limit=scan_limit,
+            allow_info_request=False,
+        )
+        if result.get("source_errors") or result.get("errors"):
+            reason = (f"source_errors={result.get('source_errors') or {}}; "
+                      f"message_errors={int(result.get('errors') or 0)}")
+            await _alert_endpoint_failure("/cs/ingest/replay", reason, "")
+            return JSONResponse(status_code=424, content={"ok": False, **result})
+        return {"ok": True, **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/ingest/replay", str(e), tr)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 
 @app.post("/cs/dispatch")
@@ -1572,11 +1613,19 @@ async def run_cs_dispatch(authorization: str = Header(default=""), limit: int = 
     _check_auth(authorization)
     try:
         result = await cs_dispatch.run(limit=limit, rids=rids)
+        if (result.get("error") or result.get("config_errors") or
+                result.get("read_errors") or result.get("send_errors")):
+            reason = (f"error={result.get('error') or ''}; "
+                      f"config_errors={result.get('config_errors') or []}; "
+                      f"read_error_count={len(result.get('read_errors') or [])}; "
+                      f"send_error_count={len(result.get('send_errors') or [])}")
+            await _alert_endpoint_failure("/cs/dispatch", reason, "")
+            return JSONResponse(status_code=424, content={"ok": False, **result})
         return {"ok": True, **result}
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/cs/dispatch", str(e), tr)
-        return {"ok": False, "error": str(e), "trace": tr}
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 
 @app.get("/cs/social-review/health")

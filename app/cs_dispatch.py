@@ -15,6 +15,7 @@ import re
 import ssl
 import smtplib
 import time
+import urllib.parse
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid, parseaddr
@@ -32,9 +33,17 @@ CS_ASSIST_ID = (os.environ.get("FEISHU_CS_ASSISTANT_APP_ID")
 CS_ASSIST_SECRET = (os.environ.get("FEISHU_CS_ASSISTANT_APP_SECRET")
                     or os.environ.get("FEISHU_CUSTOMER_SERVICE_APP_SECRET")
                     or "")
+OBSERVE_CONFIGURED = bool((os.environ.get("CS_DISPATCH_OBSERVE", "") or "").strip())
 OBSERVE = (os.environ.get("CS_DISPATCH_OBSERVE", "1") or "1") != "0"
+OBSERVE_UNION_CONFIGURED = bool((os.environ.get("CS_DISPATCH_OBSERVE_UNION", "") or "").strip())
 OBSERVE_UNION = os.environ.get("CS_DISPATCH_OBSERVE_UNION",
                                "on_6e85dd60606f76f2d5af892785ac1dfe")  # Frankie union_id
+DISPATCH_NOT_BEFORE_RAW = (os.environ.get("CS_DISPATCH_NOT_BEFORE_MS", "") or "").strip()
+try:
+    DISPATCH_NOT_BEFORE_MS = int(DISPATCH_NOT_BEFORE_RAW or "0")
+except ValueError:
+    DISPATCH_NOT_BEFORE_MS = 0
+MIN_REASONABLE_CUTOFF_MS = 1_577_836_800_000  # 2020-01-01 UTC
 SOCIAL_REVIEW_FRANKIE_UNION = os.environ.get(
     "CS_SOCIAL_REVIEW_FRANKIE_UNION", "on_6e85dd60606f76f2d5af892785ac1dfe"
 )  # 独立于观察期路由，避免观察目标变化导致测试卡改发他人
@@ -119,19 +128,34 @@ async def _token() -> str:
     return _tok["v"]
 
 
+async def _send_card_result(union_id: str, card: dict, idempotency_key: str = "") -> dict:
+    try:
+        tok = await _token()
+        params = {"receive_id_type": "union_id"}
+        if idempotency_key:
+            params["uuid"] = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            r = await c.post("https://open.feishu.cn/open-apis/im/v1/messages",
+                             params=params,
+                             headers={"Authorization": f"Bearer {tok}"},
+                             json={"receive_id": union_id, "msg_type": "interactive",
+                                   "content": json.dumps(card, ensure_ascii=False)})
+            try:
+                d = r.json()
+            except Exception:
+                d = {}
+        message_id = (d.get("data", {}) or {}).get("message_id", "") if d.get("code") == 0 else ""
+        return {"ok": bool(message_id), "message_id": message_id,
+                "http_status": r.status_code, "feishu_code": d.get("code"),
+                "error": "" if message_id else str(d.get("msg") or f"HTTP {r.status_code}")[:300]}
+    except Exception as exc:
+        return {"ok": False, "message_id": "", "http_status": 0, "feishu_code": None,
+                "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
+
+
 async def _send_card(union_id: str, card: dict, idempotency_key: str = "") -> str:
-    tok = await _token()
-    params = {"receive_id_type": "union_id"}
-    if idempotency_key:
-        params["uuid"] = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
-    async with httpx.AsyncClient(timeout=30.0) as c:
-        r = await c.post("https://open.feishu.cn/open-apis/im/v1/messages",
-                         params=params,
-                         headers={"Authorization": f"Bearer {tok}"},
-                         json={"receive_id": union_id, "msg_type": "interactive",
-                               "content": json.dumps(card, ensure_ascii=False)})
-        d = r.json()
-    return d.get("data", {}).get("message_id", "") if d.get("code") == 0 else ""
+    result = await _send_card_result(union_id, card, idempotency_key=idempotency_key)
+    return result.get("message_id", "") if result.get("ok") else ""
 
 
 async def _update_card(message_id: str, card: dict) -> bool:
@@ -759,32 +783,69 @@ def _social_review_outbound_audit(f: dict) -> dict:
 
 
 async def run(limit: int = 10, rids: str = "") -> dict:
+    limit = max(1, min(int(limit), 10))
+    config_errors = []
+    if not OBSERVE_CONFIGURED:
+        config_errors.append("CS_DISPATCH_OBSERVE")
+    if not OBSERVE_UNION_CONFIGURED:
+        config_errors.append("CS_DISPATCH_OBSERVE_UNION")
+    max_reasonable_cutoff_ms = int(time.time() * 1000) + 86_400_000
+    if (not DISPATCH_NOT_BEFORE_RAW or
+            not (MIN_REASONABLE_CUTOFF_MS <= DISPATCH_NOT_BEFORE_MS <= max_reasonable_cutoff_ms)):
+        config_errors.append("CS_DISPATCH_NOT_BEFORE_MS")
+    if config_errors:
+        return {"observe": OBSERVE, "observe_configured": OBSERVE_CONFIGURED,
+                "candidates": 0, "sent": 0, "config_errors": config_errors,
+                "fallbacks": [], "send_errors": [], "samples": []}
     if not CS_ASSIST_SECRET:
         return {"error": "FEISHU_CS_ASSISTANT_APP_SECRET 未配"}
+    read_errors = []
     if rids:
-        # 定向派单: 只派指定 rid(逐个 GET), 用于审计后精确放行(避开未审计渠道如 Discord 待派)
+        # 历史工单每次只允许显式放行 1 条，避免把逗号列表误当成批量恢复入口。
+        requested_rids = [x.strip() for x in rids.split(",") if x.strip()]
+        if len(requested_rids) != 1:
+            return {"error": "rids must contain exactly one record_id",
+                    "config_errors": [], "read_errors": [], "send_errors": [],
+                    "fallbacks": [], "samples": [], "sent": 0}
         items = []
-        for rid in [x.strip() for x in rids.split(",") if x.strip()]:
+        for rid in requested_rids:
             try:
                 rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                                        which="notify")
                 rf = ((rec.get("data", {}) or {}).get("record", {}) or {})
                 if rf:
                     items.append({"record_id": rid, "fields": rf.get("fields", {})})
-            except Exception:
-                continue
+                else:
+                    read_errors.append({"record_id": rid, "error": "record not found"})
+            except Exception as exc:
+                read_errors.append({"record_id": rid,
+                                    "error": f"{type(exc).__name__}: {str(exc)[:240]}"})
     else:
-        body = {"filter": {"conjunction": "and", "conditions": [
-            {"field_name": "状态", "operator": "is", "value": ["待派"]}]},
-            "page_size": min(int(limit) * 3, 200)}
-        d = await feishu.api("POST", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/search",
-                             body, which="notify")
-        items = d.get("data", {}).get("items", [])
+        # list API 分页读取全部待派记录，避免 search 首 200 条历史积压挡住新工单。
+        # 不用 datetime search 条件：飞书对日期筛选曾出现静默失效，截止时间仍在本地判定。
+        items, page_token, seen_tokens = [], "", set()
+        while True:
+            params = {"page_size": 200, "filter": 'CurrentValue.[状态]="待派"'}
+            if page_token:
+                params["page_token"] = page_token
+            path = (f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records?"
+                    f"{urllib.parse.urlencode(params)}")
+            d = await feishu.api("GET", path, which="notify")
+            data = d.get("data", {}) or {}
+            items.extend(data.get("items", []) or [])
+            if not data.get("has_more"):
+                break
+            next_token = str(data.get("page_token") or "")
+            if not next_token or next_token in seen_tokens:
+                raise RuntimeError("pending ticket pagination returned an invalid page_token")
+            seen_tokens.add(next_token)
+            page_token = next_token
     try:
         resources = await cs_resources.active_resources()
     except Exception:
         resources = cs_resources.builtin_resources()
-    sent, samples = 0, []
+    sent, eligible, historical_skipped = 0, 0, 0
+    samples, fallbacks, send_errors = [], [], []
     for it in items:
         if sent >= limit:
             break
@@ -792,17 +853,49 @@ async def run(limit: int = 10, rids: str = "") -> dict:
         rid = it.get("record_id")
         if _x(f, "卡片消息ID") or _x(f, "状态") != "待派":
             continue
+        # Cron 只派修复完成后新进入的工单。历史补录必须使用 rids 明确放行，
+        # 避免恢复任务时把整段历史积压一次性推给运营。
+        try:
+            received_ms = int(float(_x(f, "入站时间") or 0))
+        except (TypeError, ValueError):
+            received_ms = 0
+        if not rids and received_ms < DISPATCH_NOT_BEFORE_MS:
+            historical_skipped += 1
+            continue
+        eligible += 1
         # 观察期统一发 Frankie; 生产期按「分配运营」路由(兜底/待定/查不到 → 降级 Frankie)
-        union = OBSERVE_UNION if OBSERVE else (await _resolve_union(_x(f, "分配运营")) or OBSERVE_UNION)
-        mid = await _send_card(union, _build_card(rid, f, resources=resources))
+        operator = _x(f, "分配运营")
+        resolved_union = "" if OBSERVE else await _resolve_union(operator)
+        union = OBSERVE_UNION if OBSERVE else (resolved_union or OBSERVE_UNION)
+        route = "observe_frankie" if OBSERVE else ("assigned_operator" if resolved_union else "fallback_frankie")
+        if route == "fallback_frankie":
+            fallbacks.append({"record_id": rid, "operator": operator,
+                              "reason": "operator_union_id_unresolved"})
+        send_result = await _send_card_result(
+            union,
+            _build_card(rid, f, resources=resources),
+            idempotency_key=f"cs_dispatch:{rid}",
+        )
+        mid = send_result.get("message_id", "") if send_result.get("ok") else ""
         if mid:
             await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                              {"fields": {"卡片消息ID": mid, "状态": "待回"}}, which="notify")
             sent += 1
             if len(samples) < 12:
                 samples.append({"产品": _x(f, "产品"), "平台": _x(f, "销售平台"),
-                                "建议运营": _x(f, "分配运营"), "摘要": _x(f, "客诉摘要")[:40]})
-    return {"observe": OBSERVE, "candidates": len(items), "sent": sent, "samples": samples}
+                                "建议运营": operator, "收件模式": route,
+                                "摘要": _x(f, "客诉摘要")[:40]})
+        else:
+            send_errors.append({"record_id": rid, "operator": operator, "route": route,
+                                "http_status": send_result.get("http_status"),
+                                "feishu_code": send_result.get("feishu_code"),
+                                "error": send_result.get("error", "")})
+    return {"observe": OBSERVE, "observe_configured": OBSERVE_CONFIGURED,
+            "candidates": len(items), "eligible": eligible,
+            "historical_skipped": historical_skipped,
+            "sent": sent, "config_errors": [],
+            "fallbacks": fallbacks, "read_errors": read_errors,
+            "send_errors": send_errors, "samples": samples}
 
 
 async def send_preview_card(rid: str) -> dict:

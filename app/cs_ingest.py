@@ -612,7 +612,10 @@ def _fetch_funlab_sync(limit: int) -> list:
     from email.header import decode_header, make_header
     from email.utils import parsedate_to_datetime, parseaddr
     if not (NE_USER and NE_CODE):
-        return []
+        raise RuntimeError(
+            "funlab_source_not_configured: missing "
+            "NETEASE_FUNLAB_CS_USER/NETEASE_FUNLAB_CS_AUTHCODE"
+        )
     out = []
     conn = imaplib.IMAP4_SSL(NE_IMAP, 993, ssl_context=ssl.create_default_context(), timeout=30)
     try:
@@ -662,7 +665,12 @@ def _fetch_funlab_one_sync(message_id: str, scan_limit: int = 500) -> dict:
     import imaplib, ssl, email
     from email.header import decode_header, make_header
     from email.utils import parsedate_to_datetime, parseaddr
-    if not (NE_USER and NE_CODE and message_id):
+    if not (NE_USER and NE_CODE):
+        raise RuntimeError(
+            "funlab_source_not_configured: missing "
+            "NETEASE_FUNLAB_CS_USER/NETEASE_FUNLAB_CS_AUTHCODE"
+        )
+    if not message_id:
         return {}
     conn = imaplib.IMAP4_SSL(NE_IMAP, 993, ssl_context=ssl.create_default_context(), timeout=30)
     try:
@@ -1156,6 +1164,9 @@ def _info_send_update(fields: dict, mode: str, outbound_msg_id: str = "") -> dic
     elif mode == "disabled":
         note = "系统补询: CS_INFO_REQUEST_LIVE=0，未自动发给客户。"
         count = int(float(_field_text(fields.get("补充信息次数")) or 0))
+    elif mode == "replay_blocked":
+        note = "系统补询: 历史回放安全闸已拦截，未自动发给客户。"
+        count = int(float(_field_text(fields.get("补充信息次数")) or 0))
     else:
         note = f"系统补询: 未发送，mode={mode}。"
         count = int(float(_field_text(fields.get("补充信息次数")) or 0))
@@ -1211,7 +1222,8 @@ async def _operator_draft_after_supplement(msg: dict, f: dict, order_no: str,
 
 
 async def _handle_waiting_info_reply(row: dict, msg: dict, resources: list | None,
-                                     dry_run: bool = False) -> dict:
+                                     dry_run: bool = False,
+                                     allow_info_request: bool = True) -> dict:
     rid = row.get("record_id")
     f = row.get("fields", {}) or {}
     if not rid:
@@ -1257,7 +1269,10 @@ async def _handle_waiting_info_reply(row: dict, msg: dict, resources: list | Non
         reply = _info_request_reply(tmp, _field_text(f.get("信息缺口")))
         update = {**common, "AI草稿": reply[:5000], "信息缺口": " / ".join(gaps or ["缺订单号", "缺国家站点"])}
         if not dry_run:
-            mode, outbound = await _send_info_request(msg, tmp, reply)
+            if allow_info_request:
+                mode, outbound = await _send_info_request(msg, tmp, reply)
+            else:
+                mode, outbound = "replay_blocked", ""
             update.update(_info_send_update(tmp, mode, outbound))
             await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{rid}",
                              {"fields": update}, which="notify")
@@ -1313,7 +1328,11 @@ async def backfill_evidence(record_id: str, dry_run: bool = False, scan_limit: i
 
 
 # ===== 主入口 =====
-async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> dict:
+async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
+              message_id: str = "", scan_limit: int = 500,
+              allow_info_request: bool = True) -> dict:
+    if message_id and source != "funlab":
+        raise ValueError("single-message replay supports source=funlab only")
     src_err = {}
     msgs = []
     if source in ("all", "powkong"):
@@ -1323,7 +1342,16 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
             src_err["powkong"] = str(e)[:200]
     if source in ("all", "funlab"):
         try:
-            msgs += await _fetch_funlab(limit)
+            if message_id:
+                one = await _fetch_funlab_one(message_id, scan_limit=scan_limit)
+                if one:
+                    msgs.append(one)
+                else:
+                    src_err["funlab"] = (
+                        f"requested message_id was not found in the latest {scan_limit} messages"
+                    )
+            else:
+                msgs += await _fetch_funlab(limit)
         except Exception as e:
             src_err["funlab"] = str(e)[:200]
     if source in ("all", "discord"):
@@ -1347,7 +1375,13 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
         waiting_match = _match_waiting_info_ticket(m, waiting)
         if waiting_match:
             try:
-                result = await _handle_waiting_info_reply(waiting_match, m, resources, dry_run=dry_run)
+                result = await _handle_waiting_info_reply(
+                    waiting_match,
+                    m,
+                    resources,
+                    dry_run=dry_run,
+                    allow_info_request=allow_info_request,
+                )
                 if (m.get("attachments") or []) and result.get("record_id") and not dry_run:
                     await _save_attachments_to_ticket(result["record_id"], m.get("attachments") or [],
                                                       existing_fields=(waiting_match.get("fields") or {}),
@@ -1379,7 +1413,10 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
                     amz_override = (p, op, "site_hint")
         fields = _to_fields(m, c, amz_override, resources=resources)
         if fields.get("状态") == STATUS_WAIT_INFO and not dry_run:
-            mode, outbound = await _send_info_request(m, fields, fields.get("AI草稿", ""))
+            if allow_info_request:
+                mode, outbound = await _send_info_request(m, fields, fields.get("AI草稿", ""))
+            else:
+                mode, outbound = "replay_blocked", ""
             fields.update(_info_send_update(fields, mode, outbound))
         if len(samples) < 14:
             samples.append({"渠道品牌": f"{fields['品牌']}", "from": m["frm"][:26],
@@ -1393,9 +1430,13 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False) -> di
                 {"fields": fields}, which="notify")
             rid = (((created.get("data") or {}).get("record") or {}).get("record_id")
                    or ((created.get("data") or {}).get("record_id") or ""))
+            if not rid:
+                err_cnt += 1
+                continue
             if rid and (m.get("attachments") or []):
                 await _save_attachments_to_ticket(rid, m.get("attachments") or [], dry_run=False)
         new_cnt += 1
 
     return {"sources": source, "fetched": len(msgs), "new": new_cnt, "skipped": skip_cnt,
-            "errors": err_cnt, "source_errors": src_err, "dry_run": dry_run, "samples": samples}
+            "errors": err_cnt, "source_errors": src_err, "dry_run": dry_run,
+            "replay_mode": bool(message_id), "samples": samples}
