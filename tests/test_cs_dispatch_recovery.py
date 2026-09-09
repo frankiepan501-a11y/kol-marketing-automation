@@ -1,19 +1,65 @@
 import unittest
 import json
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import cs_dispatch
 
 
 class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_netease_smtp_rejected_recipient_is_not_treated_as_accepted(self):
+        smtp = MagicMock()
+        smtp.__enter__.return_value = smtp
+        smtp.sendmail.return_value = {
+            "owner@example.com": (550, b"mailbox unavailable")
+        }
+
+        with patch.object(cs_dispatch.smtplib, "SMTP_SSL", return_value=smtp):
+            with self.assertRaisesRegex(RuntimeError, "拒收"):
+                cs_dispatch._netease_send_sync(
+                    "owner@example.com", "Test subject", "<p>Complete body</p>"
+                )
+
+    def test_netease_smtp_accepted_message_is_saved_to_sent_for_readback(self):
+        smtp = MagicMock()
+        smtp.__enter__.return_value = smtp
+        smtp.sendmail.return_value = {}
+
+        with patch.object(cs_dispatch.smtplib, "SMTP_SSL", return_value=smtp), \
+             patch.object(cs_dispatch, "_save_netease_sent_copy_sync") as save_copy:
+            provider_id = cs_dispatch._netease_send_sync(
+                "owner@example.com", "Test subject", "<p>Complete body</p>"
+            )
+
+        self.assertTrue(provider_id.startswith("<"))
+        raw_message, saved_id = save_copy.call_args.args
+        self.assertIsInstance(raw_message, bytes)
+        self.assertEqual(provider_id, saved_id)
+        self.assertIn(b"Message-ID:", raw_message)
+
+    def test_save_netease_sent_copy_appends_only_when_message_is_absent(self):
+        conn = MagicMock()
+        conn.list.return_value = ("OK", [b'(\\HasNoChildren \\Sent) "/" "Sent"'])
+        conn.select.return_value = ("OK", [b"1"])
+        conn.search.return_value = ("OK", [b""])
+        conn.append.return_value = ("OK", [b"1"])
+
+        with patch.object(cs_dispatch.imaplib, "IMAP4_SSL", return_value=conn):
+            cs_dispatch._save_netease_sent_copy_sync(
+                b"Message-ID: <proof@funlabswitch.com>\r\n\r\nbody",
+                "<proof@funlabswitch.com>",
+            )
+
+        conn.append.assert_called_once()
+        self.assertEqual("Sent", conn.append.call_args.args[0])
+
     async def test_funlab_dry_run_uses_netease_and_verifies_sent_copy(self):
         fields = {
             "工单ID": "CSF-inbound", "品牌": "FUNLAB", "渠道": "邮箱",
             "销售平台": "独立站", "客户标识": "customer@example.com",
             "邮件主题": "Order update",
         }
-        with patch.object(cs_dispatch, "CS_REPLY_DRY_RUN_TO", "owner@example.com"), \
+        with patch.object(cs_dispatch, "CS_REPLY_DRY_RUN_TO", "frankiepan501@gmail.com"), \
              patch.object(cs_dispatch, "_netease_send", new=AsyncMock(
                  return_value="<dry-run@funlabswitch.com>")) as netease_send, \
              patch.object(cs_dispatch, "_verify_netease_outbound", new=AsyncMock(
@@ -28,12 +74,25 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DRY-RUN", detail)
         self.assertEqual("<dry-run@funlabswitch.com>", evidence)
         netease_send.assert_awaited_once()
-        self.assertEqual("owner@example.com", netease_send.await_args.args[0])
+        self.assertEqual("frankiepan501@gmail.com", netease_send.await_args.args[0])
         self.assertIn("CS-DRY-RUN", netease_send.await_args.args[1])
         self.assertIn("CS DRY-RUN", netease_send.await_args.args[2])
         verify_netease.assert_awaited_once()
         zoho_send.assert_not_awaited()
         verify_zoho.assert_not_awaited()
+
+    async def test_dry_run_rejects_non_whitelisted_recipient_before_provider_call(self):
+        fields = {
+            "工单ID": "CSF-inbound", "品牌": "FUNLAB", "渠道": "邮箱",
+            "销售平台": "独立站", "客户标识": "customer@example.com",
+            "邮件主题": "Order update",
+        }
+        with patch.object(cs_dispatch, "CS_REPLY_DRY_RUN_TO", "customer@example.com"), \
+             patch.object(cs_dispatch, "_netease_send", new=AsyncMock()) as netease_send:
+            with self.assertRaisesRegex(RuntimeError, "白名单"):
+                await cs_dispatch._dispatch_reply(fields, "A complete customer reply.")
+
+        netease_send.assert_not_awaited()
 
     async def test_live_send_callback_acks_before_slow_network_work_and_dedupes_twin_delivery(self):
         gate = asyncio.Event()

@@ -54,6 +54,7 @@ SOCIAL_REVIEW_FRANKIE_UNION = os.environ.get(
 CS_REPLY_LIVE = (os.environ.get("CS_REPLY_LIVE", "0") or "0") != "0"
 # Scott Stein 铁律: 改/上线回客户代码先开此 env → 全部回复改发测试邮箱(真客户/频道不收), 验证 raw 完整再删
 CS_REPLY_DRY_RUN_TO = (os.environ.get("CS_REPLY_DRY_RUN_TO", "") or "").strip()
+CS_REPLY_DRY_RUN_ALLOWED_TO = "frankiepan501@gmail.com"
 CS_CUSTOM_REPLY_MAX_CHARS = int(os.environ.get("CS_CUSTOM_REPLY_MAX_CHARS", "2000") or "2000")
 CS_CARD_INPUT_MAX_CHARS = 1000
 SOCIAL_REVIEW_ACTION = "social_cs_review_save"
@@ -1079,6 +1080,44 @@ async def _verify_zoho_outbound(provider_id: str, expected_to: str,
     raise RuntimeError("Zoho 已发送箱在限时内未出现匹配收件人及完整正文")
 
 
+def _netease_sent_box(conn) -> str:
+    status, boxes = conn.list()
+    if status != "OK":
+        raise RuntimeError("网易邮箱无法列出文件夹")
+    for raw in boxes or []:
+        label = raw.decode("ascii", errors="ignore")
+        if "\\Sent" in label:
+            return label.rsplit(" ", 1)[-1].strip('"')
+    raise RuntimeError("网易邮箱未找到已发送文件夹")
+
+
+def _save_netease_sent_copy_sync(raw_message: bytes, provider_id: str) -> None:
+    """Persist the exact SMTP payload so the later IMAP readback is deterministic."""
+    conn = imaplib.IMAP4_SSL(
+        _csi.NE_IMAP, 993, ssl_context=ssl.create_default_context(), timeout=30
+    )
+    try:
+        conn.login(_csi.NE_USER, _csi.NE_CODE)
+        imaplib.Commands["ID"] = ("AUTH", "SELECTED")
+        conn._simple_command("ID", '("name" "cs-outbound-proof" "version" "1.0")')
+        sent_box = _netease_sent_box(conn)
+        if conn.select(sent_box, readonly=True)[0] != "OK":
+            raise RuntimeError("网易邮箱无法读取已发送文件夹")
+        status, data = conn.search(None, "HEADER", "Message-ID", f'"{provider_id}"')
+        if status == "OK" and data and (data[0] or b"").split():
+            return
+        status, _ = conn.append(
+            sent_box, r"(\Seen)", imaplib.Time2Internaldate(time.time()), raw_message
+        )
+        if status != "OK":
+            raise RuntimeError("网易邮箱无法保存已发送副本")
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
 def _verify_netease_outbound_sync(provider_id: str, expected_to: str,
                                    expected_html: str, timeout_s: float = 55.0) -> str:
     """Return RFC Message-ID only after the exact MIME message is visible in Sent."""
@@ -1092,17 +1131,7 @@ def _verify_netease_outbound_sync(provider_id: str, expected_to: str,
         conn.login(_csi.NE_USER, _csi.NE_CODE)
         imaplib.Commands["ID"] = ("AUTH", "SELECTED")
         conn._simple_command("ID", '("name" "cs-outbound-proof" "version" "1.0")')
-        status, boxes = conn.list()
-        if status != "OK":
-            raise RuntimeError("网易邮箱无法列出文件夹")
-        sent_box = None
-        for raw in boxes or []:
-            label = raw.decode("ascii", errors="ignore")
-            if "\\Sent" in label:
-                sent_box = label.rsplit(" ", 1)[-1]
-                break
-        if not sent_box:
-            raise RuntimeError("网易邮箱未找到已发送文件夹")
+        sent_box = _netease_sent_box(conn)
         while time.monotonic() < deadline:
             if conn.select(sent_box, readonly=True)[0] != "OK":
                 raise RuntimeError("网易邮箱无法读取已发送文件夹")
@@ -1168,9 +1197,24 @@ def _netease_send_sync(to_addr: str, subject: str, html: str, in_reply_to: str =
     plain = re.sub(r"<[^>]+>", "", html).replace("&nbsp;", " ").strip()
     msg.attach(MIMEText(plain or " ", "plain", "utf-8"))
     msg.attach(MIMEText(html, "html", "utf-8"))
+    raw_message = msg.as_bytes()
     with smtplib.SMTP_SSL(NE_SMTP, 465, context=ssl.create_default_context(), timeout=30) as s:
         s.login(_csi.NE_USER, _csi.NE_CODE)
-        s.sendmail(_csi.NE_USER, [to_addr], msg.as_string())
+        refused = s.sendmail(_csi.NE_USER, [to_addr], raw_message)
+        if refused:
+            first = next(iter(refused.values()), ("unknown", b""))
+            code = first[0] if isinstance(first, tuple) and first else "unknown"
+            raise RuntimeError(f"网易 SMTP 拒收收件人，状态码={code}")
+    print(f"[cs_dispatch.smtp] provider=netease accepted message_id={msg['Message-ID']}")
+    try:
+        _save_netease_sent_copy_sync(raw_message, str(msg["Message-ID"]))
+    except Exception as exc:
+        # SMTP has already accepted the message. Do not raise here or a retry could
+        # send a duplicate; the subsequent readback will keep the ticket pending.
+        print(
+            f"[cs_dispatch.smtp] provider=netease sent_copy_failed "
+            f"message_id={msg['Message-ID']} reason={str(exc)[:160]}"
+        )
     return str(msg["Message-ID"])
 
 
@@ -1204,6 +1248,15 @@ def _route_label(prefix: str, channel: str, cust_email: str, thread: str) -> str
     return f"{channel}:{cust_email or thread}"
 
 
+def _validated_cs_dry_run_to() -> str:
+    target = CS_REPLY_DRY_RUN_TO.strip().lower()
+    if target and target != CS_REPLY_DRY_RUN_ALLOWED_TO:
+        raise RuntimeError(
+            "客服 DRY-RUN 收件人不在白名单；已阻止发送，请核对 CS_REPLY_DRY_RUN_TO"
+        )
+    return target
+
+
 async def _dispatch_reply(f: dict, reply: str) -> tuple:
     """把运营确认的回复真发到客户原渠道。返回 (ok, detail, outbound_evidence)。
     DRY-RUN(CS_REPLY_DRY_RUN_TO 有值): 所有渠道一律改发测试邮箱 + banner 标真实去向, 真客户/频道不收。"""
@@ -1216,8 +1269,9 @@ async def _dispatch_reply(f: dict, reply: str) -> tuple:
     cust_email = parseaddr(customer)[1] or customer
     subj = "Re: " + _orig_subject(f)
     html = _to_html(reply)
+    dry_run_to = _validated_cs_dry_run_to()
 
-    if CS_REPLY_DRY_RUN_TO:
+    if dry_run_to:
         target = _route_label(prefix, channel, cust_email, thread)
         banner = (f'<div style="background:#fff3cd;padding:8px;border:1px solid #ffc107;margin-bottom:12px">'
                   f'<strong>⚠️ CS DRY-RUN</strong> — 本应发往 <code>{target}</code>，真客户/频道不会收到。'
@@ -1228,21 +1282,21 @@ async def _dispatch_reply(f: dict, reply: str) -> tuple:
         # 被 POWKONG Zoho 凭证故障误伤，而且无法验证真正的网易发信链路。
         use_netease = prefix == "CSF" or (prefix in ("CSD", "CSDT") and brand == "FUNLAB")
         if use_netease:
-            provider_id = await _netease_send(CS_REPLY_DRY_RUN_TO, dry_subject, dry_body, "")
+            provider_id = await _netease_send(dry_run_to, dry_subject, dry_body, "")
         else:
-            provider_id = await _zoho_send(CS_REPLY_DRY_RUN_TO, dry_subject, dry_body, "")
+            provider_id = await _zoho_send(dry_run_to, dry_subject, dry_body, "")
         try:
             if use_netease:
                 evidence = await _verify_netease_outbound(
-                    provider_id, CS_REPLY_DRY_RUN_TO, dry_body
+                    provider_id, dry_run_to, dry_body
                 )
             else:
                 evidence = await _verify_zoho_outbound(
-                    provider_id, CS_REPLY_DRY_RUN_TO, dry_body
+                    provider_id, dry_run_to, dry_body
                 )
         except Exception as exc:
-            raise OutboundEvidenceError(provider_id, f"DRY-RUN→{CS_REPLY_DRY_RUN_TO}", str(exc)) from exc
-        return True, f"DRY-RUN→{CS_REPLY_DRY_RUN_TO}（本应 {target}）", evidence
+            raise OutboundEvidenceError(provider_id, f"DRY-RUN→{dry_run_to}", str(exc)) from exc
+        return True, f"DRY-RUN→{dry_run_to}（本应 {target}）", evidence
 
     if prefix == "CSP":  # Powkong → Zoho reply(串原 thread)
         if "@" not in cust_email:
@@ -1632,6 +1686,10 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = 
         ))
     except OutboundEvidenceError as e:
         accepted_without_proof = True
+        print(
+            f"[cs_dispatch.outbound_evidence] rid={rid} provider_id={e.provider_id} "
+            f"reason={str(e)[:160]}"
+        )
         try:
             await feishu.api(
                 "PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
