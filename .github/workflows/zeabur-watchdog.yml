@@ -2,7 +2,8 @@ name: Zeabur Tokyo Watchdog
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    # Avoid minute 00/10/20 peaks where GitHub may delay or drop scheduled jobs.
+    - cron: "7,17,27,37,47,57 * * * *"
   push:
     branches:
       - master
