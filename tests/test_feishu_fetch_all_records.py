@@ -4,6 +4,7 @@ import os
 import sys
 import urllib.parse
 import unittest
+from unittest.mock import AsyncMock, patch
 
 
 REPO_ROOT = os.environ.get("KOL_TEST_REPO_ROOT") or os.path.join(
@@ -36,6 +37,49 @@ from app import feishu  # noqa: E402
 
 
 class FeishuFetchAllRecordsTests(unittest.TestCase):
+    def test_kol_recovery_is_bounded_and_never_returns_partial_rows(self):
+        failure = feishu.FeishuAPIError(method="GET", path="/records",
+            status_code=400, feishu_code=1254607, feishu_msg="Data not ready")
+        first = {"data": {"items": [{"record_id": "rec1"}],
+                          "has_more": True, "page_token": "next"}}
+        with patch.object(feishu.config, "T_KOL", "kol-test"), \
+             patch.object(feishu, "api", new=AsyncMock(side_effect=[first, failure, failure, failure])) as api, \
+             patch("asyncio.sleep", new=AsyncMock()) as sleep:
+            with self.assertRaises(feishu.FeishuReadError):
+                asyncio.run(feishu.fetch_all_records("kol-test"))
+        self.assertEqual(4, api.await_count)
+        self.assertEqual([30, 60], [call.args[0] for call in sleep.await_args_list])
+
+    def test_other_tables_do_not_receive_kol_recovery(self):
+        failure = feishu.FeishuAPIError(method="GET", path="/records",
+            status_code=400, feishu_code=1254607, feishu_msg="Data not ready")
+        with patch.object(feishu, "api", new=AsyncMock(side_effect=failure)) as api, \
+             patch("asyncio.sleep", new=AsyncMock()) as sleep:
+            with self.assertRaises(feishu.FeishuReadError):
+                asyncio.run(feishu.fetch_all_records("unrelated-table"))
+        self.assertEqual(1, api.await_count)
+        sleep.assert_not_awaited()
+
+    def test_kol_transient_later_page_recovers_without_losing_first_page(self):
+        calls = []
+
+        async def fake_api(method, path, **kwargs):
+            calls.append(path)
+            if len(calls) == 1:
+                return {"code": 0, "data": {"items": [{"record_id": "rec1"}],
+                        "has_more": True, "page_token": "next"}}
+            if len(calls) == 2:
+                raise feishu.FeishuAPIError(method=method, path=path,
+                    status_code=400, feishu_code=1254607, feishu_msg="Data not ready")
+            return {"code": 0, "data": {"items": [{"record_id": "rec2"}], "has_more": False}}
+
+        with patch.object(feishu.config, "T_KOL", "kol-test"), \
+             patch.object(feishu, "api", new=fake_api), \
+             patch("asyncio.sleep", new=AsyncMock()):
+            rows = asyncio.run(feishu.fetch_all_records("kol-test", page_size=500))
+        self.assertEqual(["rec1", "rec2"], [row["record_id"] for row in rows])
+        self.assertEqual(calls[1], calls[2])
+
     def test_fetch_all_records_projects_fields_and_uses_500_page_size(self):
         paths = []
 

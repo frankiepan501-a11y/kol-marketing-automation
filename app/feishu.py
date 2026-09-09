@@ -293,6 +293,13 @@ def xrid(f):
 
 async def fetch_all_records(table_id: str, field_names: list = None, page_size: int = 100,
                             automatic_fields: bool = False):
+    import asyncio
+    # Only KOL core reads receive the extra recovery window. Shared consumers
+    # and all writes retain their existing retry policy. Budget is per scan,
+    # not per page, so a large table cannot multiply the delay indefinitely.
+    kol_core_tables = {config.T_KOL, config.T_EDITOR, config.T_DRAFT}
+    recovery_delays = (30, 60) if table_id in kol_core_tables else ()
+    recoveries = 0
     try:
         page_size_i = int(page_size)
     except (TypeError, ValueError):
@@ -334,6 +341,16 @@ async def fetch_all_records(table_id: str, field_names: list = None, page_size: 
                     f"page_token={token_label(page_token)} status={exc.status_code} "
                     f"code={exc.feishu_code} msg={exc.feishu_msg or exc.response_text[:160]}"
                 )
+                if exc.feishu_code == 1254607 and recoveries < len(recovery_delays):
+                    delay = recovery_delays[recoveries]
+                    recoveries += 1
+                    print(
+                        f"[kol.read_recovery] table={table_id} page={page_number} "
+                        f"page_size={active_page_size} recovery={recoveries}/2 "
+                        f"delay_seconds={delay} code=1254607"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 can_shrink = (
                     _is_page_size_compat_error(exc)
                     and size_index + 1 < len(page_sizes)

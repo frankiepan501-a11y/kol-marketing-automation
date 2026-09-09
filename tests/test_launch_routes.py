@@ -16,6 +16,37 @@ class FakeRequest:
 
 
 class LaunchRouteTests(unittest.TestCase):
+    def test_cancelled_autonomous_job_is_terminal_without_replay(self):
+        async def exercise():
+            main._launch_runtime_jobs.clear()
+            entered = asyncio.Event()
+
+            async def wait_for_cancel(**kwargs):
+                entered.set()
+                await asyncio.Event().wait()
+
+            with patch.object(main.config, "INTERNAL_TOKEN", "secret"), \
+                 patch.object(main.config, "LAUNCH_ACTIVITY_QUEUE_ENABLED", True), \
+                 patch.object(main.launch_runtime, "persist_runtime_job", new=AsyncMock()) as persist, \
+                 patch.object(main.launch_runtime, "autonomous_refill", new=AsyncMock(side_effect=wait_for_cancel)) as refill:
+                before = asyncio.all_tasks()
+                accepted = await main.launch_runtime_autonomous_refill(
+                    FakeRequest({"campaign_id": "c1", "dry_run": False,
+                        "ai_mode": "legacy_deepseek", "confirm": "RUN_LEGACY_DEEPSEEK_REFILL"}),
+                    authorization="Bearer secret")
+                await entered.wait()
+                tasks = asyncio.all_tasks() - before
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                status = dict(main._launch_runtime_jobs[accepted["job_id"]])
+                self.assertEqual("error", status["status"])
+                self.assertEqual("service_shutdown_interrupted_job", status["error"])
+                self.assertEqual("error", persist.await_args.kwargs["status"])
+                self.assertEqual(1, refill.await_count)
+            main._launch_runtime_jobs.clear()
+        asyncio.run(exercise())
+
     def test_source_metadata_backfill_defaults_to_dry_run(self):
         campaigns = sorted(main.keyword_supply.P0_SOURCE_BACKFILL_CAMPAIGNS)
         result = {

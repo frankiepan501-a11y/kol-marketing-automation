@@ -3732,6 +3732,30 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                     f"/launch/runtime/{mode}", "LaunchOutcomeReconcileError",
                     f"activity outcome readback failed: {outcome_error_count} record(s)",
                 )
+        except asyncio.CancelledError:
+            # Cancellation is a BaseException, not an Exception. Record a
+            # terminal outcome without replaying any possibly completed writes.
+            interruption = "service_shutdown_interrupted_job"
+            _launch_runtime_jobs[job_id].update(
+                status="error", finished_at=datetime_now_string(),
+                error=interruption, stage="error",
+                stage_detail={"error_type": "CancelledError"},
+                stage_started_ts=time.time(),
+            )
+            if durable_job:
+                try:
+                    await asyncio.wait_for(
+                        launch_runtime.persist_runtime_job(
+                            campaign_id=campaign_id, job_id=job_id, mode=mode,
+                            status="error", error=interruption, started_ts=started_ts,
+                        ), timeout=5.0,
+                    )
+                except Exception as persist_exc:
+                    print(
+                        f"[kol.runtime_interrupted] job_id={job_id} "
+                        f"persist_error={type(persist_exc).__name__}"
+                    )
+            raise
         except Exception as exc:
             tr = _tb.format_exc()[-1000:]
             audit_result = None
