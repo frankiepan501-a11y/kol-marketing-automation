@@ -17,7 +17,7 @@ class ZeaburWatchdogTests(unittest.TestCase):
             "last_modified_time": "3000",
             "fields": {"状态": "已回复", "回复时间": 1999, "最近出站Message-ID": ""},
         }
-        state = {}
+        state = {"baseline_initialized": True}
 
         issues, summary = zw.evaluate_cs_outbound_records([legacy], state)
         self.assertEqual([], issues)
@@ -56,7 +56,7 @@ class ZeaburWatchdogTests(unittest.TestCase):
             {"record_id": "rec_archived", "last_modified_time": str(zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT), "fields": {"状态": "归档非客服", "最近出站Message-ID": ""}},
             {"record_id": "rec_proven", "last_modified_time": str(zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT), "fields": {"状态": "已回复", "回复时间": zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT, "最近出站Message-ID": "<mid>"}},
         ]
-        state = {}
+        state = {"baseline_initialized": True}
         issues, summary = zw.evaluate_cs_outbound_records(records, state)
         self.assertEqual([], issues)
         self.assertEqual(0, summary["current_anomaly_count"])
@@ -69,7 +69,7 @@ class ZeaburWatchdogTests(unittest.TestCase):
             "last_modified_time": "3000",
             "fields": {"状态": "已回复", "回复时间": "", "最近出站Message-ID": ""},
         }
-        issues, summary = zw.evaluate_cs_outbound_records([record], {})
+        issues, summary = zw.evaluate_cs_outbound_records([record], {"baseline_initialized": True})
         self.assertEqual(["cs_outbound_audit_time_missing:rec_unknown"], [issue.key for issue in issues])
         self.assertIn("无法确认", issues[0].message)
         self.assertNotIn("状态=已回复，但最近出站Message-ID为空", issues[0].message)
@@ -89,13 +89,13 @@ class ZeaburWatchdogTests(unittest.TestCase):
             "last_modified_time": "3000",
             "fields": {"状态": "已回复", "回复时间": "", "最近出站Message-ID": ""},
         }
-        issues, summary = zw.evaluate_cs_outbound_records([record], {})
+        issues, summary = zw.evaluate_cs_outbound_records([record], {"baseline_initialized": True})
         self.assertEqual([], issues)
         self.assertEqual(0, summary["records_with_unknown_transition"])
 
     @mock.patch.dict(os.environ, {"CS_AUDIT_NOT_BEFORE_MS": "2000"}, clear=True)
     def test_cs_outbound_audit_catches_old_ticket_reentering_required_status(self):
-        state = {"status_by_record": {"rec_reused": "待回"}}
+        state = {"baseline_initialized": True, "status_by_record": {"rec_reused": "待回"}}
         record = {
             "record_id": "rec_reused",
             "created_time": "1000",
@@ -113,7 +113,7 @@ class ZeaburWatchdogTests(unittest.TestCase):
             "record_id": "rec_no_clock",
             "fields": {"状态": "已回复", "回复时间": "", "最近出站Message-ID": ""},
         }
-        issues, summary = zw.evaluate_cs_outbound_records([record], {})
+        issues, summary = zw.evaluate_cs_outbound_records([record], {"baseline_initialized": True})
         self.assertEqual(["cs_outbound_audit_source_time_missing"], [issue.key for issue in issues])
         self.assertIn("不能视为巡检健康", issues[0].message)
         self.assertEqual(1, summary["records_without_automatic_time"])
@@ -124,6 +124,30 @@ class ZeaburWatchdogTests(unittest.TestCase):
         self.assertIn("客服工单出站凭证异常", rendered)
         self.assertIn("automatic_fields", rendered)
         self.assertNotIn("优先打开 Zeabur 构建日志", rendered)
+
+    @mock.patch.dict(os.environ, {"CS_AUDIT_NOT_BEFORE_MS": "2000"}, clear=True)
+    def test_cs_outbound_audit_first_run_is_not_silently_healthy(self):
+        state = {}
+        record = {
+            "record_id": "rec_legacy",
+            "created_time": "1000",
+            "last_modified_time": "1000",
+            "fields": {"状态": "已回复", "回复时间": "", "最近出站Message-ID": ""},
+        }
+        issues, summary = zw.evaluate_cs_outbound_records([record], state)
+        self.assertEqual(["cs_outbound_audit_baseline_missing"], [issue.key for issue in issues])
+        self.assertTrue(summary["baseline_was_missing"])
+        self.assertTrue(state["baseline_initialized"])
+        card = zw.build_alert_card(
+            issues, [], {"name": "tokyo", "status": {"isOnline": True, "vmStatus": "RUNNING"}}, {}
+        )
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertIn("下一次 10 分钟巡检", rendered)
+        self.assertNotIn("核对原渠道发件箱", rendered)
+
+        issues, summary = zw.evaluate_cs_outbound_records([record], state)
+        self.assertEqual([], issues)
+        self.assertFalse(summary["baseline_was_missing"])
 
     @mock.patch.dict(
         os.environ,

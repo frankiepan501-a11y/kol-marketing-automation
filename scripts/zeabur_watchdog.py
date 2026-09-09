@@ -600,6 +600,7 @@ def evaluate_cs_outbound_records(
     with an audit-integrity issue instead of silently declaring it healthy.
     """
     not_before_ms = env_int("CS_AUDIT_NOT_BEFORE_MS", CS_AUDIT_NOT_BEFORE_MS_DEFAULT)
+    baseline_was_missing = not bool(state_bucket.get("baseline_initialized"))
     previous_statuses = state_bucket.get("status_by_record") or {}
     current_statuses: dict[str, str] = {}
     current: dict[str, dict[str, str]] = {}
@@ -670,6 +671,7 @@ def evaluate_cs_outbound_records(
         }
 
     state_bucket["status_by_record"] = current_statuses
+    state_bucket["baseline_initialized"] = True
     tracked_ids = set(current)
     state_bucket["tracked_ids"] = sorted(tracked_ids)
     state_bucket["not_before_ms"] = not_before_ms
@@ -706,6 +708,17 @@ def evaluate_cs_outbound_records(
                 "客服工单巡检完整性",
             )
         )
+    if baseline_was_missing and current_statuses:
+        issues.append(
+            Issue(
+                "cs_outbound_audit_baseline_missing",
+                "warning",
+                "客服外部巡检首次启动或状态缓存已丢失，现已建立只含记录ID与状态的新基线；"
+                "本轮无法判断旧工单是否刚重新进入需凭证状态，不能视为巡检健康。"
+                "请等待下一次定时巡检确认。",
+                "客服外部巡检基线",
+            )
+        )
     return issues, {
         "enabled": True,
         "records_scanned": len(records),
@@ -714,6 +727,7 @@ def evaluate_cs_outbound_records(
         "records_without_timestamp": records_without_timestamp,
         "records_with_unknown_transition": records_with_unknown_transition,
         "records_without_automatic_time": records_without_automatic_time,
+        "baseline_was_missing": baseline_was_missing,
         "current_anomaly_count": len(current),
         "tracked_count": len(tracked_ids),
     }
@@ -807,6 +821,11 @@ def extract_between(text: str, pattern: str) -> str:
 
 
 def issue_to_card_markdown(issue: Issue) -> str:
+    if issue.key == "cs_outbound_audit_baseline_missing":
+        return (
+            "**客服外部巡检基线** · 首次启动或状态缓存丢失\n"
+            "已重新记录工单状态；本轮不能判定健康，请等待下一次 10 分钟巡检。"
+        )
     if issue.key == "cs_outbound_audit_source_time_missing":
         return (
             "**客服工单巡检完整性** · 飞书接口没有返回完整自动时间\n"
@@ -961,7 +980,11 @@ def build_alert_card(
     elements.append({"tag": "hr"})
     if cs_only:
         action_lines = ["**本次需要处理**"]
-        if any(issue.key != "cs_outbound_audit_source_time_missing" for issue in issues):
+        integrity_keys = {
+            "cs_outbound_audit_baseline_missing",
+            "cs_outbound_audit_source_time_missing",
+        }
+        if any(issue.key not in integrity_keys for issue in issues):
             action_lines.append(
                 "逐条打开工单并核对原渠道发件箱：若实际未发出，恢复为“待回”后由负责人重新处理；"
                 "若已发出，补录真实 Message-ID。没有发件箱证据时不要重复发送，也不要保留已回复状态。"
@@ -970,6 +993,11 @@ def build_alert_card(
             action_lines.append(
                 "同时检查客服工单 Base 的 `automatic_fields` 参数、飞书应用读取权限和接口返回；"
                 "自动时间恢复前，本轮巡检不能判定为健康。"
+            )
+        if any(issue.key == "cs_outbound_audit_baseline_missing" for issue in issues):
+            action_lines.append(
+                "这是首次启动或缓存丢失保护：无需处理客户工单，等待下一次 10 分钟巡检；"
+                "若下次仍出现相同提示，再检查 GitHub Actions cache。"
             )
         action_text = "\n".join(action_lines)
     else:
