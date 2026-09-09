@@ -10,6 +10,102 @@ from scripts import zeabur_watchdog as zw
 
 
 class ZeaburWatchdogTests(unittest.TestCase):
+    @mock.patch.dict(os.environ, {"CS_AUDIT_NOT_BEFORE_MS": "2000"}, clear=True)
+    def test_cs_outbound_audit_uses_cutover_and_tracks_anomaly_until_fixed(self):
+        legacy = {
+            "record_id": "rec_legacy",
+            "last_modified_time": "1999",
+            "fields": {"工单ID": "CSF-legacy", "状态": "已回复", "最近出站Message-ID": ""},
+        }
+        state = {}
+
+        issues, summary = zw.evaluate_cs_outbound_records([legacy], state)
+        self.assertEqual([], issues)
+        self.assertEqual(0, summary["records_after_cutover"])
+
+        new_bad = {
+            "record_id": "rec_new",
+            "last_modified_time": "2000",
+            "fields": {
+                "工单ID": "CSF-new",
+                "状态": "待客户补充",
+                "最近出站Message-ID": "",
+                "客户标识": "customer@example.com",
+                "原文": "private body",
+            },
+        }
+        issues, summary = zw.evaluate_cs_outbound_records([legacy, new_bad], state)
+        self.assertEqual(["cs_outbound_missing_proof:rec_new"], [issue.key for issue in issues])
+        self.assertEqual(1, summary["tracked_count"])
+        self.assertIn("CSF-new", issues[0].message)
+        self.assertNotIn("customer@example.com", issues[0].message)
+        self.assertNotIn("private body", issues[0].message)
+
+        issues, summary = zw.evaluate_cs_outbound_records([legacy], state)
+        self.assertEqual([], issues)
+        self.assertEqual(0, summary["tracked_count"])
+
+        issues, summary = zw.evaluate_cs_outbound_records([legacy, new_bad], state)
+        self.assertEqual(["cs_outbound_missing_proof:rec_new"], [issue.key for issue in issues])
+        self.assertEqual(1, summary["tracked_count"])
+
+    def test_cs_outbound_audit_ignores_states_that_do_not_require_customer_send(self):
+        records = [
+            {"record_id": "rec_pending", "last_modified_time": str(zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT), "fields": {"状态": "待回", "最近出站Message-ID": ""}},
+            {"record_id": "rec_escalated", "last_modified_time": str(zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT), "fields": {"状态": "已升级", "最近出站Message-ID": ""}},
+            {"record_id": "rec_archived", "last_modified_time": str(zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT), "fields": {"状态": "归档非客服", "最近出站Message-ID": ""}},
+            {"record_id": "rec_proven", "last_modified_time": str(zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT), "fields": {"状态": "已回复", "最近出站Message-ID": "<mid>"}},
+        ]
+        state = {}
+        issues, summary = zw.evaluate_cs_outbound_records(records, state)
+        self.assertEqual([], issues)
+        self.assertEqual(0, summary["current_anomaly_count"])
+
+    @mock.patch.dict(
+        os.environ,
+        {
+            "FEISHU_NOTIFY_APP_ID": "app",
+            "FEISHU_NOTIFY_APP_SECRET": "secret",
+            "CS_AUDIT_APP_TOKEN": "base",
+            "CS_AUDIT_TABLE_ID": "table",
+        },
+        clear=True,
+    )
+    @mock.patch("scripts.zeabur_watchdog.http_get_json")
+    @mock.patch("scripts.zeabur_watchdog.feishu_token", return_value="tenant-token")
+    def test_fetch_cs_ticket_records_uses_list_api_and_query_page_token(self, feishu_token, http_get):
+        http_get.side_effect = [
+            {"code": 0, "data": {"items": [{"record_id": "r1", "fields": {}}],
+                                   "has_more": True, "page_token": "next token"}},
+            {"code": 0, "data": {"items": [{"record_id": "r2", "fields": {}}],
+                                   "has_more": False, "page_token": ""}},
+        ]
+        records = zw.fetch_cs_ticket_records()
+        self.assertEqual(["r1", "r2"], [record["record_id"] for record in records])
+        self.assertNotIn("page_token=", http_get.call_args_list[0].args[0])
+        self.assertIn("automatic_fields=true", http_get.call_args_list[0].args[0])
+        self.assertIn("page_token=next+token", http_get.call_args_list[1].args[0])
+        for call in http_get.call_args_list:
+            self.assertEqual("Bearer tenant-token", call.kwargs["headers"]["Authorization"])
+
+    def test_cs_only_alert_card_is_business_readable_and_actionable(self):
+        issue = zw.Issue(
+            "cs_outbound_missing_proof:rec_new",
+            "critical",
+            "工单 CSF-new 状态=已回复，但最近出站Message-ID为空",
+            "CSF-new",
+        )
+        card = zw.build_alert_card(
+            [issue], [], {"name": "tokyo", "status": {"isOnline": True, "vmStatus": "RUNNING"}}, {}
+        )
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertEqual(
+            "🟠 [AUDIT·P1] 客服工单出站凭证异常 · 1条",
+            card["header"]["title"]["content"],
+        )
+        self.assertIn("Message-ID", rendered)
+        self.assertIn("record=rec_new", rendered)
+
     def test_evaluate_server_resource_thresholds(self):
         server = {
             "name": "tokyo",
@@ -204,6 +300,9 @@ class ZeaburWatchdogTests(unittest.TestCase):
                     "restart_on_fail": True,
                 }
             ],
+        ), mock.patch(
+            "scripts.zeabur_watchdog.utc_now_ts",
+            return_value=zw.parse_utc_ts("2026-07-07T06:10:00Z"),
         ):
             summary = zw.run_once(args)
         self.assertFalse(summary["ok"])

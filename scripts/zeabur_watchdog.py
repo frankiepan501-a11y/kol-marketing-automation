@@ -110,6 +110,11 @@ DEFAULT_DEPLOYMENT_FAILURE_STATUSES = {"FAILED"}
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 URL_RE = re.compile(r"https?://[^\s\"<>]+")
 MAX_CARD_ISSUES = 6
+CS_AUDIT_APP_TOKEN_DEFAULT = "J2fibLgBZaLGTNsQOPHcQXLonZe"
+CS_AUDIT_TABLE_ID_DEFAULT = "tblAhXMA9uDbGEMS"
+CS_AUDIT_NOT_BEFORE_MS_DEFAULT = 1_788_953_431_000  # live reply cutover: 2026-09-09T11:30:31Z
+CS_PROOF_REQUIRED_STATUSES = {"已回复", "已解决", "待客户补充"}
+CS_RECORD_URL = "https://u1wpma3xuhr.feishu.cn/base/{app_token}?table={table_id}&record={record_id}"
 
 
 @dataclass
@@ -219,6 +224,27 @@ def http_json(
             **(headers or {}),
         },
         method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} {url}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"URL error {url}: {exc}") from exc
+
+
+def http_get_json(
+    url: str,
+    headers: dict[str, str] | None = None,
+    timeout: int = 20,
+) -> dict[str, Any]:
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 zeabur-watchdog/1.0", **(headers or {})},
+        method="GET",
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -498,6 +524,114 @@ def feishu_token(app_id: str, app_secret: str) -> str:
     return token
 
 
+def field_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return str(value.get("text") or value.get("link") or "").strip()
+    if isinstance(value, list):
+        return "".join(field_text(item) for item in value).strip()
+    return str(value).strip()
+
+
+def fetch_cs_ticket_records() -> list[dict[str, Any]]:
+    """Read the CS ticket Base directly from GitHub Actions, not via kol-auto."""
+    app_id = os.getenv("FEISHU_NOTIFY_APP_ID", "").strip()
+    app_secret = os.getenv("FEISHU_NOTIFY_APP_SECRET", "").strip()
+    if not app_id or not app_secret:
+        raise RuntimeError("FEISHU_NOTIFY_APP_ID/SECRET is required for CS outbound audit")
+    app_token = os.getenv("CS_AUDIT_APP_TOKEN", CS_AUDIT_APP_TOKEN_DEFAULT).strip()
+    table_id = os.getenv("CS_AUDIT_TABLE_ID", CS_AUDIT_TABLE_ID_DEFAULT).strip()
+    token = feishu_token(app_id, app_secret)
+    records: list[dict[str, Any]] = []
+    page_token = ""
+    while True:
+        params = {"page_size": "500", "automatic_fields": "true"}
+        if page_token:
+            params["page_token"] = page_token
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records?{urllib.parse.urlencode(params)}"
+        )
+        payload = http_get_json(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        if payload.get("code") not in (None, 0):
+            raise RuntimeError(
+                f"Feishu Bitable list failed: code={payload.get('code')} msg={payload.get('msg', '')}"
+            )
+        data = payload.get("data") or {}
+        records.extend(data.get("items") or [])
+        if not data.get("has_more"):
+            break
+        next_token = str(data.get("page_token") or "").strip()
+        if not next_token or next_token == page_token:
+            raise RuntimeError("Feishu Bitable pagination did not advance")
+        page_token = next_token
+    return records
+
+
+def evaluate_cs_outbound_records(
+    records: list[dict[str, Any]],
+    state_bucket: dict[str, Any],
+) -> tuple[list[Issue], dict[str, Any]]:
+    """Track proof-less terminal tickets modified after the live-send cutover."""
+    not_before_ms = env_int("CS_AUDIT_NOT_BEFORE_MS", CS_AUDIT_NOT_BEFORE_MS_DEFAULT)
+    current: dict[str, dict[str, str]] = {}
+    records_after_cutover = 0
+    records_without_timestamp = 0
+    for record in records:
+        record_id = str(record.get("record_id") or record.get("id") or "").strip()
+        try:
+            modified_ms = int(record.get("last_modified_time") or 0)
+        except (TypeError, ValueError):
+            modified_ms = 0
+        if not modified_ms:
+            records_without_timestamp += 1
+            continue
+        if modified_ms < not_before_ms:
+            continue
+        records_after_cutover += 1
+        fields = record.get("fields") or {}
+        status = field_text(fields.get("状态"))
+        outbound_id = field_text(fields.get("最近出站Message-ID"))
+        if record_id and status in CS_PROOF_REQUIRED_STATUSES and not outbound_id:
+            current[record_id] = {
+                "ticket_id": field_text(fields.get("工单ID")) or record_id,
+                "status": status,
+            }
+
+    tracked_ids = set(current)
+    state_bucket["tracked_ids"] = sorted(tracked_ids)
+    state_bucket["not_before_ms"] = not_before_ms
+
+    app_token = os.getenv("CS_AUDIT_APP_TOKEN", CS_AUDIT_APP_TOKEN_DEFAULT).strip()
+    table_id = os.getenv("CS_AUDIT_TABLE_ID", CS_AUDIT_TABLE_ID_DEFAULT).strip()
+    issues: list[Issue] = []
+    for record_id in sorted(tracked_ids):
+        item = current[record_id]
+        record_url = CS_RECORD_URL.format(
+            app_token=app_token, table_id=table_id, record_id=record_id
+        )
+        issues.append(
+            Issue(
+                f"cs_outbound_missing_proof:{record_id}",
+                "critical",
+                f"工单 {item['ticket_id']} 状态={item['status']}，但最近出站Message-ID为空；{record_url}",
+                item["ticket_id"],
+            )
+        )
+    return issues, {
+        "enabled": True,
+        "records_scanned": len(records),
+        "not_before_ms": not_before_ms,
+        "records_after_cutover": records_after_cutover,
+        "records_without_timestamp": records_without_timestamp,
+        "current_anomaly_count": len(current),
+        "tracked_count": len(tracked_ids),
+    }
+
+
 def send_feishu(text: str, dry_run: bool, card: dict[str, Any] | None = None) -> bool:
     app_id = os.getenv("FEISHU_NOTIFY_APP_ID", "").strip()
     app_secret = os.getenv("FEISHU_NOTIFY_APP_SECRET", "").strip()
@@ -586,6 +720,17 @@ def extract_between(text: str, pattern: str) -> str:
 
 
 def issue_to_card_markdown(issue: Issue) -> str:
+    if issue.key.startswith("cs_outbound_missing_proof:"):
+        record_id = issue.key.rsplit(":", 1)[-1]
+        app_token = os.getenv("CS_AUDIT_APP_TOKEN", CS_AUDIT_APP_TOKEN_DEFAULT).strip()
+        table_id = os.getenv("CS_AUDIT_TABLE_ID", CS_AUDIT_TABLE_ID_DEFAULT).strip()
+        record_url = CS_RECORD_URL.format(
+            app_token=app_token, table_id=table_id, record_id=record_id
+        )
+        return (
+            f"**{trim_text(issue.target or record_id, 60)}** · 状态已进入客户回复阶段，但没有出站凭证\n"
+            f"[打开工单核对]({record_url})"
+        )
     if issue.key.startswith("deployment_failed:"):
         deployment_id = issue.key.rsplit(":", 1)[-1]
         status = extract_between(issue.message, r"status=([^ ]+)")
@@ -632,9 +777,14 @@ def build_alert_card(
     disk = pct(status.get("usedDisk"), status.get("totalDisk"))
     critical_count = sum(1 for issue in issues if issue.severity == "critical")
     deployment_count = sum(1 for issue in issues if issue.key.startswith("deployment_failed:"))
+    cs_issue_count = sum(1 for issue in issues if issue.key.startswith("cs_outbound_missing_proof:"))
+    cs_only = bool(issues) and cs_issue_count == len(issues)
     ok_probe_count = sum(1 for probe in probes.values() if probe.ok)
-    template = "red" if critical_count else "orange"
-    title = "[AUDIT·P1] Zeabur 构建/运行告警"
+    template = "orange" if cs_only else ("red" if critical_count else "orange")
+    title = (
+        f"🟠 [AUDIT·P1] 客服工单出站凭证异常 · {cs_issue_count}条"
+        if cs_only else "[AUDIT·P1] Zeabur 构建/运行告警"
+    )
 
     elements: list[dict[str, Any]] = [
         {
@@ -715,13 +865,20 @@ def build_alert_card(
         elements.append({"tag": "action", "actions": actions})
 
     elements.append({"tag": "hr"})
+    action_text = (
+        "**本次需要处理**\n"
+        "逐条打开工单并核对原渠道发件箱：若实际未发出，恢复为“待回”后由负责人重新处理；"
+        "若已发出，补录真实 Message-ID。没有发件箱证据时不要重复发送，也不要保留已回复状态。"
+        if cs_only else
+        "**本次需要处理**\n"
+        "优先打开 Zeabur 构建日志。若日志是 `failed to download source code` 或 `i/o timeout`，通常是 Zeabur 拉 GitHub 超时，可重试部署；若是 Docker/build/runtime error，按对应 commit 查代码。"
+    )
     elements.append(
         {
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": "**本次需要处理**\n"
-                "优先打开 Zeabur 构建日志。若日志是 `failed to download source code` 或 `i/o timeout`，通常是 Zeabur 拉 GitHub 超时，可重试部署；若是 Docker/build/runtime error，按对应 commit 查代码。",
+                "content": action_text,
             },
         }
     )
@@ -832,6 +989,25 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
                 if svc.get("restart_on_fail"):
                     restart_candidates.append(svc)
 
+    cs_audit_summary: dict[str, Any] = {"enabled": False}
+    if getattr(args, "check_cs_outbound", False):
+        try:
+            cs_records = fetch_cs_ticket_records()
+            cs_issues, cs_audit_summary = evaluate_cs_outbound_records(
+                cs_records, state.setdefault("cs_outbound", {})
+            )
+            issues.extend(cs_issues)
+        except Exception as exc:
+            cs_audit_summary = {"enabled": True, "error": trim_text(str(exc), 180)}
+            issues.append(
+                Issue(
+                    "cs_outbound_check_error",
+                    "warning",
+                    f"客服出站凭证独立巡检失败: {trim_text(str(exc), 180)}",
+                    "客服工单巡检",
+                )
+            )
+
     if getattr(args, "check_deployments", True):
         deployment_state = state.setdefault("deployments", {})
         prune_seen_deployments(
@@ -917,6 +1093,7 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
             "status": server.get("status"),
         },
         "deployment_issue_count": len(deployment_issues),
+        "cs_outbound_audit": cs_audit_summary,
         "probes": {name: probe.__dict__ for name, probe in probes.items()},
     }
     if getattr(args, "summary_file", ""):
@@ -977,6 +1154,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--include-build-logs",
         action=argparse.BooleanOptionalAction,
         default=env_bool("WATCHDOG_INCLUDE_BUILD_LOGS", True),
+    )
+    parser.add_argument(
+        "--check-cs-outbound",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("WATCHDOG_CHECK_CS_OUTBOUND", False),
     )
     parser.add_argument("--dry-run", action="store_true", default=env_bool("WATCHDOG_DRY_RUN", False))
     parser.add_argument(
