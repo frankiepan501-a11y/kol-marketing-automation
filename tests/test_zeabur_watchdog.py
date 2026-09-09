@@ -501,6 +501,58 @@ class ZeaburWatchdogTests(unittest.TestCase):
         self.assertNotIn("https://github.com", rendered)
         self.assertIn("本次需要处理", rendered)
 
+    @mock.patch.dict(os.environ, {"ZEABUR_API_KEY": "stale"}, clear=True)
+    @mock.patch("scripts.zeabur_watchdog.save_state")
+    @mock.patch("scripts.zeabur_watchdog.load_state", return_value={"cs_outbound": {"baseline_initialized": True}})
+    @mock.patch("scripts.zeabur_watchdog.send_feishu", return_value=True)
+    @mock.patch("scripts.zeabur_watchdog.fetch_cs_ticket_records")
+    @mock.patch("scripts.zeabur_watchdog.zeabur_graphql", side_effect=RuntimeError("HTTP 401 invalid token"))
+    def test_zeabur_query_failure_does_not_block_cs_audit(
+        self, graphql, fetch_cs, send_feishu, load_state, save_state
+    ):
+        fetch_cs.return_value = [
+            {
+                "record_id": "rec_pending",
+                "created_time": "3000",
+                "last_modified_time": "3000",
+                "fields": {"状态": "待回"},
+            }
+        ]
+        args = argparse.Namespace(
+            project_id=zw.DEFAULT_PROJECT_ID,
+            environment_id=zw.DEFAULT_ENVIRONMENT_ID,
+            server_id=zw.DEFAULT_SERVER_ID,
+            state_file="",
+            health_timeout=1,
+            alert_cooldown=60,
+            restart_cooldown=60,
+            auto_restart_services=True,
+            check_cs_outbound=True,
+            check_deployments=False,
+            dry_run=False,
+        )
+        with mock.patch("scripts.zeabur_watchdog.load_json_env", return_value=[]):
+            summary = zw.run_once(args)
+        self.assertEqual("zeabur_query_error", summary["issues"][0]["key"])
+        self.assertTrue(summary["cs_outbound_audit"]["enabled"])
+        self.assertEqual(1, summary["cs_outbound_audit"]["records_scanned"])
+        fetch_cs.assert_called_once()
+        send_feishu.assert_called_once()
+
+    @mock.patch("scripts.zeabur_watchdog.run_once", side_effect=RuntimeError("fatal test"))
+    def test_main_overwrites_summary_on_fatal_error(self, run_once):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary_path = os.path.join(temp_dir, "summary.json")
+            with open(summary_path, "w", encoding="utf-8") as fh:
+                json.dump({"ok": True, "stale": True}, fh)
+            exit_code = zw.main(["--summary-file", summary_path, "--no-fail-on-issue"])
+            self.assertEqual(0, exit_code)
+            with open(summary_path, "r", encoding="utf-8") as fh:
+                summary = json.load(fh)
+            self.assertFalse(summary["ok"])
+            self.assertNotIn("stale", summary)
+            self.assertIn("fatal test", summary["fatal"])
+
     @mock.patch.dict(
         os.environ,
         {

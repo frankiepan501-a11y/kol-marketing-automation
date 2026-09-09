@@ -1104,13 +1104,29 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
     now = utc_now_ts()
     state = load_state(args.state_file)
     services_cfg = load_json_env("WATCHDOG_SERVICES_JSON", DEFAULT_SERVICES)
-    data = zeabur_graphql(SERVER_QUERY, {"projectID": args.project_id})
+    issues: list[Issue] = []
+    try:
+        data = zeabur_graphql(SERVER_QUERY, {"projectID": args.project_id})
+    except Exception as exc:
+        # The CS proof audit is intentionally independent of Zeabur. A stale
+        # Zeabur credential must raise its own alert, but must not prevent the
+        # direct Feishu Base audit from running and writing a fresh summary.
+        data = {}
+        issues.append(
+            Issue(
+                "zeabur_query_error",
+                "critical",
+                f"Zeabur control-plane query failed: {trim_text(str(exc), 180)}",
+                "Zeabur API",
+            )
+        )
     servers = data.get("servers") or []
     server = next((s for s in servers if s.get("_id") == args.server_id), servers[0] if servers else {})
     project_services = ((data.get("project") or {}).get("services") or [])
     service_by_id = service_status_map(project_services)
 
-    issues = evaluate_server(server)
+    if server:
+        issues.extend(evaluate_server(server))
     server_online = bool((server.get("status") or {}).get("isOnline")) and (
         (server.get("status") or {}).get("vmStatus") in (None, "RUNNING")
     )
@@ -1353,6 +1369,21 @@ def main(argv: list[str] | None = None) -> int:
         summary = run_once(args)
     except Exception as exc:
         safe_print(f"watchdog fatal: {exc}", file=sys.stderr)
+        if args.summary_file:
+            os.makedirs(os.path.dirname(args.summary_file) or ".", exist_ok=True)
+            with open(args.summary_file, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "ok": False,
+                        "issue_count": 1,
+                        "fatal": trim_text(str(exc), 240),
+                        "generated_at": iso_utc(),
+                    },
+                    fh,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
         if args.fail_on_issue:
             return 2
         return 0

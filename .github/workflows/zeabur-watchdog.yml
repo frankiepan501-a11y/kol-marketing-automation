@@ -78,7 +78,14 @@ jobs:
           WATCHDOG_RESTART_COOLDOWN_MINUTES: "60"
           WATCHDOG_FAIL_ON_ISSUE: "false"
           WATCHDOG_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
-        run: python scripts/zeabur_watchdog.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # Never let a previous cached summary make a failed run look healthy.
+          Path(".watchdog-state/zeabur_watchdog_summary.json").unlink(missing_ok=True)
+          PY
+          python scripts/zeabur_watchdog.py
 
       - name: Save watchdog state
         if: steps.preflight.outputs.ready == 'true'
