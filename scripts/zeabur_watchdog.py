@@ -114,6 +114,17 @@ CS_AUDIT_APP_TOKEN_DEFAULT = "J2fibLgBZaLGTNsQOPHcQXLonZe"
 CS_AUDIT_TABLE_ID_DEFAULT = "tblAhXMA9uDbGEMS"
 CS_AUDIT_NOT_BEFORE_MS_DEFAULT = 1_788_953_431_000  # live reply cutover: 2026-09-09T11:30:31Z
 CS_PROOF_REQUIRED_STATUSES = {"已回复", "已解决", "待客户补充"}
+CS_STATUS_TIME_FIELDS = {
+    "已回复": "回复时间",
+    "已解决": "回复时间",
+    "待客户补充": "补充信息请求时间",
+}
+CS_AUDIT_FIELD_NAMES = [
+    "状态",
+    "最近出站Message-ID",
+    "回复时间",
+    "补充信息请求时间",
+]
 CS_RECORD_URL = "https://u1wpma3xuhr.feishu.cn/base/{app_token}?table={table_id}&record={record_id}"
 
 
@@ -548,7 +559,13 @@ def fetch_cs_ticket_records() -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     page_token = ""
     while True:
-        params = {"page_size": "500", "automatic_fields": "true"}
+        params = {
+            "page_size": "500",
+            "automatic_fields": "true",
+            # Only fetch audit fields. In particular, do not copy customer
+            # identifiers or message bodies into GitHub Actions memory/logs.
+            "field_names": json.dumps(CS_AUDIT_FIELD_NAMES, ensure_ascii=False),
+        }
         if page_token:
             params["page_token"] = page_token
         url = (
@@ -575,31 +592,60 @@ def evaluate_cs_outbound_records(
     records: list[dict[str, Any]],
     state_bucket: dict[str, Any],
 ) -> tuple[list[Issue], dict[str, Any]]:
-    """Track proof-less terminal tickets modified after the live-send cutover."""
+    """Track post-cutover proof gaps using the status-specific business time.
+
+    ``last_modified_time`` is deliberately not treated as the reply time: an
+    unrelated edit to an old record must not turn it into a post-cutover send.
+    If a recently touched proof-required row lacks its status time, fail closed
+    with an audit-integrity issue instead of silently declaring it healthy.
+    """
     not_before_ms = env_int("CS_AUDIT_NOT_BEFORE_MS", CS_AUDIT_NOT_BEFORE_MS_DEFAULT)
     current: dict[str, dict[str, str]] = {}
     records_after_cutover = 0
     records_without_timestamp = 0
+    records_with_unknown_transition = 0
     for record in records:
         record_id = str(record.get("record_id") or record.get("id") or "").strip()
+        fields = record.get("fields") or {}
+        status = field_text(fields.get("状态"))
+        if not record_id or status not in CS_PROOF_REQUIRED_STATUSES:
+            continue
+        outbound_id = field_text(fields.get("最近出站Message-ID"))
+        if outbound_id:
+            continue
+        time_field = CS_STATUS_TIME_FIELDS[status]
+        try:
+            status_time_ms = int(float(field_text(fields.get(time_field)) or 0))
+        except (TypeError, ValueError):
+            status_time_ms = 0
+        if status_time_ms:
+            if status_time_ms < not_before_ms:
+                continue
+            records_after_cutover += 1
+            current[record_id] = {
+                "status": status,
+                "kind": "missing_proof",
+                "time_field": time_field,
+            }
+            continue
+
+        records_without_timestamp += 1
+        try:
+            created_ms = int(record.get("created_time") or 0)
+        except (TypeError, ValueError):
+            created_ms = 0
         try:
             modified_ms = int(record.get("last_modified_time") or 0)
         except (TypeError, ValueError):
             modified_ms = 0
-        if not modified_ms:
-            records_without_timestamp += 1
+        if max(created_ms, modified_ms) < not_before_ms:
             continue
-        if modified_ms < not_before_ms:
-            continue
-        records_after_cutover += 1
-        fields = record.get("fields") or {}
-        status = field_text(fields.get("状态"))
-        outbound_id = field_text(fields.get("最近出站Message-ID"))
-        if record_id and status in CS_PROOF_REQUIRED_STATUSES and not outbound_id:
-            current[record_id] = {
-                "ticket_id": field_text(fields.get("工单ID")) or record_id,
-                "status": status,
-            }
+        records_with_unknown_transition += 1
+        current[record_id] = {
+            "status": status,
+            "kind": "missing_status_time",
+            "time_field": time_field,
+        }
 
     tracked_ids = set(current)
     state_bucket["tracked_ids"] = sorted(tracked_ids)
@@ -613,20 +659,26 @@ def evaluate_cs_outbound_records(
         record_url = CS_RECORD_URL.format(
             app_token=app_token, table_id=table_id, record_id=record_id
         )
-        issues.append(
-            Issue(
-                f"cs_outbound_missing_proof:{record_id}",
-                "critical",
-                f"工单 {item['ticket_id']} 状态={item['status']}，但最近出站Message-ID为空；{record_url}",
-                item["ticket_id"],
+        label = f"客服工单记录 …{record_id[-8:]}"
+        if item["kind"] == "missing_status_time":
+            key = f"cs_outbound_audit_time_missing:{record_id}"
+            message = (
+                f"{label} 状态={item['status']}，但{item['time_field']}为空，"
+                f"无法确认是否属于正式发送后的工单；{record_url}"
             )
-        )
+        else:
+            key = f"cs_outbound_missing_proof:{record_id}"
+            message = (
+                f"{label} 状态={item['status']}，但最近出站Message-ID为空；{record_url}"
+            )
+        issues.append(Issue(key, "critical", message, label))
     return issues, {
         "enabled": True,
         "records_scanned": len(records),
         "not_before_ms": not_before_ms,
         "records_after_cutover": records_after_cutover,
         "records_without_timestamp": records_without_timestamp,
+        "records_with_unknown_transition": records_with_unknown_transition,
         "current_anomaly_count": len(current),
         "tracked_count": len(tracked_ids),
     }
@@ -720,17 +772,19 @@ def extract_between(text: str, pattern: str) -> str:
 
 
 def issue_to_card_markdown(issue: Issue) -> str:
-    if issue.key.startswith("cs_outbound_missing_proof:"):
+    if issue.key.startswith("cs_outbound_"):
         record_id = issue.key.rsplit(":", 1)[-1]
         app_token = os.getenv("CS_AUDIT_APP_TOKEN", CS_AUDIT_APP_TOKEN_DEFAULT).strip()
         table_id = os.getenv("CS_AUDIT_TABLE_ID", CS_AUDIT_TABLE_ID_DEFAULT).strip()
         record_url = CS_RECORD_URL.format(
             app_token=app_token, table_id=table_id, record_id=record_id
         )
-        return (
-            f"**{trim_text(issue.target or record_id, 60)}** · 状态已进入客户回复阶段，但没有出站凭证\n"
-            f"[打开工单核对]({record_url})"
+        problem = (
+            "状态时间缺失，系统无法确认是否属于正式发送后的工单"
+            if issue.key.startswith("cs_outbound_audit_time_missing:")
+            else "状态已进入客户回复阶段，但没有出站凭证"
         )
+        return f"**{trim_text(issue.target or record_id, 60)}** · {problem}\n[打开工单核对]({record_url})"
     if issue.key.startswith("deployment_failed:"):
         deployment_id = issue.key.rsplit(":", 1)[-1]
         status = extract_between(issue.message, r"status=([^ ]+)")
@@ -777,7 +831,7 @@ def build_alert_card(
     disk = pct(status.get("usedDisk"), status.get("totalDisk"))
     critical_count = sum(1 for issue in issues if issue.severity == "critical")
     deployment_count = sum(1 for issue in issues if issue.key.startswith("deployment_failed:"))
-    cs_issue_count = sum(1 for issue in issues if issue.key.startswith("cs_outbound_missing_proof:"))
+    cs_issue_count = sum(1 for issue in issues if issue.key.startswith("cs_outbound_"))
     cs_only = bool(issues) and cs_issue_count == len(issues)
     ok_probe_count = sum(1 for probe in probes.values() if probe.ok)
     template = "orange" if cs_only else ("red" if critical_count else "orange")
@@ -934,6 +988,36 @@ def build_alert_card(
     }
 
 
+def build_alert_cards(
+    issues: list[Issue],
+    restarts: list[str],
+    server: dict[str, Any],
+    probes: dict[str, ProbeResult],
+) -> list[dict[str, Any]]:
+    """Build enough cards for every CS record link to be directly actionable."""
+    cs_issues = [issue for issue in issues if issue.key.startswith("cs_outbound_")]
+    other_issues = [issue for issue in issues if not issue.key.startswith("cs_outbound_")]
+    cards: list[dict[str, Any]] = []
+    if other_issues:
+        cards.append(build_alert_card(other_issues, restarts, server, probes))
+    for offset in range(0, len(cs_issues), MAX_CARD_ISSUES):
+        chunk = cs_issues[offset : offset + MAX_CARD_ISSUES]
+        card = build_alert_card(
+            chunk,
+            [] if other_issues else restarts,
+            server,
+            {} if other_issues else probes,
+        )
+        total_cards = (len(cs_issues) + MAX_CARD_ISSUES - 1) // MAX_CARD_ISSUES
+        if total_cards > 1:
+            card["header"]["title"]["content"] = (
+                f"🟠 [AUDIT·P1] 客服工单出站凭证异常 · 共{len(cs_issues)}条 "
+                f"（第{offset // MAX_CARD_ISSUES + 1}/{total_cards}卡）"
+            )
+        cards.append(card)
+    return cards
+
+
 def service_status_map(services: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(s.get("_id")): s for s in services}
 
@@ -1068,16 +1152,27 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
 
     fired_alert = False
     if issues:
-        alert_key = "|".join(sorted(issue.key for issue in issues))
-        if should_fire(state.setdefault("alerts", {}), alert_key, args.alert_cooldown, now):
-            alert_text = format_alert(issues, restart_actions, server, probes)
-            alert_card = build_alert_card(issues, restart_actions, server, probes)
-            fired_alert = send_feishu(alert_text, dry_run=args.dry_run, card=alert_card)
-            mark_fired(state["alerts"], alert_key, now)
+        alert_state = state.setdefault("alerts", {})
+        due_issues = [
+            issue for issue in issues
+            if should_fire(alert_state, issue.key, args.alert_cooldown, now)
+        ]
+        suppressed = [issue.key for issue in issues if issue not in due_issues]
+        if suppressed:
+            safe_print("Alerts suppressed by per-issue cooldown: " + "|".join(sorted(suppressed)))
+        if due_issues:
+            alert_text = format_alert(due_issues, restart_actions, server, probes)
+            alert_cards = build_alert_cards(due_issues, restart_actions, server, probes)
+            send_results = [
+                send_feishu(alert_text, dry_run=args.dry_run, card=card)
+                for card in alert_cards
+            ]
+            fired_alert = bool(send_results) and all(send_results)
             if fired_alert:
+                for issue in due_issues:
+                    mark_fired(alert_state, issue.key, now)
                 mark_seen_deployment_failures(state.setdefault("deployments", {}), deployment_issues, now)
         else:
-            safe_print(f"Alert suppressed by cooldown: {alert_key}")
             mark_seen_deployment_failures(state.setdefault("deployments", {}), deployment_issues, now)
 
     save_state(args.state_file, state)

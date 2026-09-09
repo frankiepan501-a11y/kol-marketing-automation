@@ -14,8 +14,8 @@ class ZeaburWatchdogTests(unittest.TestCase):
     def test_cs_outbound_audit_uses_cutover_and_tracks_anomaly_until_fixed(self):
         legacy = {
             "record_id": "rec_legacy",
-            "last_modified_time": "1999",
-            "fields": {"工单ID": "CSF-legacy", "状态": "已回复", "最近出站Message-ID": ""},
+            "last_modified_time": "3000",
+            "fields": {"状态": "已回复", "回复时间": 1999, "最近出站Message-ID": ""},
         }
         state = {}
 
@@ -27,8 +27,8 @@ class ZeaburWatchdogTests(unittest.TestCase):
             "record_id": "rec_new",
             "last_modified_time": "2000",
             "fields": {
-                "工单ID": "CSF-new",
                 "状态": "待客户补充",
+                "补充信息请求时间": 2000,
                 "最近出站Message-ID": "",
                 "客户标识": "customer@example.com",
                 "原文": "private body",
@@ -37,7 +37,7 @@ class ZeaburWatchdogTests(unittest.TestCase):
         issues, summary = zw.evaluate_cs_outbound_records([legacy, new_bad], state)
         self.assertEqual(["cs_outbound_missing_proof:rec_new"], [issue.key for issue in issues])
         self.assertEqual(1, summary["tracked_count"])
-        self.assertIn("CSF-new", issues[0].message)
+        self.assertIn("rec_new", issues[0].message)
         self.assertNotIn("customer@example.com", issues[0].message)
         self.assertNotIn("private body", issues[0].message)
 
@@ -54,12 +54,32 @@ class ZeaburWatchdogTests(unittest.TestCase):
             {"record_id": "rec_pending", "last_modified_time": str(zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT), "fields": {"状态": "待回", "最近出站Message-ID": ""}},
             {"record_id": "rec_escalated", "last_modified_time": str(zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT), "fields": {"状态": "已升级", "最近出站Message-ID": ""}},
             {"record_id": "rec_archived", "last_modified_time": str(zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT), "fields": {"状态": "归档非客服", "最近出站Message-ID": ""}},
-            {"record_id": "rec_proven", "last_modified_time": str(zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT), "fields": {"状态": "已回复", "最近出站Message-ID": "<mid>"}},
+            {"record_id": "rec_proven", "last_modified_time": str(zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT), "fields": {"状态": "已回复", "回复时间": zw.CS_AUDIT_NOT_BEFORE_MS_DEFAULT, "最近出站Message-ID": "<mid>"}},
         ]
         state = {}
         issues, summary = zw.evaluate_cs_outbound_records(records, state)
         self.assertEqual([], issues)
         self.assertEqual(0, summary["current_anomaly_count"])
+
+    @mock.patch.dict(os.environ, {"CS_AUDIT_NOT_BEFORE_MS": "2000"}, clear=True)
+    def test_cs_outbound_audit_does_not_mislabel_unknown_transition_as_missing_proof(self):
+        record = {
+            "record_id": "rec_unknown",
+            "created_time": "1000",
+            "last_modified_time": "3000",
+            "fields": {"状态": "已回复", "回复时间": "", "最近出站Message-ID": ""},
+        }
+        issues, summary = zw.evaluate_cs_outbound_records([record], {})
+        self.assertEqual(["cs_outbound_audit_time_missing:rec_unknown"], [issue.key for issue in issues])
+        self.assertIn("无法确认", issues[0].message)
+        self.assertNotIn("状态=已回复，但最近出站Message-ID为空", issues[0].message)
+        self.assertEqual(1, summary["records_with_unknown_transition"])
+        card = zw.build_alert_card(
+            issues, [], {"name": "tokyo", "status": {"isOnline": True, "vmStatus": "RUNNING"}}, {}
+        )
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertIn("客服工单出站凭证异常", rendered)
+        self.assertIn("record=rec_unknown", rendered)
 
     @mock.patch.dict(
         os.environ,
@@ -84,6 +104,8 @@ class ZeaburWatchdogTests(unittest.TestCase):
         self.assertEqual(["r1", "r2"], [record["record_id"] for record in records])
         self.assertNotIn("page_token=", http_get.call_args_list[0].args[0])
         self.assertIn("automatic_fields=true", http_get.call_args_list[0].args[0])
+        self.assertIn("field_names=", http_get.call_args_list[0].args[0])
+        self.assertNotIn("%E5%AE%A2%E6%88%B7%E6%A0%87%E8%AF%86", http_get.call_args_list[0].args[0])
         self.assertIn("page_token=next+token", http_get.call_args_list[1].args[0])
         for call in http_get.call_args_list:
             self.assertEqual("Bearer tenant-token", call.kwargs["headers"]["Authorization"])
@@ -105,6 +127,28 @@ class ZeaburWatchdogTests(unittest.TestCase):
         )
         self.assertIn("Message-ID", rendered)
         self.assertIn("record=rec_new", rendered)
+
+    def test_cs_alert_cards_include_every_record_link(self):
+        issues = [
+            zw.Issue(
+                f"cs_outbound_missing_proof:rec_{index}",
+                "critical",
+                f"客服工单记录 rec_{index} 状态=已回复，但最近出站Message-ID为空；"
+                f"https://example.invalid/?record=rec_{index}",
+                f"rec_{index}",
+            )
+            for index in range(8)
+        ]
+        cards = zw.build_alert_cards(
+            issues,
+            [],
+            {"name": "tokyo", "status": {"isOnline": True, "vmStatus": "RUNNING"}},
+            {},
+        )
+        self.assertEqual(2, len(cards))
+        rendered = "\n".join(json.dumps(card, ensure_ascii=False) for card in cards)
+        for index in range(8):
+            self.assertIn(f"record=rec_{index}", rendered)
 
     def test_evaluate_server_resource_thresholds(self):
         server = {
