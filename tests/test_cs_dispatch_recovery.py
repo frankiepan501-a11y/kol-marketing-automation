@@ -7,6 +7,34 @@ from app import cs_dispatch
 
 
 class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_funlab_dry_run_uses_netease_and_verifies_sent_copy(self):
+        fields = {
+            "工单ID": "CSF-inbound", "品牌": "FUNLAB", "渠道": "邮箱",
+            "销售平台": "独立站", "客户标识": "customer@example.com",
+            "邮件主题": "Order update",
+        }
+        with patch.object(cs_dispatch, "CS_REPLY_DRY_RUN_TO", "owner@example.com"), \
+             patch.object(cs_dispatch, "_netease_send", new=AsyncMock(
+                 return_value="<dry-run@funlabswitch.com>")) as netease_send, \
+             patch.object(cs_dispatch, "_verify_netease_outbound", new=AsyncMock(
+                 return_value="<dry-run@funlabswitch.com>")) as verify_netease, \
+             patch.object(cs_dispatch, "_zoho_send", new=AsyncMock()) as zoho_send, \
+             patch.object(cs_dispatch, "_verify_zoho_outbound", new=AsyncMock()) as verify_zoho:
+            ok, detail, evidence = await cs_dispatch._dispatch_reply(
+                fields, "A complete customer reply."
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("DRY-RUN", detail)
+        self.assertEqual("<dry-run@funlabswitch.com>", evidence)
+        netease_send.assert_awaited_once()
+        self.assertEqual("owner@example.com", netease_send.await_args.args[0])
+        self.assertIn("CS-DRY-RUN", netease_send.await_args.args[1])
+        self.assertIn("CS DRY-RUN", netease_send.await_args.args[2])
+        verify_netease.assert_awaited_once()
+        zoho_send.assert_not_awaited()
+        verify_zoho.assert_not_awaited()
+
     async def test_live_send_callback_acks_before_slow_network_work_and_dedupes_twin_delivery(self):
         gate = asyncio.Event()
 

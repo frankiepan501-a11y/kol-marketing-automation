@@ -1222,13 +1222,24 @@ async def _dispatch_reply(f: dict, reply: str) -> tuple:
         banner = (f'<div style="background:#fff3cd;padding:8px;border:1px solid #ffc107;margin-bottom:12px">'
                   f'<strong>⚠️ CS DRY-RUN</strong> — 本应发往 <code>{target}</code>，真客户/频道不会收到。'
                   f'渠道={channel} / 品牌={brand} / 工单={ticket_id}</div>')
-        provider_id = await _zoho_send(
-            CS_REPLY_DRY_RUN_TO, f"[CS-DRY-RUN→{target}] {subj}", banner + html, ""
-        )
+        dry_subject = f"[CS-DRY-RUN→{target}] {subj}"
+        dry_body = banner + html
+        # DRY-RUN 也要走与真客户相同的邮箱服务商，否则 FUNLAB 工单会
+        # 被 POWKONG Zoho 凭证故障误伤，而且无法验证真正的网易发信链路。
+        use_netease = prefix == "CSF" or (prefix in ("CSD", "CSDT") and brand == "FUNLAB")
+        if use_netease:
+            provider_id = await _netease_send(CS_REPLY_DRY_RUN_TO, dry_subject, dry_body, "")
+        else:
+            provider_id = await _zoho_send(CS_REPLY_DRY_RUN_TO, dry_subject, dry_body, "")
         try:
-            evidence = await _verify_zoho_outbound(
-                provider_id, CS_REPLY_DRY_RUN_TO, banner + html
-            )
+            if use_netease:
+                evidence = await _verify_netease_outbound(
+                    provider_id, CS_REPLY_DRY_RUN_TO, dry_body
+                )
+            else:
+                evidence = await _verify_zoho_outbound(
+                    provider_id, CS_REPLY_DRY_RUN_TO, dry_body
+                )
         except Exception as exc:
             raise OutboundEvidenceError(provider_id, f"DRY-RUN→{CS_REPLY_DRY_RUN_TO}", str(exc)) from exc
         return True, f"DRY-RUN→{CS_REPLY_DRY_RUN_TO}（本应 {target}）", evidence
