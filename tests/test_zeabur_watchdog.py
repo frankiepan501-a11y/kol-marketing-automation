@@ -4,12 +4,18 @@ import os
 import tempfile
 import unittest
 import urllib.error
+from pathlib import Path
 from unittest import mock
 
 from scripts import zeabur_watchdog as zw
 
 
 class ZeaburWatchdogTests(unittest.TestCase):
+    def test_workflow_does_not_skip_cs_audit_when_zeabur_secret_is_missing(self):
+        workflow = Path(".github/workflows/zeabur-watchdog.yml").read_text(encoding="utf-8")
+        self.assertNotIn("steps.preflight.outputs.ready", workflow)
+        self.assertIn("the independent customer-service audit will still run", workflow)
+
     @mock.patch.dict(os.environ, {"CS_AUDIT_NOT_BEFORE_MS": "2000"}, clear=True)
     def test_cs_outbound_audit_uses_cutover_and_tracks_anomaly_until_fixed(self):
         legacy = {

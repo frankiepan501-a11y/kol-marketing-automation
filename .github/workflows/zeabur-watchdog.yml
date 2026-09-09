@@ -32,20 +32,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check required secrets
-        id: preflight
+      - name: Report optional Zeabur credential status
         env:
           ZEABUR_API_KEY: ${{ secrets.ZEABUR_API_KEY }}
         run: |
           if [ -z "$ZEABUR_API_KEY" ]; then
-            echo "::warning::ZEABUR_API_KEY secret is missing; watchdog skipped."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::ZEABUR_API_KEY secret is missing; Zeabur checks will report an issue, but the independent customer-service audit will still run."
           else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "ZEABUR_API_KEY is configured."
           fi
 
       - name: Restore watchdog state
-        if: steps.preflight.outputs.ready == 'true'
         uses: actions/cache/restore@v4
         with:
           path: .watchdog-state
@@ -54,7 +51,6 @@ jobs:
             zeabur-watchdog-state-
 
       - name: Run watchdog
-        if: steps.preflight.outputs.ready == 'true'
         env:
           ZEABUR_API_KEY: ${{ secrets.ZEABUR_API_KEY }}
           FEISHU_NOTIFY_APP_ID: ${{ secrets.FEISHU_NOTIFY_APP_ID }}
@@ -89,14 +85,14 @@ jobs:
           python scripts/zeabur_watchdog.py
 
       - name: Save watchdog state
-        if: steps.preflight.outputs.ready == 'true'
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: .watchdog-state
           key: zeabur-watchdog-state-${{ github.run_id }}
 
       - name: Evaluate watchdog result
-        if: steps.preflight.outputs.ready == 'true'
+        if: always()
         env:
           WATCHDOG_FAIL_ON_ISSUE: ${{ github.event_name == 'workflow_dispatch' && inputs.fail_on_issue || 'true' }}
         run: |
