@@ -65,7 +65,7 @@ class ZeaburWatchdogTests(unittest.TestCase):
     def test_cs_outbound_audit_does_not_mislabel_unknown_transition_as_missing_proof(self):
         record = {
             "record_id": "rec_unknown",
-            "created_time": "1000",
+            "created_time": "3000",
             "last_modified_time": "3000",
             "fields": {"状态": "已回复", "回复时间": "", "最近出站Message-ID": ""},
         }
@@ -80,6 +80,29 @@ class ZeaburWatchdogTests(unittest.TestCase):
         rendered = json.dumps(card, ensure_ascii=False)
         self.assertIn("客服工单出站凭证异常", rendered)
         self.assertIn("record=rec_unknown", rendered)
+
+    @mock.patch.dict(os.environ, {"CS_AUDIT_NOT_BEFORE_MS": "2000"}, clear=True)
+    def test_cs_outbound_audit_ignores_unrelated_edit_to_legacy_record(self):
+        record = {
+            "record_id": "rec_legacy_edited",
+            "created_time": "1000",
+            "last_modified_time": "3000",
+            "fields": {"状态": "已回复", "回复时间": "", "最近出站Message-ID": ""},
+        }
+        issues, summary = zw.evaluate_cs_outbound_records([record], {})
+        self.assertEqual([], issues)
+        self.assertEqual(0, summary["records_with_unknown_transition"])
+
+    @mock.patch.dict(os.environ, {"CS_AUDIT_NOT_BEFORE_MS": "2000"}, clear=True)
+    def test_cs_outbound_audit_fails_closed_when_automatic_times_are_missing(self):
+        record = {
+            "record_id": "rec_no_clock",
+            "fields": {"状态": "已回复", "回复时间": "", "最近出站Message-ID": ""},
+        }
+        issues, summary = zw.evaluate_cs_outbound_records([record], {})
+        self.assertEqual(["cs_audit_source_time_missing"], [issue.key for issue in issues])
+        self.assertIn("不能视为巡检健康", issues[0].message)
+        self.assertEqual(1, summary["records_without_automatic_time"])
 
     @mock.patch.dict(
         os.environ,

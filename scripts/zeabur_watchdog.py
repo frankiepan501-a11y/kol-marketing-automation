@@ -604,6 +604,7 @@ def evaluate_cs_outbound_records(
     records_after_cutover = 0
     records_without_timestamp = 0
     records_with_unknown_transition = 0
+    records_without_automatic_time = 0
     for record in records:
         record_id = str(record.get("record_id") or record.get("id") or "").strip()
         fields = record.get("fields") or {}
@@ -638,7 +639,14 @@ def evaluate_cs_outbound_records(
             modified_ms = int(record.get("last_modified_time") or 0)
         except (TypeError, ValueError):
             modified_ms = 0
-        if max(created_ms, modified_ms) < not_before_ms:
+        if not created_ms or not modified_ms:
+            records_without_automatic_time += 1
+            continue
+        # An unrelated edit to a pre-cutover record must not enter the anomaly
+        # set. New records can be classified safely by creation time; existing
+        # records must carry the status-specific business time written by the
+        # production transition itself.
+        if created_ms < not_before_ms:
             continue
         records_with_unknown_transition += 1
         current[record_id] = {
@@ -672,6 +680,17 @@ def evaluate_cs_outbound_records(
                 f"{label} 状态={item['status']}，但最近出站Message-ID为空；{record_url}"
             )
         issues.append(Issue(key, "critical", message, label))
+    if records_without_automatic_time:
+        issues.append(
+            Issue(
+                "cs_audit_source_time_missing",
+                "critical",
+                "客服工单接口未返回完整的创建/最后修改时间，"
+                f"共 {records_without_automatic_time} 条需凭证记录无法判定审计边界；"
+                "本轮不能视为巡检健康。",
+                "客服工单巡检完整性",
+            )
+        )
     return issues, {
         "enabled": True,
         "records_scanned": len(records),
@@ -679,6 +698,7 @@ def evaluate_cs_outbound_records(
         "records_after_cutover": records_after_cutover,
         "records_without_timestamp": records_without_timestamp,
         "records_with_unknown_transition": records_with_unknown_transition,
+        "records_without_automatic_time": records_without_automatic_time,
         "current_anomaly_count": len(current),
         "tracked_count": len(tracked_ids),
     }
