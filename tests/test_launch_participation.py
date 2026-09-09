@@ -254,6 +254,29 @@ class LaunchParticipationTests(unittest.TestCase):
         }
         self.assertTrue(launch_participation._can_preserve_review(fields, candidate))
 
+    def test_pending_review_reason_survives_changed_profile_snapshot(self):
+        for decision in ("待审核", "待补资料"):
+            with self.subTest(decision=decision):
+                fields = {
+                    "进入方式": "新开发", "审核结论": decision,
+                    "审核原因": "公开邮箱未证明可投递；主要受众市场待补",
+                    "国家快照": "", "语言快照": "",
+                }
+                candidate = {"decision": "eligible_new_cold", "country": "US", "language": "en"}
+                self.assertTrue(launch_participation._can_preserve_review(fields, candidate))
+                fields["审核原因"] = ""
+                self.assertFalse(launch_participation._can_preserve_review(fields, candidate))
+
+    def test_approved_review_is_not_preserved_when_country_changes(self):
+        fields = {
+            "进入方式": "新开发", "审核结论": "通过", "审核原因": "此前通过",
+            "国家快照": "US", "语言快照": "en",
+            "达人主页": {"link": "https://youtube.com/@creator"},
+        }
+        candidate = {"decision": "eligible_new_cold", "country": "DE", "language": "en",
+                     "profile_url": "https://youtube.com/@creator"}
+        self.assertFalse(launch_participation._can_preserve_review(fields, candidate))
+
     def test_full_replacement_cancels_omitted_kol_without_touching_media_version(self):
         activity = {
             "record_id": "act1",

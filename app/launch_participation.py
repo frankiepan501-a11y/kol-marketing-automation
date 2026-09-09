@@ -284,7 +284,14 @@ def _url_cell(value: str, label: str):
 
 
 def _can_preserve_review(fields: dict, candidate: dict) -> bool:
-    """候选资格和关键快照未变时，保留运营已完成的“通过”签名。"""
+    """保留待补说明；已通过结论仍要求候选资格和关键快照不变。"""
+    if (
+        ext(fields.get("进入方式")) == "新开发"
+        and ext(fields.get("审核结论")) in {"待审核", "待补资料"}
+        and ext(fields.get("审核原因"))
+    ):
+        # 更新排序/资料不能代替解决审核缺口。保留待审不会放行发送。
+        return True
     return bool(
         ext(fields.get("进入方式")) == "新开发"
         and ext(fields.get("审核结论")) == "通过"
