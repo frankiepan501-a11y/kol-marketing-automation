@@ -67,6 +67,20 @@ class CSResourceResolverTest(unittest.TestCase):
         self.assertEqual([], ctx["matches"])
         self.assertNotIn("firmware_download", ctx["needs"])
 
+    def test_ff05_vibration_reset_without_explicit_firmware_does_not_unlock_downloads(self):
+        fields = {
+            "品牌": "FUNLAB",
+            "产品": "Luminex FF05 controller",
+            "客诉类型": "产品",
+            "客诉摘要": "Factory reset did not restore vibration.",
+            "原文": "The controller still has no vibration after a factory reset.",
+        }
+
+        ctx = cs_resources.resolve_for_ticket(fields)
+
+        self.assertNotIn("firmware_download", ctx["needs"])
+        self.assertFalse(any(r["resource_type"].startswith("firmware") for r in ctx["matches"]))
+
     def test_ff05_version_exact_match(self):
         v453 = cs_resources.resolve_for_ticket(ff05_fields("V453"))
         firmware = [r for r in v453["matches"] if r["resource_type"] == "firmware_download"]

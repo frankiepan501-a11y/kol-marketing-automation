@@ -620,6 +620,7 @@ async def health():
     )
     return {
         "status": "ok" if kol_ai_configured and kol_feishu_ready else "degraded",
+        "cs_card_fix_version": "2026-09-09-p0-v2",
         "kol_ai_configured": kol_ai_configured,
         "kol_feishu_migration": {
             "route_mode": "target_only",
@@ -1967,8 +1968,7 @@ async def cs_callback(request: Request, authorization: str = Header(default=""))
     _check_auth(authorization)
     try:
         payload = await request.json()
-        event = payload.get("event", payload)
-        return await cs_dispatch.handle_callback_fast(event)
+        return await cs_dispatch.handle_callback_fast(payload)
     except Exception as e:
         return {"toast": {"type": "error", "content": "处理失败，请稍后重试"}}
 

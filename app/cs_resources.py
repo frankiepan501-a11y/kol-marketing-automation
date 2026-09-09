@@ -629,7 +629,8 @@ def _infer_current_version(text: str) -> str:
     return versions[0]
 
 
-def _infer_needs(text: str, brand: str, model: str, series: str) -> list[str]:
+def _infer_needs(text: str, brand: str, model: str, series: str,
+                 complaint_type: str = "") -> list[str]:
     s = (text or "").lower()
     needs: list[str] = []
     # Generic order/shipping messages often ask for an "update".  That word by
@@ -638,10 +639,12 @@ def _infer_needs(text: str, brand: str, model: str, series: str) -> list[str]:
     firmware_terms = any(k in s for k in [
         "firmware", "固件", "update tool", "upgrade tool", "升级工具",
     ])
-    vibration_terms = any(k in s for k in ["vibrat", "rumble", "震动", "马达"])
-    reset_terms = any(k in s for k in ["factory reset", "reset", "重置"])
     howto_terms = any(k in s for k in ["how to", "connect", "pair", "bluetooth", "turbo", "mapping", "nfc", "连接", "配对"])
-    if brand == "FUNLAB" and (firmware_terms or (model == "FF05" and (vibration_terms or reset_terms))):
+    # Product symptoms alone (for example vibration after reset) do not prove
+    # firmware is the right remedy.  Only an explicit firmware request/history
+    # may unlock firmware files; logistics is a hard exclusion.
+    is_logistics = complaint_type == "物流"
+    if brand == "FUNLAB" and firmware_terms and not is_logistics:
         needs.extend(["firmware_download", "firmware_manual", "how_to_video"])
     elif brand == "FUNLAB" and howto_terms:
         needs.append("how_to_video")
@@ -672,7 +675,7 @@ def resolve_for_ticket(fields: dict, resources: list[dict] | None = None) -> dic
     model = _infer_model(text)
     series = _infer_series(text, model)
     current_version = _infer_current_version(text)
-    needs = _infer_needs(text, brand, model, series)
+    needs = _infer_needs(text, brand, model, series, _field_text(fields.get("客诉类型")))
     resources = resources if resources is not None else builtin_resources()
     active = [r for r in resources if (r.get("status") or ACTIVE_STATUS) == ACTIVE_STATUS and r.get("url")]
     matches: list[dict] = []

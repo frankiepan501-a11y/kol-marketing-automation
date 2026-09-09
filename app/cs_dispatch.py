@@ -8,7 +8,10 @@
 凭据走 env(public 仓铁律)。
 """
 import asyncio
+import email
 import hashlib
+import html as html_lib
+import imaplib
 import json
 import os
 import re
@@ -18,7 +21,7 @@ import time
 import urllib.parse
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.utils import formataddr, formatdate, make_msgid, parseaddr
+from email.utils import formataddr, formatdate, getaddresses, make_msgid, parseaddr
 
 import httpx
 
@@ -963,6 +966,176 @@ def _orig_subject(f: dict) -> str:
     return subj or "your message"
 
 
+class OutboundEvidenceError(RuntimeError):
+    """Provider accepted a send, but sent-channel readback is not proven yet."""
+
+    def __init__(self, provider_id: str, detail: str, reason: str):
+        super().__init__(reason)
+        self.provider_id = provider_id
+        self.detail = detail
+
+
+_OUTBOUND_PENDING_MARKER = "CS_OUTBOUND_PENDING:"
+
+
+def _normalize_mail_text(value: str) -> str:
+    value = html_lib.unescape(re.sub(r"<[^>]+>", " ", value or ""))
+    return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def _required_urls(value: str) -> set[str]:
+    return {u.rstrip(".,);]>") for u in re.findall(r"https?://[^\s<>'\"]+", value or "", re.I)}
+
+
+def _outbound_body_matches(expected_html: str, actual_text: str, actual_raw: str = "") -> bool:
+    """Require the whole normalized body and every URL, not just a similar length."""
+    expected = _normalize_mail_text(expected_html)
+    actual = _normalize_mail_text(actual_text)
+    if not expected or expected not in actual:
+        return False
+    raw_and_text = html_lib.unescape((actual_raw or "") + "\n" + (actual_text or ""))
+    return all(url in raw_and_text for url in _required_urls(expected_html))
+
+
+def _pending_outbound_id(fields: dict) -> str:
+    history = _x(fields, "沟通历史摘要")
+    match = re.search(rf"(?m)^{re.escape(_OUTBOUND_PENDING_MARKER)}([^\s]+)", history)
+    return match.group(1).strip() if match else ""
+
+
+def _pending_outbound_update(fields: dict, error: OutboundEvidenceError,
+                             reply: str = "") -> dict:
+    history = _x(fields, "沟通历史摘要").strip()
+    line = f"{_OUTBOUND_PENDING_MARKER}{error.provider_id} · {str(error)[:180]}"
+    update = {
+        "状态": "待回",
+        # Keep the lock at the beginning so a full 5,000-character history can
+        # never truncate it and reopen duplicate sending after a restart.
+        "沟通历史摘要": (line + "\n" + history).strip()[:5000],
+    }
+    if reply:
+        update["AI草稿"] = reply[:5000]
+    return update
+
+
+def _mail_text(message) -> str:
+    """Extract comparable plain text from a MIME message for sent-box proof."""
+    chunks = []
+    for part in message.walk() if message.is_multipart() else [message]:
+        if part.get_content_maintype() == "multipart":
+            continue
+        if part.get_content_type() not in ("text/plain", "text/html"):
+            continue
+        raw = part.get_payload(decode=True) or b""
+        try:
+            text = raw.decode(part.get_content_charset() or "utf-8", "replace")
+        except LookupError:
+            text = raw.decode("utf-8", "replace")
+        if part.get_content_type() == "text/html":
+            text = re.sub(r"<[^>]+>", " ", text)
+        chunks.append(text)
+    return re.sub(r"\s+", " ", " ".join(chunks)).strip()
+
+
+async def _verify_zoho_outbound(provider_id: str, expected_to: str,
+                                expected_html: str, timeout_s: float = 55.0) -> str:
+    """Return a Zoho message id only after sent-folder and raw-body readback."""
+    if not provider_id or provider_id == "ok":
+        raise RuntimeError("Zoho 未返回可核对的 Message-ID")
+    tok = await _csi._ztoken()
+    headers = {"Authorization": f"Zoho-oauthtoken {tok}"}
+    deadline = time.monotonic() + timeout_s
+    async with httpx.AsyncClient(timeout=30.0) as c:
+        folders_resp = await c.get(
+            f"https://mail.zoho.com/api/accounts/{_csi.ZACC}/folders", headers=headers
+        )
+        folders_resp.raise_for_status()
+        folders = folders_resp.json().get("data") or []
+        sent = next((f for f in folders if (f.get("folderType") or "").lower() == "sent"
+                     or (f.get("folderName") or "").lower() in ("sent", "sent items", "已发送")), None)
+        if not sent or not sent.get("folderId"):
+            raise RuntimeError("Zoho 未找到已发送文件夹")
+        sent_id = sent["folderId"]
+        while time.monotonic() < deadline:
+            view = await c.get(
+                f"https://mail.zoho.com/api/accounts/{_csi.ZACC}/messages/view"
+                f"?folderId={sent_id}&limit=100&start=0", headers=headers
+            )
+            view.raise_for_status()
+            hit = next((m for m in (view.json().get("data") or [])
+                        if str(m.get("messageId") or "") == str(provider_id)), None)
+            if hit:
+                actual_to = parseaddr(hit.get("toAddress") or "")[1].lower()
+                raw_resp = await c.get(
+                    f"https://mail.zoho.com/api/accounts/{_csi.ZACC}/folders/{sent_id}"
+                    f"/messages/{provider_id}/content", headers=headers
+                )
+                raw_resp.raise_for_status()
+                raw = ((raw_resp.json().get("data") or {}).get("content") or "")
+                if (actual_to == expected_to.lower()
+                        and _outbound_body_matches(expected_html, raw, raw)):
+                    return str(provider_id)
+            await asyncio.sleep(5)
+    raise RuntimeError("Zoho 已发送箱在限时内未出现匹配收件人及完整正文")
+
+
+def _verify_netease_outbound_sync(provider_id: str, expected_to: str,
+                                   expected_html: str, timeout_s: float = 55.0) -> str:
+    """Return RFC Message-ID only after the exact MIME message is visible in Sent."""
+    if not provider_id or provider_id == "ok":
+        raise RuntimeError("网易 SMTP 未生成可核对的 Message-ID")
+    deadline = time.monotonic() + timeout_s
+    conn = imaplib.IMAP4_SSL(
+        _csi.NE_IMAP, 993, ssl_context=ssl.create_default_context(), timeout=30
+    )
+    try:
+        conn.login(_csi.NE_USER, _csi.NE_CODE)
+        imaplib.Commands["ID"] = ("AUTH", "SELECTED")
+        conn._simple_command("ID", '("name" "cs-outbound-proof" "version" "1.0")')
+        status, boxes = conn.list()
+        if status != "OK":
+            raise RuntimeError("网易邮箱无法列出文件夹")
+        sent_box = None
+        for raw in boxes or []:
+            label = raw.decode("ascii", errors="ignore")
+            if "\\Sent" in label:
+                sent_box = label.rsplit(" ", 1)[-1]
+                break
+        if not sent_box:
+            raise RuntimeError("网易邮箱未找到已发送文件夹")
+        while time.monotonic() < deadline:
+            if conn.select(sent_box, readonly=True)[0] != "OK":
+                raise RuntimeError("网易邮箱无法读取已发送文件夹")
+            status, data = conn.search(None, "HEADER", "Message-ID", f'"{provider_id}"')
+            ids = (data[0] or b"").split() if status == "OK" and data else []
+            for uid in ids[-5:]:
+                status, parts = conn.fetch(uid, "(BODY.PEEK[])")
+                part = next((p for p in (parts or []) if isinstance(p, tuple)), None)
+                if status != "OK" or not part:
+                    continue
+                msg = email.message_from_bytes(part[1])
+                actual_id = (msg.get("Message-ID") or "").strip()
+                recipients = {addr.lower() for _, addr in getaddresses(msg.get_all("To", [])) if addr}
+                raw_message = part[1].decode("utf-8", "replace")
+                if (actual_id == provider_id and expected_to.lower() in recipients
+                        and _outbound_body_matches(expected_html, _mail_text(msg), raw_message)):
+                    return provider_id
+            time.sleep(5)
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    raise RuntimeError("网易已发送箱在限时内未出现匹配 Message-ID、收件人及完整正文")
+
+
+async def _verify_netease_outbound(provider_id: str, expected_to: str,
+                                    expected_html: str, timeout_s: float = 55.0) -> str:
+    return await asyncio.to_thread(
+        _verify_netease_outbound_sync, provider_id, expected_to, expected_html, timeout_s
+    )
+
+
 async def _zoho_send(to_addr: str, subject: str, html: str, reply_to_msgid: str = "") -> str:
     """Powkong 客服 Zoho 发信; 带 reply_to_msgid 走 action:reply 串原 thread, 失败降级新邮件。"""
     tok = await _csi._ztoken()
@@ -998,7 +1171,7 @@ def _netease_send_sync(to_addr: str, subject: str, html: str, in_reply_to: str =
     with smtplib.SMTP_SSL(NE_SMTP, 465, context=ssl.create_default_context(), timeout=30) as s:
         s.login(_csi.NE_USER, _csi.NE_CODE)
         s.sendmail(_csi.NE_USER, [to_addr], msg.as_string())
-    return "ok"
+    return str(msg["Message-ID"])
 
 
 async def _netease_send(to_addr: str, subject: str, html: str, in_reply_to: str = "") -> str:
@@ -1015,7 +1188,10 @@ async def _discord_send(channel_id: str, content: str, reply_to_msgid: str = "")
                                   "User-Agent": "DiscordBot (cs,1.0)"}, json=payload)
     if r.status_code not in (200, 201):
         raise Exception(f"Discord 发送失败 {r.status_code}: {r.text[:200]}")
-    return "ok"
+    message_id = str((r.json() or {}).get("id") or "")
+    if not message_id:
+        raise Exception("Discord 未返回消息ID，无法确认发送")
+    return message_id
 
 
 def _route_label(prefix: str, channel: str, cust_email: str, thread: str) -> str:
@@ -1029,7 +1205,7 @@ def _route_label(prefix: str, channel: str, cust_email: str, thread: str) -> str
 
 
 async def _dispatch_reply(f: dict, reply: str) -> tuple:
-    """把运营确认的回复真发到客户原渠道。返回 (ok, detail)。
+    """把运营确认的回复真发到客户原渠道。返回 (ok, detail, outbound_evidence)。
     DRY-RUN(CS_REPLY_DRY_RUN_TO 有值): 所有渠道一律改发测试邮箱 + banner 标真实去向, 真客户/频道不收。"""
     ticket_id = _x(f, "工单ID")
     prefix = ticket_id.split("-", 1)[0] if ticket_id else ""
@@ -1046,33 +1222,57 @@ async def _dispatch_reply(f: dict, reply: str) -> tuple:
         banner = (f'<div style="background:#fff3cd;padding:8px;border:1px solid #ffc107;margin-bottom:12px">'
                   f'<strong>⚠️ CS DRY-RUN</strong> — 本应发往 <code>{target}</code>，真客户/频道不会收到。'
                   f'渠道={channel} / 品牌={brand} / 工单={ticket_id}</div>')
-        await _zoho_send(CS_REPLY_DRY_RUN_TO, f"[CS-DRY-RUN→{target}] {subj}", banner + html, "")
-        return True, f"DRY-RUN→{CS_REPLY_DRY_RUN_TO}（本应 {target}）"
+        provider_id = await _zoho_send(
+            CS_REPLY_DRY_RUN_TO, f"[CS-DRY-RUN→{target}] {subj}", banner + html, ""
+        )
+        try:
+            evidence = await _verify_zoho_outbound(
+                provider_id, CS_REPLY_DRY_RUN_TO, banner + html
+            )
+        except Exception as exc:
+            raise OutboundEvidenceError(provider_id, f"DRY-RUN→{CS_REPLY_DRY_RUN_TO}", str(exc)) from exc
+        return True, f"DRY-RUN→{CS_REPLY_DRY_RUN_TO}（本应 {target}）", evidence
 
     if prefix == "CSP":  # Powkong → Zoho reply(串原 thread)
         if "@" not in cust_email:
-            return False, "无有效客户邮箱"
-        await _zoho_send(cust_email, subj, html, thread)
-        return True, f"Zoho→{cust_email}"
+            return False, "无有效客户邮箱", ""
+        provider_id = await _zoho_send(cust_email, subj, html, thread)
+        try:
+            evidence = await _verify_zoho_outbound(provider_id, cust_email, html)
+        except Exception as exc:
+            raise OutboundEvidenceError(provider_id, f"Zoho→{cust_email}", str(exc)) from exc
+        return True, f"Zoho→{cust_email}", evidence
     if prefix == "CSF":  # Funlab → 网易 SMTP
         if "@" not in cust_email:
-            return False, "无有效客户邮箱"
-        await _netease_send(cust_email, subj, html, thread)
-        return True, f"网易→{cust_email}"
+            return False, "无有效客户邮箱", ""
+        provider_id = await _netease_send(cust_email, subj, html, thread)
+        try:
+            evidence = await _verify_netease_outbound(provider_id, cust_email, html)
+        except Exception as exc:
+            raise OutboundEvidenceError(provider_id, f"网易→{cust_email}", str(exc)) from exc
+        return True, f"网易→{cust_email}", evidence
     if prefix in ("CSDT", "CSD"):  # Discord
         if prefix == "CSDT" and thread.startswith("ticket-"):
-            await _discord_send(thread[len("ticket-"):], reply, "")  # 工单频道: thread=ticket-{cid}
+            provider_id = await _discord_send(thread[len("ticket-"):], reply, "")  # 工单频道: thread=ticket-{cid}
         else:
-            await _discord_send(_csi.DC_SUPPORT_CHAN, reply, thread)  # 公开频道: 回 #support-center
-        return True, f"Discord→{prefix}"
+            provider_id = await _discord_send(_csi.DC_SUPPORT_CHAN, reply, thread)  # 公开频道: 回 #support-center
+        return True, f"Discord→{prefix}", f"discord:{provider_id}"
     # 兜底: 工单ID 前缀不明但渠道=邮箱 → 按品牌选发信通道
     if channel == "邮箱" and "@" in cust_email:
         if brand == "FUNLAB":
-            await _netease_send(cust_email, subj, html, thread)
+            provider_id = await _netease_send(cust_email, subj, html, thread)
+            try:
+                evidence = await _verify_netease_outbound(provider_id, cust_email, html)
+            except Exception as exc:
+                raise OutboundEvidenceError(provider_id, f"网易→{cust_email}", str(exc)) from exc
         else:
-            await _zoho_send(cust_email, subj, html, thread)
-        return True, f"邮箱(兜底brand={brand})→{cust_email}"
-    return False, f"无法路由(prefix={prefix} 渠道={channel})"
+            provider_id = await _zoho_send(cust_email, subj, html, thread)
+            try:
+                evidence = await _verify_zoho_outbound(provider_id, cust_email, html)
+            except Exception as exc:
+                raise OutboundEvidenceError(provider_id, f"Zoho→{cust_email}", str(exc)) from exc
+        return True, f"邮箱(兜底brand={brand})→{cust_email}", evidence
+    return False, f"无法路由(prefix={prefix} 渠道={channel})", ""
 
 
 # ===== 卡片按钮回调处理 (card.action.trigger, 经 n8n 转发到 /cs/callback) =====
@@ -1119,7 +1319,7 @@ def _callback_mapping(value) -> dict:
     return {}
 
 
-def _social_review_form_values(action: dict) -> dict:
+def _card_form_values(action: dict) -> dict:
     form = _callback_mapping(action.get("form_value"))
     nested = form.get("input_values")
     if isinstance(nested, list):
@@ -1132,16 +1332,30 @@ def _social_review_form_values(action: dict) -> dict:
     return form
 
 
-def _reply_form_values(action: dict) -> dict:
-    """Normalize both legacy and card.action.trigger form payload shapes."""
-    return _social_review_form_values(action)
+def normalize_callback_event(payload: dict) -> dict:
+    """Unwrap the two real Feishu envelopes forwarded by the n8n callback."""
+    nested = payload.get("event") if isinstance(payload, dict) else None
+    return nested if isinstance(nested, dict) else (payload or {})
+
+
+def _callback_action(event: dict) -> tuple[dict, dict, str, str]:
+    """Normalize action name and ticket id across Feishu callback versions."""
+    action = event.get("action", {}) or {}
+    val = _callback_mapping(action.get("value", {}) or {})
+    act = val.get("act") or val.get("action")
+    act = {
+        "cs_send_reply": "send_reply",
+        "cs_reassign": "reassign",
+        "cs_escalate": "escalate",
+        "cs_undo_reassign": "undo_reassign",
+    }.get(act, act)
+    return action, val, str(act or ""), str(val.get("rid") or "").strip()
 
 
 async def _show_callback_error(event: dict, result: dict) -> None:
     """Put background validation failures on the original card for retry."""
-    action = event.get("action", {}) or {}
-    val = _callback_mapping(action.get("value", {}) or {})
-    rid = str(val.get("rid") or "").strip()
+    event = normalize_callback_event(event)
+    _, _, _, rid = _callback_action(event)
     reason = str(((result.get("toast") or {}).get("content") or "处理失败")[:180])
     if not rid:
         return
@@ -1182,11 +1396,8 @@ async def handle_callback_fast(event: dict) -> dict:
     Claiming before any network read makes the second delivery a no-op and keeps
     the user-facing response below the three-second callback window.
     """
-    action = event.get("action", {}) or {}
-    val = _callback_mapping(action.get("value", {}) or {})
-    act = val.get("act") or val.get("action")
-    act = {"cs_send_reply": "send_reply"}.get(act, act)
-    rid = str(val.get("rid") or "").strip()
+    event = normalize_callback_event(event)
+    _, _, act, rid = _callback_action(event)
     if act != "send_reply":
         return await handle_callback(event)
     if not rid:
@@ -1241,7 +1452,7 @@ async def _handle_social_review_callback(event: dict, val: dict) -> dict:
     claim = f"social-review:{rid}"
     if claim in _inflight or _recent_seen(claim):
         return _toast("该审核正在保存或刚已保存，请勿重复点击")
-    form = _social_review_form_values(event.get("action", {}) or {})
+    form = _card_form_values(event.get("action", {}) or {})
     custom = str(form.get("review_reply") or "").strip()
     reply = custom or _x(f, "AI草稿").strip()
     if len(reply) < 10:
@@ -1373,8 +1584,11 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = 
     op_union = ((event.get("operator", {}) or {}).get("union_id") or "")
     tag = f"{_x(f, '品牌')}·{_x(f, '销售平台')}·{_x(f, '客户标识')}"
     success = False
+    accepted_without_proof = False
+    outbound_id = ""
+    detail = ""
     try:
-        ok, detail = await _dispatch_reply(f, reply)
+        ok, detail, outbound_id = await _dispatch_reply(f, reply)
         if not ok:
             await _update_card(msg_id, _build_result_card(
                 rid, f, "red", "发送失败",
@@ -1397,25 +1611,68 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = 
         await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                          {"fields": {"最终回复": reply[:5000], "状态": "已回复",
                                      "回复时间": int(time.time() * 1000),
-                                     "回复人": _operator_label(event)}}, which="notify")
+                                     "回复人": _operator_label(event),
+                                     "最近出站Message-ID": outbound_id[:1000]}}, which="notify")
         await _update_card(msg_id, _build_result_card(
             rid, f, "green", "已回复",
             "✅ [客服·已回复]",
             f"已发送给客户：{detail}",
             "不用再处理这张卡；重复点击会被系统拦截。"
         ))
-    except Exception as e:
+    except OutboundEvidenceError as e:
+        accepted_without_proof = True
+        try:
+            await feishu.api(
+                "PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                {"fields": _pending_outbound_update(f, e, reply)}, which="notify"
+            )
+        except Exception as persist_exc:
+            print(f"[cs_dispatch._send_async pending evidence persist] rid={rid} err={persist_exc}")
         await _update_card(msg_id, _build_result_card(
-            rid, f, "red", "发送异常",
-            "❌ [客服·发送异常]",
-            f"发送异常：{str(e)[:120]}",
-            "请重试或在原渠道手动回复。"
+            rid, f, "orange", "等待发送凭证",
+            "⚠️ [客服·待核实]",
+            f"发送通道已受理，但系统还没在已发送箱确认凭证：{str(e)[:100]}",
+            "工单保持待回；请先核对已发送箱，暂勿重复点击，避免重复发给客户。"
         ))
         for u in {op_union, OBSERVE_UNION} - {""}:
-            await _notify_union(u, f"❌ 客服回复发送异常\n{tag}\n{str(e)[:160]}\n请重试或在原渠道手动回复。")
+            await _notify_union(
+                u, f"⚠️ 客服回复待核实\n{tag}\n通道已受理但未取得已发送箱凭证；请勿重发，先人工核查。"
+            )
+    except Exception as e:
+        if outbound_id and not CS_REPLY_DRY_RUN_TO:
+            accepted_without_proof = True
+            pending = OutboundEvidenceError(
+                outbound_id, detail, f"出站已验证，但工单状态回写失败：{str(e)[:120]}"
+            )
+            try:
+                await feishu.api(
+                    "PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                    {"fields": _pending_outbound_update(f, pending, reply)}, which="notify"
+                )
+            except Exception as persist_exc:
+                print(f"[cs_dispatch._send_async verified persist] rid={rid} err={persist_exc}")
+            await _update_card(msg_id, _build_result_card(
+                rid, f, "orange", "客户已收到·工单待修复",
+                "⚠️ [客服·勿重复发送]",
+                f"已取得真实发送凭证，但工单状态回写失败：{str(e)[:100]}",
+                "客户已经收到；请勿重发。系统/负责人需按 Message-ID 修复工单状态。"
+            ))
+            for u in {op_union, OBSERVE_UNION} - {""}:
+                await _notify_union(
+                    u, f"⚠️ 客服工单回写失败\n{tag}\n客户已收到且有出站凭证；请勿重发，需修复工单状态。"
+                )
+        else:
+            await _update_card(msg_id, _build_result_card(
+                rid, f, "red", "发送异常",
+                "❌ [客服·发送异常]",
+                f"发送异常：{str(e)[:120]}",
+                "本次没有取得出站凭证；请核对后再重试或在原渠道手动回复。"
+            ))
+            for u in {op_union, OBSERVE_UNION} - {""}:
+                await _notify_union(u, f"❌ 客服回复发送异常\n{tag}\n{str(e)[:160]}\n未取得出站凭证，请核对后处理。")
     finally:
         _inflight.discard(rid)
-        if success:
+        if success or accepted_without_proof:
             _recent[rid] = time.time()   # 成功 → 保持去重窗口
         else:
             _recent.pop(rid, None)       # 失败 → 清掉 claim 时的标记, 放行操作人重试
@@ -1423,21 +1680,13 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = 
 
 async def handle_callback(event: dict) -> dict:
     """飞书卡片按钮回调: 发送回复 / 改派 / 升级。返回 toast 给操作人即时反馈。"""
-    action = event.get("action", {}) or {}
-    val = _callback_mapping(action.get("value", {}) or {})
-    act = val.get("act") or val.get("action")
+    event = normalize_callback_event(event)
+    action, val, act, rid = _callback_action(event)
     if isinstance(act, str) and act.startswith("amz_issue_"):
         from . import amz_review_audit
         return await amz_review_audit.handle_callback(event)
     if act == SOCIAL_REVIEW_ACTION:
         return await _handle_social_review_callback(event, val)
-    act = {
-        "cs_send_reply": "send_reply",
-        "cs_reassign": "reassign",
-        "cs_escalate": "escalate",
-        "cs_undo_reassign": "undo_reassign",
-    }.get(act, act)
-    rid = val.get("rid")
     if not rid:
         return _toast("缺少工单ID", "error")
     # Fail closed for stale cards created while live sending was disabled.  A
@@ -1510,7 +1759,7 @@ async def handle_callback(event: dict) -> dict:
         return _toast("已通知负责人改派 ✓")
 
     if act == "send_reply":
-        form = _reply_form_values(action)
+        form = _card_form_values(action)
         custom_parts = [
             (form.get("custom_reply") or "").strip(),
             (form.get("custom_reply_extra") or "").strip(),
@@ -1532,6 +1781,15 @@ async def handle_callback(event: dict) -> dict:
         resource_block = cs_resources.validate_reply_for_ticket(reply, f, resources=resources)
         if resource_block:
             return _toast(resource_block, "error")
+        pending_id = _pending_outbound_id(f)
+        if pending_id:
+            _spawn(_update_card(msg_id, _build_result_card(
+                rid, f, "orange", "等待发送凭证",
+                "⚠️ [客服·待核实]",
+                "发送通道曾受理此回复，但已发送箱凭证尚未确认。",
+                "请勿重复发送；先由系统或负责人按 Message-ID 核对已发送箱。"
+            )))
+            return _toast("该回复已被通道受理、正在核实，请勿重复发送", "error")
         # 🚨 去重①(内存即时): 正在发送中 / 刚发完 5min 内(防 bitable 读后写延迟漏判) → 拦下
         if rid in _inflight or _recent_seen(rid):
             _spawn(_update_card(msg_id, _build_result_card(

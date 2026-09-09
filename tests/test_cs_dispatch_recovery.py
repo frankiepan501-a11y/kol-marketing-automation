@@ -14,19 +14,31 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await gate.wait()
             return {"toast": {"type": "success", "content": "done"}}
 
-        event = {
+        legacy_event = {
             "open_message_id": "om_test",
             "action": {
                 "value": {"act": "send_reply", "action": "cs_send_reply", "rid": "rec_fast"},
                 "form_value": {"custom_reply": "A complete reply", "custom_reply_extra": ""},
             },
         }
+        schema2_event = {
+            "schema": "2.0",
+            "header": {"event_type": "card.action.trigger"},
+            "event": {
+                "operator": {"union_id": "on_operator"},
+                "context": {"open_message_id": "om_test", "open_chat_id": "oc_test"},
+                "action": {
+                    "value": {"act": "send_reply", "action": "cs_send_reply", "rid": "rec_fast"},
+                    "form_value": {"custom_reply": "A complete reply", "custom_reply_extra": ""},
+                },
+            },
+        }
         cs_dispatch._callback_fast_inflight.clear()
         with patch.object(cs_dispatch, "CS_REPLY_LIVE", True), \
              patch.object(cs_dispatch, "CS_REPLY_DRY_RUN_TO", ""), \
              patch.object(cs_dispatch, "handle_callback", side_effect=slow_handler) as handler:
-            first = await cs_dispatch.handle_callback_fast(event)
-            second = await cs_dispatch.handle_callback_fast(event)
+            first = await cs_dispatch.handle_callback_fast(legacy_event)
+            second = await cs_dispatch.handle_callback_fast(schema2_event)
             await asyncio.sleep(0)
             self.assertEqual(1, handler.call_count)
             self.assertIn("正在发送", first["toast"]["content"])
@@ -36,6 +48,101 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
 
         self.assertNotIn("rec_fast:send_reply", cs_dispatch._callback_fast_inflight)
+
+    async def test_verified_outbound_id_is_required_before_ticket_closes(self):
+        rid = "rec_verified"
+        fields = {
+            "工单ID": "CSF-inbound", "品牌": "FUNLAB", "销售平台": "独立站",
+            "客户标识": "customer@example.com", "状态": "待回",
+        }
+        event = {"operator": {"union_id": "on_operator"}}
+        cs_dispatch._recent.pop(rid, None)
+        with patch.object(cs_dispatch, "_dispatch_reply", new=AsyncMock(
+                 return_value=(True, "网易→customer@example.com", "<proof@funlabswitch.com>"))), \
+             patch.object(cs_dispatch.feishu, "api", new=AsyncMock()) as api, \
+             patch.object(cs_dispatch, "_update_card", new=AsyncMock()), \
+             patch.object(cs_dispatch, "_notify_union", new=AsyncMock()):
+            await cs_dispatch._send_async(rid, fields, "A complete customer reply.", event, "om_test")
+
+        writes = [call for call in api.await_args_list if call.args and call.args[0] == "PUT"]
+        self.assertEqual(1, len(writes))
+        update = writes[0].args[2]["fields"]
+        self.assertEqual("已回复", update["状态"])
+        self.assertEqual("<proof@funlabswitch.com>", update["最近出站Message-ID"])
+        cs_dispatch._recent.pop(rid, None)
+
+    async def test_provider_accept_without_sent_proof_keeps_ticket_open_and_blocks_retry(self):
+        rid = "rec_unproven"
+        fields = {
+            "工单ID": "CSF-inbound", "品牌": "FUNLAB", "销售平台": "独立站",
+            "客户标识": "customer@example.com", "状态": "待回",
+        }
+        event = {"operator": {"union_id": "on_operator"}}
+        cs_dispatch._recent.pop(rid, None)
+        failure = cs_dispatch.OutboundEvidenceError(
+            "<accepted@funlabswitch.com>", "网易→customer@example.com", "sent readback missing"
+        )
+        with patch.object(cs_dispatch, "_dispatch_reply", new=AsyncMock(side_effect=failure)), \
+             patch.object(cs_dispatch.feishu, "api", new=AsyncMock()) as api, \
+             patch.object(cs_dispatch, "_update_card", new=AsyncMock()) as update_card, \
+             patch.object(cs_dispatch, "_notify_union", new=AsyncMock()):
+            await cs_dispatch._send_async(rid, fields, "A complete customer reply.", event, "om_test")
+
+        writes = [call for call in api.await_args_list if call.args and call.args[0] == "PUT"]
+        self.assertEqual(1, len(writes))
+        pending = writes[0].args[2]["fields"]
+        self.assertEqual("待回", pending["状态"])
+        self.assertIn("CS_OUTBOUND_PENDING:<accepted@funlabswitch.com>", pending["沟通历史摘要"])
+        self.assertEqual("A complete customer reply.", pending["AI草稿"])
+        self.assertIn(rid, cs_dispatch._recent)
+        self.assertIn("待核实", update_card.await_args_list[0].args[1]["header"]["title"]["content"])
+        cs_dispatch._recent.pop(rid, None)
+
+    async def test_verified_send_with_ticket_write_failure_says_do_not_resend_and_persists_lock(self):
+        rid = "rec_write_failed"
+        fields = {
+            "工单ID": "CSF-inbound", "品牌": "FUNLAB", "销售平台": "独立站",
+            "客户标识": "customer@example.com", "状态": "待回",
+        }
+        event = {"operator": {"union_id": "on_operator"}}
+        cs_dispatch._recent.pop(rid, None)
+        api = AsyncMock(side_effect=[RuntimeError("first write failed"), {}])
+        with patch.object(cs_dispatch, "_dispatch_reply", new=AsyncMock(
+                 return_value=(True, "网易→customer@example.com", "<verified@funlabswitch.com>"))), \
+             patch.object(cs_dispatch.feishu, "api", new=api), \
+             patch.object(cs_dispatch, "_update_card", new=AsyncMock()) as update_card, \
+             patch.object(cs_dispatch, "_notify_union", new=AsyncMock()):
+            await cs_dispatch._send_async(rid, fields, "A complete customer reply.", event, "om_test")
+
+        self.assertEqual(2, api.await_count)
+        recovery = api.await_args_list[1].args[2]["fields"]
+        self.assertEqual("待回", recovery["状态"])
+        self.assertIn("CS_OUTBOUND_PENDING:<verified@funlabswitch.com>", recovery["沟通历史摘要"])
+        self.assertIn("勿重复发送", update_card.await_args_list[0].args[1]["header"]["title"]["content"])
+        self.assertIn(rid, cs_dispatch._recent)
+        cs_dispatch._recent.pop(rid, None)
+
+    def test_outbound_body_proof_rejects_truncated_tail_or_missing_link(self):
+        expected = "<p>Hello customer, here is the tracking update.</p><p>https://example.com/track/123</p>"
+        self.assertTrue(cs_dispatch._outbound_body_matches(expected, expected, expected))
+        self.assertFalse(cs_dispatch._outbound_body_matches(
+            expected, "Hello customer, here is the tracking update.", ""
+        ))
+        linked = '<p>Hello customer.</p><a href="https://example.com/track/123">Track here</a>'
+        self.assertFalse(cs_dispatch._outbound_body_matches(
+            linked, "Hello customer. Track here", ""
+        ))
+
+    def test_pending_outbound_lock_survives_full_history_truncation(self):
+        error = cs_dispatch.OutboundEvidenceError(
+            "<proof@funlabswitch.com>", "网易", "readback pending"
+        )
+        update = cs_dispatch._pending_outbound_update(
+            {"沟通历史摘要": "x" * 5000}, error, "A complete customer reply."
+        )
+
+        self.assertEqual(5000, len(update["沟通历史摘要"]))
+        self.assertEqual("<proof@funlabswitch.com>", cs_dispatch._pending_outbound_id(update))
 
     async def test_stale_send_button_in_manual_mode_never_closes_ticket(self):
         record = {"data": {"record": {"fields": {
@@ -65,6 +172,30 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], writes)
         self.assertEqual("error", result["toast"]["type"])
         self.assertIn("未发送", result["toast"]["content"])
+
+    async def test_persisted_pending_outbound_marker_blocks_resend_after_restart(self):
+        record = {"data": {"record": {"fields": {
+            "状态": "待回", "渠道": "邮箱", "品牌": "FUNLAB", "销售平台": "独立站",
+            "客户标识": "customer@example.com", "客诉摘要": "Question",
+            "AI草稿": "A complete customer reply.", "卡片消息ID": "om_test",
+            "沟通历史摘要": "CS_OUTBOUND_PENDING:<accepted@funlabswitch.com> · readback pending",
+        }}}}
+        event = {
+            "open_message_id": "om_test",
+            "action": {"value": {"act": "send_reply", "rid": "rec_pending"},
+                       "form_value": {"custom_reply": "", "custom_reply_extra": ""}},
+        }
+        cs_dispatch._recent.pop("rec_pending", None)
+        with patch.object(cs_dispatch, "CS_REPLY_LIVE", True), \
+             patch.object(cs_dispatch, "CS_REPLY_DRY_RUN_TO", ""), \
+             patch.object(cs_dispatch.feishu, "api", new=AsyncMock(return_value=record)), \
+             patch.object(cs_dispatch.cs_resources, "active_resources", new=AsyncMock(return_value=[])), \
+             patch.object(cs_dispatch, "_dispatch_reply", new=AsyncMock()) as dispatch:
+            result = await cs_dispatch.handle_callback(event)
+
+        dispatch.assert_not_awaited()
+        self.assertEqual("error", result["toast"]["type"])
+        self.assertIn("请勿重复发送", result["toast"]["content"])
 
     async def test_dispatch_stops_when_observe_mode_is_not_explicitly_configured(self):
         with patch.object(cs_dispatch, "CS_ASSIST_SECRET", "configured"), \
