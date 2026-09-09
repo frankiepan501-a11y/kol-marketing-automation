@@ -94,15 +94,36 @@ class ZeaburWatchdogTests(unittest.TestCase):
         self.assertEqual(0, summary["records_with_unknown_transition"])
 
     @mock.patch.dict(os.environ, {"CS_AUDIT_NOT_BEFORE_MS": "2000"}, clear=True)
+    def test_cs_outbound_audit_catches_old_ticket_reentering_required_status(self):
+        state = {"status_by_record": {"rec_reused": "待回"}}
+        record = {
+            "record_id": "rec_reused",
+            "created_time": "1000",
+            "last_modified_time": "3000",
+            "fields": {"状态": "已回复", "回复时间": "", "最近出站Message-ID": ""},
+        }
+        issues, summary = zw.evaluate_cs_outbound_records([record], state)
+        self.assertEqual(["cs_outbound_audit_time_missing:rec_reused"], [issue.key for issue in issues])
+        self.assertEqual(1, summary["records_with_unknown_transition"])
+        self.assertEqual("已回复", state["status_by_record"]["rec_reused"])
+
+    @mock.patch.dict(os.environ, {"CS_AUDIT_NOT_BEFORE_MS": "2000"}, clear=True)
     def test_cs_outbound_audit_fails_closed_when_automatic_times_are_missing(self):
         record = {
             "record_id": "rec_no_clock",
             "fields": {"状态": "已回复", "回复时间": "", "最近出站Message-ID": ""},
         }
         issues, summary = zw.evaluate_cs_outbound_records([record], {})
-        self.assertEqual(["cs_audit_source_time_missing"], [issue.key for issue in issues])
+        self.assertEqual(["cs_outbound_audit_source_time_missing"], [issue.key for issue in issues])
         self.assertIn("不能视为巡检健康", issues[0].message)
         self.assertEqual(1, summary["records_without_automatic_time"])
+        card = zw.build_alert_card(
+            issues, [], {"name": "tokyo", "status": {"isOnline": True, "vmStatus": "RUNNING"}}, {}
+        )
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertIn("客服工单出站凭证异常", rendered)
+        self.assertIn("automatic_fields", rendered)
+        self.assertNotIn("优先打开 Zeabur 构建日志", rendered)
 
     @mock.patch.dict(
         os.environ,

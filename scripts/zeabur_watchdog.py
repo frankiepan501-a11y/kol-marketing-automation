@@ -600,6 +600,8 @@ def evaluate_cs_outbound_records(
     with an audit-integrity issue instead of silently declaring it healthy.
     """
     not_before_ms = env_int("CS_AUDIT_NOT_BEFORE_MS", CS_AUDIT_NOT_BEFORE_MS_DEFAULT)
+    previous_statuses = state_bucket.get("status_by_record") or {}
+    current_statuses: dict[str, str] = {}
     current: dict[str, dict[str, str]] = {}
     records_after_cutover = 0
     records_without_timestamp = 0
@@ -609,8 +611,16 @@ def evaluate_cs_outbound_records(
         record_id = str(record.get("record_id") or record.get("id") or "").strip()
         fields = record.get("fields") or {}
         status = field_text(fields.get("状态"))
+        if record_id:
+            current_statuses[record_id] = status
         if not record_id or status not in CS_PROOF_REQUIRED_STATUSES:
             continue
+        previous_status = str(previous_statuses.get(record_id) or "")
+        newly_entered_required_status = (
+            bool(previous_status)
+            and previous_status not in CS_PROOF_REQUIRED_STATUSES
+            and status in CS_PROOF_REQUIRED_STATUSES
+        )
         outbound_id = field_text(fields.get("最近出站Message-ID"))
         if outbound_id:
             continue
@@ -620,12 +630,16 @@ def evaluate_cs_outbound_records(
         except (TypeError, ValueError):
             status_time_ms = 0
         if status_time_ms:
-            if status_time_ms < not_before_ms:
+            if status_time_ms < not_before_ms and not newly_entered_required_status:
                 continue
             records_after_cutover += 1
             current[record_id] = {
                 "status": status,
-                "kind": "missing_proof",
+                "kind": (
+                    "missing_status_time"
+                    if status_time_ms < not_before_ms
+                    else "missing_proof"
+                ),
                 "time_field": time_field,
             }
             continue
@@ -646,7 +660,7 @@ def evaluate_cs_outbound_records(
         # set. New records can be classified safely by creation time; existing
         # records must carry the status-specific business time written by the
         # production transition itself.
-        if created_ms < not_before_ms:
+        if created_ms < not_before_ms and not newly_entered_required_status:
             continue
         records_with_unknown_transition += 1
         current[record_id] = {
@@ -655,6 +669,7 @@ def evaluate_cs_outbound_records(
             "time_field": time_field,
         }
 
+    state_bucket["status_by_record"] = current_statuses
     tracked_ids = set(current)
     state_bucket["tracked_ids"] = sorted(tracked_ids)
     state_bucket["not_before_ms"] = not_before_ms
@@ -683,7 +698,7 @@ def evaluate_cs_outbound_records(
     if records_without_automatic_time:
         issues.append(
             Issue(
-                "cs_audit_source_time_missing",
+                "cs_outbound_audit_source_time_missing",
                 "critical",
                 "客服工单接口未返回完整的创建/最后修改时间，"
                 f"共 {records_without_automatic_time} 条需凭证记录无法判定审计边界；"
@@ -792,6 +807,11 @@ def extract_between(text: str, pattern: str) -> str:
 
 
 def issue_to_card_markdown(issue: Issue) -> str:
+    if issue.key == "cs_outbound_audit_source_time_missing":
+        return (
+            "**客服工单巡检完整性** · 飞书接口没有返回完整自动时间\n"
+            "本轮不能判断新旧边界；请检查 Bitable `automatic_fields`、应用权限和接口返回。"
+        )
     if issue.key.startswith("cs_outbound_"):
         record_id = issue.key.rsplit(":", 1)[-1]
         app_token = os.getenv("CS_AUDIT_APP_TOKEN", CS_AUDIT_APP_TOKEN_DEFAULT).strip()
@@ -939,14 +959,24 @@ def build_alert_card(
         elements.append({"tag": "action", "actions": actions})
 
     elements.append({"tag": "hr"})
-    action_text = (
-        "**本次需要处理**\n"
-        "逐条打开工单并核对原渠道发件箱：若实际未发出，恢复为“待回”后由负责人重新处理；"
-        "若已发出，补录真实 Message-ID。没有发件箱证据时不要重复发送，也不要保留已回复状态。"
-        if cs_only else
-        "**本次需要处理**\n"
-        "优先打开 Zeabur 构建日志。若日志是 `failed to download source code` 或 `i/o timeout`，通常是 Zeabur 拉 GitHub 超时，可重试部署；若是 Docker/build/runtime error，按对应 commit 查代码。"
-    )
+    if cs_only:
+        action_lines = ["**本次需要处理**"]
+        if any(issue.key != "cs_outbound_audit_source_time_missing" for issue in issues):
+            action_lines.append(
+                "逐条打开工单并核对原渠道发件箱：若实际未发出，恢复为“待回”后由负责人重新处理；"
+                "若已发出，补录真实 Message-ID。没有发件箱证据时不要重复发送，也不要保留已回复状态。"
+            )
+        if any(issue.key == "cs_outbound_audit_source_time_missing" for issue in issues):
+            action_lines.append(
+                "同时检查客服工单 Base 的 `automatic_fields` 参数、飞书应用读取权限和接口返回；"
+                "自动时间恢复前，本轮巡检不能判定为健康。"
+            )
+        action_text = "\n".join(action_lines)
+    else:
+        action_text = (
+            "**本次需要处理**\n"
+            "优先打开 Zeabur 构建日志。若日志是 `failed to download source code` 或 `i/o timeout`，通常是 Zeabur 拉 GitHub 超时，可重试部署；若是 Docker/build/runtime error，按对应 commit 查代码。"
+        )
     elements.append(
         {
             "tag": "div",
