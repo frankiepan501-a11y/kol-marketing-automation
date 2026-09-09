@@ -7,10 +7,38 @@ from app import cs_dispatch
 class CsDispatchCardTests(unittest.TestCase):
     def setUp(self):
         self._old_observe = cs_dispatch.OBSERVE
+        self._old_reply_live = cs_dispatch.CS_REPLY_LIVE
+        self._old_reply_dry_run_to = cs_dispatch.CS_REPLY_DRY_RUN_TO
         cs_dispatch.OBSERVE = False
+        cs_dispatch.CS_REPLY_DRY_RUN_TO = ""
 
     def tearDown(self):
         cs_dispatch.OBSERVE = self._old_observe
+        cs_dispatch.CS_REPLY_LIVE = self._old_reply_live
+        cs_dispatch.CS_REPLY_DRY_RUN_TO = self._old_reply_dry_run_to
+
+    def test_manual_mode_never_renders_a_send_button_or_claims_direct_send(self):
+        cs_dispatch.CS_REPLY_LIVE = False
+        fields = {
+            "工单ID": "CSF-<raw@mail.example.com>",
+            "客户标识": "customer@example.com",
+            "品牌": ["FUNLAB"],
+            "销售平台": ["独立站"],
+            "渠道": ["邮箱"],
+            "客诉类型": ["售后"],
+            "AI置信度": ["AI起草人工审"],
+            "分配运营": "张佳烨",
+            "客诉摘要": "Do you ship worldwide?",
+            "AI草稿": "Hello, yes, we ship worldwide.",
+        }
+
+        card = cs_dispatch._build_card("rec_manual", fields, resources=[])
+        rendered = json.dumps(card, ensure_ascii=False)
+
+        self.assertNotIn("cs_send_reply", rendered)
+        self.assertNotIn("发送回复给客户", rendered)
+        self.assertIn("原渠道", rendered)
+        self.assertIn("不会自动标记已回复", rendered)
 
     def test_email_message_id_is_not_rendered_in_card_title_or_body(self):
         fields = {
@@ -61,6 +89,7 @@ class CsDispatchCardTests(unittest.TestCase):
         self.assertNotIn("兜底发给 Frankie", rendered)
 
     def test_custom_reply_input_splits_2000_chars_across_two_fields(self):
+        cs_dispatch.CS_REPLY_LIVE = True
         fields = {
             "工单ID": "CSF-<raw@mail.example.com>",
             "客户标识": "customer@example.com",

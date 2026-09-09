@@ -632,7 +632,12 @@ def _infer_current_version(text: str) -> str:
 def _infer_needs(text: str, brand: str, model: str, series: str) -> list[str]:
     s = (text or "").lower()
     needs: list[str] = []
-    firmware_terms = any(k in s for k in ["firmware", "固件", "update", "upgrade", "升级"])
+    # Generic order/shipping messages often ask for an "update".  That word by
+    # itself is not evidence that a customer needs device firmware; treating it
+    # as such polluted logistics cards with every FUNLAB firmware download.
+    firmware_terms = any(k in s for k in [
+        "firmware", "固件", "update tool", "upgrade tool", "升级工具",
+    ])
     vibration_terms = any(k in s for k in ["vibrat", "rumble", "震动", "马达"])
     reset_terms = any(k in s for k in ["factory reset", "reset", "重置"])
     howto_terms = any(k in s for k in ["how to", "connect", "pair", "bluetooth", "turbo", "mapping", "nfc", "连接", "配对"])

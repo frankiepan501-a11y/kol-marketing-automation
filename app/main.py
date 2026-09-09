@@ -1968,7 +1968,7 @@ async def cs_callback(request: Request, authorization: str = Header(default=""))
     try:
         payload = await request.json()
         event = payload.get("event", payload)
-        return await cs_dispatch.handle_callback(event)
+        return await cs_dispatch.handle_callback_fast(event)
     except Exception as e:
         return {"toast": {"type": "error", "content": "处理失败，请稍后重试"}}
 

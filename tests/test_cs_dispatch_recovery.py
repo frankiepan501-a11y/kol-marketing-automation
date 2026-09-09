@@ -1,11 +1,71 @@
 import unittest
 import json
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 from app import cs_dispatch
 
 
 class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_send_callback_acks_before_slow_network_work_and_dedupes_twin_delivery(self):
+        gate = asyncio.Event()
+
+        async def slow_handler(event):
+            await gate.wait()
+            return {"toast": {"type": "success", "content": "done"}}
+
+        event = {
+            "open_message_id": "om_test",
+            "action": {
+                "value": {"act": "send_reply", "action": "cs_send_reply", "rid": "rec_fast"},
+                "form_value": {"custom_reply": "A complete reply", "custom_reply_extra": ""},
+            },
+        }
+        cs_dispatch._callback_fast_inflight.clear()
+        with patch.object(cs_dispatch, "CS_REPLY_LIVE", True), \
+             patch.object(cs_dispatch, "CS_REPLY_DRY_RUN_TO", ""), \
+             patch.object(cs_dispatch, "handle_callback", side_effect=slow_handler) as handler:
+            first = await cs_dispatch.handle_callback_fast(event)
+            second = await cs_dispatch.handle_callback_fast(event)
+            await asyncio.sleep(0)
+            self.assertEqual(1, handler.call_count)
+            self.assertIn("正在发送", first["toast"]["content"])
+            self.assertIn("请勿重复点击", second["toast"]["content"])
+            gate.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        self.assertNotIn("rec_fast:send_reply", cs_dispatch._callback_fast_inflight)
+
+    async def test_stale_send_button_in_manual_mode_never_closes_ticket(self):
+        record = {"data": {"record": {"fields": {
+            "状态": "待回",
+            "渠道": "邮箱",
+            "品牌": "FUNLAB",
+            "销售平台": "独立站",
+            "客户标识": "customer@example.com",
+            "客诉摘要": "Do you ship worldwide?",
+            "AI草稿": "Hello, yes, we ship worldwide.",
+            "卡片消息ID": "om_test",
+        }}}}
+        event = {
+            "open_message_id": "om_test",
+            "action": {
+                "value": {"act": "send_reply", "action": "cs_send_reply", "rid": "rec_manual"},
+                "form_value": {"custom_reply": "", "custom_reply_extra": ""},
+            },
+        }
+        with patch.object(cs_dispatch, "CS_REPLY_LIVE", False), \
+             patch.object(cs_dispatch, "CS_REPLY_DRY_RUN_TO", ""), \
+             patch.object(cs_dispatch.feishu, "api", new=AsyncMock(return_value=record)) as api, \
+             patch.object(cs_dispatch.cs_resources, "active_resources", new=AsyncMock(return_value=[])):
+            result = await cs_dispatch.handle_callback(event)
+
+        writes = [call for call in api.await_args_list if call.args and call.args[0] == "PUT"]
+        self.assertEqual([], writes)
+        self.assertEqual("error", result["toast"]["type"])
+        self.assertIn("未发送", result["toast"]["content"])
+
     async def test_dispatch_stops_when_observe_mode_is_not_explicitly_configured(self):
         with patch.object(cs_dispatch, "CS_ASSIST_SECRET", "configured"), \
              patch.object(cs_dispatch, "OBSERVE_CONFIGURED", False), \

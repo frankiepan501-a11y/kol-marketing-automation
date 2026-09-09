@@ -87,6 +87,7 @@ _tok = {"v": "", "exp": 0.0}
 # 配合"工单状态已是终态"持久去重(跨进程/重启/超 _RECENT_TTL)。三层互补。
 _inflight = set()
 _recent = {}
+_callback_fast_inflight = set()
 _bg_tasks = set()
 _RECENT_TTL = 300  # 秒: 刚发完 5 分钟内同 rid 再点 → 拦下
 
@@ -439,7 +440,10 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
         {"tag": "div", "text": {"tag": "lark_md",
                                 "content": "**🤖 AI 建议回复全文**（可复制；满意直接发）：\n" + draft}},
         {"tag": "hr"},
-        {"tag": "form", "name": f"r_{rid}", "elements": [
+    ])
+    can_send = bool(CS_REPLY_LIVE or CS_REPLY_DRY_RUN_TO)
+    if can_send:
+        elements.append({"tag": "form", "name": f"r_{rid}", "elements": [
             {"tag": "input", "name": "custom_reply", "width": "fill", "label_position": "top",
              "label": {"tag": "plain_text", "content": f"✍️ 如需修改：最终回复第1段（≤{CS_CARD_INPUT_MAX_CHARS}字；留空=用上方草稿）"},
              "placeholder": {"tag": "plain_text", "content": "1000字以内直接填这里；超过1000字请接着填下面第2段"},
@@ -453,7 +457,13 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
              "value": {"act": "send_reply", "action": "cs_send_reply", "rid": rid,
                        "resource_status": resource_context.get("status"),
                        "resource_keys": resource_keys[:20]}},
-        ]},
+        ]})
+    else:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
+            "**⚠️ 当前不会自动发给客户**\n"
+            "请复制上方 AI 草稿，在原渠道（邮箱/Discord）发出。"
+            "未检测到真实发送证据时，系统不会自动标记已回复。"}})
+    elements.extend([
         {"tag": "action", "actions": [
             {"tag": "button", "text": {"tag": "plain_text", "content": "🔁 改派给其他负责人"},
              "value": {"act": "reassign", "action": "cs_reassign", "rid": rid}},
@@ -461,7 +471,8 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
              "value": {"act": "escalate", "action": "cs_escalate", "rid": rid}},
         ]},
         {"tag": "note", "elements": [{"tag": "plain_text",
-                                      "content": "按钮说明：发送=直接回客户；改派=通知负责人重新分配，不回客户；升级=红线/无法判断时交Frankie，不回客户。"}]},
+                                      "content": (("按钮说明：发送=直接回客户；" if can_send else "按钮说明：")
+                                                  + "改派=通知负责人重新分配，不回客户；升级=红线/无法判断时交Frankie，不回客户。")}]},
     ])
     if CS_REPLY_DRY_RUN_TO:
         note = "🧪 DRY-RUN 验证中：点「发送回复」会改发测试邮箱（真客户/频道不会收到），用于核对内容完整"
@@ -470,7 +481,7 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
     elif OBSERVE:
         note = "🔎 观察期：全部卡片暂发你一人；点按钮暂不真回客户，仅供你校准路由/草稿质量"
     else:
-        note = "💬 一键回客户闭环灰度中：请先复制上方 AI 草稿，在原渠道(邮箱/Discord)回复客户；闭环验证完即开"
+        note = "💬 手动回复模式：请在原渠道发出；本卡无发送按钮，也不会因点击其他按钮而标记已回复"
     if resource_md:
         elements[2:2] = [
             {"tag": "div", "text": {"tag": "lark_md", "content": resource_md}},
@@ -1121,6 +1132,77 @@ def _social_review_form_values(action: dict) -> dict:
     return form
 
 
+def _reply_form_values(action: dict) -> dict:
+    """Normalize both legacy and card.action.trigger form payload shapes."""
+    return _social_review_form_values(action)
+
+
+async def _show_callback_error(event: dict, result: dict) -> None:
+    """Put background validation failures on the original card for retry."""
+    action = event.get("action", {}) or {}
+    val = _callback_mapping(action.get("value", {}) or {})
+    rid = str(val.get("rid") or "").strip()
+    reason = str(((result.get("toast") or {}).get("content") or "处理失败")[:180])
+    if not rid:
+        return
+    try:
+        rec = await feishu.api(
+            "GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}", which="notify"
+        )
+        f = ((rec.get("data", {}) or {}).get("record", {}) or {}).get("fields", {}) or {}
+        try:
+            resources = await cs_resources.active_resources()
+        except Exception:
+            resources = cs_resources.builtin_resources()
+        card = _build_card(rid, f, resources=resources)
+        card["header"]["template"] = "red"
+        card["header"]["title"]["content"] = f"❌ [客服·未发送] {_x(f, '品牌')} · {_product_label(f)}"
+        card["elements"].insert(0, {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**本次没有发给客户**\n原因：{reason}\n请修正后重试。"},
+        })
+        await _update_card(_card_message_id(event, f), card)
+    except Exception as exc:
+        print(f"[cs_dispatch._show_callback_error] rid={rid} err={exc}")
+
+
+async def _run_fast_callback_job(event: dict, key: str) -> None:
+    try:
+        result = await handle_callback(event)
+        if ((result.get("toast") or {}).get("type") == "error"):
+            await _show_callback_error(event, result)
+    finally:
+        _callback_fast_inflight.discard(key)
+
+
+async def handle_callback_fast(event: dict) -> dict:
+    """Acknowledge live email submission before Feishu's callback timeout.
+
+    Feishu currently delivers both legacy and schema-2 callbacks for one click.
+    Claiming before any network read makes the second delivery a no-op and keeps
+    the user-facing response below the three-second callback window.
+    """
+    action = event.get("action", {}) or {}
+    val = _callback_mapping(action.get("value", {}) or {})
+    act = val.get("act") or val.get("action")
+    act = {"cs_send_reply": "send_reply"}.get(act, act)
+    rid = str(val.get("rid") or "").strip()
+    if act != "send_reply":
+        return await handle_callback(event)
+    if not rid:
+        return _toast("缺少工单ID", "error")
+    if not CS_REPLY_LIVE and not CS_REPLY_DRY_RUN_TO:
+        return _toast("邮件未发送：当前是手动回复模式，工单仍保持待回", "error")
+    key = f"{rid}:send_reply"
+    if key in _callback_fast_inflight or rid in _inflight or _recent_seen(rid):
+        return _toast("已收到这次操作，请勿重复点击")
+    _callback_fast_inflight.add(key)
+    _spawn(_run_fast_callback_job(event, key))
+    if CS_REPLY_DRY_RUN_TO:
+        return _toast("🧪 已收到，正在发往测试邮箱；真客户不会收到")
+    return _toast("已收到，正在发送；结果会更新在原卡片")
+
+
 async def _handle_social_review_callback(event: dict, val: dict) -> dict:
     """Save a Frankie-only synthetic review. This branch has no send call."""
     rid = str(val.get("rid") or "").strip()
@@ -1358,6 +1440,11 @@ async def handle_callback(event: dict) -> dict:
     rid = val.get("rid")
     if not rid:
         return _toast("缺少工单ID", "error")
+    # Fail closed for stale cards created while live sending was disabled.  A
+    # button labelled "send" must never mutate the ticket to 已回复 unless the
+    # real sender (or the explicit test mailbox) is enabled.
+    if act == "send_reply" and not CS_REPLY_LIVE and not CS_REPLY_DRY_RUN_TO:
+        return _toast("邮件未发送：当前是手动回复模式，工单仍保持待回", "error")
     try:
         rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                                which="notify")
@@ -1423,7 +1510,7 @@ async def handle_callback(event: dict) -> dict:
         return _toast("已通知负责人改派 ✓")
 
     if act == "send_reply":
-        form = action.get("form_value", {}) or {}
+        form = _reply_form_values(action)
         custom_parts = [
             (form.get("custom_reply") or "").strip(),
             (form.get("custom_reply_extra") or "").strip(),
@@ -1464,19 +1551,6 @@ async def handle_callback(event: dict) -> dict:
                 "如果客户又有新消息，会生成新工单/新卡片。"
             )))
             return _toast("该工单已处理 ✓ 无需重复发送")
-
-        # 闭环未开 且 未开 DRY-RUN → 旧行为: 只记录(快, 同步)
-        if not CS_REPLY_LIVE and not CS_REPLY_DRY_RUN_TO:
-            _recent[rid] = time.time()
-            await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
-                             {"fields": {"最终回复": reply[:5000], "状态": "已回复"}}, which="notify")
-            _spawn(_update_card(msg_id, _build_result_card(
-                rid, f, "green", "已记录回复",
-                "✅ [客服·已记录回复]",
-                "系统已记录最终回复。",
-                "当前未开启真实发送闭环，请按提示在原渠道手动回复客户。"
-            )))
-            return _toast("已记录回复 ✓ 发送闭环灰度中，请暂在原渠道发给客户")
 
         # DRY-RUN 或 LIVE → 异步真发(立即返回 toast, 防飞书卡片回调 >3s timeout+重试导致重复发送)
         _inflight.add(rid)

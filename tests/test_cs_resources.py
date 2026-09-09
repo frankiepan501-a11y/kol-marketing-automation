@@ -52,6 +52,21 @@ class CSResourceParserTest(unittest.TestCase):
 
 
 class CSResourceResolverTest(unittest.TestCase):
+    def test_order_status_update_does_not_trigger_firmware_resources(self):
+        fields = {
+            "品牌": "FUNLAB",
+            "产品": "",
+            "客诉类型": "物流",
+            "客诉摘要": "客户询问订单FL1044的物流状态，订单显示等待详情。",
+            "原文": "Could you please provide an update on order FL1044 and its tracking status?",
+        }
+
+        ctx = cs_resources.resolve_for_ticket(fields)
+
+        self.assertEqual("无需资源", ctx["status"])
+        self.assertEqual([], ctx["matches"])
+        self.assertNotIn("firmware_download", ctx["needs"])
+
     def test_ff05_version_exact_match(self):
         v453 = cs_resources.resolve_for_ticket(ff05_fields("V453"))
         firmware = [r for r in v453["matches"] if r["resource_type"] == "firmware_download"]
