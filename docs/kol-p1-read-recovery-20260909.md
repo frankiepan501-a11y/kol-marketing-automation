@@ -10,11 +10,13 @@ or replay business effects.
 
 ## Changes
 
-- `app/feishu.py`: only T_KOL/T_EDITOR/T_DRAFT complete reads get at most two
+- `app/feishu.py`: only explicitly opted-in autonomous background jobs reading
+  T_KOL/T_EDITOR/T_DRAFT get at most two
   additional attempts, after 30/60 seconds, for exhausted 1254607 errors.
   The same page and collected rows are retained; budget is per complete scan.
   Existing duplicate/missing-token guards and terminal failure remain intact.
-  Other tables and writes do not receive this policy.
+  Context-local opt-in is reset on exit; synchronous routes, other jobs,
+  other tables and writes do not receive this policy.
 - `app/main.py`: launch job cancellation records error in memory, attempts
   durable error persistence with a five-second bound, and re-raises cancellation.
   It does not retry the business operation or send an interruption card.
@@ -25,7 +27,9 @@ Both new regression scenarios failed before their fixes. Targeted suite:
 63 passed and 3 subtests passed. Production 1254607 is intermittent; this is
 bounded recovery, not proof that the external source's cause was fixed.
 Extra waits total at most 90 seconds per complete read, in addition to existing
-API retry time. These are background jobs, not synchronous HTTP batch requests.
+API retry time (up to 105 seconds across three exhausted calls, plus request
+durations). The opt-in is only in the autonomous background job branch;
+synchronous HTTP batch requests retain their original retry window.
 Forced process termination can prevent durable persistence; the existing restart
 status reconciliation remains necessary. No automatic replay is introduced.
 

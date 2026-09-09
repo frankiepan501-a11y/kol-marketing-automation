@@ -3670,9 +3670,10 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                     campaign_id=campaign_id, review_target=review_target,
                 )
             elif mode == "autonomous":
-                result = await launch_runtime.autonomous_refill(
-                    campaign_id=campaign_id, runtime_job_id=job_id,
-                )
+                with feishu.kol_background_read_recovery():
+                    result = await launch_runtime.autonomous_refill(
+                        campaign_id=campaign_id, runtime_job_id=job_id,
+                    )
             elif mode == "autonomous_preview":
                 result = await launch_runtime.preview_zero_model_refill(
                     campaign_id=campaign_id,

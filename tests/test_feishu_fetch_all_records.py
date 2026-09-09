@@ -37,6 +37,37 @@ from app import feishu  # noqa: E402
 
 
 class FeishuFetchAllRecordsTests(unittest.TestCase):
+    def test_kol_recovery_does_not_leak_into_synchronous_or_other_task_reads(self):
+        failure = feishu.FeishuAPIError(method="GET", path="/records",
+            status_code=400, feishu_code=1254607, feishu_msg="Data not ready")
+
+        async def exercise():
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def background_scope():
+                with feishu.kol_background_read_recovery():
+                    entered.set()
+                    await release.wait()
+
+            background = asyncio.create_task(background_scope())
+            await entered.wait()
+            try:
+                with self.assertRaises(feishu.FeishuReadError):
+                    await feishu.fetch_all_records("kol-test")
+            finally:
+                release.set()
+                await background
+            with self.assertRaises(feishu.FeishuReadError):
+                await feishu.fetch_all_records("kol-test")
+
+        with patch.object(feishu.config, "T_KOL", "kol-test"), \
+             patch.object(feishu, "api", new=AsyncMock(side_effect=failure)) as api, \
+             patch("asyncio.sleep", new=AsyncMock()) as sleep:
+            asyncio.run(exercise())
+        self.assertEqual(2, api.await_count)
+        sleep.assert_not_awaited()
+
     def test_kol_recovery_is_bounded_and_never_returns_partial_rows(self):
         failure = feishu.FeishuAPIError(method="GET", path="/records",
             status_code=400, feishu_code=1254607, feishu_msg="Data not ready")
@@ -45,7 +76,7 @@ class FeishuFetchAllRecordsTests(unittest.TestCase):
         with patch.object(feishu.config, "T_KOL", "kol-test"), \
              patch.object(feishu, "api", new=AsyncMock(side_effect=[first, failure, failure, failure])) as api, \
              patch("asyncio.sleep", new=AsyncMock()) as sleep:
-            with self.assertRaises(feishu.FeishuReadError):
+            with feishu.kol_background_read_recovery(), self.assertRaises(feishu.FeishuReadError):
                 asyncio.run(feishu.fetch_all_records("kol-test"))
         self.assertEqual(4, api.await_count)
         self.assertEqual([30, 60], [call.args[0] for call in sleep.await_args_list])
@@ -55,7 +86,7 @@ class FeishuFetchAllRecordsTests(unittest.TestCase):
             status_code=400, feishu_code=1254607, feishu_msg="Data not ready")
         with patch.object(feishu, "api", new=AsyncMock(side_effect=failure)) as api, \
              patch("asyncio.sleep", new=AsyncMock()) as sleep:
-            with self.assertRaises(feishu.FeishuReadError):
+            with feishu.kol_background_read_recovery(), self.assertRaises(feishu.FeishuReadError):
                 asyncio.run(feishu.fetch_all_records("unrelated-table"))
         self.assertEqual(1, api.await_count)
         sleep.assert_not_awaited()
@@ -76,7 +107,8 @@ class FeishuFetchAllRecordsTests(unittest.TestCase):
         with patch.object(feishu.config, "T_KOL", "kol-test"), \
              patch.object(feishu, "api", new=fake_api), \
              patch("asyncio.sleep", new=AsyncMock()):
-            rows = asyncio.run(feishu.fetch_all_records("kol-test", page_size=500))
+            with feishu.kol_background_read_recovery():
+                rows = asyncio.run(feishu.fetch_all_records("kol-test", page_size=500))
         self.assertEqual(["rec1", "rec2"], [row["record_id"] for row in rows])
         self.assertEqual(calls[1], calls[2])
 

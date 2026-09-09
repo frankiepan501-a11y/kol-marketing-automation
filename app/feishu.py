@@ -1,12 +1,25 @@
 """飞书 API 封装 - 双 App token 管理"""
 import json
 import urllib.parse
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import httpx
 import time
 from . import config
 
 _tokens = {}  # {"bitable": (token, expiry_ts), "notify": ...}
+_kol_background_recovery = ContextVar("kol_background_read_recovery", default=False)
+
+
+@contextmanager
+def kol_background_read_recovery():
+    """Opt in only around an asynchronous KOL job, never a synchronous route."""
+    scope = _kol_background_recovery.set(True)
+    try:
+        yield
+    finally:
+        _kol_background_recovery.reset(scope)
 
 
 class FeishuAPIError(RuntimeError):
@@ -298,7 +311,9 @@ async def fetch_all_records(table_id: str, field_names: list = None, page_size: 
     # and all writes retain their existing retry policy. Budget is per scan,
     # not per page, so a large table cannot multiply the delay indefinitely.
     kol_core_tables = {config.T_KOL, config.T_EDITOR, config.T_DRAFT}
-    recovery_delays = (30, 60) if table_id in kol_core_tables else ()
+    recovery_delays = (
+        (30, 60) if _kol_background_recovery.get() and table_id in kol_core_tables else ()
+    )
     recoveries = 0
     try:
         page_size_i = int(page_size)
