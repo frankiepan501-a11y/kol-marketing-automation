@@ -476,6 +476,14 @@ def _draft_regen_terminal_card(*, ok: bool, record_id: str = "", approver: str =
             f"新版草稿已生成：`{new_rid}`\n\n"
             "新的审核卡会按正常流程发出；本卡无需再次点击。"
         )
+    elif new_rid:
+        template = "orange"
+        title = "⚠️ [重生待交接] 新草稿已保存"
+        content = (
+            f"新版草稿已保存：`{new_rid}`\n\n"
+            "审核卡交接尚未完成，系统需修复后补交审核。"
+            "新版必须人工审核，不能直接自动通过；请勿重复重生。"
+        )
     else:
         template = "red"
         title = "⚠️ [重生失败] 未生成新草稿"
@@ -489,7 +497,17 @@ def _draft_regen_terminal_card(*, ok: bool, record_id: str = "", approver: str =
         "tag": "div",
         "text": {"tag": "lark_md", "content": content},
     }]
-    if not ok and record_id:
+    if new_rid:
+        elements.append({
+            "tag": "action",
+            "actions": [{
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "查看新版草稿"},
+                "url": f"https://u1wpma3xuhr.feishu.cn/base/{config.FEISHU_APP_TOKEN}?table={config.T_DRAFT}&record={new_rid}",
+                "type": "default",
+            }],
+        })
+    if not ok and record_id and not new_rid:
         elements.append({
             "tag": "action",
             "actions": [{

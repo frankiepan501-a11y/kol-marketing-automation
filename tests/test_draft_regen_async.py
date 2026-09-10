@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -6,6 +7,18 @@ from app import main
 
 
 class DraftRegenAsyncTests(unittest.IsolatedAsyncioTestCase):
+    def test_saved_draft_routing_failure_is_not_generation_failure(self):
+        card = main._draft_regen_terminal_card(
+            ok=False, record_id="rec_old", new_rid="rec_new",
+            error="review card routing fail: HTTP 400",
+        )
+        text = json.dumps(card, ensure_ascii=False)
+        self.assertNotIn("未生成新草稿", text)
+        self.assertNotIn("原草稿未被替换", text)
+        self.assertIn("人工审核", text)
+        self.assertIn("record=rec_new", text)
+        self.assertNotIn('"action": "draft_regen"', text)
+
     async def asyncSetUp(self):
         main.config.INTERNAL_TOKEN = "test-token"
         self._orig_kol_key = main.config.KOL_DEEPSEEK_API_KEY
