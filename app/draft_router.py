@@ -9,6 +9,7 @@
   AI评分 < 5 且 重生<2          → 邮件草稿状态=退回重生 / 重生次数+1 + 触发对应 generator 重生
   AI评分 < 5 且 重生≥2          → 邮件草稿状态=待审 / 审核路径=需人改 + 飞书通知
 """
+import re
 import time
 from . import config, feishu, reviewer, stage_model
 from .feishu import ext
@@ -66,6 +67,12 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
     brand = config.brand_from_text(sender_alias) or "FUNLAB"
 
     retries = int(f.get("重生次数") or 0)
+
+    # draft_regen persists -rgN in the new draft ID before routing. A later
+    # pending scan has no caller arguments, so recover the human-review gate
+    # from that durable marker (retry count alone also occurs on normal drafts).
+    if re.search(r"-rg[1-9][0-9]*\Z", ext(f.get("邮件草稿ID"))):
+        force_review_reason = force_review_reason or "重生草稿必须由运营重新审核"
 
     # 2. 调 reviewer
     result = await reviewer.review_draft(
