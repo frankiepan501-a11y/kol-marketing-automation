@@ -72,6 +72,7 @@ def public_message_payload(attachment_filename: str, *, channel_name: str = camp
             "duration": 72,
             "allow_multiselect": False,
             "layout_type": 1,
+            "attachment_ids": [0],
         },
         "nonce": campaign_config.public_nonce(channel_name),
         "enforce_nonce": True,

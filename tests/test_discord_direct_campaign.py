@@ -19,6 +19,7 @@ class DiscordDirectCampaignTests(unittest.TestCase):
         self.assertEqual(72, payload["poll"]["duration"])
         self.assertFalse(payload["poll"]["allow_multiselect"])
         self.assertEqual(7, len(payload["poll"]["answers"]))
+        self.assertEqual([0], payload["poll"]["attachment_ids"])
         self.assertEqual(0, payload["attachments"][0]["id"])
         self.assertLessEqual(len(payload["nonce"]), 25)
 
