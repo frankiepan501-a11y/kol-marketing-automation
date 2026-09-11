@@ -127,6 +127,28 @@ class DiscordDirectCampaignTests(unittest.TestCase):
         self.assertEqual(16, len(subject))
         self.assertNotIn("932448074931011606", subject)
 
+    def test_discord_validation_error_preserves_nested_field_path(self):
+        response = MagicMock()
+        response.status_code = 400
+        response.json.return_value = {
+            "code": 50035,
+            "message": "Invalid Form Body",
+            "errors": {
+                "poll": {
+                    "question": {
+                        "text": {
+                            "_errors": [{"code": "BASE_TYPE_MAX_LENGTH", "message": "Too long."}]
+                        }
+                    }
+                }
+            },
+        }
+        client = MagicMock()
+        client.request.return_value = response
+
+        with self.assertRaisesRegex(RuntimeError, r'errors=.*"poll".*"question".*"text"'):
+            campaign._request(client, "POST", "/channels/123/messages", token="secret-token")
+
 
 if __name__ == "__main__":
     unittest.main()

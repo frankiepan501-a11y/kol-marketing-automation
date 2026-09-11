@@ -146,6 +146,11 @@ def _request(client: httpx.Client, method: str, path: str, *, token: str,
         try:
             body = response.json()
             detail = f" code={body.get('code', '')} message={str(body.get('message') or '')[:240]}"
+            if body.get("errors"):
+                validation = json.dumps(
+                    body["errors"], ensure_ascii=True, separators=(",", ":")
+                )[:1500]
+                detail += f" errors={validation}"
         except ValueError:
             pass
         raise RuntimeError(f"Discord API {method} {path} failed: HTTP {response.status_code}{detail}")
