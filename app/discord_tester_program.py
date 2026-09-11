@@ -17,13 +17,18 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
+from . import discord_direct_campaign_config as direct_campaign
+
 
 Work = Callable[[], Awaitable[None]]
 CompletionNotifier = Callable[[str], Awaitable[None]]
+DirectMessageSender = Callable[[str, dict], Awaitable[direct_campaign.DirectMessageStatus]]
 _drafts: dict[str, tuple[float, dict]] = {}
 _DRAFT_TTL_SECONDS = 30 * 60
 _HOUR_CANONICAL = {"2-5": "2–5", "6-10": "6–10"}
 _PC_SCORING_HOURS = {*_HOUR_CANONICAL.values(), "10+"}
+DIRECT_INTEREST_MARKER = direct_campaign.DM_MARKER
+DIRECT_INTEREST_CHOICES = direct_campaign.INTEREST_CHOICES
 
 
 def _require_feishu_ok(result: dict, action: str) -> dict:
@@ -158,11 +163,14 @@ def _text_input(custom_id: str, label: str, *, placeholder: str = "", max_length
     return {"type": 1, "components": [component]}
 
 
-def _step1_modal() -> dict:
+def _step1_modal(direct_choice: str = "") -> dict:
+    custom_id = "tester_apply_v2_step1"
+    if direct_choice:
+        custom_id += f".direct.{direct_choice}"
     return {
         "type": 9,
         "data": {
-            "custom_id": "tester_apply_v2_step1",
+            "custom_id": custom_id,
             "title": "Step 1 Of 2 — Eligibility",
             "components": [
                 _text_input("country", "Country Or Region", placeholder="United States, Canada, Mexico, UK, DE, FR, IT, ES"),
@@ -171,6 +179,64 @@ def _step1_modal() -> dict:
                 _text_input("amazon_24m", "Amazon Video Games Purchase In 24 Months?", placeholder="Type YES or NO"),
                 _text_input("commit", "14-Day Test, Privacy And Rules?", placeholder="Type YES"),
             ],
+        },
+    }
+
+
+def direct_interest_dm_payload() -> dict:
+    """Build the one-time DM sent after a member explicitly opts in."""
+    buttons = [
+        {
+            "type": 2,
+            "style": 2,
+            "label": label,
+            "custom_id": f"tester_direct_zelda.{key}",
+        }
+        for key, label in DIRECT_INTEREST_CHOICES.items()
+    ]
+    return {
+        "content": (
+            f"**{DIRECT_INTEREST_MARKER}**\n\n"
+            "Thanks for joining the community vote! One quick Zelda question:\n\n"
+            "**Which Zelda 40th Anniversary reveal are you most excited about?**\n\n"
+            "Choose one below. Your answer helps us understand player interests. "
+            "Product-test details remain private until selection."
+        ),
+        "components": [{"type": 1, "components": buttons}],
+        "allowed_mentions": {"parse": []},
+    }
+
+
+def _direct_choice(custom_id: str, prefix: str) -> str:
+    marker = f"{prefix}.direct."
+    if not custom_id.startswith(marker):
+        return ""
+    choice = custom_id.removeprefix(marker)
+    return choice if choice in DIRECT_INTEREST_CHOICES else ""
+
+
+def _direct_choice_response(choice: str) -> dict:
+    label = DIRECT_INTEREST_CHOICES[choice]
+    return {
+        "type": 7,
+        "data": {
+            "content": (
+                f"**{DIRECT_INTEREST_MARKER}**\n\n"
+                f"Thanks — we noted: **{label}**.\n\n"
+                "If you use Switch or Switch 2 and want to help test a FUNLAB controller "
+                "across real games, you can open the 2-step application below. "
+                "Applying does not guarantee selection."
+            ),
+            "components": [{
+                "type": 1,
+                "components": [{
+                    "type": 2,
+                    "style": 1,
+                    "label": "Apply For Private Product Test",
+                    "custom_id": f"tester_apply_start.direct.{choice}",
+                }],
+            }],
+            "allowed_mentions": {"parse": []},
         },
     }
 
@@ -456,17 +522,37 @@ def _step2_modal(token: str) -> dict:
     }
 
 
-def _error_response(content: str, *, restart: bool = True) -> InteractionOutcome:
+def _restart_custom_id(direct_choice: str = "") -> str:
+    if direct_choice in DIRECT_INTEREST_CHOICES:
+        return f"tester_apply_start.direct.{direct_choice}"
+    return "tester_apply_start"
+
+
+def _error_response(content: str, *, restart: bool = True,
+                    direct_choice: str = "") -> InteractionOutcome:
     data: dict = {"content": content, "flags": 64}
     if restart:
         data["components"] = [{
             "type": 1,
             "components": [{
                 "type": 2, "style": 1, "label": "Restart Application",
-                "custom_id": "tester_apply_start",
+                "custom_id": _restart_custom_id(direct_choice),
             }],
         }]
     return InteractionOutcome({"type": 4, "data": data})
+
+
+def _draft_reference(state: str) -> tuple[str, str]:
+    if not state.startswith("d-"):
+        return "", ""
+    draft_id, separator, direct_choice = state[2:].partition("~")
+    if not draft_id:
+        return "", ""
+    if not separator:
+        return draft_id, ""
+    if direct_choice not in DIRECT_INTEREST_CHOICES:
+        return "", ""
+    return draft_id, direct_choice
 
 
 def _parse_pair_text(value: str) -> dict[str, str]:
@@ -634,7 +720,8 @@ def _infer_route(devices: list[str], pc_hours: str) -> str:
     return "Switch"
 
 
-def _application_fields(payload: dict, step1_state: str, step2: dict) -> tuple[dict, str]:
+def _application_fields(payload: dict, step1_state: str, step2: dict,
+                        direct_choice: str = "") -> tuple[dict, str]:
     country, devices = _step1_fields(step1_state)
     if not country or not devices:
         return {}, "The application draft is invalid. Please start again."
@@ -667,7 +754,10 @@ def _application_fields(payload: dict, step1_state: str, step2: dict) -> tuple[d
         "配件关注点": step2["priorities"],
         "断连问题回答": "",
         "功能测试回答": "",
-        "申请理由": "",
+        "申请理由": (
+            f"Discord Direct poll {direct_campaign.CAMPAIGN_DATE} — {DIRECT_INTEREST_CHOICES[direct_choice]}"
+            if direct_choice in DIRECT_INTEREST_CHOICES else ""
+        ),
         "主测试路线": route,
         "承诺完成测试": True,
         "同意保密": True,
@@ -687,7 +777,8 @@ def _application_fields(payload: dict, step1_state: str, step2: dict) -> tuple[d
 
 async def build_interaction_outcome(payload: dict, *, signing_secret: str = "",
                                     ledger: Optional[DiscordTesterLedger] = None,
-                                    completion_notifier: Optional[CompletionNotifier] = None) -> InteractionOutcome:
+                                    completion_notifier: Optional[CompletionNotifier] = None,
+                                    direct_message_sender: Optional[DirectMessageSender] = None) -> InteractionOutcome:
     """Build a Discord response through the public interaction boundary."""
     interaction_type = int(payload.get("type") or 0)
     if interaction_type == 1:  # Discord endpoint verification ping
@@ -695,8 +786,66 @@ async def build_interaction_outcome(payload: dict, *, signing_secret: str = "",
 
     data = payload.get("data") or {}
     custom_id = str(data.get("custom_id") or "")
+
+    if interaction_type == 3 and custom_id == "tester_direct_dm":
+        user = ((payload.get("member") or {}).get("user") or payload.get("user") or {})
+        discord_id = str(user.get("id") or "")
+        if not discord_id:
+            return _error_response(
+                "Discord user identity is missing. Please try again in the FUNLAB server.",
+                restart=False,
+            )
+        if direct_message_sender is None:
+            return _error_response(
+                "FUN Bot private follow-up is temporarily unavailable. Please try again shortly.",
+                restart=False,
+            )
+        direct_campaign.log_event("cta_clicked", discord_user_id=discord_id)
+
+        async def send_direct_followup() -> None:
+            try:
+                result = await direct_message_sender(discord_id, direct_interest_dm_payload())
+            except Exception:
+                direct_campaign.log_event("dm_failed", discord_user_id=discord_id)
+                message = (
+                    "FUN Bot could not deliver the private follow-up. Please enable direct messages "
+                    "from server members for FUNLAB, then tap the button again."
+                )
+            else:
+                if result is direct_campaign.DirectMessageStatus.ALREADY_SENT:
+                    message = "The tester details are already in your DMs."
+                elif result is direct_campaign.DirectMessageStatus.SENT:
+                    message = "Check your DMs — FUN Bot sent the optional tester follow-up."
+                else:
+                    direct_campaign.log_event("dm_failed", discord_user_id=discord_id)
+                    message = "FUN Bot could not confirm the private follow-up. Please try again shortly."
+            if completion_notifier:
+                await completion_notifier(message)
+
+        return InteractionOutcome(
+            {"type": 5, "data": {"flags": 64}},
+            work=send_direct_followup,
+        )
+
+    if interaction_type == 3 and custom_id.startswith("tester_direct_zelda."):
+        choice = custom_id.removeprefix("tester_direct_zelda.")
+        if choice not in DIRECT_INTEREST_CHOICES:
+            return _error_response("This interest option is no longer available.", restart=False)
+        user = ((payload.get("member") or {}).get("user") or payload.get("user") or {})
+        direct_campaign.log_event(
+            "interest_selected",
+            discord_user_id=str(user.get("id") or ""),
+            choice=choice,
+        )
+        return InteractionOutcome(_direct_choice_response(choice))
+
     if interaction_type == 3 and custom_id == "tester_apply_start":
         return InteractionOutcome(_step1_modal())
+    if interaction_type == 3 and custom_id.startswith("tester_apply_start.direct."):
+        choice = _direct_choice(custom_id, "tester_apply_start")
+        if not choice:
+            return _error_response("This tester invitation is invalid. Please start again.", restart=False)
+        return InteractionOutcome(_step1_modal(choice))
 
     legacy_ids = (
         "tester_apply_step1", "tester_apply_step2.", "tester_apply_step3.",
@@ -707,12 +856,21 @@ async def build_interaction_outcome(payload: dict, *, signing_secret: str = "",
             "The application form has been updated. Please return to the recruitment message and start again."
         )
 
-    if interaction_type == 5 and custom_id == "tester_apply_v2_step1":
+    if interaction_type == 5 and (
+        custom_id == "tester_apply_v2_step1" or custom_id.startswith("tester_apply_v2_step1.direct.")
+    ):
+        direct_choice = _direct_choice(custom_id, "tester_apply_v2_step1")
+        if custom_id != "tester_apply_v2_step1" and not direct_choice:
+            return _error_response("This tester invitation is invalid. Please start again.", restart=False)
         state, error = _step1_state(_values(data))
         if error:
-            return _error_response(f"This application is not eligible: {error}")
-        draft_id = _store_draft({"step1": state})
-        token = _sign_state(f"d-{draft_id}", signing_secret or "development-only")
+            return _error_response(
+                f"This application is not eligible: {error}",
+                direct_choice=direct_choice,
+            )
+        draft_id = _store_draft({"step1": state, "direct_choice": direct_choice})
+        draft_reference = f"d-{draft_id}" + (f"~{direct_choice}" if direct_choice else "")
+        token = _sign_state(draft_reference, signing_secret or "development-only")
         return InteractionOutcome(_continue_button(
             f"tester_apply_v2_continue2.{token}", "Continue To Final Step"
         ))
@@ -720,24 +878,36 @@ async def build_interaction_outcome(payload: dict, *, signing_secret: str = "",
     if interaction_type == 3 and custom_id.startswith("tester_apply_v2_continue2."):
         token = custom_id.removeprefix("tester_apply_v2_continue2.")
         state = _verify_state(token, signing_secret or "development-only")
-        draft_id = state.removeprefix("d-") if state.startswith("d-") else ""
+        draft_id, direct_choice = _draft_reference(state)
         if not draft_id or not _load_draft(draft_id):
-            return _error_response("Form expired or invalid. Please start again.")
+            return _error_response(
+                "Form expired or invalid. Please start again.",
+                direct_choice=direct_choice,
+            )
         return InteractionOutcome(_step2_modal(token))
 
     if interaction_type == 5 and custom_id.startswith("tester_apply_v2_step2."):
         token = custom_id.removeprefix("tester_apply_v2_step2.")
         state = _verify_state(token, signing_secret or "development-only")
-        draft_id = state.removeprefix("d-") if state.startswith("d-") else ""
+        draft_id, direct_choice = _draft_reference(state)
         draft = _load_draft(draft_id) if draft_id else None
         if not draft:
-            return _error_response("Form expired or invalid. Please start again.")
+            return _error_response(
+                "Form expired or invalid. Please start again.",
+                direct_choice=direct_choice,
+            )
+        direct_choice = str(draft.get("direct_choice") or direct_choice)
         step2, error = _step2_values(_values(data))
         if error:
-            return _error_response(error)
-        fields, error = _application_fields(payload, draft.get("step1", ""), step2)
+            return _error_response(error, direct_choice=direct_choice)
+        fields, error = _application_fields(
+            payload,
+            draft.get("step1", ""),
+            step2,
+            direct_choice,
+        )
         if error:
-            return _error_response(error)
+            return _error_response(error, direct_choice=direct_choice)
         active_ledger = ledger or DiscordTesterLedger()
 
         async def save_and_notify() -> None:
@@ -748,6 +918,14 @@ async def build_interaction_outcome(payload: dict, *, signing_secret: str = "",
                            "Please try again shortly or contact marketing@fireflyfunlab.com.")
             else:
                 _drafts.pop(draft_id, None)
+                if direct_choice in DIRECT_INTEREST_CHOICES:
+                    direct_campaign.log_event(
+                        "application_saved",
+                        discord_user_id=fields["Discord用户ID"],
+                        choice=direct_choice,
+                        source=fields.get("报名来源") or "",
+                        record_id=record_id,
+                    )
                 message = (f"Application received. Your application ID is `{record_id}`. "
                            "Do not send proof or shipping details in Discord.")
             if completion_notifier:

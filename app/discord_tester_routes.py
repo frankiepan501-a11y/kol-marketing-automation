@@ -12,6 +12,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+from . import discord_direct_campaign_config as direct_campaign
 from . import discord_tester_program
 
 
@@ -153,6 +154,58 @@ async def _discord_request(method: str, path: str, *, body: dict | None = None):
             detail += f", {message}"
         raise HTTPException(502, detail)
     return response.json() if response.content else {}
+
+
+async def _send_direct_interest_dm(
+    discord_user_id: str, message: dict
+) -> direct_campaign.DirectMessageStatus:
+    """Send the opt-in Direct follow-up once and confirm Discord stored it."""
+    dm = await _discord_request(
+        "POST",
+        "/users/@me/channels",
+        body={"recipient_id": discord_user_id},
+    )
+    channel_id = str(dm.get("id") or "")
+    if not channel_id:
+        raise HTTPException(502, "Discord did not return a DM channel")
+
+    bot_user_id = os.environ.get("DISCORD_FUN_BOT_USER_ID", direct_campaign.BOT_USER_ID)
+    recent = await _discord_request("GET", f"/channels/{channel_id}/messages?limit=100")
+    for existing in recent if isinstance(recent, list) else []:
+        author_id = str(((existing.get("author") or {}).get("id")) or "")
+        content = str(existing.get("content") or "")
+        if author_id == bot_user_id and discord_tester_program.DIRECT_INTEREST_MARKER in content:
+            direct_campaign.log_event(
+                "dm_opt_in",
+                discord_user_id=discord_user_id,
+                delivery_status=direct_campaign.DirectMessageStatus.ALREADY_SENT.value,
+            )
+            return direct_campaign.DirectMessageStatus.ALREADY_SENT
+
+    outbound = dict(message)
+    outbound["nonce"] = direct_campaign.dm_nonce(discord_user_id)
+    outbound["enforce_nonce"] = True
+    created = await _discord_request("POST", f"/channels/{channel_id}/messages", body=outbound)
+    message_id = str(created.get("id") or "")
+    if not message_id:
+        raise HTTPException(502, "Discord did not confirm the private follow-up")
+    stored = await _discord_request("GET", f"/channels/{channel_id}/messages/{message_id}")
+    expected_ids = {
+        f"tester_direct_zelda.{key}" for key in discord_tester_program.DIRECT_INTEREST_CHOICES
+    }
+    if (
+        str(stored.get("id") or "") != message_id
+        or str(((stored.get("author") or {}).get("id")) or "") != bot_user_id
+        or discord_tester_program.DIRECT_INTEREST_MARKER not in str(stored.get("content") or "")
+        or not expected_ids.issubset(direct_campaign.component_custom_ids(stored))
+    ):
+        raise HTTPException(502, "Discord private follow-up verification failed")
+    direct_campaign.log_event(
+        "dm_opt_in",
+        discord_user_id=discord_user_id,
+        delivery_status=direct_campaign.DirectMessageStatus.SENT.value,
+    )
+    return direct_campaign.DirectMessageStatus.SENT
 
 
 @router.post("/admin/setup")
@@ -584,6 +637,7 @@ async def discord_interactions(request: Request, background_tasks: BackgroundTas
         payload,
         signing_secret=signing_secret,
         completion_notifier=notify_completion,
+        direct_message_sender=_send_direct_interest_dm,
     )
     if outcome.work:
         background_tasks.add_task(outcome.work)

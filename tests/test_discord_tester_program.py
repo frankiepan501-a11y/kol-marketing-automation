@@ -23,6 +23,49 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         _, kwargs = client.request.call_args
         self.assertNotIn("json", kwargs)
 
+    async def test_direct_interest_dm_is_sent_and_read_back(self):
+        message = program.direct_interest_dm_payload()
+        request = AsyncMock(side_effect=[
+            {"id": "dm-channel"},
+            [],
+            {"id": "dm-message"},
+            {
+                "id": "dm-message",
+                "author": {"id": "1485906070248493116"},
+                "content": message["content"],
+                "components": message["components"],
+            },
+        ])
+        with patch.object(routes, "_discord_request", request):
+            result = await routes._send_direct_interest_dm("123", message)
+
+        self.assertIs(program.direct_campaign.DirectMessageStatus.SENT, result)
+        self.assertEqual("POST", request.await_args_list[0].args[0])
+        self.assertEqual("/users/@me/channels", request.await_args_list[0].args[1])
+        self.assertEqual("123", request.await_args_list[0].kwargs["body"]["recipient_id"])
+        self.assertEqual("/channels/dm-channel/messages?limit=100", request.await_args_list[1].args[1])
+        self.assertEqual("/channels/dm-channel/messages", request.await_args_list[2].args[1])
+        sent_body = request.await_args_list[2].kwargs["body"]
+        self.assertTrue(sent_body["enforce_nonce"])
+        self.assertLessEqual(len(sent_body["nonce"]), 25)
+        self.assertEqual("/channels/dm-channel/messages/dm-message", request.await_args_list[3].args[1])
+
+    async def test_direct_interest_dm_does_not_duplicate_existing_marker(self):
+        message = program.direct_interest_dm_payload()
+        request = AsyncMock(side_effect=[
+            {"id": "dm-channel"},
+            [{
+                "id": "existing",
+                "author": {"id": "1485906070248493116"},
+                "content": message["content"],
+            }],
+        ])
+        with patch.object(routes, "_discord_request", request):
+            result = await routes._send_direct_interest_dm("123", message)
+
+        self.assertIs(program.direct_campaign.DirectMessageStatus.ALREADY_SENT, result)
+        self.assertEqual(2, request.await_count)
+
     async def test_emergency_notification_counts_only_confirmed_message_ids(self):
         sender = AsyncMock(side_effect=["", "om_confirmed"])
         with (patch("app.config.NOTIFY_CHAT_ID", "oc_ops"),
@@ -51,6 +94,149 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("tester_apply_v2_step1", outcome.response["data"]["custom_id"])
         self.assertIn("Step 1 Of 2", outcome.response["data"]["title"])
         self.assertEqual(5, len(outcome.response["data"]["components"]))
+
+    async def test_direct_cta_sends_one_private_followup_after_explicit_click(self):
+        sent, notices = [], []
+
+        async def send_dm(user_id, message):
+            sent.append((user_id, message))
+            return program.direct_campaign.DirectMessageStatus.SENT
+
+        async def notify(message):
+            notices.append(message)
+
+        outcome = await program.build_interaction_outcome({
+            "type": 3,
+            "data": {"custom_id": "tester_direct_dm"},
+            "member": {"user": {"id": "123", "username": "tester"}},
+        }, direct_message_sender=send_dm, completion_notifier=notify)
+
+        self.assertEqual(5, outcome.response["type"])
+        self.assertEqual(64, outcome.response["data"]["flags"])
+        self.assertIsNotNone(outcome.work)
+        await outcome.work()
+        self.assertEqual("123", sent[0][0])
+        self.assertIn("FUNLAB DIRECT CHECK-IN", sent[0][1]["content"])
+        buttons = sent[0][1]["components"][0]["components"]
+        self.assertEqual(5, len(buttons))
+        self.assertTrue(all(button["custom_id"].startswith("tester_direct_zelda.") for button in buttons))
+        self.assertIn("Check your DMs", notices[0])
+
+    async def test_direct_cta_does_not_treat_an_unknown_delivery_result_as_success(self):
+        notices = []
+
+        async def send_dm(_user_id, _message):
+            return "unexpected"
+
+        async def notify(message):
+            notices.append(message)
+
+        outcome = await program.build_interaction_outcome({
+            "type": 3,
+            "data": {"custom_id": "tester_direct_dm"},
+            "member": {"user": {"id": "123", "username": "tester"}},
+        }, direct_message_sender=send_dm, completion_notifier=notify)
+        await outcome.work()
+
+        self.assertIn("could not confirm", notices[0])
+
+    async def test_direct_cta_explains_when_discord_identity_is_missing(self):
+        outcome = await program.build_interaction_outcome({
+            "type": 3, "data": {"custom_id": "tester_direct_dm"},
+        }, direct_message_sender=AsyncMock())
+        self.assertEqual(4, outcome.response["type"])
+        self.assertIn("identity", outcome.response["data"]["content"].lower())
+        self.assertIsNone(outcome.work)
+
+    async def test_zelda_choice_updates_dm_and_exposes_contextual_apply_button(self):
+        outcome = await program.build_interaction_outcome({
+            "type": 3,
+            "data": {"custom_id": "tester_direct_zelda.oot"},
+            "user": {"id": "123", "username": "tester"},
+        })
+        self.assertEqual(7, outcome.response["type"])
+        self.assertIn(program.DIRECT_INTEREST_MARKER, outcome.response["data"]["content"])
+        self.assertIn("Ocarina of Time remake", outcome.response["data"]["content"])
+        button = outcome.response["data"]["components"][0]["components"][0]
+        self.assertEqual("tester_apply_start.direct.oot", button["custom_id"])
+
+    async def test_direct_choice_message_still_prevents_a_second_campaign_dm(self):
+        choice_message = (await program.build_interaction_outcome({
+            "type": 3,
+            "data": {"custom_id": "tester_direct_zelda.oot"},
+            "user": {"id": "123", "username": "tester"},
+        })).response["data"]
+        request = AsyncMock(side_effect=[
+            {"id": "dm-channel"},
+            [{
+                "id": "updated",
+                "author": {"id": "1485906070248493116"},
+                "content": choice_message["content"],
+                "components": choice_message["components"],
+            }],
+        ])
+        with patch.object(routes, "_discord_request", request):
+            result = await routes._send_direct_interest_dm("123", program.direct_interest_dm_payload())
+
+        self.assertEqual("already_sent", result.value)
+        self.assertEqual(2, request.await_count)
+
+    async def test_direct_application_keeps_interest_choice_and_reported_source(self):
+        open_form = await program.build_interaction_outcome({
+            "type": 3,
+            "data": {"custom_id": "tester_apply_start.direct.pro_controller"},
+            "user": {"id": "123", "username": "tester"},
+        })
+        self.assertEqual("tester_apply_v2_step1.direct.pro_controller",
+                         open_form.response["data"]["custom_id"])
+
+        step1 = await program.build_interaction_outcome(_modal_submit(
+            open_form.response["data"]["custom_id"], {
+                "country": "Canada", "age": "YES", "devices": "Switch 2",
+                "amazon_24m": "YES", "commit": "YES",
+            }), signing_secret="test-secret")
+        continue_id = step1.response["data"]["components"][0]["components"][0]["custom_id"]
+        step2 = await program.build_interaction_outcome({
+            "type": 3, "data": {"custom_id": continue_id},
+            "user": {"id": "123", "username": "tester"},
+        }, signing_secret="test-secret")
+
+        ledger = FakeLedger()
+        final = await program.build_interaction_outcome(_modal_submit(
+            step2.response["data"]["custom_id"], {
+                "purchase_profile": "COUNT=2-3; FUNLAB=YES; PRIME=YES",
+                "play_profile": "SWITCH=6-10; PC=0; CROSS=NO; SOURCE=INSTAGRAM",
+                "favorite_ips": "Zelda; Mario",
+                "usage": "Zelda on Switch 2 with a Pro Controller",
+                "priorities": "Comfort; low latency",
+            }), signing_secret="test-secret", ledger=ledger)
+        await final.work()
+
+        self.assertEqual("Instagram", ledger.saved["报名来源"])
+        self.assertEqual(
+            "Discord Direct poll 2026-09-11 — Anniversary Pro Controller",
+            ledger.saved["申请理由"],
+        )
+
+    async def test_direct_step1_error_keeps_direct_restart_context(self):
+        outcome = await program.build_interaction_outcome(_modal_submit(
+            "tester_apply_v2_step1.direct.case", {
+                "country": "Canada", "age": "NO", "devices": "Switch 2",
+                "amazon_24m": "YES", "commit": "YES",
+            }
+        ))
+        restart = outcome.response["data"]["components"][0]["components"][0]
+        self.assertEqual("tester_apply_start.direct.case", restart["custom_id"])
+
+    async def test_expired_direct_draft_keeps_direct_restart_context(self):
+        signed = program._sign_state("d-missing~oot", "test-secret")
+        outcome = await program.build_interaction_outcome({
+            "type": 3,
+            "data": {"custom_id": f"tester_apply_v2_continue2.{signed}"},
+            "user": {"id": "123", "username": "tester"},
+        }, signing_secret="test-secret")
+        restart = outcome.response["data"]["components"][0]["components"][0]
+        self.assertEqual("tester_apply_start.direct.oot", restart["custom_id"])
 
     async def test_valid_step1_returns_private_continue_button(self):
         outcome = await program.build_interaction_outcome(_modal_submit("tester_apply_v2_step1", {
@@ -120,7 +306,9 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         }), signing_secret="test-secret", ledger=ledger, completion_notifier=notify)
         self.assertEqual(5, outcome.response["type"])
         self.assertIsNone(ledger.saved)
-        await outcome.work()
+        with patch.object(program.direct_campaign, "log_event") as log_event:
+            await outcome.work()
+        log_event.assert_not_called()
         self.assertIn("Application received", notices[0])
         self.assertEqual("123", ledger.saved["Discord用户ID"])
         self.assertEqual(["Switch 2", "Steam Deck"], ledger.saved["设备"])
