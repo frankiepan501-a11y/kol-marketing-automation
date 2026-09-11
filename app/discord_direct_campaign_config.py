@@ -55,9 +55,11 @@ def dm_nonce(discord_user_id: str) -> str:
     return f"dir911-{event_subject(discord_user_id)}"
 
 
-def public_nonce(channel_name: str) -> str:
-    """Return a stable channel-scoped nonce so rehearsal cannot suppress public posting."""
-    channel_key = hashlib.sha256(channel_name.encode("utf-8")).hexdigest()[:10]
+def public_nonce(channel_name: str, message_kind: str = "main") -> str:
+    """Return a stable channel/message nonce so rehearsal and poll posts stay distinct."""
+    channel_key = hashlib.sha256(
+        f"{channel_name}:{message_kind}".encode("utf-8")
+    ).hexdigest()[:10]
     return f"dir911-{channel_key}"
 
 
