@@ -74,6 +74,18 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(Exception, "channel_name must be"):
                 await routes.run_direct_campaign(request, authorization="Bearer internal")
 
+    async def test_direct_campaign_admin_auth_fails_closed_when_internal_token_is_missing(self):
+        request = AsyncMock()
+        request.json.return_value = {
+            "channel_name": "tester-staff-rehearsal",
+            "commit": True,
+        }
+        with (patch("app.config.INTERNAL_TOKEN", ""),
+              patch.object(routes.asyncio, "to_thread", new=AsyncMock()) as to_thread):
+            with self.assertRaisesRegex(Exception, "Invalid internal token"):
+                await routes.run_direct_campaign(request, authorization="Bearer ")
+        to_thread.assert_not_awaited()
+
     async def test_direct_interest_dm_does_not_duplicate_existing_marker(self):
         message = program.direct_interest_dm_payload()
         request = AsyncMock(side_effect=[

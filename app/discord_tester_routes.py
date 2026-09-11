@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 from html import escape
@@ -337,7 +338,9 @@ async def tester_rules():
 
 def _check_internal_auth(authorization: str) -> None:
     from . import config
-    if not authorization.startswith("Bearer ") or authorization[7:] != config.INTERNAL_TOKEN:
+    expected = str(config.INTERNAL_TOKEN or "")
+    supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+    if not expected or not supplied or not hmac.compare_digest(supplied, expected):
         raise HTTPException(401, "Invalid internal token")
 
 
