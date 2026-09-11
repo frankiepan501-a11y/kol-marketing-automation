@@ -74,6 +74,22 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(Exception, "channel_name must be"):
                 await routes.run_direct_campaign(request, authorization="Bearer internal")
 
+    async def test_direct_campaign_admin_endpoint_forwards_public_rehearsal_evidence(self):
+        request = AsyncMock()
+        request.json.return_value = {
+            "channel_name": "general",
+            "commit": True,
+            "rehearsal_message_id": "hidden-message",
+            "rehearsal_user_id": "staff-user",
+        }
+        with (patch.object(routes, "_check_internal_auth"),
+              patch.object(routes.asyncio, "to_thread", new=AsyncMock(return_value={"ok": True})) as to_thread):
+            await routes.run_direct_campaign(request, authorization="Bearer internal")
+
+        self.assertEqual("general", to_thread.await_args.kwargs["channel_name"])
+        self.assertEqual("hidden-message", to_thread.await_args.kwargs["rehearsal_message_id"])
+        self.assertEqual("staff-user", to_thread.await_args.kwargs["rehearsal_user_id"])
+
     async def test_direct_campaign_admin_auth_fails_closed_when_internal_token_is_missing(self):
         request = AsyncMock()
         request.json.return_value = {

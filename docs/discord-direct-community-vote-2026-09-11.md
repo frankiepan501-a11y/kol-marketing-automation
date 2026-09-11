@@ -37,11 +37,17 @@ python -m app.discord_direct_campaign --channel-name general --commit --rehearsa
 If the Zeabur web terminal is unavailable, the same publisher is exposed through the existing internal Bearer-authenticated service route:
 
 ```text
-POST /discord/tester/admin/direct-campaign
+POST https://kol-auto.zeabur.app/discord/tester/admin/direct-campaign
+Authorization: Bearer <INTERNAL_TOKEN>
+Content-Type: application/json
+
 {"channel_name":"tester-staff-rehearsal","commit":false}
+{"channel_name":"tester-staff-rehearsal","commit":true}
+{"channel_name":"general","commit":false}
+{"channel_name":"general","commit":true,"rehearsal_message_id":"<verified_hidden_message_id>","rehearsal_user_id":"<staff_tester_discord_user_id>"}
 ```
 
-Only `tester-staff-rehearsal` and `general` are accepted. The route calls the same duplicate-safe publisher and does not bypass the public rehearsal evidence gate.
+Send one JSON body per request. Only `tester-staff-rehearsal` and `general` are accepted. The route calls the same duplicate-safe publisher and does not bypass the public rehearsal evidence gate. Treat a request as successful only after the response confirms `ok=true`, the expected `channel_id`, the stored `message_id`, `mention_everyone=false`, and both official URLs under `official_preview_urls`. A client timeout may leave the publisher running in its worker thread; retrying is safe because the channel-scoped nonce and campaign marker prevent duplicate posts.
 
 The non-commit command validates FUN Bot identity, resolves one exact text channel, checks Discord history back to the campaign start for duplicates, validates the image, and returns the final payload without posting. The commit command posts once and reads the stored Discord message back to verify the author, image, poll, button, both official Direct previews, and `mention_everyone=false`. A public commit is blocked unless it is given the verified hidden rehearsal message ID and a staff tester whose FUN Bot DM shows an answered Zelda choice plus the contextual application button.
 
@@ -50,7 +56,7 @@ The short campaign funnel is measurable without storing message content: `cta_cl
 ## Verification
 
 - Automated regression: `python -m unittest discover -s tests -p 'test_*.py'`
-- Expected result on 2026-09-11 baseline: 1,026 tests pass.
+- Expected result on 2026-09-11 baseline: 1,027 tests pass.
 - In the hidden employee channel, click the opt-in button, confirm one DM, choose one Zelda option, and open the two-step application.
 - Before public posting, rerun the dry-run against `general`.
 
