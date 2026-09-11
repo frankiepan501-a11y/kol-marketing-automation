@@ -32,6 +32,24 @@ class DiscordDirectCampaignTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exactly one"):
             campaign.find_channel_id(channels, "missing")
 
+    def test_rehearsal_and_public_posts_use_distinct_stable_nonces(self):
+        rehearsal = campaign.public_message_payload(
+            "visual.png", channel_name=campaign_config.REHEARSAL_CHANNEL
+        )["nonce"]
+        public = campaign.public_message_payload(
+            "visual.png", channel_name=campaign_config.PUBLIC_CHANNEL
+        )["nonce"]
+
+        self.assertNotEqual(rehearsal, public)
+        self.assertEqual(
+            public,
+            campaign.public_message_payload(
+                "visual.png", channel_name=campaign_config.PUBLIC_CHANNEL
+            )["nonce"],
+        )
+        self.assertLessEqual(len(rehearsal), 25)
+        self.assertLessEqual(len(public), 25)
+
     def test_existing_public_marker_prevents_duplicate_post(self):
         messages = [
             {"id": "old", "author": {"id": "other"}, "content": campaign.PUBLIC_MARKER},

@@ -22,7 +22,7 @@ CAMPAIGN_START_SNOWFLAKE = campaign_config.CAMPAIGN_START_SNOWFLAKE
 DEFAULT_IMAGE = Path(__file__).parent / "assets" / "funlab-direct-community-vote-1200x675.png"
 
 
-def public_message_payload(attachment_filename: str) -> dict:
+def public_message_payload(attachment_filename: str, *, channel_name: str = campaign_config.PUBLIC_CHANNEL) -> dict:
     return {
         "content": (
             f"🎮 **{PUBLIC_MARKER}**\n\n"
@@ -73,7 +73,7 @@ def public_message_payload(attachment_filename: str) -> dict:
             "allow_multiselect": False,
             "layout_type": 1,
         },
-        "nonce": campaign_config.PUBLIC_NONCE,
+        "nonce": campaign_config.public_nonce(channel_name),
         "enforce_nonce": True,
     }
 
@@ -250,7 +250,7 @@ def publish(*, channel_name: str, image_path: Path = DEFAULT_IMAGE, commit: bool
     if not image_path.is_file():
         raise RuntimeError(f"Campaign image not found: {image_path}")
     filename = image_path.name
-    payload = public_message_payload(filename)
+    payload = public_message_payload(filename, channel_name=channel_name)
 
     with httpx.Client(timeout=30.0) as client:
         bot = _request(client, "GET", "/users/@me", token=token)

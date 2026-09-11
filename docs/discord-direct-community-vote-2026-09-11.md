@@ -50,7 +50,7 @@ The short campaign funnel is measurable without storing message content: `cta_cl
 ## Verification
 
 - Automated regression: `python -m unittest discover -s tests -p 'test_*.py'`
-- Expected result on 2026-09-11 baseline: 1,025 tests pass.
+- Expected result on 2026-09-11 baseline: 1,026 tests pass.
 - In the hidden employee channel, click the opt-in button, confirm one DM, choose one Zelda option, and open the two-step application.
 - Before public posting, rerun the dry-run against `general`.
 

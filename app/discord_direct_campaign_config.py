@@ -18,7 +18,6 @@ OFFICIAL_DIRECT_URLS = (
     "https://www.nintendo.com/us/nintendo-direct/9-8-2026/",
     "https://www.nintendo.com/us/nintendo-direct/9-9-2026/",
 )
-PUBLIC_NONCE = "direct-vote-20260911"
 DISCORD_EPOCH_MS = 1420070400000
 CAMPAIGN_START_MS = int(
     datetime.fromisoformat(CAMPAIGN_DATE).replace(tzinfo=UTC).timestamp() * 1000
@@ -54,6 +53,12 @@ def event_subject(discord_user_id: str) -> str:
 
 def dm_nonce(discord_user_id: str) -> str:
     return f"dir911-{event_subject(discord_user_id)}"
+
+
+def public_nonce(channel_name: str) -> str:
+    """Return a stable channel-scoped nonce so rehearsal cannot suppress public posting."""
+    channel_key = hashlib.sha256(channel_name.encode("utf-8")).hexdigest()[:10]
+    return f"dir911-{channel_key}"
 
 
 def log_event(event: str, *, discord_user_id: str = "", **fields: object) -> None:
