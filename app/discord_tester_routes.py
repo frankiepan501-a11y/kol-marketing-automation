@@ -1,6 +1,7 @@
 """HTTP routes for the existing FUN Bot product-tester program."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from html import escape
@@ -13,6 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from . import discord_direct_campaign_config as direct_campaign
+from . import discord_direct_campaign as direct_campaign_publisher
 from . import discord_tester_program
 
 
@@ -337,6 +339,29 @@ def _check_internal_auth(authorization: str) -> None:
     from . import config
     if not authorization.startswith("Bearer ") or authorization[7:] != config.INTERNAL_TOKEN:
         raise HTTPException(401, "Invalid internal token")
+
+
+@router.post("/admin/direct-campaign")
+async def run_direct_campaign(request: Request, authorization: str = Header(default="")):
+    """Run the duplicate-safe Direct campaign publisher through existing internal auth."""
+    _check_internal_auth(authorization)
+    body = await request.json()
+    channel_name = str(body.get("channel_name") or "")
+    if channel_name not in {direct_campaign.REHEARSAL_CHANNEL, direct_campaign.PUBLIC_CHANNEL}:
+        raise HTTPException(400, "channel_name must be tester-staff-rehearsal or general")
+    commit = body.get("commit", False)
+    if not isinstance(commit, bool):
+        raise HTTPException(400, "commit must be a boolean")
+    try:
+        return await asyncio.to_thread(
+            direct_campaign_publisher.publish,
+            channel_name=channel_name,
+            commit=commit,
+            rehearsal_message_id=str(body.get("rehearsal_message_id") or ""),
+            rehearsal_user_id=str(body.get("rehearsal_user_id") or ""),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/admin/role-sync/health")

@@ -50,6 +50,30 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(sent_body["nonce"]), 25)
         self.assertEqual("/channels/dm-channel/messages/dm-message", request.await_args_list[3].args[1])
 
+    async def test_direct_campaign_admin_endpoint_runs_only_after_internal_auth(self):
+        request = AsyncMock()
+        request.json.return_value = {
+            "channel_name": "tester-staff-rehearsal",
+            "commit": True,
+        }
+        result = {"ok": True, "message_id": "hidden-message"}
+        with (patch.object(routes, "_check_internal_auth") as check_auth,
+              patch.object(routes.asyncio, "to_thread", new=AsyncMock(return_value=result)) as to_thread):
+            response = await routes.run_direct_campaign(request, authorization="Bearer internal")
+
+        self.assertEqual(result, response)
+        check_auth.assert_called_once_with("Bearer internal")
+        self.assertEqual(routes.direct_campaign_publisher.publish, to_thread.await_args.args[0])
+        self.assertEqual("tester-staff-rehearsal", to_thread.await_args.kwargs["channel_name"])
+        self.assertTrue(to_thread.await_args.kwargs["commit"])
+
+    async def test_direct_campaign_admin_endpoint_rejects_unknown_channel(self):
+        request = AsyncMock()
+        request.json.return_value = {"channel_name": "announcement", "commit": False}
+        with patch.object(routes, "_check_internal_auth"):
+            with self.assertRaisesRegex(Exception, "channel_name must be"):
+                await routes.run_direct_campaign(request, authorization="Bearer internal")
+
     async def test_direct_interest_dm_does_not_duplicate_existing_marker(self):
         message = program.direct_interest_dm_payload()
         request = AsyncMock(side_effect=[
