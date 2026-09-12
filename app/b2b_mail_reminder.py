@@ -46,6 +46,21 @@ DEFAULT_TARGET_ACCOUNTS = {
 OWNER_OPTIONS = {"冼浩华", "李桐欣", "吴晓丹"}
 CHANNEL_OPTIONS = {"微信", "WhatsApp", "电话", "面谈", "LinkedIn", "其他"}
 TEST_THREAD_PREFIX = "__test__"
+REMINDER_DATETIME_FIELDS = frozenset(
+    {
+        "最后来信时间",
+        "最后发件时间",
+        "最后草稿时间",
+        "回执时间",
+        "首次提醒时间",
+        "升级提醒时间",
+        "最后扫描时间",
+    }
+)
+
+
+class ReminderWriteError(RuntimeError):
+    """A reminder write failed before a safe, confirmed Bitable commit."""
 
 INTERNAL_DOMAINS = {
     "powkong.com",
@@ -211,6 +226,69 @@ def _to_bj_string(value: str) -> str:
 
 def _now_bj_string() -> str:
     return datetime.now(BJ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _to_bitable_datetime_ms(value, field_name: str = "") -> int:
+    """Convert supported reminder timestamps to Feishu DateTime milliseconds.
+
+    Naive text is the existing Beijing-time display format. Numeric inputs are
+    accepted only as 10-digit epoch seconds or 13-digit epoch milliseconds so
+    malformed values fail before reaching Bitable.
+    """
+    dt = None
+    if isinstance(value, bool):
+        raise ReminderWriteError(f"invalid datetime field: {field_name or 'unknown'}")
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)):
+        if isinstance(value, float) and not value.is_integer():
+            raise ReminderWriteError(f"invalid datetime field: {field_name or 'unknown'}")
+        digits = str(int(value))
+        if len(digits) == 10:
+            return int(value) * 1000
+        if len(digits) == 13:
+            return int(value)
+        raise ReminderWriteError(f"invalid datetime field: {field_name or 'unknown'}")
+    elif isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"\d{10}", text):
+            return int(text) * 1000
+        if re.fullmatch(r"\d{13}", text):
+            return int(text)
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ReminderWriteError(f"invalid datetime field: {field_name or 'unknown'}") from exc
+    else:
+        raise ReminderWriteError(f"invalid datetime field: {field_name or 'unknown'}")
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=BJ)
+    epoch_ms = int(dt.timestamp() * 1000)
+    if len(str(epoch_ms)) != 13:
+        raise ReminderWriteError(f"invalid datetime field: {field_name or 'unknown'}")
+    return epoch_ms
+
+
+def _normalize_reminder_fields(fields: dict) -> dict:
+    normalized = dict(fields)
+    for field_name in REMINDER_DATETIME_FIELDS.intersection(normalized):
+        normalized[field_name] = _to_bitable_datetime_ms(normalized[field_name], field_name)
+    return normalized
+
+
+def _require_feishu_write_success(response, *, require_record_id: bool = False) -> dict:
+    if not isinstance(response, dict):
+        raise ReminderWriteError("code=invalid_response msg=non-object response")
+    code = response.get("code")
+    msg = _text(response.get("msg") or response.get("message"))[:200]
+    if code != 0:
+        raise ReminderWriteError(f"code={code} msg={msg or '-'}")
+    if require_record_id:
+        record = ((response.get("data") or {}).get("record") or {})
+        if not (record.get("record_id") or record.get("recordId")):
+            raise ReminderWriteError("code=0 msg=missing record_id")
+    return response
 
 
 async def _list_records(app_token: str, table_id: str, *, field_names: list[str] | None = None) -> list[dict]:
@@ -816,24 +894,29 @@ async def _existing_reminders_by_key() -> dict:
 
 async def _upsert_reminder(fields: dict, existing_rec: dict | None = None):
     rid = (existing_rec or {}).get("record_id")
-    body = {"fields": fields}
+    normalized_fields = _normalize_reminder_fields(fields)
+    body = {"fields": normalized_fields}
     path_base = f"/bitable/v1/apps/{B2B_CUSTOMER_APP_TOKEN}/tables/{B2B_REMINDER_TABLE}/records"
     try:
         if rid:
-            return await feishu.api("PUT", f"{path_base}/{rid}", body, which="bitable")
-        return await feishu.api("POST", path_base, body, which="bitable")
+            response = await feishu.api("PUT", f"{path_base}/{rid}", body, which="bitable")
+        else:
+            response = await feishu.api("POST", path_base, body, which="bitable")
     except Exception as exc:
         # Relation-field payloads can vary by API/field type. The relation is
         # useful but non-critical; retry without it to avoid dropping the whole
         # daily sync on one schema nuance.
-        if "关联CRM客户" in fields:
-            retry = dict(fields)
+        if "关联CRM客户" in normalized_fields:
+            retry = dict(normalized_fields)
             retry.pop("关联CRM客户", None)
             body = {"fields": retry}
             if rid:
-                return await feishu.api("PUT", f"{path_base}/{rid}", body, which="bitable")
-            return await feishu.api("POST", path_base, body, which="bitable")
-        raise exc
+                response = await feishu.api("PUT", f"{path_base}/{rid}", body, which="bitable")
+            else:
+                response = await feishu.api("POST", path_base, body, which="bitable")
+        else:
+            raise exc
+    return _require_feishu_write_success(response, require_record_id=not rid)
 
 
 async def _get_reminder_record(record_id: str, app_token: str = "", table_id: str = "") -> dict:
@@ -1092,7 +1175,7 @@ def _build_card(rows: list[dict], *, escalation_copy: bool = False) -> dict:
 
 
 async def _mark_card_sent(rows: list[dict]) -> list[dict]:
-    sent_at = _now_bj_string()
+    sent_at = _to_bitable_datetime_ms(datetime.now(BJ), "首次提醒时间")
     updates = []
     for row in rows:
         if row["status"] == "待首次提醒":
@@ -1240,30 +1323,31 @@ async def handle_receipt(payload: dict) -> dict:
     crm_sync = {}
     if not reply:
         try:
+            fields = _normalize_reminder_fields(fields)
             resp = await feishu.api(
                 "PUT",
                 f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
                 {"fields": fields},
                 which="bitable",
             )
-            ok = resp.get("code", 0) == 0
-            if ok:
-                label = fields.get("回执类型") or fields.get("提醒状态")
-                target = _text(card_action.get("customer")) or _text(card_action.get("thread_key")) or record_id
-                try:
-                    crm_sync = await b2b_crm_sync.sync_mail_receipt_to_customer(
-                        reminder_record,
-                        receipt_type=label,
-                        actor=actor,
-                        note=note,
-                        channels=channels,
-                    )
-                except Exception as exc:
-                    crm_sync = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
-                reply = f"B2B邮件回执已写入：{label} · {target} · by {actor}"
-            else:
-                write_error = f"code={resp.get('code')} msg={resp.get('msg') or ''}"
-                reply = "B2B邮件回执写入失败 " + write_error
+            _require_feishu_write_success(resp)
+            ok = True
+            label = fields.get("回执类型") or fields.get("提醒状态")
+            target = _text(card_action.get("customer")) or _text(card_action.get("thread_key")) or record_id
+            try:
+                crm_sync = await b2b_crm_sync.sync_mail_receipt_to_customer(
+                    reminder_record,
+                    receipt_type=label,
+                    actor=actor,
+                    note=note,
+                    channels=channels,
+                )
+            except Exception as exc:
+                crm_sync = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+            reply = f"B2B邮件回执已写入：{label} · {target} · by {actor}"
+        except ReminderWriteError as exc:
+            write_error = str(exc)
+            reply = "B2B邮件回执写入失败 " + write_error
         except Exception as exc:
             write_error = f"{type(exc).__name__}: {str(exc)[:240]}"
             reply = "B2B邮件回执写入异常：" + write_error
