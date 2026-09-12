@@ -18,7 +18,6 @@ BJ = timezone(timedelta(hours=8))
 B2B_APP_TOKEN = os.environ.get("B2B_CUSTOMER_APP_TOKEN", "E1kkbx1tVaJvQGsKf94cJG88nzb")
 B2B_LINKEDIN_TABLE = os.environ.get("B2B_LINKEDIN_TABLE", "tblN8XszEatuTJgP")
 B2B_LINKEDIN_VIEW = os.environ.get("B2B_LINKEDIN_VIEW", "vew9f7zQ7s")
-B2B_GROUP_CHAT_ID = os.environ.get("B2B_GROUP_CHAT_ID", "oc_2e878553984592d7396401fdd6a37d61")
 B2B_LINKEDIN_FRANKIE_EMAIL = os.environ.get("B2B_LINKEDIN_FRANKIE_EMAIL", "398459272@qq.com")
 B2B_LINKEDIN_POOL_SUMMARY_OWNER = os.environ.get("B2B_LINKEDIN_POOL_SUMMARY_OWNER", "吴晓丹")
 DEFAULT_DISPATCH_OWNERS = ["吴晓丹", "冼浩华", "李桐欣"]
@@ -638,8 +637,6 @@ def _notify_target(
     owner: str,
     *,
     frankie_only: bool = False,
-    fallback_to_group: bool = True,
-    allow_wildcard: bool = True,
 ) -> tuple[str, str]:
     if frankie_only:
         return "email", B2B_LINKEDIN_FRANKIE_EMAIL
@@ -648,22 +645,76 @@ def _notify_target(
         try:
             mapping = json.loads(raw)
             value = mapping.get(owner)
-            if not value and allow_wildcard:
-                value = mapping.get("*")
             if isinstance(value, dict):
                 receive_type = value.get("receive_type") or value.get("type") or ""
                 receive_id = value.get("receive_id") or value.get("id") or ""
-                if receive_type and receive_id:
-                    return receive_type, receive_id
+                if isinstance(receive_type, str) and isinstance(receive_id, str):
+                    receive_type = receive_type.strip()
+                    receive_id = receive_id.strip()
+                    if receive_type and receive_id:
+                        return receive_type, receive_id
             if isinstance(value, str):
                 target = _target_from_value(value)
                 if target[0] and target[1]:
                     return target
         except Exception as exc:
             print(f"[b2b_linkedin_daily_card] bad B2B_LINKEDIN_OWNER_NOTIFY_JSON: {exc}")
-    if fallback_to_group:
-        return "chat_id", B2B_GROUP_CHAT_ID
     return "", ""
+
+
+def _is_valid_private_notify_target(receive_type: str, receive_id: str) -> bool:
+    if not isinstance(receive_type, str) or not isinstance(receive_id, str):
+        return False
+    if not receive_id or any(char.isspace() for char in receive_id):
+        return False
+    if receive_type == "email":
+        local, separator, domain = receive_id.partition("@")
+        return bool(local and separator and domain and "@" not in domain)
+    if receive_type == "open_id":
+        return receive_id.startswith("ou_") and len(receive_id) > 3
+    if receive_type == "union_id":
+        return receive_id.startswith("on_") and len(receive_id) > 3
+    return False
+
+
+def _daily_card_notify_targets(
+    grouped: dict[str, list[dict]],
+    *,
+    frankie_only: bool = False,
+) -> dict[str, tuple[str, str]]:
+    targets: dict[str, tuple[str, str]] = {}
+    owners_by_target: dict[tuple[str, str], str] = {}
+    owners_to_validate = list(grouped)
+    if not frankie_only:
+        owners_to_validate = list(dict.fromkeys([*_dispatch_owners(), *owners_to_validate]))
+    for owner_name in owners_to_validate:
+        receive_type, receive_id = _notify_target(
+            owner_name,
+            frankie_only=frankie_only,
+        )
+        if not receive_type or not receive_id:
+            raise ValueError(
+                f"missing private notify target for LinkedIn daily card owner: {owner_name or '-'}"
+            )
+        if receive_type not in {"email", "open_id", "union_id"}:
+            raise ValueError(
+                f"private target required for LinkedIn daily card owner {owner_name or '-'}; "
+                f"got {receive_type or '-'}"
+            )
+        if not _is_valid_private_notify_target(receive_type, receive_id):
+            raise ValueError(
+                f"invalid private notify target for LinkedIn daily card owner: {owner_name or '-'}"
+            )
+        target = (receive_type, receive_id)
+        if not frankie_only and target in owners_by_target:
+            raise ValueError(
+                "duplicate private notify target for LinkedIn daily card owners: "
+                f"{owners_by_target[target]} and {owner_name or '-'}"
+            )
+        owners_by_target[target] = owner_name
+        if grouped.get(owner_name):
+            targets[owner_name] = target
+    return targets
 
 
 def _pool_summary_notify_target(*, frankie_only: bool = False) -> tuple[str, str]:
@@ -674,14 +725,16 @@ def _pool_summary_notify_target(*, frankie_only: bool = False) -> tuple[str, str
     receive_type, receive_id = _notify_target(
         owner,
         frankie_only=frankie_only,
-        fallback_to_group=False,
-        allow_wildcard=False,
     )
     if not receive_type or not receive_id:
         raise ValueError(f"missing private notify target for pool summary owner: {owner or '-'}")
     if receive_type not in {"email", "open_id", "union_id"}:
         raise ValueError(
             f"private target required for LinkedIn pool summary; got {receive_type or '-'}"
+        )
+    if not _is_valid_private_notify_target(receive_type, receive_id):
+        raise ValueError(
+            f"invalid private notify target for LinkedIn pool summary owner: {owner or '-'}"
         )
     return receive_type, receive_id
 
@@ -905,6 +958,11 @@ async def run(
     else:
         rows = await _eligible_rows(include_test=include_test)
         grouped, queued, assignment_stats = _assign_rows(rows, limit_per_owner=limit, owner_filter=owner)
+    notify_targets = (
+        _daily_card_notify_targets(grouped, frankie_only=frankie_only)
+        if notify
+        else {}
+    )
     assignment_updates = await _sync_assignments(grouped, commit=commit)
 
     message_ids = []
@@ -912,7 +970,7 @@ async def run(
     if notify:
         for owner_name, owner_rows in grouped.items():
             card = build_card(owner_rows, owner_name=owner_name)
-            receive_type, receive_id = _notify_target(owner_name, frankie_only=frankie_only)
+            receive_type, receive_id = notify_targets[owner_name]
             try:
                 message_id = await feishu.send_card_via_b2b_assistant(receive_type, receive_id, card)
                 message_ids.append({"owner": owner_name, "receive_type": receive_type, "receive_id": receive_id, "message_id": message_id})

@@ -54,7 +54,6 @@ class B2BLinkedInPoolSummaryRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("", result["send_error"])
         self.assertEqual(1, len(self.sent))
         self.assertEqual(("open_id", "ou_b2b_owner"), self.sent[0][:2])
-        self.assertNotEqual(daily_card.B2B_GROUP_CHAT_ID, self.sent[0][1])
 
     async def test_missing_owner_mapping_never_falls_back_to_group(self):
         os.environ["B2B_LINKEDIN_POOL_SUMMARY_OWNER"] = "吴晓丹"
