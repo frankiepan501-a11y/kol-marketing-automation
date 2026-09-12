@@ -163,9 +163,9 @@ async def _list_records(table_id: str, *, field_names: list[str] | None = None) 
         if page_token:
             path += f"&page_token={page_token}"
         if field_names:
-            resp = await feishu.api("POST", path.replace("/records?", "/records/search?"), {"field_names": field_names}, which="bitable")
+            resp = await feishu.api("POST", path.replace("/records?", "/records/search?"), {"field_names": field_names}, which="b2b_base")
         else:
-            resp = await feishu.api("GET", path, which="bitable")
+            resp = await feishu.api("GET", path, which="b2b_base")
         data = resp.get("data") or {}
         items.extend(data.get("items") or [])
         if not data.get("has_more"):
@@ -180,7 +180,7 @@ async def _get_record(table_id: str, record_id: str) -> dict:
     resp = await feishu.api(
         "GET",
         f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records/{record_id}",
-        which="bitable",
+        which="b2b_base",
     )
     return (resp.get("data") or {}).get("record") or {}
 
@@ -191,7 +191,7 @@ async def _create_record(table_id: str, fields: dict) -> str:
         "POST",
         f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records",
         {"fields": clean},
-        which="bitable",
+        which="b2b_base",
     )
     return (((resp.get("data") or {}).get("record") or {}).get("record_id") or "")
 
@@ -204,7 +204,7 @@ async def _update_record(table_id: str, record_id: str, fields: dict) -> None:
         "PUT",
         f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records/{record_id}",
         {"fields": clean},
-        which="bitable",
+        which="b2b_base",
     )
 
 

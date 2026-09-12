@@ -645,7 +645,7 @@ async def _list_records(table_id: str, *, field_names: list[str]) -> list[dict]:
         path = f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records?page_size=500{encoded_fields}"
         if page_token:
             path += "&page_token=" + quote(page_token, safe="")
-        resp = await feishu.api("GET", path, which="bitable")
+        resp = await feishu.api("GET", path, which="b2b_base")
         data = resp.get("data") or {}
         items.extend(data.get("items") or [])
         if not data.get("has_more"):
@@ -657,7 +657,7 @@ async def _list_records(table_id: str, *, field_names: list[str]) -> list[dict]:
 
 
 async def _create_table_record(table_id: str, fields: dict) -> str:
-    resp = await feishu.api("POST", f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records", {"fields": fields}, which="bitable")
+    resp = await feishu.api("POST", f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records", {"fields": fields}, which="b2b_base")
     return (((resp.get("data") or {}).get("record") or {}).get("record_id")) or ""
 
 
@@ -672,7 +672,7 @@ async def _create_table_records(table_id: str, rows: list[dict]) -> list[str]:
                 "POST",
                 f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records/batch_create",
                 {"records": [{"fields": fields} for fields in chunk]},
-                which="bitable",
+                which="b2b_base",
             )
             records = (resp.get("data") or {}).get("records") or []
             ids.extend([(rec.get("record_id") or rec.get("id") or "") for rec in records])
@@ -691,7 +691,7 @@ async def _update_table_record(table_id: str, record_id: str, fields: dict) -> N
     clean = {k: v for k, v in fields.items() if v not in (None, "", [])}
     if not record_id or not clean:
         return
-    await feishu.api("PUT", f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records/{record_id}", {"fields": clean}, which="bitable")
+    await feishu.api("PUT", f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{table_id}/records/{record_id}", {"fields": clean}, which="b2b_base")
 
 
 async def _list_candidate_records() -> list[dict]:

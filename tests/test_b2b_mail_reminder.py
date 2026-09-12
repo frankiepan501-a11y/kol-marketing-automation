@@ -163,6 +163,10 @@ class B2BMailReminderWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertIn("code=1254064", result["write_error"])
         crm.assert_not_awaited()
+        self.assertEqual(
+            ["b2b_base", "b2b_base", "b2b_assistant"],
+            [call.kwargs.get("which") for call in api.await_args_list],
+        )
         receipt_fields = api.await_args_list[1].args[2]["fields"]
         self.assertIsInstance(receipt_fields["回执时间"], int)
         self.assertEqual(13, len(str(receipt_fields["回执时间"])))

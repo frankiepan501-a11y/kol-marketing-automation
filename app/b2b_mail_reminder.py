@@ -300,9 +300,9 @@ async def _list_records(app_token: str, table_id: str, *, field_names: list[str]
             path += f"&page_token={page_token}"
         body = {"field_names": field_names} if field_names else None
         if body:
-            data = await feishu.api("POST", path.replace("/records?", "/records/search?"), body, which="bitable")
+            data = await feishu.api("POST", path.replace("/records?", "/records/search?"), body, which="b2b_base")
         else:
-            data = await feishu.api("GET", path, which="bitable")
+            data = await feishu.api("GET", path, which="b2b_base")
         payload = data.get("data") or {}
         items.extend(payload.get("items") or [])
         if not payload.get("has_more"):
@@ -899,9 +899,9 @@ async def _upsert_reminder(fields: dict, existing_rec: dict | None = None):
     path_base = f"/bitable/v1/apps/{B2B_CUSTOMER_APP_TOKEN}/tables/{B2B_REMINDER_TABLE}/records"
     try:
         if rid:
-            response = await feishu.api("PUT", f"{path_base}/{rid}", body, which="bitable")
+            response = await feishu.api("PUT", f"{path_base}/{rid}", body, which="b2b_base")
         else:
-            response = await feishu.api("POST", path_base, body, which="bitable")
+            response = await feishu.api("POST", path_base, body, which="b2b_base")
     except Exception as exc:
         # Relation-field payloads can vary by API/field type. The relation is
         # useful but non-critical; retry without it to avoid dropping the whole
@@ -911,9 +911,9 @@ async def _upsert_reminder(fields: dict, existing_rec: dict | None = None):
             retry.pop("关联CRM客户", None)
             body = {"fields": retry}
             if rid:
-                response = await feishu.api("PUT", f"{path_base}/{rid}", body, which="bitable")
+                response = await feishu.api("PUT", f"{path_base}/{rid}", body, which="b2b_base")
             else:
-                response = await feishu.api("POST", path_base, body, which="bitable")
+                response = await feishu.api("POST", path_base, body, which="b2b_base")
         else:
             raise exc
     return _require_feishu_write_success(response, require_record_id=not rid)
@@ -925,7 +925,7 @@ async def _get_reminder_record(record_id: str, app_token: str = "", table_id: st
     resp = await feishu.api(
         "GET",
         f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
-        which="bitable",
+        which="b2b_base",
     )
     return (resp.get("data") or {}).get("record") or {}
 
@@ -1328,7 +1328,7 @@ async def handle_receipt(payload: dict) -> dict:
                 "PUT",
                 f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
                 {"fields": fields},
-                which="bitable",
+                which="b2b_base",
             )
             _require_feishu_write_success(resp)
             ok = True

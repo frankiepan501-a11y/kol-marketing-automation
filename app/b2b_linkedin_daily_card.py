@@ -171,7 +171,7 @@ async def _list_records(*, field_names: list[str] | None = None, automatic_field
         path = f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{B2B_LINKEDIN_TABLE}/records?page_size=500{auto}{encoded_fields}"
         if page_token:
             path += "&page_token=" + quote(page_token, safe="")
-        resp = await feishu.api("GET", path, which="bitable")
+        resp = await feishu.api("GET", path, which="b2b_base")
         data = resp.get("data") or {}
         items.extend(data.get("items") or [])
         if not data.get("has_more"):
@@ -186,7 +186,7 @@ async def _get_record(record_id: str) -> dict:
     resp = await feishu.api(
         "GET",
         f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{B2B_LINKEDIN_TABLE}/records/{record_id}",
-        which="bitable",
+        which="b2b_base",
     )
     return (resp.get("data") or {}).get("record") or {}
 
@@ -196,7 +196,7 @@ async def _update_record(record_id: str, fields: dict) -> None:
         "PUT",
         f"/bitable/v1/apps/{B2B_APP_TOKEN}/tables/{B2B_LINKEDIN_TABLE}/records/{record_id}",
         {"fields": fields},
-        which="bitable",
+        which="b2b_base",
     )
 
 

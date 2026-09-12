@@ -70,7 +70,7 @@ async def _refresh_token(which: str):
     elif which == "kol_assistant":
         aid = config.FEISHU_KOL_ASSISTANT_APP_ID
         sec = config.FEISHU_KOL_ASSISTANT_APP_SECRET
-    elif which == "b2b_assistant":
+    elif which in {"b2b_assistant", "b2b_base"}:
         aid, sec = config.FEISHU_B2B_ASSISTANT_APP_ID, config.FEISHU_B2B_ASSISTANT_APP_SECRET
     else:
         aid, sec = config.FEISHU_NOTIFY_APP_ID, config.FEISHU_NOTIFY_APP_SECRET

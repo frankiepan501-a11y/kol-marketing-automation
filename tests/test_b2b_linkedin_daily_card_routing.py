@@ -106,10 +106,11 @@ class B2BLinkedInDailyCardRoutingTest(unittest.IsolatedAsyncioTestCase):
             ensure_ascii=False,
         )
         send_card = AsyncMock(side_effect=["om_one", "om_two", "om_three"])
+        api = AsyncMock(return_value={"code": 0})
         try:
             with (
                 patch.object(daily_card, "_eligible_rows", AsyncMock(return_value=[_lead(1), _lead(2), _lead(3)])),
-                patch.object(daily_card.feishu, "api", AsyncMock(return_value={"code": 0})),
+                patch.object(daily_card.feishu, "api", api),
                 patch.object(daily_card.feishu, "send_card_via_b2b_assistant", send_card),
             ):
                 result = await daily_card.run(commit=True, notify=True, limit=1)
@@ -125,6 +126,11 @@ class B2BLinkedInDailyCardRoutingTest(unittest.IsolatedAsyncioTestCase):
                 {(call.args[0], call.args[1]) for call in send_card.await_args_list},
             )
             self.assertNotIn("chat_id", {call.args[0] for call in send_card.await_args_list})
+            self.assertGreater(api.await_count, 0)
+            self.assertEqual(
+                {"b2b_base"},
+                {call.kwargs.get("which") for call in api.await_args_list},
+            )
         finally:
             if old_mapping is None:
                 os.environ.pop("B2B_LINKEDIN_OWNER_NOTIFY_JSON", None)
