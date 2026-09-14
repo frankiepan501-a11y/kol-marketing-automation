@@ -163,6 +163,49 @@ def _text_input(custom_id: str, label: str, *, placeholder: str = "", max_length
     return {"type": 1, "components": [component]}
 
 
+def _modal_text_input(custom_id: str, label: str, *, placeholder: str = "",
+                      max_length: int = 200, value: str = "") -> dict:
+    component = {
+        "type": 4,
+        "custom_id": custom_id,
+        "style": 1,
+        "required": True,
+        "max_length": max_length,
+    }
+    if placeholder:
+        component["placeholder"] = placeholder
+    if value:
+        component["value"] = value[:max_length]
+    return {"type": 18, "label": label, "component": component}
+
+
+def _modal_string_select(custom_id: str, label: str, description: str,
+                         options: list[tuple[str, str]], *, values_required: int,
+                         selected_values: set[str] | None = None) -> dict:
+    selected_values = selected_values or set()
+    return {
+        "type": 18,
+        "label": label,
+        "description": description,
+        "component": {
+            "type": 3,
+            "custom_id": custom_id,
+            "placeholder": f"Select {values_required} answers",
+            "options": [
+                {
+                    "label": option_label,
+                    "value": option_value,
+                    **({"default": True} if option_value in selected_values else {}),
+                }
+                for option_label, option_value in options
+            ],
+            "min_values": values_required,
+            "max_values": values_required,
+            "required": True,
+        },
+    }
+
+
 def _step1_modal(direct_choice: str = "") -> dict:
     custom_id = "tester_apply_v2_step1"
     if direct_choice:
@@ -247,7 +290,10 @@ def _values(data: dict) -> dict[str, str]:
     def walk(node):
         if isinstance(node, dict):
             cid = node.get("custom_id")
-            if cid and "value" in node:
+            if cid and "values" in node:
+                selected = node.get("values") or []
+                out[str(cid)] = ";".join(str(value).strip() for value in selected)
+            elif cid and "value" in node:
                 out[str(cid)] = str(node.get("value") or "").strip()
             for value in node.values():
                 walk(value)
@@ -505,18 +551,76 @@ def _continue_button(custom_id: str, label: str) -> dict:
     }
 
 
-def _step2_modal(token: str) -> dict:
+def _selected_pair_values(value: str) -> set[str]:
+    items = _parse_pair_items(value)
+    key_counts = {key: sum(1 for item_key, _ in items if item_key == key) for key, _ in items}
+    selected: set[str] = set()
+    for key, item in items:
+        if key_counts[key] != 1:
+            continue
+        normalized_item = item.upper().replace("–", "-")
+        if key == "prime" and normalized_item == "PREFER NOT TO SAY":
+            normalized_item = "PREFER NOT"
+        selected.add(f"{key.upper()}={normalized_item}")
+    return selected
+
+
+def _step2_modal(token: str, previous_values: dict[str, str] | None = None) -> dict:
+    previous_values = previous_values or {}
     return {
         "type": 9,
         "data": {
             "custom_id": f"tester_apply_v2_step2.{token}",
             "title": "Step 2 Of 2 — Match And Preferences",
             "components": [
-                _text_input("purchase_profile", "Amazon, FUNLAB And Prime Profile", placeholder="COUNT=4-6; FUNLAB=YES; PRIME=YES", max_length=200),
-                _text_input("play_profile", "Weekly Play And Discovery Profile", placeholder="SWITCH=6-10; PC=2-5; CROSS=YES; SOURCE=INSTAGRAM", max_length=200),
-                _text_input("favorite_ips", "Favorite Game IPs Or Franchises", placeholder="Pokémon; Zelda; Mario (max 3)", max_length=240),
-                _text_input("usage", "Games, Platforms And Controllers", placeholder="Games + platform + controller examples", max_length=1500),
-                _text_input("priorities", "What Matters Most In Gaming Accessories?", placeholder="Comfort; low latency; durability (max 3)", max_length=180),
+                _modal_string_select(
+                    "purchase_profile",
+                    "Amazon Purchases / FUNLAB / Prime",
+                    "Choose one answer from each of the three groups.",
+                    [
+                        ("Amazon purchases: 1", "COUNT=1"),
+                        ("Amazon purchases: 2–3", "COUNT=2-3"),
+                        ("Amazon purchases: 4–6", "COUNT=4-6"),
+                        ("Amazon purchases: 7+", "COUNT=7+"),
+                        ("Bought FUNLAB before: Yes", "FUNLAB=YES"),
+                        ("Bought FUNLAB before: No", "FUNLAB=NO"),
+                        ("Amazon Prime: Yes", "PRIME=YES"),
+                        ("Amazon Prime: No", "PRIME=NO"),
+                        ("Amazon Prime: Prefer not to say", "PRIME=PREFER NOT"),
+                    ],
+                    values_required=3,
+                    selected_values=_selected_pair_values(previous_values.get("purchase_profile", "")),
+                ),
+                _modal_string_select(
+                    "play_profile",
+                    "Switch / PC Play / Cross-Test / Source",
+                    "Choose one answer from each of the four groups.",
+                    [
+                        ("Switch time: Under 2 hours/week", "SWITCH=UNDER 2"),
+                        ("Switch time: 2–5 hours/week", "SWITCH=2-5"),
+                        ("Switch time: 6–10 hours/week", "SWITCH=6-10"),
+                        ("Switch time: 11–20 hours/week", "SWITCH=11-20"),
+                        ("Switch time: 20+ hours/week", "SWITCH=20+"),
+                        ("PC/Steam time: 0 hours/week", "PC=0"),
+                        ("PC/Steam time: Under 2 hours/week", "PC=UNDER 2"),
+                        ("PC/Steam time: 2–5 hours/week", "PC=2-5"),
+                        ("PC/Steam time: 6–10 hours/week", "PC=6-10"),
+                        ("PC/Steam time: 10+ hours/week", "PC=10+"),
+                        ("Cross-platform testing: Yes", "CROSS=YES"),
+                        ("Cross-platform testing: No", "CROSS=NO"),
+                        ("Found via: Instagram", "SOURCE=INSTAGRAM"),
+                        ("Found via: Facebook", "SOURCE=FACEBOOK"),
+                        ("Found via: X", "SOURCE=X"),
+                        ("Found via: Discord", "SOURCE=DISCORD"),
+                        ("Found via: Friend", "SOURCE=FRIEND"),
+                        ("Found via: Other", "SOURCE=OTHER"),
+                    ],
+                    values_required=4,
+                    selected_values=_selected_pair_values(previous_values.get("play_profile", "")),
+                ),
+                _modal_text_input("favorite_ips", "Favorite Game IPs Or Franchises", placeholder="Pokémon; Zelda; Mario (max 3)", max_length=240, value=previous_values.get("favorite_ips", "")),
+                _modal_text_input("usage", "Games, Platforms And Controllers", placeholder="Games + platform + controller examples", max_length=1500, value=previous_values.get("usage", "")),
+                _modal_text_input("priorities", "What Matters Most In Gaming Accessories?", placeholder="Comfort; low latency; durability (max 3)", max_length=180, value=previous_values.get("priorities", "")),
             ],
         },
     }
@@ -542,6 +646,25 @@ def _error_response(content: str, *, restart: bool = True,
     return InteractionOutcome({"type": 4, "data": data})
 
 
+def _step2_retry_response(content: str, token: str) -> InteractionOutcome:
+    return InteractionOutcome({
+        "type": 4,
+        "data": {
+            "content": content,
+            "flags": 64,
+            "components": [{
+                "type": 1,
+                "components": [{
+                    "type": 2,
+                    "style": 1,
+                    "label": "Correct Step 2",
+                    "custom_id": f"tester_apply_v2_continue2.{token}",
+                }],
+            }],
+        },
+    })
+
+
 def _draft_reference(state: str) -> tuple[str, str]:
     if not state.startswith("d-"):
         return "", ""
@@ -555,15 +678,24 @@ def _draft_reference(state: str) -> tuple[str, str]:
     return draft_id, direct_choice
 
 
-def _parse_pair_text(value: str) -> dict[str, str]:
-    out: dict[str, str] = {}
+def _parse_pair_items(value: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
     normalized = unicodedata.normalize("NFKC", value).translate(str.maketrans({"，": ";", "；": ";", ",": ";"}))
     for part in normalized.split(";"):
         if "=" not in part:
             continue
         key, item = part.split("=", 1)
-        out[key.strip().casefold()] = item.strip()
+        out.append((key.strip().casefold(), item.strip()))
     return out
+
+
+def _parse_pair_text(value: str) -> dict[str, str]:
+    return dict(_parse_pair_items(value))
+
+
+def _has_one_of_each_pair(value: str, expected_keys: set[str]) -> bool:
+    keys = [key for key, _ in _parse_pair_items(value)]
+    return len(keys) == len(expected_keys) and set(keys) == expected_keys
 
 
 def _limited_list(value: str, label: str, *, item_max: int, total_max: int) -> tuple[str, str]:
@@ -605,16 +737,24 @@ def _application_source(value: str) -> str:
 
 
 def _step2_values(values: dict[str, str]) -> tuple[dict, str]:
+    if not _has_one_of_each_pair(
+        values.get("purchase_profile", ""), {"count", "funlab", "prime"}
+    ):
+        return {}, "Choose one Amazon purchase count, one FUNLAB answer, and one Prime answer."
     purchase = _parse_pair_text(values.get("purchase_profile", ""))
     purchase_count = purchase.get("count", "").replace("–", "-").replace(" ", "")
     aliases = {"1": "1", "2-3": "2–3", "4-6": "4–6", "7+": "7+"}
     if purchase_count not in aliases:
-        return {}, "Use COUNT=1, COUNT=2-3, COUNT=4-6, or COUNT=7+."
+        return {}, "Choose one of the available Amazon purchase counts."
     if purchase.get("funlab", "").casefold() not in {"yes", "no"}:
-        return {}, "Use FUNLAB=YES or FUNLAB=NO."
+        return {}, "Choose Yes or No for the FUNLAB purchase question."
     prime_raw = purchase.get("prime", "").casefold()
     if prime_raw not in {"yes", "no", "prefer not", "prefer not to say"}:
-        return {}, "Use PRIME=YES, PRIME=NO, or PRIME=PREFER NOT."
+        return {}, "Choose one of the available Amazon Prime answers."
+    if not _has_one_of_each_pair(
+        values.get("play_profile", ""), {"switch", "pc", "cross", "source"}
+    ):
+        return {}, "Choose one Switch time, one PC/Steam time, one cross-test answer, and one source."
     play = _parse_pair_text(values.get("play_profile", ""))
     switch_hours = play.get("switch", "").upper()
     pc_hours = play.get("pc", "").upper()
@@ -624,10 +764,10 @@ def _step2_values(values: dict[str, str]) -> tuple[dict, str]:
         return {}, "Use the play-time examples shown in the field."
     cross_raw = play.get("cross", "").casefold()
     if cross_raw not in {"yes", "no"}:
-        return {}, "Use CROSS=YES or CROSS=NO."
+        return {}, "Choose Yes or No for cross-platform testing."
     source = _application_source(play.get("source", ""))
     if not source:
-        return {}, "Use SOURCE=INSTAGRAM, FACEBOOK, X, DISCORD, FRIEND, or OTHER."
+        return {}, "Choose one of the available application sources."
     favorite_ips, error = _limited_list(
         values.get("favorite_ips", ""), "game IP", item_max=80, total_max=240
     )
@@ -879,12 +1019,13 @@ async def build_interaction_outcome(payload: dict, *, signing_secret: str = "",
         token = custom_id.removeprefix("tester_apply_v2_continue2.")
         state = _verify_state(token, signing_secret or "development-only")
         draft_id, direct_choice = _draft_reference(state)
-        if not draft_id or not _load_draft(draft_id):
+        draft = _load_draft(draft_id) if draft_id else None
+        if not draft:
             return _error_response(
                 "Form expired or invalid. Please start again.",
                 direct_choice=direct_choice,
             )
-        return InteractionOutcome(_step2_modal(token))
+        return InteractionOutcome(_step2_modal(token, draft.get("step2_values") or {}))
 
     if interaction_type == 5 and custom_id.startswith("tester_apply_v2_step2."):
         token = custom_id.removeprefix("tester_apply_v2_step2.")
@@ -897,9 +1038,11 @@ async def build_interaction_outcome(payload: dict, *, signing_secret: str = "",
                 direct_choice=direct_choice,
             )
         direct_choice = str(draft.get("direct_choice") or direct_choice)
-        step2, error = _step2_values(_values(data))
+        step2_values = _values(data)
+        step2, error = _step2_values(step2_values)
         if error:
-            return _error_response(error, direct_choice=direct_choice)
+            draft["step2_values"] = step2_values
+            return _step2_retry_response(error, token)
         fields, error = _application_fields(
             payload,
             draft.get("step1", ""),

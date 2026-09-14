@@ -325,16 +325,28 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(9, outcome.response["type"])
         self.assertTrue(outcome.response["data"]["custom_id"].startswith("tester_apply_v2_step2."))
         self.assertIn("Step 2 Of 2", outcome.response["data"]["title"])
-        self.assertEqual(5, len(outcome.response["data"]["components"]))
-        labels = [row["components"][0]["label"] for row in outcome.response["data"]["components"]]
+        components = outcome.response["data"]["components"]
+        self.assertEqual(5, len(components))
+        self.assertTrue(all(row["type"] == 18 for row in components))
+        labels = [row["label"] for row in components]
         self.assertEqual([
-            "Amazon, FUNLAB And Prime Profile",
-            "Weekly Play And Discovery Profile",
+            "Amazon Purchases / FUNLAB / Prime",
+            "Switch / PC Play / Cross-Test / Source",
             "Favorite Game IPs Or Franchises",
             "Games, Platforms And Controllers",
             "What Matters Most In Gaming Accessories?",
         ], labels)
         self.assertTrue(all(len(label) <= 45 for label in labels))
+        purchase, play = components[0]["component"], components[1]["component"]
+        self.assertEqual((3, 3, 3), (purchase["type"], purchase["min_values"], purchase["max_values"]))
+        self.assertEqual((3, 4, 4), (play["type"], play["min_values"], play["max_values"]))
+        visible_text = " ".join(
+            labels
+            + [row.get("description", "") for row in components]
+            + [option["label"] for menu in (purchase, play) for option in menu["options"]]
+        )
+        for internal_name in ("COUNT=", "FUNLAB=", "PRIME=", "SWITCH=", "PC=", "CROSS=", "SOURCE="):
+            self.assertNotIn(internal_name, visible_text)
 
     async def test_tampered_continue_state_is_rejected(self):
         outcome = await program.build_interaction_outcome({
@@ -375,6 +387,120 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("收件地址", ledger.saved)
         self.assertIn("/47", ledger.saved["筛选结论"])
 
+    async def test_select_based_second_submission_saves_the_same_business_fields(self):
+        ledger, notices = FakeLedger(), []
+
+        async def notify(message):
+            notices.append(message)
+
+        outcome = await program.build_interaction_outcome(
+            _modal_submit_with_selects(
+                await _open_step2_custom_id(),
+                purchase=["COUNT=4-6", "FUNLAB=YES", "PRIME=YES"],
+                play=["SWITCH=6-10", "PC=2-5", "CROSS=YES", "SOURCE=INSTAGRAM"],
+                text={
+                    "favorite_ips": "Pokémon; Zelda; Mario",
+                    "usage": "Mario Kart World on Switch 2; Hades on Steam Deck",
+                    "priorities": "Comfort; low latency; durability",
+                },
+            ),
+            signing_secret="test-secret",
+            ledger=ledger,
+            completion_notifier=notify,
+        )
+
+        self.assertEqual(5, outcome.response["type"])
+        await outcome.work()
+        self.assertIn("Application received", notices[0])
+        self.assertEqual("4–6", ledger.saved["Amazon购买次数"])
+        self.assertEqual("是", ledger.saved["购买过FUNLAB"])
+        self.assertEqual("是", ledger.saved["Amazon Prime"])
+        self.assertEqual("6–10", ledger.saved["每周Switch游戏时长"])
+        self.assertEqual("2–5", ledger.saved["每周PC手柄时长"])
+        self.assertEqual("Instagram", ledger.saved["报名来源"])
+
+    async def test_invalid_step2_selection_can_be_corrected_without_restarting(self):
+        ledger = FakeLedger()
+        step2_custom_id = await _open_step2_custom_id()
+        submitted_text = {
+            "favorite_ips": "Zelda; Mario",
+            "usage": "Zelda on Switch 2 and Hades on Steam Deck",
+            "priorities": "Comfort; low latency",
+        }
+        outcome = await program.build_interaction_outcome(
+            _modal_submit_with_selects(
+                step2_custom_id,
+                purchase=["COUNT=1", "COUNT=2-3", "FUNLAB=YES"],
+                play=["SWITCH=6-10", "PC=2-5", "CROSS=YES", "SOURCE=DISCORD"],
+                text=submitted_text,
+            ),
+            signing_secret="test-secret",
+            ledger=ledger,
+        )
+
+        self.assertEqual(4, outcome.response["type"])
+        self.assertIn("one Amazon purchase count", outcome.response["data"]["content"])
+        retry = outcome.response["data"]["components"][0]["components"][0]
+        self.assertEqual("Correct Step 2", retry["label"])
+        self.assertTrue(retry["custom_id"].startswith("tester_apply_v2_continue2."))
+        self.assertIsNone(ledger.saved)
+        self.assertIsNone(outcome.work)
+
+        reopened = await program.build_interaction_outcome(
+            {"type": 3, "data": {"custom_id": retry["custom_id"]}},
+            signing_secret="test-secret",
+        )
+        self.assertEqual(9, reopened.response["type"])
+        purchase_menu = reopened.response["data"]["components"][0]["component"]
+        defaults = {option["value"] for option in purchase_menu["options"] if option.get("default")}
+        self.assertEqual({"FUNLAB=YES"}, defaults)
+        reopened_text = {
+            row["component"]["custom_id"]: row["component"].get("value", "")
+            for row in reopened.response["data"]["components"][2:]
+        }
+        self.assertEqual(submitted_text, reopened_text)
+
+    def test_correction_modal_never_defaults_more_than_select_allows(self):
+        modal = program._step2_modal("signed", {
+            "purchase_profile": "COUNT=1; COUNT=2-3; FUNLAB=YES; PRIME=NO",
+            "play_profile": "SWITCH=2-5; SWITCH=6-10; PC=0; CROSS=YES; SOURCE=DISCORD",
+        })
+        purchase, play = [row["component"] for row in modal["data"]["components"][:2]]
+        purchase_defaults = {
+            option["value"] for option in purchase["options"] if option.get("default")
+        }
+        play_defaults = {
+            option["value"] for option in play["options"] if option.get("default")
+        }
+
+        self.assertEqual({"FUNLAB=YES", "PRIME=NO"}, purchase_defaults)
+        self.assertEqual({"PC=0", "CROSS=YES", "SOURCE=DISCORD"}, play_defaults)
+        self.assertLessEqual(len(purchase_defaults), purchase["max_values"])
+        self.assertLessEqual(len(play_defaults), play["max_values"])
+
+    async def test_invalid_play_selection_is_rejected_before_saving(self):
+        ledger = FakeLedger()
+        step2_custom_id = await _open_step2_custom_id()
+        outcome = await program.build_interaction_outcome(
+            _modal_submit_with_selects(
+                step2_custom_id,
+                purchase=["COUNT=4-6", "FUNLAB=YES", "PRIME=YES"],
+                play=["SWITCH=2-5", "SWITCH=6-10", "CROSS=YES", "SOURCE=DISCORD"],
+                text={
+                    "favorite_ips": "Zelda",
+                    "usage": "Zelda on Switch 2",
+                    "priorities": "Comfort",
+                },
+            ),
+            signing_secret="test-secret",
+            ledger=ledger,
+        )
+
+        self.assertEqual(4, outcome.response["type"])
+        self.assertIn("one Switch time", outcome.response["data"]["content"])
+        self.assertIsNone(ledger.saved)
+        self.assertIsNone(outcome.work)
+
     async def test_second_submission_reports_background_save_failure(self):
         notices = []
 
@@ -414,8 +540,9 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
         }), signing_secret="test-secret")
         self.assertEqual(4, outcome.response["type"])
         self.assertIn("up to 3", outcome.response["data"]["content"])
-        restart = outcome.response["data"]["components"][0]["components"][0]
-        self.assertEqual("tester_apply_start", restart["custom_id"])
+        retry = outcome.response["data"]["components"][0]["components"][0]
+        self.assertEqual("Correct Step 2", retry["label"])
+        self.assertTrue(retry["custom_id"].startswith("tester_apply_v2_continue2."))
 
     def test_route_inference_uses_the_approved_precedence(self):
         self.assertEqual("Switch + Steam Deck", program._infer_route(
@@ -683,6 +810,26 @@ def _modal_submit(custom_id, values):
                 for key, value in values.items()
             ],
         },
+        "member": {"user": {"id": "123", "username": "tester"}},
+    }
+
+
+def _modal_submit_with_selects(custom_id, *, purchase, play, text):
+    components = [
+        {"type": 18, "component": {
+            "type": 3, "custom_id": "purchase_profile", "values": purchase,
+        }},
+        {"type": 18, "component": {
+            "type": 3, "custom_id": "play_profile", "values": play,
+        }},
+    ]
+    components.extend(
+        {"type": 18, "component": {"type": 4, "custom_id": key, "value": value}}
+        for key, value in text.items()
+    )
+    return {
+        "type": 5,
+        "data": {"custom_id": custom_id, "components": components},
         "member": {"user": {"id": "123", "username": "tester"}},
     }
 
