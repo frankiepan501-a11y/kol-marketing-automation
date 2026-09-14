@@ -376,6 +376,68 @@ class B2BMailReminderOwnerRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         mark_card_sent.assert_awaited_once_with([wu])
 
+    async def test_partial_send_escalates_only_successful_24h_owner_and_keeps_failure_evidence(self):
+        wu = self._eligible_row("rec_wu", "吴晓丹", status="24h待升级")
+        li = self._eligible_row("rec_li", "李桐欣", status="24h待升级")
+
+        async def send(receive_type, receive_id, card):
+            if receive_id == "ou_li":
+                raise reminder.feishu.FeishuAPIError(
+                    method="POST",
+                    path="/im/v1/messages?receive_id_type=open_id",
+                    status_code=400,
+                    feishu_code=230013,
+                    feishu_msg="recipient ou_leaked on_leaked owner@example.com unavailable",
+                )
+            if receive_id == reminder.B2B_WU_NOTIFY_UNION_ID:
+                raise reminder.feishu.FeishuAPIError(
+                    method="POST",
+                    path="/im/v1/messages?receive_id_type=union_id",
+                    status_code=503,
+                    feishu_code=2200,
+                    feishu_msg="escalation on_escalation_leaked escalation@example.com unavailable",
+                )
+            return "om_wu"
+
+        send_card = AsyncMock(side_effect=send)
+        mark_card_sent = AsyncMock(
+            side_effect=lambda rows: [{"record_id": row["record_id"]} for row in rows]
+        )
+        mapping = {"吴晓丹": "open_id:ou_wu", "李桐欣": "open_id:ou_li"}
+
+        with patch.dict(
+            os.environ,
+            {"B2B_LINKEDIN_OWNER_NOTIFY_JSON": json.dumps(mapping, ensure_ascii=False)},
+            clear=False,
+        ):
+            with self.assertRaises(reminder.ReminderNotificationError) as raised:
+                await self._run([wu, li], send_card, mark_card_sent)
+
+        self.assertEqual(3, send_card.await_count)
+        escalation_card = json.dumps(send_card.await_args_list[2].args[2], ensure_ascii=False)
+        self.assertIn("rec_wu", escalation_card)
+        self.assertNotIn("rec_li", escalation_card)
+        mark_card_sent.assert_awaited_once_with([wu])
+        partial = raised.exception.partial_result
+        self.assertEqual(["李桐欣"], partial["failed_owners"])
+        self.assertEqual([{"record_id": "rec_wu"}], partial["marked_sent"])
+        self.assertEqual(
+            [{"owner": "吴晓丹", "receive_type": "open_id", "message_id": "om_wu"}],
+            partial["message_ids"],
+        )
+        self.assertNotIn("ou_wu", json.dumps(partial, ensure_ascii=False))
+        self.assertNotIn("ou_li", json.dumps(partial, ensure_ascii=False))
+        self.assertNotIn("ou_leaked", json.dumps(partial, ensure_ascii=False))
+        self.assertNotIn("on_leaked", json.dumps(partial, ensure_ascii=False))
+        self.assertNotIn("owner@example.com", json.dumps(partial, ensure_ascii=False))
+        self.assertNotIn("on_escalation_leaked", json.dumps(partial, ensure_ascii=False))
+        self.assertNotIn("escalation@example.com", json.dumps(partial, ensure_ascii=False))
+        safe_errors = " | ".join(partial["notify_errors"])
+        self.assertIn("HTTP=400", safe_errors)
+        self.assertIn("FeishuCode=230013", safe_errors)
+        self.assertIn("HTTP=503", safe_errors)
+        self.assertIn("FeishuCode=2200", safe_errors)
+
     async def test_empty_message_id_is_a_failed_owner_delivery(self):
         wu = self._eligible_row("rec_wu", "吴晓丹")
         send_card = AsyncMock(return_value="")
@@ -386,7 +448,7 @@ class B2BMailReminderOwnerRoutingTests(unittest.IsolatedAsyncioTestCase):
             {"B2B_LINKEDIN_OWNER_NOTIFY_JSON": json.dumps({"吴晓丹": "open_id:ou_wu"}, ensure_ascii=False)},
             clear=False,
         ):
-            with self.assertRaisesRegex(RuntimeError, "missing message_id"):
+            with self.assertRaisesRegex(RuntimeError, "missing_message_id"):
                 await self._run([wu], send_card, mark_card_sent)
 
         mark_card_sent.assert_not_awaited()
@@ -425,7 +487,7 @@ class B2BMailReminderOwnerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, result["eligible_count"])
 
 
-class B2BMailReminderJobResultTests(unittest.TestCase):
+class B2BMailReminderJobResultTests(unittest.IsolatedAsyncioTestCase):
     def test_compact_async_job_result_keeps_per_owner_delivery_evidence(self):
         from app import main
 
@@ -436,6 +498,44 @@ class B2BMailReminderJobResultTests(unittest.TestCase):
         compact = main._compact_b2b_result({"ok": True, "message_ids": message_ids})
 
         self.assertEqual(message_ids, compact["message_ids"])
+
+    async def test_async_job_keeps_sanitized_partial_delivery_evidence_on_error(self):
+        from app import main
+
+        job_id = "test-partial-owner-delivery"
+        partial = {
+            "ok": False,
+            "commit": True,
+            "notify": True,
+            "eligible_count": 2,
+            "message_ids": [
+                {"owner": "吴晓丹", "receive_type": "open_id", "message_id": "om_wu"}
+            ],
+            "marked_sent": [{"record_id": "rec_wu"}],
+            "failed_owners": ["李桐欣"],
+            "notify_errors": ["李桐欣负责人私聊失败: RuntimeError: temporary Feishu error"],
+        }
+        error = reminder.ReminderNotificationError(
+            "李桐欣负责人私聊失败",
+            partial_result=partial,
+        )
+        main._b2b_mail_jobs[job_id] = {"status": "running", "started_ts": 0}
+        try:
+            with patch.object(
+                main.b2b_mail_reminder,
+                "run",
+                AsyncMock(side_effect=error),
+            ), patch.object(main, "_alert_endpoint_failure", AsyncMock()):
+                await main._run_b2b_mail_job(job_id, True, True, 10, 30)
+
+            job = main._b2b_mail_jobs[job_id]
+            self.assertEqual("error", job["status"])
+            self.assertEqual(partial["message_ids"], job["result"]["message_ids"])
+            self.assertEqual(partial["marked_sent"], job["result"]["marked_sent"])
+            self.assertEqual(partial["failed_owners"], job["result"]["failed_owners"])
+            self.assertNotIn("receive_id", json.dumps(job["result"], ensure_ascii=False))
+        finally:
+            main._b2b_mail_jobs.pop(job_id, None)
 
 
 if __name__ == "__main__":

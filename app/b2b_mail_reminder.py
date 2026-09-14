@@ -65,6 +65,10 @@ class ReminderWriteError(RuntimeError):
 class ReminderNotificationError(RuntimeError):
     """One or more owner cards failed after successful owners were safely marked."""
 
+    def __init__(self, message: str, *, partial_result: dict | None = None):
+        super().__init__(message)
+        self.partial_result = dict(partial_result or {})
+
 INTERNAL_DOMAINS = {
     "powkong.com",
     "funlabswitch.com",
@@ -163,6 +167,20 @@ def _is_valid_owner_private_target(receive_type: str, receive_id: str) -> bool:
     if receive_type == "union_id":
         return receive_id.startswith("on_") and len(receive_id) > 3
     return False
+
+
+def _notification_error_evidence(exc: Exception) -> str:
+    """Keep useful failure codes without persisting recipient identifiers or email."""
+    evidence = [type(exc).__name__]
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        evidence.append(f"HTTP={status_code}")
+    feishu_code = getattr(exc, "feishu_code", None)
+    if isinstance(feishu_code, int):
+        evidence.append(f"FeishuCode={feishu_code}")
+    if str(exc) == "missing message_id":
+        evidence.append("reason=missing_message_id")
+    return " ".join(evidence)
 
 
 def _owner_private_routes(
@@ -1500,6 +1518,7 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
     wu_message_id = ""
     marked_sent = []
     notify_errors = []
+    failed_owners = []
     eligible = []
     if commit:
         eligible = await _eligible_rows(limit)
@@ -1528,10 +1547,13 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
                     )
                     successfully_notified_rows.extend(owner_rows)
                 except Exception as exc:
+                    failed_owners.append(owner)
                     main_send_errors.append(
-                        f"{owner}负责人私聊失败: {type(exc).__name__}: {str(exc)[:200]}"
+                        f"{owner}负责人私聊失败: {_notification_error_evidence(exc)}"
                     )
-            escalation_rows = [row for row in eligible if row["status"] == "24h待升级"]
+            escalation_rows = [
+                row for row in successfully_notified_rows if row["status"] == "24h待升级"
+            ]
             if escalation_rows and (B2B_WU_NOTIFY_UNION_ID or B2B_WU_NOTIFY_CHAT_ID):
                 try:
                     wu_card = _build_card(escalation_rows, escalation_copy=True)
@@ -1540,12 +1562,33 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
                     else:
                         wu_message_id = await feishu.send_card_via_b2b_assistant("chat_id", B2B_WU_NOTIFY_CHAT_ID, wu_card)
                 except Exception as exc:
-                    notify_errors.append(f"吴晓丹升级抄送失败: {type(exc).__name__}: {str(exc)[:200]}")
+                    notify_errors.append(
+                        f"吴晓丹升级抄送失败: {_notification_error_evidence(exc)}"
+                    )
             if successfully_notified_rows:
                 marked_sent = await _mark_card_sent(successfully_notified_rows)
             if main_send_errors:
                 notify_errors.extend(main_send_errors)
-                raise ReminderNotificationError("; ".join(main_send_errors))
+                partial_result = {
+                    "ok": False,
+                    "commit": commit,
+                    "notify": notify,
+                    "eligible_count": len(eligible),
+                    "message_id": message_id,
+                    "message_ids": list(message_ids),
+                    "wu_message_id": wu_message_id,
+                    "notify_errors": list(notify_errors),
+                    "marked_sent": [
+                        {"record_id": item.get("record_id", "")}
+                        for item in marked_sent
+                        if item.get("record_id")
+                    ],
+                    "failed_owners": list(failed_owners),
+                }
+                raise ReminderNotificationError(
+                    "; ".join(main_send_errors),
+                    partial_result=partial_result,
+                )
 
     summary = {
         "commit": commit,
@@ -1576,6 +1619,7 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
         "message_ids": message_ids,
         "wu_message_id": wu_message_id,
         "notify_errors": notify_errors,
+        "failed_owners": failed_owners,
         "marked_sent": marked_sent,
     }
     return summary

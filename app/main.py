@@ -279,7 +279,7 @@ def _compact_b2b_result(result: dict) -> dict:
         "events", "customer_groups_with_inbound", "unreplied_or_pending",
         "risk_counts", "status_counts", "sync", "eligible_count",
         "eligible_preview", "message_id", "message_ids", "wu_message_id", "notify_errors",
-        "marked_sent",
+        "failed_owners", "marked_sent",
     ]
     return {k: result.get(k) for k in keep if k in result}
 
@@ -294,12 +294,18 @@ async def _run_b2b_mail_job(job_id: str, commit: bool, notify: bool, limit: int,
         )
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
-        _b2b_mail_jobs[job_id].update(
+        error_update = dict(
             status="error",
             finished_at=datetime_now_string(),
             error=str(e),
             trace=tr,
         )
+        partial_result = getattr(e, "partial_result", None)
+        if isinstance(partial_result, dict) and partial_result:
+            error_update["result"] = _compact_b2b_result(
+                {"ok": False, **partial_result}
+            )
+        _b2b_mail_jobs[job_id].update(**error_update)
         await _alert_endpoint_failure("/b2b-mail-reminder/run", str(e), tr)
 
 

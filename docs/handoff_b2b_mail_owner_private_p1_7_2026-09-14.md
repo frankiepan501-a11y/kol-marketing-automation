@@ -20,6 +20,8 @@
   - 主卡只接受外贸助手同 namespace 的 `open_id` / `union_id`；拒绝 email、chat_id、通配符、空值、`待确认` 和重复目标。
   - 本批所有目标先校验，任一配置异常时主卡零发送、提醒时间零标记，禁止回退群。
   - 飞书运行时部分失败时，只标记已成功私聊负责人的记录；失败负责人记录保留待下轮重试，并让后台 job 进入 error。
+  - 24 小时升级只包含主私聊已成功的记录，防止失败负责人下轮收到重复升级。
+  - 失败 job 保留成功发送和已标记记录的脱敏证据；飞书原始异常文本不落盘，只保留异常类型、HTTP 状态和飞书错误码。
   - 保留原有 24 小时吴晓丹升级私聊。
 - `app/main.py`
   - 异步 job 精简结果保留分负责人 `message_ids`；接口说明改为按负责人私发。
@@ -30,9 +32,9 @@
 
 ## 验证
 
-- 专项：`19 passed, 4 subtests passed`。
-- B2B 与端点相关回归：`75 passed, 6 subtests passed`。
-- 全仓：`1208 passed, 54 subtests passed`。
+- 专项：`21 passed, 4 subtests passed`。
+- B2B 相关回归：`71 passed, 6 subtests passed`。
+- 全仓：`1210 passed, 54 subtests passed`。
 - `py_compile`：`app/b2b_mail_reminder.py`、`app/main.py` 通过。
 - 生产只读预检：当前三位负责人映射覆盖 `3/3`，有效私聊 `3`、群目标 `0`、重复目标 `0`；外贸助手联系人验证 `3/3`。
 - 本次验收未手动触发 `notify=true`，未发送群卡、私聊卡或客户邮件，也未修改 n8n。
