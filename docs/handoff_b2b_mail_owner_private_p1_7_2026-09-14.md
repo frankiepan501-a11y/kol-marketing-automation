@@ -43,7 +43,7 @@
 ## 发布与回滚
 
 - 目标服务：Zeabur 生产项目 `n8n-aments` 的 `kol-automation`。
-- 发布证据：待推送和精确 deployment 回读后补充。
+- 发布证据：commit `b2dee6c92e8cfc90a76e7439d60b1bf7bf86f436` 已由 deployment `6aa768a28eb543d8d10c4651` 精确运行；状态 `RUNNING`，`/health` 为 HTTP 200 / `ok`。
 - 回滚边界：只需回退本提交中的邮件提醒路由代码；不要回滚 P1-1 的 `b2b_base` 身份隔离，也不要恢复群聊兜底。
 
 ## 剩余事项

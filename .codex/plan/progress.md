@@ -613,3 +613,5 @@
 - 双轴审查补齐三个边界：失败负责人的 24 小时记录不进入升级卡；异步 job 在 error 状态仍保留成功 message_id、已标记 record_id 和失败负责人；飞书原始异常文本不入 job，只保留异常类型、HTTP 状态和飞书错误码，避免泄漏收件 ID/邮箱。
 - 修正后规格与工程规范双轴终审均 PASS，`P0=0 / P1=0`；实现提交为 `0539e6472df3dfcbdf51ee286a9781c08612d04e` 与 `cf1196d8ea8374b682566d1efe4662de539305c7`。
 - 首次发布前只读闸发现两条 KOL Launch 后台任务仍为真实 running/queued，另有客服邮箱采集刚进入定时节点；因此暂缓部署，等待任务终态后复检，避免部署重启中断其他工作流。
+- 11:22 第二次发布闸通过：两条 KOL Launch 已到 completed；客服邮箱采集、客服派单和 KOL auto-send 均已结束。随后以 fast-forward 推送 `b2dee6c92e8cfc90a76e7439d60b1bf7bf86f436`，未强推。
+- Zeabur deployment `6aa768a28eb543d8d10c4651` 已精确运行上述 commit，状态 RUNNING；`/health` 为 HTTP 200 / `ok`。全程未触发业务 endpoint、未发卡、未写 Base、未改 n8n。
