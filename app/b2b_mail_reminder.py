@@ -5,7 +5,7 @@ Daily cloud job:
 2. Scan inbox/sent/drafts/junk/trash for the last N days.
 3. Compare latest customer inbound mail with sent/draft follow-up.
 4. Sync the B2B reminder Bitable.
-5. Optionally send one B2B Assistant interactive receipt card to the B2B group.
+5. Optionally split B2B Assistant receipt cards by mailbox owner and send them privately.
 
 All customer feedback/suppression state lives in the reminder table, not in repo
 JSON files. This keeps business data in Bitable and lets card callbacks suppress
@@ -34,7 +34,6 @@ B2B_REMINDER_TABLE = os.environ.get("B2B_REMINDER_TABLE", "tblULtGR2SJ4MoNf")
 B2B_REMINDER_VIEW = os.environ.get("B2B_REMINDER_VIEW", "vew4j62x5G")
 B2B_MAIL_ACCOUNT_BASE = os.environ.get("B2B_MAIL_ACCOUNT_BASE", "NBM2bRFugaxLnjs8UUmc6iV0n8c")
 B2B_MAIL_ACCOUNT_TABLE = os.environ.get("B2B_MAIL_ACCOUNT_TABLE", "tblJKzaKAH2O3Rop")
-B2B_GROUP_CHAT_ID = os.environ.get("B2B_GROUP_CHAT_ID", "oc_2e878553984592d7396401fdd6a37d61")
 B2B_WU_NOTIFY_UNION_ID = os.environ.get("B2B_WU_NOTIFY_UNION_ID", "on_854142cacab1e17fe75cb5622ed5112d")
 B2B_WU_NOTIFY_CHAT_ID = os.environ.get("B2B_WU_NOTIFY_CHAT_ID", "")
 
@@ -61,6 +60,10 @@ REMINDER_DATETIME_FIELDS = frozenset(
 
 class ReminderWriteError(RuntimeError):
     """A reminder write failed before a safe, confirmed Bitable commit."""
+
+
+class ReminderNotificationError(RuntimeError):
+    """One or more owner cards failed after successful owners were safely marked."""
 
 INTERNAL_DOMAINS = {
     "powkong.com",
@@ -126,6 +129,86 @@ def _target_accounts() -> dict:
         if account:
             out[account] = owner or DEFAULT_TARGET_ACCOUNTS.get(account, "待确认")
     return out or dict(DEFAULT_TARGET_ACCOUNTS)
+
+
+def _owner_target_from_value(value) -> tuple[str, str]:
+    if isinstance(value, dict):
+        receive_type = value.get("receive_type") or value.get("type") or ""
+        receive_id = value.get("receive_id") or value.get("id") or ""
+        if isinstance(receive_type, str) and isinstance(receive_id, str):
+            return receive_type.strip(), receive_id.strip()
+        return "", ""
+    if not isinstance(value, str):
+        return "", ""
+    value = value.strip()
+    if not value:
+        return "", ""
+    if ":" in value:
+        receive_type, receive_id = value.split(":", 1)
+        return receive_type.strip(), receive_id.strip()
+    if value.startswith("ou_"):
+        return "open_id", value
+    if value.startswith("on_"):
+        return "union_id", value
+    return "", ""
+
+
+def _is_valid_owner_private_target(receive_type: str, receive_id: str) -> bool:
+    if not isinstance(receive_type, str) or not isinstance(receive_id, str):
+        return False
+    if not receive_id or any(char.isspace() for char in receive_id):
+        return False
+    if receive_type == "open_id":
+        return receive_id.startswith("ou_") and len(receive_id) > 3
+    if receive_type == "union_id":
+        return receive_id.startswith("on_") and len(receive_id) > 3
+    return False
+
+
+def _owner_private_routes(
+    rows: list[dict],
+) -> tuple[dict[str, list[dict]], dict[str, tuple[str, str]]]:
+    raw = os.environ.get("B2B_LINKEDIN_OWNER_NOTIFY_JSON", "").strip()
+    if not raw:
+        raise ValueError("missing B2B owner private notify mapping")
+    try:
+        mapping = json.loads(raw)
+    except Exception as exc:
+        raise ValueError(f"bad B2B owner private notify mapping JSON: {exc}") from exc
+    if not isinstance(mapping, dict):
+        raise ValueError("B2B owner private notify mapping must be a JSON object")
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        owner = str(row.get("owner") or "").strip()
+        if not owner or owner == "待确认":
+            raise ValueError(
+                f"missing valid mailbox owner for B2B mail reminder: {row.get('record_id') or '-'}"
+            )
+        grouped.setdefault(owner, []).append(row)
+
+    targets: dict[str, tuple[str, str]] = {}
+    owners_by_target: dict[tuple[str, str], str] = {}
+    for owner in grouped:
+        receive_type, receive_id = _owner_target_from_value(mapping.get(owner))
+        if not receive_type or not receive_id:
+            raise ValueError(f"missing private notify target for B2B mail reminder owner: {owner}")
+        if receive_type not in {"open_id", "union_id"}:
+            raise ValueError(
+                f"private target required for B2B mail reminder owner {owner}; "
+                f"got {receive_type or '-'}"
+            )
+        if not _is_valid_owner_private_target(receive_type, receive_id):
+            raise ValueError(f"invalid private notify target for B2B mail reminder owner: {owner}")
+        target = (receive_type, receive_id)
+        if target in owners_by_target:
+            raise ValueError(
+                "duplicate private notify target for B2B mail reminder owners: "
+                f"{owners_by_target[target]} and {owner}"
+            )
+        owners_by_target[target] = owner
+        targets[owner] = target
+    return grouped, targets
 
 
 def _text(value) -> str:
@@ -1413,6 +1496,7 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
     sync = await _sync_rows(rows, existing, commit=commit)
 
     message_id = ""
+    message_ids = []
     wu_message_id = ""
     marked_sent = []
     notify_errors = []
@@ -1420,8 +1504,33 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
     if commit:
         eligible = await _eligible_rows(limit)
         if notify and eligible:
-            card = _build_card(eligible)
-            message_id = await feishu.send_card_via_b2b_assistant("chat_id", B2B_GROUP_CHAT_ID, card)
+            grouped, owner_targets = _owner_private_routes(eligible)
+            successfully_notified_rows = []
+            main_send_errors = []
+            for owner, owner_rows in grouped.items():
+                receive_type, receive_id = owner_targets[owner]
+                try:
+                    owner_message_id = await feishu.send_card_via_b2b_assistant(
+                        receive_type,
+                        receive_id,
+                        _build_card(owner_rows),
+                    )
+                    if not isinstance(owner_message_id, str) or not owner_message_id.strip():
+                        raise RuntimeError("missing message_id")
+                    if not message_id:
+                        message_id = owner_message_id
+                    message_ids.append(
+                        {
+                            "owner": owner,
+                            "receive_type": receive_type,
+                            "message_id": owner_message_id,
+                        }
+                    )
+                    successfully_notified_rows.extend(owner_rows)
+                except Exception as exc:
+                    main_send_errors.append(
+                        f"{owner}负责人私聊失败: {type(exc).__name__}: {str(exc)[:200]}"
+                    )
             escalation_rows = [row for row in eligible if row["status"] == "24h待升级"]
             if escalation_rows and (B2B_WU_NOTIFY_UNION_ID or B2B_WU_NOTIFY_CHAT_ID):
                 try:
@@ -1432,7 +1541,11 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
                         wu_message_id = await feishu.send_card_via_b2b_assistant("chat_id", B2B_WU_NOTIFY_CHAT_ID, wu_card)
                 except Exception as exc:
                     notify_errors.append(f"吴晓丹升级抄送失败: {type(exc).__name__}: {str(exc)[:200]}")
-            marked_sent = await _mark_card_sent(eligible)
+            if successfully_notified_rows:
+                marked_sent = await _mark_card_sent(successfully_notified_rows)
+            if main_send_errors:
+                notify_errors.extend(main_send_errors)
+                raise ReminderNotificationError("; ".join(main_send_errors))
 
     summary = {
         "commit": commit,
@@ -1460,6 +1573,7 @@ async def run(*, commit: bool = False, notify: bool = False, limit: int = 10, da
             for r in eligible[:10]
         ],
         "message_id": message_id,
+        "message_ids": message_ids,
         "wu_message_id": wu_message_id,
         "notify_errors": notify_errors,
         "marked_sent": marked_sent,

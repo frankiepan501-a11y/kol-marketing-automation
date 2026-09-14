@@ -1,3 +1,5 @@
+import json
+import os
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
@@ -170,6 +172,270 @@ class B2BMailReminderWriteTests(unittest.IsolatedAsyncioTestCase):
         receipt_fields = api.await_args_list[1].args[2]["fields"]
         self.assertIsInstance(receipt_fields["回执时间"], int)
         self.assertEqual(13, len(str(receipt_fields["回执时间"])))
+
+
+class B2BMailReminderOwnerRoutingTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _eligible_row(record_id: str, owner: str, *, status: str = "待首次提醒") -> dict:
+        return {
+            "record_id": record_id,
+            "thread_key": f"mailbox@example.com|{record_id}",
+            "mailbox": "mailbox@example.com",
+            "owner": owner,
+            "external_email": f"buyer-{record_id}@customer.example",
+            "customer": f"Customer {record_id}",
+            "last_in_at": "2026-09-14T01:00:00+00:00",
+            "subject": f"Subject {record_id}",
+            "status": status,
+            "risk": "P0" if status == "24h待升级" else "P1",
+            "trigger_reason": "客户来信后未回复",
+            "hours_open": "25" if status == "24h待升级" else "2",
+            "first_reminded_at": "",
+            "escalated_at": "",
+        }
+
+    async def _run(
+        self,
+        eligible: list[dict],
+        send_card: AsyncMock,
+        mark_card_sent: AsyncMock,
+        *,
+        notify: bool = True,
+    ):
+        with patch.object(reminder, "_existing_reminders_by_key", AsyncMock(return_value={})), patch.object(
+            reminder, "_load_accounts", AsyncMock(return_value=[])
+        ), patch.object(reminder, "_load_customers", AsyncMock(return_value=[])), patch.object(
+            reminder, "_collect_mail_events", AsyncMock(return_value=([], []))
+        ), patch.object(reminder, "_audit_groups", return_value=([], [])), patch.object(
+            reminder, "_sync_rows", AsyncMock(return_value={"rows": 0})
+        ), patch.object(reminder, "_eligible_rows", AsyncMock(return_value=eligible)), patch.object(
+            reminder, "_mark_card_sent", mark_card_sent
+        ), patch.object(reminder.feishu, "send_card_via_b2b_assistant", send_card):
+            return await reminder.run(commit=True, notify=notify, limit=10, days=1)
+
+    async def test_splits_main_cards_by_owner_and_uses_only_private_targets(self):
+        wu = self._eligible_row("rec_wu", "吴晓丹")
+        li = self._eligible_row("rec_li", "李桐欣")
+        send_card = AsyncMock(side_effect=["om_wu", "om_li"])
+        mark_card_sent = AsyncMock(
+            side_effect=lambda rows: [{"record_id": row["record_id"]} for row in rows]
+        )
+        mapping = {
+            "吴晓丹": "open_id:ou_wu",
+            "李桐欣": {"receive_type": "union_id", "receive_id": "on_li"},
+        }
+
+        with patch.dict(
+            os.environ,
+            {"B2B_LINKEDIN_OWNER_NOTIFY_JSON": json.dumps(mapping, ensure_ascii=False)},
+            clear=False,
+        ):
+            result = await self._run([wu, li], send_card, mark_card_sent)
+
+        self.assertEqual(2, send_card.await_count)
+        calls_by_target = {call.args[1]: call for call in send_card.await_args_list}
+        self.assertEqual({"ou_wu", "on_li"}, set(calls_by_target))
+        self.assertEqual("open_id", calls_by_target["ou_wu"].args[0])
+        self.assertEqual("union_id", calls_by_target["on_li"].args[0])
+        wu_card = json.dumps(calls_by_target["ou_wu"].args[2], ensure_ascii=False)
+        li_card = json.dumps(calls_by_target["on_li"].args[2], ensure_ascii=False)
+        self.assertIn("rec_wu", wu_card)
+        self.assertNotIn("rec_li", wu_card)
+        self.assertIn("rec_li", li_card)
+        self.assertNotIn("rec_wu", li_card)
+        mark_card_sent.assert_awaited_once_with([wu, li])
+        self.assertEqual("om_wu", result["message_id"])
+        self.assertEqual(
+            [
+                {"owner": "吴晓丹", "receive_type": "open_id", "message_id": "om_wu"},
+                {"owner": "李桐欣", "receive_type": "union_id", "message_id": "om_li"},
+            ],
+            result["message_ids"],
+        )
+
+    async def test_missing_owner_mapping_stops_before_any_card_or_mark(self):
+        li = self._eligible_row("rec_li", "李桐欣")
+        send_card = AsyncMock()
+        mark_card_sent = AsyncMock()
+
+        with patch.dict(
+            os.environ,
+            {"B2B_LINKEDIN_OWNER_NOTIFY_JSON": json.dumps({"吴晓丹": "open_id:ou_wu"}, ensure_ascii=False)},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "李桐欣"):
+                await self._run([li], send_card, mark_card_sent)
+
+        send_card.assert_not_awaited()
+        mark_card_sent.assert_not_awaited()
+
+    async def test_missing_mapping_stops_before_any_card_or_mark(self):
+        wu = self._eligible_row("rec_wu", "吴晓丹")
+        send_card = AsyncMock()
+        mark_card_sent = AsyncMock()
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("B2B_LINKEDIN_OWNER_NOTIFY_JSON", None)
+            with self.assertRaisesRegex(ValueError, "missing B2B owner private notify mapping"):
+                await self._run([wu], send_card, mark_card_sent)
+
+        send_card.assert_not_awaited()
+        mark_card_sent.assert_not_awaited()
+
+    async def test_group_target_stops_before_any_card_or_mark(self):
+        wu = self._eligible_row("rec_wu", "吴晓丹")
+        send_card = AsyncMock()
+        mark_card_sent = AsyncMock()
+
+        with patch.dict(
+            os.environ,
+            {"B2B_LINKEDIN_OWNER_NOTIFY_JSON": json.dumps({"吴晓丹": "chat_id:oc_group"}, ensure_ascii=False)},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "private target required"):
+                await self._run([wu], send_card, mark_card_sent)
+
+        send_card.assert_not_awaited()
+        mark_card_sent.assert_not_awaited()
+
+    async def test_malformed_email_wildcard_and_placeholder_routes_fail_closed(self):
+        cases = [
+            ("{", "bad JSON"),
+            (json.dumps({"吴晓丹": "email:owner@example.com"}, ensure_ascii=False), "email target"),
+            (json.dumps({"*": "open_id:ou_wildcard"}, ensure_ascii=False), "wildcard"),
+            (json.dumps({"吴晓丹": "open_id:"}, ensure_ascii=False), "blank ID"),
+        ]
+        for raw_mapping, label in cases:
+            with self.subTest(label=label):
+                wu = self._eligible_row("rec_wu", "吴晓丹")
+                send_card = AsyncMock()
+                mark_card_sent = AsyncMock()
+                with patch.dict(
+                    os.environ,
+                    {"B2B_LINKEDIN_OWNER_NOTIFY_JSON": raw_mapping},
+                    clear=False,
+                ):
+                    with self.assertRaises(ValueError):
+                        await self._run([wu], send_card, mark_card_sent)
+                send_card.assert_not_awaited()
+                mark_card_sent.assert_not_awaited()
+
+        placeholder = self._eligible_row("rec_unknown", "待确认")
+        send_card = AsyncMock()
+        mark_card_sent = AsyncMock()
+        with patch.dict(
+            os.environ,
+            {"B2B_LINKEDIN_OWNER_NOTIFY_JSON": json.dumps({"待确认": "open_id:ou_unknown"}, ensure_ascii=False)},
+            clear=False,
+        ):
+            with self.assertRaises(ValueError):
+                await self._run([placeholder], send_card, mark_card_sent)
+        send_card.assert_not_awaited()
+        mark_card_sent.assert_not_awaited()
+
+    async def test_duplicate_private_target_stops_before_any_card_or_mark(self):
+        wu = self._eligible_row("rec_wu", "吴晓丹")
+        li = self._eligible_row("rec_li", "李桐欣")
+        send_card = AsyncMock()
+        mark_card_sent = AsyncMock()
+        mapping = {"吴晓丹": "open_id:ou_same", "李桐欣": "open_id:ou_same"}
+
+        with patch.dict(
+            os.environ,
+            {"B2B_LINKEDIN_OWNER_NOTIFY_JSON": json.dumps(mapping, ensure_ascii=False)},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "duplicate private notify target"):
+                await self._run([wu, li], send_card, mark_card_sent)
+
+        send_card.assert_not_awaited()
+        mark_card_sent.assert_not_awaited()
+
+    async def test_partial_send_marks_only_successful_owner_and_raises(self):
+        wu = self._eligible_row("rec_wu", "吴晓丹")
+        li = self._eligible_row("rec_li", "李桐欣")
+
+        async def send(receive_type, receive_id, card):
+            if receive_id == "ou_li":
+                raise RuntimeError("temporary Feishu error")
+            return "om_wu"
+
+        send_card = AsyncMock(side_effect=send)
+        mark_card_sent = AsyncMock(
+            side_effect=lambda rows: [{"record_id": row["record_id"]} for row in rows]
+        )
+        mapping = {"吴晓丹": "open_id:ou_wu", "李桐欣": "open_id:ou_li"}
+
+        with patch.dict(
+            os.environ,
+            {"B2B_LINKEDIN_OWNER_NOTIFY_JSON": json.dumps(mapping, ensure_ascii=False)},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "李桐欣"):
+                await self._run([wu, li], send_card, mark_card_sent)
+
+        mark_card_sent.assert_awaited_once_with([wu])
+
+    async def test_empty_message_id_is_a_failed_owner_delivery(self):
+        wu = self._eligible_row("rec_wu", "吴晓丹")
+        send_card = AsyncMock(return_value="")
+        mark_card_sent = AsyncMock()
+
+        with patch.dict(
+            os.environ,
+            {"B2B_LINKEDIN_OWNER_NOTIFY_JSON": json.dumps({"吴晓丹": "open_id:ou_wu"}, ensure_ascii=False)},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing message_id"):
+                await self._run([wu], send_card, mark_card_sent)
+
+        mark_card_sent.assert_not_awaited()
+
+    async def test_existing_24h_escalation_private_copy_is_preserved(self):
+        wu = self._eligible_row("rec_wu", "吴晓丹", status="24h待升级")
+        send_card = AsyncMock(side_effect=["om_owner", "om_escalation"])
+        mark_card_sent = AsyncMock(return_value=[{"record_id": "rec_wu"}])
+
+        with patch.dict(
+            os.environ,
+            {"B2B_LINKEDIN_OWNER_NOTIFY_JSON": json.dumps({"吴晓丹": "open_id:ou_wu"}, ensure_ascii=False)},
+            clear=False,
+        ):
+            result = await self._run([wu], send_card, mark_card_sent)
+
+        self.assertEqual(2, send_card.await_count)
+        self.assertEqual("open_id", send_card.await_args_list[0].args[0])
+        self.assertEqual("union_id", send_card.await_args_list[1].args[0])
+        self.assertEqual("om_escalation", result["wu_message_id"])
+        escalation_card = json.dumps(send_card.await_args_list[1].args[2], ensure_ascii=False)
+        self.assertIn("B2B邮件24h升级确认", escalation_card)
+        mark_card_sent.assert_awaited_once_with([wu])
+
+    async def test_notify_false_does_not_require_private_mapping(self):
+        wu = self._eligible_row("rec_wu", "吴晓丹")
+        send_card = AsyncMock()
+        mark_card_sent = AsyncMock()
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("B2B_LINKEDIN_OWNER_NOTIFY_JSON", None)
+            result = await self._run([wu], send_card, mark_card_sent, notify=False)
+
+        send_card.assert_not_awaited()
+        mark_card_sent.assert_not_awaited()
+        self.assertEqual(1, result["eligible_count"])
+
+
+class B2BMailReminderJobResultTests(unittest.TestCase):
+    def test_compact_async_job_result_keeps_per_owner_delivery_evidence(self):
+        from app import main
+
+        message_ids = [
+            {"owner": "吴晓丹", "receive_type": "open_id", "message_id": "om_wu"}
+        ]
+
+        compact = main._compact_b2b_result({"ok": True, "message_ids": message_ids})
+
+        self.assertEqual(message_ids, compact["message_ids"])
 
 
 if __name__ == "__main__":

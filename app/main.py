@@ -278,7 +278,7 @@ def _compact_b2b_result(result: dict) -> dict:
         "ok", "commit", "notify", "since", "accounts", "account_errors",
         "events", "customer_groups_with_inbound", "unreplied_or_pending",
         "risk_counts", "status_counts", "sync", "eligible_count",
-        "eligible_preview", "message_id", "wu_message_id", "notify_errors",
+        "eligible_preview", "message_id", "message_ids", "wu_message_id", "notify_errors",
         "marked_sent",
     ]
     return {k: result.get(k) for k in keep if k in result}
@@ -913,7 +913,7 @@ async def run_b2b_mail_reminder(authorization: str = Header(default=""),
     """B2B 外贸邮箱跟进提醒.
 
     默认 dry-run 只扫描/计算不写表; n8n 生产定时使用
-    ?commit=true&notify=true&async_mode=true 后台写 B2B 提醒表并向 B2B 群发外贸助手交互卡。
+    ?commit=true&notify=true&async_mode=true 后台写 B2B 提醒表，并按邮箱负责人私发外贸助手交互卡。
     """
     _check_auth(authorization)
     if async_mode:
