@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .clients import ApiError, FeishuClient, YouTubeClient
 from .constants import (
@@ -436,43 +437,46 @@ class IncrementalCollector:
         )
 
     def _search(
-        self, config: dict[str, Any], start: datetime, end: datetime
+        self, config: dict[str, Any], start: datetime, end: datetime,
+        queries: list[str] | None = None,
     ) -> tuple[dict[str, dict[str, list[str]]], int]:
         evidence: dict[str, dict[str, list[str]]] = {}
         calls = 0
         window = f"{rfc3339(start)}/{rfc3339(end)}"
+        search_start = start - timedelta(seconds=1) if queries is not None else start
+        search_end = end + timedelta(seconds=1) if queries is not None else end
         keyword = _text(config.get("关键词")) or _text(config.get("竞品品牌"))
-        for terms in query_groups(config, keyword).values():
-            for query in terms:
-                token: str | None = None
-                for page_number in range(1, 11):
-                    response = self.youtube.search(
-                        query,
-                        published_after=rfc3339(start),
-                        published_before=rfc3339(end),
-                        page_token=token,
+        selected = queries if queries is not None else [q for terms in query_groups(config, keyword).values() for q in terms]
+        for query in selected:
+            token: str | None = None
+            for page_number in range(1, 11):
+                response = self.youtube.search(
+                    query,
+                    published_after=rfc3339(search_start),
+                    published_before=rfc3339(search_end),
+                    page_token=token,
+                )
+                calls += 1
+                for item in response.get("items", []) or []:
+                    identifier = item.get("id") if isinstance(item, dict) else None
+                    video_id = identifier.get("videoId") if isinstance(identifier, dict) else ""
+                    if not is_youtube_video_id(video_id):
+                        continue
+                    item_evidence = evidence.setdefault(
+                        video_id, {"sources": [], "queries": [], "windows": []}
                     )
-                    calls += 1
-                    for item in response.get("items", []) or []:
-                        identifier = item.get("id") if isinstance(item, dict) else None
-                        video_id = identifier.get("videoId") if isinstance(identifier, dict) else ""
-                        if not is_youtube_video_id(video_id):
-                            continue
-                        item_evidence = evidence.setdefault(
-                            video_id, {"sources": [], "queries": [], "windows": []}
-                        )
-                        for name, value in (
-                            ("sources", "YouTube API"),
-                            ("queries", query),
-                            ("windows", window),
-                        ):
-                            if value not in item_evidence[name]:
-                                item_evidence[name].append(value)
-                    token = str(response.get("nextPageToken") or "") or None
-                    if not token:
-                        break
-                    if page_number == 10:
-                        raise ApiError("youtube", "incremental_page_cap", f"query exceeded 10 pages: {query}")
+                    for name, value in (
+                        ("sources", "YouTube API"),
+                        ("queries", query),
+                        ("windows", window),
+                    ):
+                        if value not in item_evidence[name]:
+                            item_evidence[name].append(value)
+                token = str(response.get("nextPageToken") or "") or None
+                if not token:
+                    break
+                if page_number == 10:
+                    raise ApiError("youtube", "incremental_page_cap", f"query exceeded 10 pages: {query}")
         return evidence, calls
 
     def _collect_window(
@@ -488,13 +492,14 @@ class IncrementalCollector:
         commit: bool,
         job_id: str,
         refresh_existing_ids: bool,
+        queries: list[str] | None = None,
     ) -> dict[str, Any]:
         """Collect one explicit window; shared by incremental and history flows.
 
         Historical windows only refresh IDs found in that window. This keeps a
         7-day backfill bounded even when a brand already has thousands of rows.
         """
-        evidence, search_calls = self._search(config, start, end)
+        evidence, search_calls = self._search(config, start, end, queries=queries)
         all_rows = self.feishu.list_records(
             BASE_TOKEN, TABLES["competitor_posts"], field_names=POST_READ_FIELDS
         )
@@ -703,6 +708,111 @@ class IncrementalCollector:
             }
         )
         return result
+
+    def backfill_budgeted(
+        self, *, now: datetime, job_id: str, quota_remaining: Callable[[datetime], int],
+        after: datetime, brand: str = "8BitDo", window_days: int = 7,
+    ) -> dict[str, Any]:
+        """Resume at most one historical window, checkpointing each completed query/day."""
+        from .quota import QuotaUnavailable, SAFETY_RESERVE, SEGMENT_MAX_CALLS
+
+        config = self._config(brand=brand, platform=DEFAULT_PLATFORM)
+        record_id = str(config.get("_record_id") or "")
+        if not record_id:
+            raise ApiError("feishu", "missing_config_id", "history config has no record id")
+        start, end, history_start, done, progress = backfill_window(config, now, window_days=window_days)
+        if done:
+            return {"status": "completed", "message": "历史已补完", "next_end": rfc3339(history_start)}
+        pending = progress.get("pending_segments")
+        window = progress.get("active_window")
+        expected = {"start": rfc3339(start), "end": rfc3339(end)}
+        if pending is not None and window != expected:
+            raise ApiError("feishu", "history_cursor_conflict", "saved segments do not match history cursor")
+        if pending is None:
+            keyword = _text(config.get("关键词")) or brand
+            queries = list(dict.fromkeys(q for terms in query_groups(config, keyword).values() for q in terms))
+            if not queries:
+                raise ApiError("youtube", "history_queries_missing", "history config has no search terms")
+            pending = []
+            for query in queries:
+                cursor = start
+                while cursor < end:
+                    next_midnight = cursor.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                    segment_end = min(end, next_midnight)
+                    pending.append({"query": query, "start": rfc3339(cursor), "end": rfc3339(segment_end)})
+                    cursor = segment_end
+        else:
+            if not isinstance(pending, list) or not all(
+                isinstance(s, dict) and all(k in s for k in ("query", "start", "end")) for s in pending
+            ):
+                raise ApiError("feishu", "history_cursor_invalid", "saved segments are invalid")
+
+        def save() -> None:
+            state = {
+                **progress, "version": "yt-backfill-v1", "brand": brand,
+                "platform": DEFAULT_PLATFORM, "status": "partial" if pending else "ready",
+                "history_start": rfc3339(history_start), "active_window": expected if pending else None,
+                "pending_segments": pending if pending else None,
+                "next_end": rfc3339(end if pending else start), "last_job_id": job_id,
+                "last_updated": rfc3339(datetime.now(timezone.utc)),
+            }
+            self.feishu.batch_update(BASE_TOKEN, TABLES["keyword_config"], [
+                (record_id, {"YouTube历史游标": json.dumps(state, ensure_ascii=False, separators=(",", ":"))})
+            ])
+            progress.clear()
+            progress.update(state)
+
+        completed = 0
+        new_posts = 0
+        search_calls = 0
+        deadline = time.monotonic() + 20 * 60
+        while pending:
+            if time.monotonic() >= deadline:
+                return {"status": "partial", "message": "本次运行已达 20 分钟，保留断点下次续跑", "next_end": rfc3339(end), "completed_segments": completed}
+            try:
+                remaining = quota_remaining(after)
+            except QuotaUnavailable:
+                if completed:
+                    save()
+                return {"status": "quota_unknown", "message": "配额读数不可验证，补采暂停", "next_end": rfc3339(end), "completed_segments": completed}
+            if remaining < SEGMENT_MAX_CALLS + SAFETY_RESERVE:
+                if completed:
+                    save()
+                return {"status": "quota_paused", "message": f"搜索余量 {remaining} 次，低于安全门槛 30 次，补采暂停", "next_end": rfc3339(end), "completed_segments": completed}
+            segment = pending[0]
+            segment_start = parse_datetime(segment["start"])
+            segment_end = parse_datetime(segment["end"])
+            try:
+                result = self._collect_window(
+                    config=config, config_record_id=record_id, brand=brand,
+                    platform=DEFAULT_PLATFORM, now=datetime.now(timezone.utc),
+                    start=segment_start, end=segment_end, commit=True, job_id=job_id,
+                    refresh_existing_ids=False, queries=[str(segment["query"])],
+                )
+            except ApiError as error:
+                if error.code != "incremental_page_cap":
+                    raise
+                if segment_end - segment_start <= timedelta(hours=1):
+                    return {"status": "overflow", "message": "1 小时小段仍超过 10 页，需人工处理", "next_end": rfc3339(end), "segment": segment}
+                middle = segment_start + (segment_end - segment_start) / 2
+                pending[:1] = [
+                    {**segment, "end": rfc3339(middle)},
+                    {**segment, "start": rfc3339(middle)},
+                ]
+                save()
+                after = datetime.now(timezone.utc)
+                continue
+            search_calls += result["search_calls"]
+            new_posts += result["new_posts"]
+            pending.pop(0)
+            completed += 1
+            save()
+            after = datetime.now(timezone.utc)
+        return {
+            "status": "completed", "message": f"完成 {completed} 个小段，新增 {new_posts} 条帖子",
+            "next_end": rfc3339(start), "completed_segments": completed,
+            "search_calls": search_calls, "new_posts": new_posts,
+        }
 
     def run(
         self,

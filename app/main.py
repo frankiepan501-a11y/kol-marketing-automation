@@ -16,6 +16,7 @@ from .constants import BASE_TOKEN, CONFIG_READ_FIELDS, DEFAULT_PLATFORM, TABLES
 from .core import BEIJING, is_youtube_video_id, scalar
 from .job_status import durable_job_snapshot_many, finished_status
 from .daily import DailyReporter, NYXI_CONFIG_ID, format_report, quota_decision
+from .quota import GoogleQuotaReader, QuotaUnavailable
 
 BUILD_VERSION = os.environ.get("BUILD_VERSION", "dev")
 COMMIT_ENABLED = os.environ.get("COMMIT_ENABLED", "0") == "1"
@@ -246,6 +247,20 @@ def _execute_daily(job_id: str) -> None:
         backfill = quota_decision()
         if nyxi["status"] != "completed":
             backfill = {"status": "nyxi_failed", "message": "NYXI 失败，未启动历史补采"}
+        else:
+            try:
+                reader = GoogleQuotaReader.from_environment(collector.youtube.api_key)
+                if reader is not None:
+                    backfill = collector.backfill_budgeted(
+                        now=started, job_id=job_id,
+                        quota_remaining=lambda after: reader.wait_for_snapshot(after=after).remaining,
+                        after=datetime.now(timezone.utc), brand="8BitDo",
+                    )
+            except QuotaUnavailable as error:
+                backfill = {"status": "quota_unknown", "message": f"配额不可验证，历史补采暂停（{error}）"}
+            except Exception as error:
+                logger.exception("daily 8BitDo backfill failed id=%s", job_id)
+                backfill = {"status": "failed", "message": f"历史补采失败（{type(error).__name__}）；游标保留"}
         text = format_report(
             started, nyxi=nyxi, backfill=backfill, posts=posts,
             weekly=weekly, known_channel_ids=known_channels,
