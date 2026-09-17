@@ -13,8 +13,9 @@ from pydantic import BaseModel
 from .clients import FeishuClient, YouTubeClient
 from .collector import IncrementalCollector
 from .constants import BASE_TOKEN, CONFIG_READ_FIELDS, DEFAULT_PLATFORM, TABLES
-from .core import is_youtube_video_id, scalar
+from .core import BEIJING, is_youtube_video_id, scalar
 from .job_status import durable_job_snapshot_many, finished_status
+from .daily import DailyReporter, NYXI_CONFIG_ID, format_report, quota_decision
 
 BUILD_VERSION = os.environ.get("BUILD_VERSION", "dev")
 COMMIT_ENABLED = os.environ.get("COMMIT_ENABLED", "0") == "1"
@@ -200,6 +201,74 @@ def _execute_backfill(job_id: str, request: BackfillRequest) -> None:
         _lock.release()
 
 
+def _execute_daily(job_id: str) -> None:
+    started = datetime.now(timezone.utc)
+    _jobs[job_id] = {"job_id": job_id, "status": "running", "operation": "daily", "started_at": started.isoformat()}
+    nyxi: dict[str, Any] = {"status": "failed", "job_id": job_id}
+    weekly: dict[str, Any] | None = None
+    report: dict[str, Any] | None = None
+    try:
+        feishu = FeishuClient()
+        reporter = DailyReporter(feishu)
+        existing = reporter.begin(started)
+        if existing.get("state") == "sent":
+            _jobs[job_id] = {
+                "job_id": job_id, "status": "completed", "operation": "daily",
+                "reason": "already_reported", "message_id": existing.get("message_id"),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+            return
+        if existing.get("state") == "sending":
+            raise RuntimeError("previous message outcome is unknown; reconcile the group before retry")
+        collector = IncrementalCollector(feishu, YouTubeClient())
+        try:
+            nyxi = collector.run(
+                now=started, commit=True, force=True, job_id=job_id,
+                config_record_id=NYXI_CONFIG_ID, brand="NYXI",
+            )
+            nyxi["job_id"] = job_id
+            if started.astimezone(BEIJING).weekday() == 0:
+                try:
+                    weekly = collector.refresh_older(
+                        now=started, commit=True, config_record_id=NYXI_CONFIG_ID
+                    )
+                except Exception as error:
+                    weekly = {"status": "failed", "error_type": type(error).__name__}
+        except Exception as error:
+            logger.exception("daily NYXI failed id=%s", job_id)
+            nyxi = {"status": "failed", "job_id": job_id, "error_type": type(error).__name__}
+            try:
+                collector.mark_failure(error, config_record_id=NYXI_CONFIG_ID, job_id=job_id)
+            except Exception:
+                logger.exception("failed to record NYXI failure id=%s", job_id)
+        posts = reporter.today_posts(started, existing) if nyxi["status"] == "completed" else []
+        known_channels = reporter.known_channels_before(existing) if nyxi["status"] == "completed" else set()
+        backfill = quota_decision()
+        if nyxi["status"] != "completed":
+            backfill = {"status": "nyxi_failed", "message": "NYXI 失败，未启动历史补采"}
+        text = format_report(
+            started, nyxi=nyxi, backfill=backfill, posts=posts,
+            weekly=weekly, known_channel_ids=known_channels,
+        )
+        report = reporter.send_once(started, text, job_id=job_id)
+        result_status = "completed" if nyxi["status"] == "completed" else "failed"
+        _jobs[job_id] = {
+            "job_id": job_id, "status": result_status, "operation": "daily",
+            "started_at": started.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat(),
+            "nyxi": nyxi, "weekly": weekly, "backfill": backfill, "report": report,
+        }
+    except Exception as error:
+        logger.exception("daily job failed id=%s", job_id)
+        _jobs[job_id] = {
+            "job_id": job_id, "status": "failed", "operation": "daily",
+            "started_at": started.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat(),
+            "error_type": type(error).__name__, "error_message": str(error)[:300],
+            "nyxi": nyxi, "weekly": weekly, "report": report,
+        }
+    finally:
+        _lock.release()
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "version": BUILD_VERSION, "commit_enabled": COMMIT_ENABLED}
@@ -298,6 +367,34 @@ def backfill(
     }
 
 
+@app.post("/daily")
+def daily(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _authorized(authorization)
+    if not COMMIT_ENABLED:
+        raise HTTPException(status_code=409, detail="commit mode is disabled")
+    if not _lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="a collection job is already running")
+    job_id = f"ytdaily-{uuid.uuid4().hex[:12]}"
+    threading.Thread(target=_execute_daily, args=(job_id,), daemon=True).start()
+    return {"ok": True, "accepted": True, "job_id": job_id, "status_url": f"/runs/{job_id}"}
+
+
+@app.post("/report/test")
+def test_report(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """Send one fixed, clearly labelled channel test per Beijing business day."""
+    _authorized(authorization)
+    if not COMMIT_ENABLED:
+        raise HTTPException(status_code=409, detail="commit mode is disabled")
+    now = datetime.now(timezone.utc)
+    date = now.astimezone(BEIJING).date().isoformat()
+    reporter = DailyReporter(FeishuClient())
+    return reporter.send_once(
+        now,
+        f"🟢 [KOL·P3] NYXI YouTube 日报通道测试 · {date}\n这是一条测试消息，不代表采集结果。",
+        job_id=f"report-test-{date}", key=f"{date}|NYXI日报测试",
+    )
+
+
 @app.get("/runs/{job_id}")
 def status(job_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _authorized(authorization)
@@ -314,6 +411,8 @@ def assert_finished(
     """Return 2xx only after a successful completion or an intentional skip."""
     _authorized(authorization)
     job = _jobs.get(job_id)
+    if not job and job_id.startswith("ytdaily-"):
+        raise HTTPException(status_code=404, detail="daily job lost before final verification")
     if not job:
         configs = FeishuClient().list_records(
             BASE_TOKEN, TABLES["keyword_config"], field_names=CONFIG_READ_FIELDS

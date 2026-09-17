@@ -198,7 +198,11 @@ class FeishuClient:
             data = self.request("GET", path).get("data", {})
             for record in data.get("items", []) or []:
                 if isinstance(record, dict):
-                    rows.append({"_record_id": record.get("record_id"), **dict(record.get("fields") or {})})
+                    rows.append({
+                        "_record_id": record.get("record_id"),
+                        "_created_time": record.get("created_time"),
+                        **dict(record.get("fields") or {}),
+                    })
             if not data.get("has_more"):
                 break
             next_token = str(data.get("page_token") or "")
@@ -262,3 +266,17 @@ class FeishuClient:
             returned = self.request("POST", path, body=body).get("data", {}).get("records", [])
             if len(returned) != len(batch):
                 raise ApiError("feishu", "batch_update_short", "not all records were updated")
+
+    def send_text_to_chat(self, chat_id: str, text: str) -> str:
+        result = self.request(
+            "POST", "/im/v1/messages?receive_id_type=chat_id",
+            body={
+                "receive_id": chat_id,
+                "msg_type": "text",
+                "content": json.dumps({"text": text}, ensure_ascii=False),
+            },
+        )
+        message_id = str(result.get("data", {}).get("message_id") or "")
+        if not message_id:
+            raise ApiError("feishu", "message_id_missing", "send result had no message_id")
+        return message_id

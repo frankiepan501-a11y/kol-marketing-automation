@@ -1,9 +1,9 @@
 {
-  "name": "SocialEcho - Multi-brand YouTube Incremental (Mon + Launch Wed/Fri)",
+  "name": "SocialEcho - NYXI First Daily YouTube Monitor",
   "nodes": [
     {
       "id": "schedule",
-      "name": "Mon Wed Fri 09:30 BJ",
+      "name": "Daily 16:30 BJ",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.1,
       "position": [260, 300],
@@ -12,7 +12,7 @@
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "30 9 * * 1,3,5"
+              "expression": "30 16 * * *"
             }
           ]
         }
@@ -20,7 +20,7 @@
     },
     {
       "id": "start",
-      "name": "Start Multi-brand Incremental",
+      "name": "Start NYXI Daily",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [500, 300],
@@ -32,13 +32,10 @@
       },
       "parameters": {
         "method": "POST",
-        "url": "https://socialecho-youtube-incremental.zeabur.app/run",
+        "url": "https://socialecho-youtube-incremental.zeabur.app/daily",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
-        "sendBody": true,
-        "contentType": "json",
-        "specifyBody": "json",
-        "jsonBody": "={\"platform\":\"YouTube\",\"mode\":\"commit\",\"force\":false}",
+        "sendBody": false,
         "options": {
           "timeout": 30000
         }
@@ -73,7 +70,7 @@
       },
       "parameters": {
         "method": "GET",
-        "url": "=https://socialecho-youtube-incremental.zeabur.app/runs/{{ $(\"Start Multi-brand Incremental\").item.json.job_id }}/assert",
+        "url": "=https://socialecho-youtube-incremental.zeabur.app/runs/{{ $(\"Start NYXI Daily\").item.json.job_id }}/assert",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {
@@ -83,18 +80,18 @@
     }
   ],
   "connections": {
-    "Mon Wed Fri 09:30 BJ": {
+    "Daily 16:30 BJ": {
       "main": [
         [
           {
-            "node": "Start Multi-brand Incremental",
+            "node": "Start NYXI Daily",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Start Multi-brand Incremental": {
+    "Start NYXI Daily": {
       "main": [
         [
           {

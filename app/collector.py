@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .clients import ApiError, FeishuClient, YouTubeClient
@@ -36,6 +36,33 @@ _DURATION = re.compile(
 )
 _COUNTER_FIELDS = ("粉丝数快照", "帖子数快照", "曝光量", "点赞数", "评论数")
 _REFRESH_FIELDS = _COUNTER_FIELDS
+NYXI_OFFICIAL_CHANNEL_IDS = frozenset({
+    "UCIY4yC2qUCPcM7ws-xTARYg",
+    "UCbvp-CTcH3Mhtj2UWsSy8sA",
+})
+
+
+def is_recent_post(row: dict[str, Any], now: datetime, days: int = 30) -> bool:
+    try:
+        published = parse_datetime(row.get("发布时间")).astimezone(timezone.utc)
+    except ValueError:
+        return False
+    return now.astimezone(timezone.utc) - timedelta(days=days) <= published <= now.astimezone(timezone.utc)
+
+
+def older_refresh_batch(rows: list[dict[str, Any]], now: datetime) -> tuple[int, int, list[dict[str, Any]]]:
+    """Pick at most 100 stable older IDs, rotating once per Beijing Monday."""
+    older = sorted(
+        (row for row in rows if not is_recent_post(row, now)),
+        key=lambda row: _text(row.get("帖子ID")),
+    )
+    count = (len(older) + 99) // 100
+    if not count:
+        return 0, 0, []
+    monday = datetime(2026, 9, 21, tzinfo=timezone(timedelta(hours=8)))
+    week = max(0, (now.astimezone(monday.tzinfo).date() - monday.date()).days // 7)
+    index = week % count
+    return index, count, older[index * 100 : (index + 1) * 100]
 
 
 def post_unique_key(video_id: str) -> str:
@@ -737,7 +764,7 @@ class IncrementalCollector:
         current_ids = {
             _text(row.get("帖子ID"))
             for row in all_rows
-            if is_youtube_identity(row, brand=brand)
+            if is_youtube_identity(row, brand=brand) and is_recent_post(row, now)
         }
         requested_ids = sorted(current_ids | set(evidence))
         existing = index_rows_by_unique_key(
@@ -792,10 +819,18 @@ class IncrementalCollector:
             change.update(repair_interrupted_insert_fields(old, row, brand=brand))
             if change:
                 updates.append((str(old["_record_id"]), change))
+        known_channels = {
+            _text(row.get("KOL平台ID"))
+            for row in existing_rows
+            if _text(row.get("KOL平台ID"))
+        }
         new_channels = {
             str(row.get("KOL平台ID") or "")
             for row in new_rows
-            if row.get("KOL平台ID") and row.get("相关性") != "无关"
+            if row.get("KOL平台ID")
+            and row.get("相关性") != "无关"
+            and str(row.get("KOL平台ID")) not in known_channels
+            and str(row.get("KOL平台ID")) not in NYXI_OFFICIAL_CHANNEL_IDS
         }
 
         if commit:
@@ -836,7 +871,7 @@ class IncrementalCollector:
                 "最近新增帖子数": len(new_rows),
                 "最近新增KOL候选数": len(new_channels),
                 "YouTube历史进度": (
-                    f"云端增量完成；品牌={brand}；平台={platform}；调度=周一09:30+新品期周三/周五09:30；"
+                    f"云端增量完成；品牌={brand}；平台={platform}；调度=每日16:30；"
                     f"job={job_id or batch_id}；batch={batch_id}；"
                     f"窗口={rfc3339(start)}/{rfc3339(end)}；"
                     f"新增={len(new_rows)}；公开数据更新={len(updates)}；不可用={len(set(requested_ids) - found_ids)}"
@@ -862,8 +897,64 @@ class IncrementalCollector:
             "new_posts": len(new_rows),
             "updated_existing": len(updates),
             "candidate_new_kols": len(new_channels),
+            "new_post_examples": [
+                {
+                    "video_id": row.get("帖子ID"),
+                    "title": row.get("帖子标题"),
+                    "url": row.get("帖子URL"),
+                    "channel_id": row.get("KOL平台ID"),
+                    "channel_name": row.get("KOL账号名"),
+                    "relevance": row.get("相关性"),
+                }
+                for row in new_rows[:20]
+            ],
+            "new_channel_ids": sorted(new_channels),
             "kol_master_writes": 0,
             "outbound_messages": 0,
+        }
+
+    def refresh_older(
+        self, *, now: datetime, commit: bool, config_record_id: str
+    ) -> dict[str, Any]:
+        """Refresh one deterministic Monday batch without changing the search waterline."""
+        config = self._config(config_record_id=config_record_id, brand="NYXI")
+        rows = self.feishu.list_records(
+            BASE_TOKEN, TABLES["competitor_posts"], field_names=POST_READ_FIELDS
+        )
+        relevant = [row for row in rows if is_youtube_identity(row, brand="NYXI")]
+        index, count, batch = older_refresh_batch(relevant, now)
+        ids = [_text(row.get("帖子ID")) for row in batch]
+        videos = self.youtube.videos(ids)
+        by_id = {str(video.get("id") or ""): video for video in videos}
+        channel_ids = sorted({
+            str(video.get("snippet", {}).get("channelId") or "")
+            for video in videos if isinstance(video.get("snippet"), dict)
+        } - {""})
+        channels = {
+            str(item.get("id") or ""): item
+            for item in self.youtube.channels(channel_ids)
+        }
+        updates: list[tuple[str, dict[str, Any]]] = []
+        for row in batch:
+            video = by_id.get(_text(row.get("帖子ID")))
+            if not video:
+                continue
+            channel_id = str(video.get("snippet", {}).get("channelId") or "")
+            incoming = normalize_video(
+                video, channels.get(channel_id), config=config,
+                evidence={"sources": ["YouTube API"], "queries": [], "windows": []},
+                batch_id=f"ytweekly-{now.strftime('%Y%m%d')}",
+                captured_at=now, config_record_id=config_record_id,
+            )
+            change = build_update(row, incoming)
+            if change:
+                updates.append((str(row["_record_id"]), change))
+        if commit:
+            self.feishu.batch_update(BASE_TOKEN, TABLES["competitor_posts"], updates)
+        return {
+            "batch_index": index, "batch_count": count,
+            "selected": len(batch), "available": len(videos),
+            "changed": len(updates), "status": "completed",
         }
 
     def run_many(

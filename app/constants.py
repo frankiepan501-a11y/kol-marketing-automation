@@ -76,6 +76,7 @@ CONFIG_READ_FIELDS = [
     "历史回溯起始日期",
     "YouTube历史进度",
     "YouTube历史游标",
+    "YouTube日报回执JSON",
     "产品系列词",
     "产品型号词",
 ]
