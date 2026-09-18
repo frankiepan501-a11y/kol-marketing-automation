@@ -11,14 +11,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from .clients import _json_request
+from .clients import ApiError, _json_request
 from .core import rfc3339
 
 PROJECT_ID = "powkong-funlab-ads-api"
 QUOTA_METRIC = "youtube.googleapis.com/search_list"
 LIMIT_NAME = "defaultSearchListPerDayPerProject"
 SERVICE = "youtube.googleapis.com"
-MONITORING_TYPE = "serviceruntime.googleapis.com/quota/allocation/usage"
+MONITORING_TYPE = "serviceruntime.googleapis.com/quota/ratev2/net_usage"
 PACIFIC = ZoneInfo("America/Los_Angeles")
 SAFETY_RESERVE = 20
 SEGMENT_MAX_CALLS = 10
@@ -98,7 +98,7 @@ class GoogleQuotaReader:
             {"keyString": self.youtube_api_key}
         )
         result = self._get_json(url)
-        if result.get("parent") != f"projects/{self.project_number}":
+        if result.get("parent") != f"projects/{self.project_number}/locations/global":
             raise QuotaUnavailable("YouTube key project does not match quota project")
 
     def _limit(self) -> int:
@@ -114,10 +114,10 @@ class GoogleQuotaReader:
                 if metric.get("metric") != QUOTA_METRIC:
                     continue
                 for limit in metric.get("consumerQuotaLimits", []):
-                    if not str(limit.get("name", "")).endswith("/" + LIMIT_NAME):
-                        continue
+                    if limit.get("metric") not in (None, QUOTA_METRIC):
+                        raise QuotaUnavailable("search quota limit metric does not match")
                     if not str(limit.get("unit", "")).startswith("1/d/"):
-                        raise QuotaUnavailable("search quota is not a daily project quota")
+                        continue
                     buckets = limit.get("quotaBuckets", [])
                     global_buckets = [b for b in buckets if not b.get("dimensions")]
                     if len(global_buckets) != 1:
@@ -152,10 +152,21 @@ class GoogleQuotaReader:
         if result.get("nextPageToken") or len(series) != 1:
             raise QuotaUnavailable("search usage is missing or ambiguous")
         item = series[0]
+        if item.get("metric", {}).get("type") != MONITORING_TYPE:
+            raise QuotaUnavailable("usage metric type does not match daily rate quota")
         if item.get("resource", {}).get("labels", {}).get("service") != SERVICE:
             raise QuotaUnavailable("usage service does not match YouTube")
-        if item.get("metric", {}).get("labels", {}).get("quota_metric") != QUOTA_METRIC:
+        labels = item.get("metric", {}).get("labels", {})
+        if labels.get("quota_metric") != QUOTA_METRIC or labels.get("limit_name") != LIMIT_NAME:
             raise QuotaUnavailable("usage metric does not match search.list")
+        if labels.get("window_size") != "86400s":
+            raise QuotaUnavailable("search usage is not a daily rate window")
+        try:
+            window_start = datetime.fromisoformat(labels["window_start_time"].replace("Z", "+00:00"))
+        except (KeyError, ValueError):
+            raise QuotaUnavailable("search usage window start is missing") from None
+        if window_start != day_start.astimezone(timezone.utc):
+            raise QuotaUnavailable("search usage is from a different quota window")
         points = item.get("points", [])
         if not points:
             raise QuotaUnavailable("search usage has no data points")
@@ -168,9 +179,12 @@ class GoogleQuotaReader:
 
     def snapshot(self, *, after: datetime, now: datetime | None = None) -> QuotaSnapshot:
         now = now or datetime.now(timezone.utc)
-        self._verify_key_project()
-        limit = self._limit()
-        used, sampled_at = self._usage(now)
+        try:
+            self._verify_key_project()
+            limit = self._limit()
+            used, sampled_at = self._usage(now)
+        except ApiError as error:
+            raise QuotaUnavailable(f"Google quota read failed ({error.code})") from None
         if sampled_at <= after or sampled_at > now or now - sampled_at > MAX_SAMPLE_AGE:
             raise QuotaUnavailable("search usage sample has not caught up")
         if used > limit:

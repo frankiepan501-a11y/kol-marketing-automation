@@ -7,14 +7,14 @@ from unittest.mock import patch
 from app.clients import ApiError
 from app.collector import IncrementalCollector
 from app.core import rfc3339
-from app.quota import GoogleQuotaReader, QuotaUnavailable, PROJECT_ID
+from app.quota import GoogleQuotaReader, QuotaUnavailable, MONITORING_TYPE, PROJECT_ID
 
 
 NOW = datetime(2026, 9, 17, 8, 30, tzinfo=timezone.utc)
 
 
 class QuotaTests(unittest.TestCase):
-    def reader(self, *, used=60, sampled_at=None, parent="projects/123"):
+    def reader(self, *, used=60, sampled_at=None, parent="projects/123/locations/global", window_start="2026-09-17T07:00:00Z"):
         sampled_at = sampled_at or NOW - timedelta(minutes=1)
 
         def get(url):
@@ -24,14 +24,18 @@ class QuotaTests(unittest.TestCase):
                 return {"metrics": [{
                     "metric": "youtube.googleapis.com/search_list",
                     "consumerQuotaLimits": [{
-                        "name": "x/defaultSearchListPerDayPerProject", "unit": "1/d/{project}",
+                        "name": "x/limits/%2Fday%2Fproject", "unit": "1/d/{project}",
                         "quotaBuckets": [{"effectiveLimit": "100"}],
                     }],
                 }]}
             if "timeSeries" in url:
                 return {"timeSeries": [{
                     "resource": {"labels": {"service": "youtube.googleapis.com"}},
-                    "metric": {"labels": {"quota_metric": "youtube.googleapis.com/search_list"}},
+                    "metric": {"type": MONITORING_TYPE, "labels": {
+                        "quota_metric": "youtube.googleapis.com/search_list",
+                        "limit_name": "defaultSearchListPerDayPerProject",
+                        "window_size": "86400s", "window_start_time": window_start,
+                    }},
                     "points": [{"interval": {"endTime": rfc3339(sampled_at)}, "value": {"int64Value": str(used)}}],
                 }]}
             raise AssertionError(url)
@@ -53,6 +57,10 @@ class QuotaTests(unittest.TestCase):
             self.reader(sampled_at=NOW - timedelta(minutes=6)).snapshot(after=NOW - timedelta(minutes=7), now=NOW)
         with self.assertRaises(QuotaUnavailable):
             self.reader().snapshot(after=NOW - timedelta(seconds=30), now=NOW)
+        with self.assertRaises(QuotaUnavailable):
+            self.reader(window_start="2026-09-16T07:00:00Z").snapshot(
+                after=NOW - timedelta(minutes=2), now=NOW
+            )
 
     def test_credentials_alone_do_not_enable_backfill(self):
         env = {
@@ -61,6 +69,14 @@ class QuotaTests(unittest.TestCase):
         }
         with patch.dict(os.environ, env, clear=True):
             self.assertIsNone(GoogleQuotaReader.from_environment("test"))
+
+    def test_api_error_pauses_backfill_as_unknown_quota(self):
+        reader = GoogleQuotaReader(
+            project_number="123", service_account_json=json.dumps({"project_id": PROJECT_ID}),
+            youtube_api_key="test", get_json=lambda url: (_ for _ in ()).throw(ApiError("http", "403", "denied")),
+        )
+        with self.assertRaises(QuotaUnavailable):
+            reader.snapshot(after=NOW - timedelta(minutes=2), now=NOW)
 
 
 class FakeFeishu:
