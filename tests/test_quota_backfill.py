@@ -96,8 +96,29 @@ class QuotaTests(unittest.TestCase):
             project_number="123", service_account_json=json.dumps({"project_id": PROJECT_ID}),
             youtube_api_key="test", get_json=lambda url: (_ for _ in ()).throw(ApiError("http", "403", "denied")),
         )
-        with self.assertRaises(QuotaUnavailable):
+        with self.assertRaisesRegex(QuotaUnavailable, "key project lookup failed \\(403\\)"):
             reader.snapshot(after=NOW - timedelta(minutes=2), now=NOW)
+
+    def test_usage_api_error_reports_safe_stage(self):
+        def get(url):
+            if "lookupKey" in url:
+                return {"parent": "projects/123/locations/global"}
+            if "consumerQuotaMetrics" in url:
+                return {"metrics": [{
+                    "metric": "youtube.googleapis.com/search_list",
+                    "consumerQuotaLimits": [{
+                        "unit": "1/d/{project}",
+                        "quotaBuckets": [{"effectiveLimit": "100"}],
+                    }],
+                }]}
+            raise ApiError("http", "403", "denied")
+
+        reader = GoogleQuotaReader(
+            project_number="123", service_account_json=json.dumps({"project_id": PROJECT_ID}),
+            youtube_api_key="test", get_json=get,
+        )
+        with self.assertRaisesRegex(QuotaUnavailable, "quota usage read failed \\(403\\)"):
+            reader.audit_snapshot(now=NOW)
 
 
 class FakeFeishu:

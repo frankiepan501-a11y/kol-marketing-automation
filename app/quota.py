@@ -193,10 +193,16 @@ class GoogleQuotaReader:
         now = now or datetime.now(timezone.utc)
         try:
             self._verify_key_project()
+        except ApiError as error:
+            raise QuotaUnavailable(f"Google key project lookup failed ({error.code})") from None
+        try:
             limit = self._limit()
+        except ApiError as error:
+            raise QuotaUnavailable(f"Google quota limit read failed ({error.code})") from None
+        try:
             used, sampled_at = self._usage(now)
         except ApiError as error:
-            raise QuotaUnavailable(f"Google quota read failed ({error.code})") from None
+            raise QuotaUnavailable(f"Google quota usage read failed ({error.code})") from None
         if sampled_at > now:
             raise QuotaUnavailable("search usage sample is from the future")
         if used > limit:
