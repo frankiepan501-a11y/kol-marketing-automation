@@ -33,6 +33,13 @@ SAFE_GOOGLE_PERMISSION_HINTS = (
     "resourcemanager.projects.get",
 )
 SAFE_GOOGLE_REASON_HINTS = ("ACCESS_TOKEN_SCOPE_INSUFFICIENT",)
+SAFE_GOOGLE_MESSAGE_CATEGORIES = (
+    ("insufficient authentication scopes", "insufficient_oauth_scope"),
+    ("caller does not have permission", "iam_permission_denied"),
+    ("api has not been used", "api_not_enabled"),
+    ("api is disabled", "api_not_enabled"),
+    ("resource may not exist", "resource_not_found_or_denied"),
+)
 
 
 class QuotaUnavailable(RuntimeError):
@@ -50,6 +57,10 @@ def _safe_google_error(error: ApiError) -> str:
     for hint in SAFE_GOOGLE_REASON_HINTS:
         if hint in detail:
             return hint if error.code == hint else f"{error.code}; reason={hint}"
+    lowered = detail.lower()
+    for phrase, category in SAFE_GOOGLE_MESSAGE_CATEGORIES:
+        if phrase in lowered:
+            return f"{error.code}; reason={category}"
     return error.code
 
 

@@ -199,6 +199,34 @@ class QuotaTests(unittest.TestCase):
         ):
             reader.audit_snapshot(now=NOW)
 
+    def test_usage_api_error_classifies_common_google_message_without_echoing_it(self):
+        secret = "Request had insufficient authentication scopes: secret-token"
+
+        def get(url):
+            if "lookupKey" in url:
+                return {"parent": "projects/123/locations/global"}
+            if "consumerQuotaMetrics" in url:
+                return {"metrics": [{
+                    "metric": "youtube.googleapis.com/search_list",
+                    "consumerQuotaLimits": [{
+                        "unit": "1/d/{project}",
+                        "quotaBuckets": [{"effectiveLimit": "100"}],
+                    }],
+                }]}
+            raise ApiError("http", "403", secret)
+
+        reader = GoogleQuotaReader(
+            project_number="123", service_account_json=json.dumps({"project_id": PROJECT_ID}),
+            youtube_api_key="test", get_json=get,
+        )
+        with self.assertRaises(QuotaUnavailable) as caught:
+            reader.audit_snapshot(now=NOW)
+        self.assertEqual(
+            str(caught.exception),
+            "Google quota usage read failed (403; reason=insufficient_oauth_scope)",
+        )
+        self.assertNotIn("secret-token", str(caught.exception))
+
 
 class FakeFeishu:
     def __init__(self, config):
