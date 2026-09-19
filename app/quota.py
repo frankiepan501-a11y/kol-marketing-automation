@@ -27,10 +27,30 @@ OAUTH_SCOPES = (
     "https://www.googleapis.com/auth/cloud-platform.read-only",
     "https://www.googleapis.com/auth/monitoring.read",
 )
+SAFE_GOOGLE_PERMISSION_HINTS = (
+    "monitoring.timeSeries.list",
+    "serviceusage.services.use",
+    "resourcemanager.projects.get",
+)
+SAFE_GOOGLE_REASON_HINTS = ("ACCESS_TOKEN_SCOPE_INSUFFICIENT",)
 
 
 class QuotaUnavailable(RuntimeError):
     """No trustworthy current reading is available; backfill must pause."""
+
+
+def _safe_google_error(error: ApiError) -> str:
+    """Expose only allow-listed authorization hints, never Google's raw response."""
+    if error.code != "403" and error.code not in SAFE_GOOGLE_REASON_HINTS:
+        return error.code
+    detail = str(error)
+    for hint in SAFE_GOOGLE_PERMISSION_HINTS:
+        if hint in detail:
+            return f"{error.code}; permission={hint}"
+    for hint in SAFE_GOOGLE_REASON_HINTS:
+        if hint in detail:
+            return hint if error.code == hint else f"{error.code}; reason={hint}"
+    return error.code
 
 
 @dataclass(frozen=True)
@@ -202,7 +222,9 @@ class GoogleQuotaReader:
         try:
             used, sampled_at = self._usage(now)
         except ApiError as error:
-            raise QuotaUnavailable(f"Google quota usage read failed ({error.code})") from None
+            raise QuotaUnavailable(
+                f"Google quota usage read failed ({_safe_google_error(error)})"
+            ) from None
         if sampled_at > now:
             raise QuotaUnavailable("search usage sample is from the future")
         if used > limit:

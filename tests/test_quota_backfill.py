@@ -120,6 +120,85 @@ class QuotaTests(unittest.TestCase):
         with self.assertRaisesRegex(QuotaUnavailable, "quota usage read failed \\(403\\)"):
             reader.audit_snapshot(now=NOW)
 
+    def test_usage_api_error_reports_only_known_permission_hint(self):
+        def get(url):
+            if "lookupKey" in url:
+                return {"parent": "projects/123/locations/global"}
+            if "consumerQuotaMetrics" in url:
+                return {"metrics": [{
+                    "metric": "youtube.googleapis.com/search_list",
+                    "consumerQuotaLimits": [{
+                        "unit": "1/d/{project}",
+                        "quotaBuckets": [{"effectiveLimit": "100"}],
+                    }],
+                }]}
+            raise ApiError(
+                "http",
+                "403",
+                "Permission monitoring.timeSeries.list denied for project secret-project-name",
+            )
+
+        reader = GoogleQuotaReader(
+            project_number="123", service_account_json=json.dumps({"project_id": PROJECT_ID}),
+            youtube_api_key="test", get_json=get,
+        )
+        with self.assertRaisesRegex(
+            QuotaUnavailable,
+            r"quota usage read failed \(403; permission=monitoring.timeSeries.list\)$",
+        ):
+            reader.audit_snapshot(now=NOW)
+
+    def test_usage_api_error_does_not_expose_unknown_response_or_secrets(self):
+        secret = "oauth-token api-key private_key raw-response secret-project"
+
+        def get(url):
+            if "lookupKey" in url:
+                return {"parent": "projects/123/locations/global"}
+            if "consumerQuotaMetrics" in url:
+                return {"metrics": [{
+                    "metric": "youtube.googleapis.com/search_list",
+                    "consumerQuotaLimits": [{
+                        "unit": "1/d/{project}",
+                        "quotaBuckets": [{"effectiveLimit": "100"}],
+                    }],
+                }]}
+            raise ApiError("http", "403", secret)
+
+        reader = GoogleQuotaReader(
+            project_number="123", service_account_json=json.dumps({"project_id": PROJECT_ID}),
+            youtube_api_key="test", get_json=get,
+        )
+        with self.assertRaises(QuotaUnavailable) as caught:
+            reader.audit_snapshot(now=NOW)
+        self.assertEqual(str(caught.exception), "Google quota usage read failed (403)")
+        self.assertNotIn(secret, str(caught.exception))
+
+    def test_usage_api_error_labels_scope_reason_without_permission_tag(self):
+        def get(url):
+            if "lookupKey" in url:
+                return {"parent": "projects/123/locations/global"}
+            if "consumerQuotaMetrics" in url:
+                return {"metrics": [{
+                    "metric": "youtube.googleapis.com/search_list",
+                    "consumerQuotaLimits": [{
+                        "unit": "1/d/{project}",
+                        "quotaBuckets": [{"effectiveLimit": "100"}],
+                    }],
+                }]}
+            raise ApiError(
+                "http", "ACCESS_TOKEN_SCOPE_INSUFFICIENT", "scope rejected"
+            )
+
+        reader = GoogleQuotaReader(
+            project_number="123", service_account_json=json.dumps({"project_id": PROJECT_ID}),
+            youtube_api_key="test", get_json=get,
+        )
+        with self.assertRaisesRegex(
+            QuotaUnavailable,
+            r"quota usage read failed \(ACCESS_TOKEN_SCOPE_INSUFFICIENT\)$",
+        ):
+            reader.audit_snapshot(now=NOW)
+
 
 class FakeFeishu:
     def __init__(self, config):
