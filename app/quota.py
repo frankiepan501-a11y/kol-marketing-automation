@@ -179,14 +179,22 @@ class GoogleQuotaReader:
 
     def snapshot(self, *, after: datetime, now: datetime | None = None) -> QuotaSnapshot:
         now = now or datetime.now(timezone.utc)
+        snapshot = self.audit_snapshot(now=now)
+        if snapshot.sampled_at <= after or now - snapshot.sampled_at > MAX_SAMPLE_AGE:
+            raise QuotaUnavailable("search usage sample has not caught up")
+        return snapshot
+
+    def audit_snapshot(self, *, now: datetime | None = None) -> QuotaSnapshot:
+        """Return the latest validated sample for console reconciliation only."""
+        now = now or datetime.now(timezone.utc)
         try:
             self._verify_key_project()
             limit = self._limit()
             used, sampled_at = self._usage(now)
         except ApiError as error:
             raise QuotaUnavailable(f"Google quota read failed ({error.code})") from None
-        if sampled_at <= after or sampled_at > now or now - sampled_at > MAX_SAMPLE_AGE:
-            raise QuotaUnavailable("search usage sample has not caught up")
+        if sampled_at > now:
+            raise QuotaUnavailable("search usage sample is from the future")
         if used > limit:
             raise QuotaUnavailable("search usage exceeds configured limit")
         return QuotaSnapshot(

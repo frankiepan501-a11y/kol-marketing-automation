@@ -33,6 +33,60 @@ _lock = threading.Lock()
 _jobs: dict[str, dict[str, Any]] = {}
 
 
+def _quota_preflight_payload(*, now: datetime | None = None) -> dict[str, Any]:
+    """Read and validate the live quota without enabling or running backfill."""
+    now = now or datetime.now(timezone.utc)
+    raw = os.environ.get("GOOGLE_QUOTA_SERVICE_ACCOUNT_JSON", "")
+    project_number = os.environ.get("GOOGLE_QUOTA_PROJECT_NUMBER", "").strip()
+    if not raw or not project_number:
+        raise QuotaUnavailable("quota reader configuration is missing")
+    reader = GoogleQuotaReader(
+        project_number=project_number,
+        service_account_json=raw,
+        youtube_api_key=YouTubeClient().api_key,
+    )
+    snapshot = reader.audit_snapshot(now=now)
+    return {
+        "project_match": True,
+        "project_id": snapshot.project_id,
+        "project_number": snapshot.project_number,
+        "quota_day": snapshot.quota_day,
+        "limit": snapshot.limit,
+        "used": snapshot.used,
+        "remaining": snapshot.remaining,
+        "sampled_at": snapshot.sampled_at.isoformat(),
+    }
+
+
+def _log_quota_preflight() -> None:
+    try:
+        result = _quota_preflight_payload()
+        logger.info(
+            "quota preflight ok project_match=%s project_id=%s project_number=%s "
+            "quota_day=%s limit=%s used=%s remaining=%s sampled_at=%s",
+            result["project_match"],
+            result["project_id"],
+            result["project_number"],
+            result["quota_day"],
+            result["limit"],
+            result["used"],
+            result["remaining"],
+            result["sampled_at"],
+        )
+    except QuotaUnavailable as error:
+        logger.warning("quota preflight unavailable reason=%s", error)
+    except Exception as error:
+        logger.warning(
+            "quota preflight failed diagnostic=quota_preflight_unexpected stage=payload type=%s",
+            type(error).__name__,
+        )
+
+
+@app.on_event("startup")
+def _start_quota_preflight() -> None:
+    threading.Thread(target=_log_quota_preflight, daemon=True).start()
+
+
 class RunRequest(BaseModel):
     brand: str | None = None
     platform: Literal["YouTube"] = DEFAULT_PLATFORM

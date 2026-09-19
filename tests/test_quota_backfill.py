@@ -50,6 +50,12 @@ class QuotaTests(unittest.TestCase):
         self.assertEqual(snapshot.remaining, 40)
         self.assertEqual(snapshot.quota_day, "2026-09-17")
 
+    def test_audit_allows_older_same_day_sample_without_relaxing_budget_gate(self):
+        reader = self.reader(sampled_at=NOW - timedelta(minutes=30))
+        self.assertEqual(reader.audit_snapshot(now=NOW).used, 60)
+        with self.assertRaisesRegex(QuotaUnavailable, "sample has not caught up"):
+            reader.snapshot(after=NOW - timedelta(minutes=31), now=NOW)
+
     def test_wrong_project_and_stale_usage_fail_closed(self):
         with self.assertRaises(QuotaUnavailable):
             self.reader(parent="projects/999").snapshot(after=NOW - timedelta(minutes=2), now=NOW)
