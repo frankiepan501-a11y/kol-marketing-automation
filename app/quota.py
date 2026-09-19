@@ -169,8 +169,8 @@ class GoogleQuotaReader:
         day_start = now.astimezone(PACIFIC).replace(hour=0, minute=0, second=0, microsecond=0)
         filter_text = (
             f'metric.type="{MONITORING_TYPE}" AND resource.type="consumer_quota" '
-            f'AND resource.label.service="{SERVICE}" '
-            f'AND metric.label.quota_metric="{QUOTA_METRIC}"'
+            f'AND resource.labels.service="{SERVICE}" '
+            f'AND metric.labels.quota_metric="{QUOTA_METRIC}"'
         )
         params = {
             "filter": filter_text,

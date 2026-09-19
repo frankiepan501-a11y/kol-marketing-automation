@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -64,6 +65,29 @@ class QuotaTests(unittest.TestCase):
         snapshot = self.reader().snapshot(after=NOW - timedelta(minutes=2), now=NOW)
         self.assertEqual(snapshot.remaining, 40)
         self.assertEqual(snapshot.quota_day, "2026-09-17")
+
+    def test_monitoring_filter_uses_documented_plural_label_selectors(self):
+        urls = []
+        reader = self.reader()
+        original_get = reader._get_json
+
+        def capture(url):
+            urls.append(url)
+            return original_get(url)
+
+        reader._get_json = capture
+        reader.audit_snapshot(now=NOW)
+        monitoring_url = next(url for url in urls if "timeSeries" in url)
+        filter_text = urllib.parse.parse_qs(
+            urllib.parse.urlparse(monitoring_url).query
+        )["filter"][0]
+        self.assertIn('resource.labels.service="youtube.googleapis.com"', filter_text)
+        self.assertIn(
+            'metric.labels.quota_metric="youtube.googleapis.com/search_list"',
+            filter_text,
+        )
+        self.assertNotIn("resource.label.", filter_text)
+        self.assertNotIn("metric.label.", filter_text)
 
     def test_audit_allows_older_same_day_sample_without_relaxing_budget_gate(self):
         reader = self.reader(sampled_at=NOW - timedelta(minutes=30))
