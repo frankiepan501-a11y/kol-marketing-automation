@@ -23,6 +23,10 @@ PACIFIC = ZoneInfo("America/Los_Angeles")
 SAFETY_RESERVE = 20
 SEGMENT_MAX_CALLS = 10
 MAX_SAMPLE_AGE = timedelta(minutes=5)
+OAUTH_SCOPES = (
+    "https://www.googleapis.com/auth/cloud-platform.read-only",
+    "https://www.googleapis.com/auth/monitoring.read",
+)
 
 
 class QuotaUnavailable(RuntimeError):
@@ -72,7 +76,7 @@ class GoogleQuotaReader:
         from google.oauth2 import service_account
 
         credentials = service_account.Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"]
+            info, scopes=list(OAUTH_SCOPES)
         )
 
         def get_json(url: str) -> dict[str, Any]:

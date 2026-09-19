@@ -7,13 +7,28 @@ from unittest.mock import patch
 from app.clients import ApiError
 from app.collector import IncrementalCollector
 from app.core import rfc3339
-from app.quota import GoogleQuotaReader, QuotaUnavailable, MONITORING_TYPE, PROJECT_ID
+from app.quota import (
+    GoogleQuotaReader,
+    QuotaUnavailable,
+    MONITORING_TYPE,
+    OAUTH_SCOPES,
+    PROJECT_ID,
+)
 
 
 NOW = datetime(2026, 9, 17, 8, 30, tzinfo=timezone.utc)
 
 
 class QuotaTests(unittest.TestCase):
+    def test_oauth_scopes_cover_key_lookup_and_monitoring_read(self):
+        self.assertEqual(
+            OAUTH_SCOPES,
+            (
+                "https://www.googleapis.com/auth/cloud-platform.read-only",
+                "https://www.googleapis.com/auth/monitoring.read",
+            ),
+        )
+
     def reader(self, *, used=60, sampled_at=None, parent="projects/123/locations/global", window_start="2026-09-17T07:00:00Z"):
         sampled_at = sampled_at or NOW - timedelta(minutes=1)
 
