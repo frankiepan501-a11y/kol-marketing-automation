@@ -311,6 +311,30 @@ class QuotaTests(unittest.TestCase):
         ):
             reader.audit_snapshot(now=NOW)
 
+    def test_usage_api_error_labels_standard_permission_denied_status(self):
+        def get(url):
+            if "lookupKey" in url:
+                return {"parent": "projects/123/locations/global"}
+            if "consumerQuotaMetrics" in url:
+                return {"metrics": [{
+                    "metric": "youtube.googleapis.com/search_list",
+                    "consumerQuotaLimits": [{
+                        "unit": "1/d/{project}",
+                        "quotaBuckets": [{"effectiveLimit": "100"}],
+                    }],
+                }]}
+            raise ApiError("http", "403", "denied", reason="PERMISSION_DENIED")
+
+        reader = GoogleQuotaReader(
+            project_number="123", service_account_json=json.dumps({"project_id": PROJECT_ID}),
+            youtube_api_key="test", get_json=get,
+        )
+        with self.assertRaisesRegex(
+            QuotaUnavailable,
+            r"quota usage read failed \(403; reason=PERMISSION_DENIED\)$",
+        ):
+            reader.audit_snapshot(now=NOW)
+
     def test_usage_api_error_classifies_common_google_message_without_echoing_it(self):
         secret = "Request had insufficient authentication scopes: secret-token"
 

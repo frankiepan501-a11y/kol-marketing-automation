@@ -59,6 +59,25 @@ class JsonRequestErrorInfoTests(unittest.TestCase):
         self.assertEqual(caught.exception.reason, "")
         self.assertEqual(caught.exception.metadata, {})
 
+    def test_google_status_is_used_when_error_info_is_absent(self):
+        payload = json.dumps({
+            "error": {
+                "code": 403,
+                "message": "Permission denied",
+                "status": "PERMISSION_DENIED",
+            }
+        }).encode("utf-8")
+        response = urllib.error.HTTPError(
+            "https://example.invalid", 403, "Forbidden", {}, io.BytesIO(payload)
+        )
+
+        with patch("urllib.request.urlopen", side_effect=response):
+            with self.assertRaises(ApiError) as caught:
+                _json_request("GET", "https://example.invalid")
+
+        self.assertEqual(caught.exception.code, "403")
+        self.assertEqual(caught.exception.reason, "PERMISSION_DENIED")
+
 
 if __name__ == "__main__":
     unittest.main()

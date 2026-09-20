@@ -70,7 +70,7 @@ def _json_request(
                 ),
                 {},
             )
-            structured_reason = str(error_info.get("reason") or "")
+            structured_reason = str(error_info.get("reason") or error_body.get("status") or "")
             structured_domain = str(error_info.get("domain") or "")
             structured_metadata = (
                 error_info.get("metadata") if isinstance(error_info.get("metadata"), dict) else {}
