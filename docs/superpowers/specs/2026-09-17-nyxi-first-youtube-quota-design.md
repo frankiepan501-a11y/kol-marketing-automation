@@ -1,5 +1,7 @@
 # NYXI 每日优先、8BitDo 余量历史补采：方案 A
 
+> **2026-09-20 范围收窄**：Google Cloud Monitoring/Billing 配额读取路线已停止。当前生产目标改为“NYXI 先运行 → 按本次日任务内部搜索计数与 20 次安全保留量运行 8BitDo → Google 返回日额度耗尽时保存断点并停止”。内部计数不代表项目全局余量。本文件其余 Monitoring 设计保留为历史决策记录，不再是当前上线前置条件；当前运行说明以仓库 `README.md` 为准。
+
 ## 结论与边界
 
 将现有 `socialecho-youtube-incremental` 服务和 n8n 工作流 `Yi5owIF2FolWJp79` 改为每日北京时间 16:30 执行。一次运行严格按“NYXI 增量完成 → 读取 Google 项目真实配额 → 8BitDo 至多一个历史窗口或安全暂停 → 发送一条汇总日报”的顺序。NYXI 失败时跳过 8BitDo，但仍发送一条明确标注失败的日报；群发失败使整个任务报错。只使用 KOL媒体助手 `cli_aa143b0a11b89be4` 向站外运营部群 `oc_4ddd938ddb73201ed7354337eb2226ac` 发送该日报；其他 KOL 通知不迁移。

@@ -15,8 +15,8 @@ from .collector import IncrementalCollector
 from .constants import BASE_TOKEN, CONFIG_READ_FIELDS, DEFAULT_PLATFORM, TABLES
 from .core import BEIJING, is_youtube_video_id, scalar
 from .job_status import durable_job_snapshot_many, finished_status
-from .daily import DailyReporter, NYXI_CONFIG_ID, format_report, quota_decision
-from .quota import GoogleQuotaReader, QuotaUnavailable
+from .daily import DailyReporter, NYXI_CONFIG_ID, format_report
+from .quota import DailySearchBudget
 
 BUILD_VERSION = os.environ.get("BUILD_VERSION", "dev")
 COMMIT_ENABLED = os.environ.get("COMMIT_ENABLED", "0") == "1"
@@ -31,60 +31,6 @@ logger = logging.getLogger("socialecho-youtube-incremental")
 app = FastAPI(title="SocialEcho YouTube Incremental", version=BUILD_VERSION)
 _lock = threading.Lock()
 _jobs: dict[str, dict[str, Any]] = {}
-
-
-def _quota_preflight_payload(*, now: datetime | None = None) -> dict[str, Any]:
-    """Read and validate the live quota without enabling or running backfill."""
-    now = now or datetime.now(timezone.utc)
-    raw = os.environ.get("GOOGLE_QUOTA_SERVICE_ACCOUNT_JSON", "")
-    project_number = os.environ.get("GOOGLE_QUOTA_PROJECT_NUMBER", "").strip()
-    if not raw or not project_number:
-        raise QuotaUnavailable("quota reader configuration is missing")
-    reader = GoogleQuotaReader(
-        project_number=project_number,
-        service_account_json=raw,
-        youtube_api_key=YouTubeClient().api_key,
-    )
-    snapshot = reader.audit_snapshot(now=now)
-    return {
-        "project_match": True,
-        "project_id": snapshot.project_id,
-        "project_number": snapshot.project_number,
-        "quota_day": snapshot.quota_day,
-        "limit": snapshot.limit,
-        "used": snapshot.used,
-        "remaining": snapshot.remaining,
-        "sampled_at": snapshot.sampled_at.isoformat(),
-    }
-
-
-def _log_quota_preflight() -> None:
-    try:
-        result = _quota_preflight_payload()
-        logger.info(
-            "quota preflight ok project_match=%s project_id=%s project_number=%s "
-            "quota_day=%s limit=%s used=%s remaining=%s sampled_at=%s",
-            result["project_match"],
-            result["project_id"],
-            result["project_number"],
-            result["quota_day"],
-            result["limit"],
-            result["used"],
-            result["remaining"],
-            result["sampled_at"],
-        )
-    except QuotaUnavailable as error:
-        logger.warning("quota preflight unavailable reason=%s", error)
-    except Exception as error:
-        logger.warning(
-            "quota preflight failed diagnostic=quota_preflight_unexpected stage=payload type=%s",
-            type(error).__name__,
-        )
-
-
-@app.on_event("startup")
-def _start_quota_preflight() -> None:
-    threading.Thread(target=_log_quota_preflight, daemon=True).start()
 
 
 class RunRequest(BaseModel):
@@ -298,20 +244,15 @@ def _execute_daily(job_id: str) -> None:
                 logger.exception("failed to record NYXI failure id=%s", job_id)
         posts = reporter.today_posts(started, existing) if nyxi["status"] == "completed" else []
         known_channels = reporter.known_channels_before(existing) if nyxi["status"] == "completed" else set()
-        backfill = quota_decision()
+        backfill = {"status": "not_started", "message": "历史补采尚未启动"}
         if nyxi["status"] != "completed":
             backfill = {"status": "nyxi_failed", "message": "NYXI 失败，未启动历史补采"}
         else:
             try:
-                reader = GoogleQuotaReader.from_environment(collector.youtube.api_key)
-                if reader is not None:
-                    backfill = collector.backfill_budgeted(
-                        now=started, job_id=job_id,
-                        quota_remaining=lambda after: reader.wait_for_snapshot(after=after).remaining,
-                        after=datetime.now(timezone.utc), brand="8BitDo",
-                    )
-            except QuotaUnavailable as error:
-                backfill = {"status": "quota_unknown", "message": f"配额不可验证，历史补采暂停（{error}）"}
+                budget = DailySearchBudget.from_nyxi(nyxi)
+                backfill = collector.backfill_budgeted(
+                    now=started, job_id=job_id, budget=budget, brand="8BitDo",
+                )
             except Exception as error:
                 logger.exception("daily 8BitDo backfill failed id=%s", job_id)
                 backfill = {"status": "failed", "message": f"历史补采失败（{type(error).__name__}）；游标保留"}

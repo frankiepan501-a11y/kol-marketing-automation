@@ -4,7 +4,7 @@ import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any
 
 from .clients import ApiError, FeishuClient, YouTubeClient
 from .constants import (
@@ -31,6 +31,7 @@ from .core import (
     stable_hash,
     unique_lines,
 )
+from .quota import DailySearchBudget, SEGMENT_MAX_CALLS, YOUTUBE_DAILY_QUOTA_CODES
 
 _DURATION = re.compile(
     r"^P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?$"
@@ -450,13 +451,17 @@ class IncrementalCollector:
         for query in selected:
             token: str | None = None
             for page_number in range(1, 11):
-                response = self.youtube.search(
-                    query,
-                    published_after=rfc3339(search_start),
-                    published_before=rfc3339(search_end),
-                    page_token=token,
-                )
                 calls += 1
+                try:
+                    response = self.youtube.search(
+                        query,
+                        published_after=rfc3339(search_start),
+                        published_before=rfc3339(search_end),
+                        page_token=token,
+                    )
+                except ApiError as error:
+                    error.metadata["search_calls"] = str(calls)
+                    raise
                 for item in response.get("items", []) or []:
                     identifier = item.get("id") if isinstance(item, dict) else None
                     video_id = identifier.get("videoId") if isinstance(identifier, dict) else ""
@@ -515,7 +520,12 @@ class IncrementalCollector:
         existing_by_post_id = index_youtube_rows_by_post_id(
             all_rows, target_ids=set(requested_ids)
         )
-        videos = self.youtube.videos(requested_ids)
+        try:
+            videos = self.youtube.videos(requested_ids)
+        except ApiError as error:
+            if error.service == "youtube":
+                error.metadata.setdefault("search_calls", str(search_calls))
+            raise
         found_ids = {str(video.get("id") or "") for video in videos}
         channel_ids = sorted(
             {
@@ -525,7 +535,12 @@ class IncrementalCollector:
                 and video.get("snippet", {}).get("channelId")
             }
         )
-        channels = {str(item.get("id") or ""): item for item in self.youtube.channels(channel_ids)}
+        try:
+            channels = {str(item.get("id") or ""): item for item in self.youtube.channels(channel_ids)}
+        except ApiError as error:
+            if error.service == "youtube":
+                error.metadata.setdefault("search_calls", str(search_calls))
+            raise
         batch_id = f"ytbackfill-{now.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         normalized: list[dict[str, Any]] = []
         for video in videos:
@@ -710,11 +725,10 @@ class IncrementalCollector:
         return result
 
     def backfill_budgeted(
-        self, *, now: datetime, job_id: str, quota_remaining: Callable[[datetime], int],
-        after: datetime, brand: str = "8BitDo", window_days: int = 7,
+        self, *, now: datetime, job_id: str, budget: DailySearchBudget,
+        brand: str = "8BitDo", window_days: int = 7,
     ) -> dict[str, Any]:
-        """Resume at most one historical window, checkpointing each completed query/day."""
-        from .quota import QuotaUnavailable, SAFETY_RESERVE, SEGMENT_MAX_CALLS
+        """Resume one historical window within this daily job's conservative budget."""
 
         config = self._config(brand=brand, platform=DEFAULT_PLATFORM)
         record_id = str(config.get("_record_id") or "")
@@ -768,17 +782,23 @@ class IncrementalCollector:
         deadline = time.monotonic() + 20 * 60
         while pending:
             if time.monotonic() >= deadline:
-                return {"status": "partial", "message": "本次运行已达 20 分钟，保留断点下次续跑", "next_end": rfc3339(end), "completed_segments": completed}
-            try:
-                remaining = quota_remaining(after)
-            except QuotaUnavailable:
+                return {
+                    "status": "partial", "message": "本次运行已达 20 分钟，保留断点下次续跑",
+                    "next_end": rfc3339(end), "completed_segments": completed,
+                    "search_calls": search_calls, **budget.summary(),
+                }
+            if not budget.can_start_segment():
                 if completed:
                     save()
-                return {"status": "quota_unknown", "message": "配额读数不可验证，补采暂停", "next_end": rfc3339(end), "completed_segments": completed}
-            if remaining < SEGMENT_MAX_CALLS + SAFETY_RESERVE:
-                if completed:
-                    save()
-                return {"status": "quota_paused", "message": f"搜索余量 {remaining} 次，低于安全门槛 30 次，补采暂停", "next_end": rfc3339(end), "completed_segments": completed}
+                return {
+                    "status": "quota_paused",
+                    "message": (
+                        f"本任务已用 {budget.used}/{budget.limit} 次搜索，"
+                        f"保留 {budget.reserve} 次安全余量，补采暂停"
+                    ),
+                    "next_end": rfc3339(end), "completed_segments": completed,
+                    "search_calls": search_calls, **budget.summary(),
+                }
             segment = pending[0]
             segment_start = parse_datetime(segment["start"])
             segment_end = parse_datetime(segment["end"])
@@ -790,28 +810,46 @@ class IncrementalCollector:
                     refresh_existing_ids=False, queries=[str(segment["query"])],
                 )
             except ApiError as error:
+                if error.service == "youtube" and error.code in YOUTUBE_DAILY_QUOTA_CODES:
+                    try:
+                        attempted_calls = max(1, int(error.metadata.get("search_calls", "1")))
+                    except ValueError:
+                        attempted_calls = 1
+                    budget.consume(attempted_calls)
+                    search_calls += attempted_calls
+                    return {
+                        "status": "quota_exhausted",
+                        "message": "YouTube 返回当日搜索额度已用完，游标保留，次日继续",
+                        "next_end": rfc3339(end), "completed_segments": completed,
+                        "search_calls": search_calls, **budget.summary(),
+                    }
                 if error.code != "incremental_page_cap":
                     raise
+                budget.consume(SEGMENT_MAX_CALLS)
+                search_calls += SEGMENT_MAX_CALLS
                 if segment_end - segment_start <= timedelta(hours=1):
-                    return {"status": "overflow", "message": "1 小时小段仍超过 10 页，需人工处理", "next_end": rfc3339(end), "segment": segment}
+                    return {
+                        "status": "overflow", "message": "1 小时小段仍超过 10 页，需人工处理",
+                        "next_end": rfc3339(end), "segment": segment,
+                        "search_calls": search_calls, **budget.summary(),
+                    }
                 middle = segment_start + (segment_end - segment_start) / 2
                 pending[:1] = [
                     {**segment, "end": rfc3339(middle)},
                     {**segment, "start": rfc3339(middle)},
                 ]
                 save()
-                after = datetime.now(timezone.utc)
                 continue
+            budget.consume(result["search_calls"])
             search_calls += result["search_calls"]
             new_posts += result["new_posts"]
             pending.pop(0)
             completed += 1
             save()
-            after = datetime.now(timezone.utc)
         return {
             "status": "completed", "message": f"完成 {completed} 个小段，新增 {new_posts} 条帖子",
             "next_end": rfc3339(start), "completed_segments": completed,
-            "search_calls": search_calls, "new_posts": new_posts,
+            "search_calls": search_calls, "new_posts": new_posts, **budget.summary(),
         }
 
     def run(

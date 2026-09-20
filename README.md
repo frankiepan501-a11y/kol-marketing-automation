@@ -4,8 +4,8 @@
 
 - 北京时间每天 16:30 先运行 NYXI，并向指定站外运营部群发一条日报。
 - 每日只刷新近 30 天已登记视频的公开数据；每周一另轮转最多 100 条更老视频。
-- 8BitDo 历史补采只有在同一 Google 项目的 `search.list` 真实剩余额度可以核实后才能自动运行；当前无可信配额读数，自动暂停，原历史游标不变。
-- 历史补采按“单个关键词 × UTC 日期”逐段进行；每段最多 10 次搜索，完整写入后才在现有 `YouTube历史游标` 保存断点。10 页仍有下一页时继续按时间拆分；同一段 1 小时仍溢出则停下人工处理。每段前确认搜索桶至少还有 30 次（其中 20 次保留不用）；单次运行达到 20 分钟也保存断点下次续跑。
+- 8BitDo 历史补采在 NYXI 成功后运行，并使用本次日任务的保守搜索预算：默认上限 100 次、始终保留 20 次，本任务每次 `search.list`（包括翻页）都计数。该数字只代表本任务自己的调用，不冒充 Google 项目全局余量；若 Google 返回日额度耗尽，立即停止并保留原历史游标。
+- 历史补采按“单个关键词 × UTC 日期”逐段进行；每段最多 10 次搜索，完整写入后才在现有 `YouTube历史游标` 保存断点。10 页仍有下一页时继续按时间拆分，并按 10 次计入内部预算；同一段 1 小时仍溢出则停下人工处理。每段前确认内部预算至少还能覆盖该段并保留 20 次；单次运行达到 20 分钟也保存断点下次续跑。
 - 查询从上次成功采集时间向前重叠 48 小时开始，成功后才推进水位。
 - 以 `YouTube + video_id` 去重；新帖写入，已有帖只更新公开数据。
 - 服务按关键词配置表逐行读取已启用的 YouTube 监控任务，可同时处理多个竞品品牌；每个配置行有独立水位和运行状态。
@@ -29,7 +29,7 @@
 
 `YOUTUBE_API_KEY`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`SERVICE_AUTH_TOKEN`、`COMMIT_ENABLED`、`BUILD_VERSION`。
 
-8BitDo 自动补采另需 `GOOGLE_QUOTA_PROJECT_NUMBER`、`GOOGLE_QUOTA_SERVICE_ACCOUNT_JSON`（专用只读服务账号 JSON）与 `GOOGLE_QUOTA_VERIFIED=1`。只有完成 API Key→`powkong-funlab-ads-api` 项目归属核对，且机器读到的 `youtube.googleapis.com/search_list` / `defaultSearchListPerDayPerProject` 上限和当天用量与 Google Cloud 控制台同口径对账后，才可设置最后这个开关。缺任何一项时 `/daily` 只做 NYXI，8BitDo 显示配额不可验证并暂停；不要把截图或通用 `Queries/day` 桶当作自动放行依据。服务账号凭据只放云端密钥环境变量，禁止写入仓库或日志。
+8BitDo 自动补采不再依赖 Google Cloud Monitoring、Cloud Billing 或服务账号。`/daily` 会先用 NYXI 本轮实际 `search_calls` 初始化内部预算，再逐段扣减 8BitDo 的搜索次数。生产环境中旧的 `GOOGLE_QUOTA_*` 变量属于废弃配置，应在新版本验证成功后删除。
 
 ## 生产资源（2026-08-12）
 

@@ -152,11 +152,13 @@ def format_report(
             f"旧帖周刷新：批次 {weekly.get('batch_index', 0)+1}/{weekly.get('batch_count', 0)}，"
             f"选中 {weekly.get('selected', 0)} 条，完成 {weekly.get('available', 0)} 条。"
         )
-    lines.append(f"8BitDo：{backfill.get('message', '配额不可验证，历史补采暂停')}。")
+    lines.append(f"8BitDo：{backfill.get('message', '历史补采未运行')}。")
+    if backfill.get("budget_limit") is not None:
+        lines.append(
+            "搜索预算：本次日任务已用 "
+            f"{backfill.get('budget_used', 0)}/{backfill.get('budget_limit', 0)} 次，"
+            f"保留 {backfill.get('budget_reserve', 0)} 次；"
+            "这是本任务内部计数，不代表 Google 项目全局余量。"
+        )
     lines.append(f"任务编号：{nyxi.get('job_id', 'unknown')}")
     return "\n".join(lines)
-
-
-def quota_decision() -> dict[str, Any]:
-    """Fail closed until same-project Search Queries/day read access is verified."""
-    return {"status": "quota_unknown", "message": "配额不可验证，历史补采暂停"}

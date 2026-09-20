@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.clients import ApiError
 from app.collector import is_recent_post, older_refresh_batch
-from app.daily import DailyReporter, format_report, quota_decision
+from app.daily import DailyReporter, format_report
 
 
 NOW = datetime(2026, 9, 21, 8, 30, tzinfo=timezone.utc)
@@ -47,9 +47,6 @@ class DailyTests(unittest.TestCase):
         self.assertEqual((index, count, len(batch)), (0, 3, 100))
         index, count, batch = older_refresh_batch([recent, *old], NOW + timedelta(days=7))
         self.assertEqual((index, count, len(batch)), (1, 3, 100))
-
-    def test_quota_unknown_always_blocks_backfill(self):
-        self.assertEqual(quota_decision()["status"], "quota_unknown")
 
     def test_one_report_per_day(self):
         fake = FakeFeishu()
@@ -95,6 +92,22 @@ class DailyTests(unittest.TestCase):
         )
         self.assertIn("NYXI：采集失败", text)
         self.assertIn("未启动历史补采", text)
+
+    def test_report_labels_internal_budget_as_non_project_wide(self):
+        text = format_report(
+            NOW,
+            nyxi={"status": "completed", "search_calls": 7, "job_id": "x"},
+            backfill={
+                "message": "完成 1 个小段，新增 2 条帖子",
+                "budget_limit": 100,
+                "budget_reserve": 20,
+                "budget_used": 17,
+                "budget_remaining": 83,
+            },
+            posts=[],
+        )
+        self.assertIn("本次日任务已用 17/100 次", text)
+        self.assertIn("不代表 Google 项目全局余量", text)
 
 
 if __name__ == "__main__":
