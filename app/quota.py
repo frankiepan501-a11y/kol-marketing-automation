@@ -30,9 +30,16 @@ OAUTH_SCOPES = (
 SAFE_GOOGLE_PERMISSION_HINTS = (
     "monitoring.timeSeries.list",
     "serviceusage.services.use",
+    "serviceusage.services.list",
     "resourcemanager.projects.get",
+    "cloudquotas.quotas.get",
 )
-SAFE_GOOGLE_REASON_HINTS = ("ACCESS_TOKEN_SCOPE_INSUFFICIENT",)
+SAFE_GOOGLE_REASON_HINTS = (
+    "ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+    "IAM_PERMISSION_DENIED",
+    "SERVICE_DISABLED",
+    "CONSUMER_INVALID",
+)
 SAFE_GOOGLE_MESSAGE_CATEGORIES = (
     ("insufficient authentication scopes", "insufficient_oauth_scope"),
     ("caller does not have permission", "iam_permission_denied"),
@@ -50,6 +57,14 @@ def _safe_google_error(error: ApiError) -> str:
     """Expose only allow-listed authorization hints, never Google's raw response."""
     if error.code != "403" and error.code not in SAFE_GOOGLE_REASON_HINTS:
         return error.code
+    reason = error.reason if error.reason in SAFE_GOOGLE_REASON_HINTS else ""
+    permission = error.metadata.get("permission", "")
+    if permission not in SAFE_GOOGLE_PERMISSION_HINTS:
+        permission = ""
+    if permission:
+        return f"{error.code}; permission={permission}"
+    if reason:
+        return reason if error.code == reason else f"{error.code}; reason={reason}"
     detail = str(error)
     for hint in SAFE_GOOGLE_PERMISSION_HINTS:
         if hint in detail:

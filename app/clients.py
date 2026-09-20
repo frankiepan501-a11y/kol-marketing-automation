@@ -12,9 +12,25 @@ from .core import chunks, parse_datetime
 
 
 class ApiError(RuntimeError):
-    def __init__(self, service: str, code: str, message: str):
+    def __init__(
+        self,
+        service: str,
+        code: str,
+        message: str,
+        *,
+        reason: str = "",
+        domain: str = "",
+        metadata: dict[str, str] | None = None,
+    ):
         self.service = service
         self.code = str(code or "unknown")
+        self.reason = str(reason or "")
+        self.domain = str(domain or "")
+        self.metadata = {
+            str(key): str(value)
+            for key, value in (metadata or {}).items()
+            if isinstance(key, str) and isinstance(value, (str, int, float, bool))
+        }
         super().__init__(f"{service}:{self.code}:{str(message)[:300]}")
 
 
@@ -39,13 +55,39 @@ def _json_request(
         payload = error.read(65536).decode("utf-8", errors="replace")
         try:
             parsed = json.loads(payload)
-            details = parsed.get("error", {}).get("errors", [])
-            reason = details[0].get("reason") if details and isinstance(details[0], dict) else None
-            code = reason or parsed.get("code") or parsed.get("error", {}).get("code") or error.code
-            message = parsed.get("msg") or parsed.get("error", {}).get("message") or "http error"
+            error_body = parsed.get("error", {})
+            details = error_body.get("errors", [])
+            legacy_reason = details[0].get("reason") if details and isinstance(details[0], dict) else None
+            structured_details = error_body.get("details", [])
+            if not isinstance(structured_details, list):
+                structured_details = []
+            error_info = next(
+                (
+                    item
+                    for item in structured_details
+                    if isinstance(item, dict)
+                    and str(item.get("@type", "")).endswith("google.rpc.ErrorInfo")
+                ),
+                {},
+            )
+            structured_reason = str(error_info.get("reason") or "")
+            structured_domain = str(error_info.get("domain") or "")
+            structured_metadata = (
+                error_info.get("metadata") if isinstance(error_info.get("metadata"), dict) else {}
+            )
+            code = legacy_reason or parsed.get("code") or error_body.get("code") or error.code
+            message = parsed.get("msg") or error_body.get("message") or "http error"
         except (json.JSONDecodeError, AttributeError):
             code, message = error.code, "http error"
-        raise ApiError("http", str(code), str(message)) from None
+            structured_reason, structured_domain, structured_metadata = "", "", {}
+        raise ApiError(
+            "http",
+            str(code),
+            str(message),
+            reason=structured_reason,
+            domain=structured_domain,
+            metadata=structured_metadata,
+        ) from None
     except (urllib.error.URLError, TimeoutError) as error:
         raise ApiError("network", type(error).__name__, "request failed") from None
     try:

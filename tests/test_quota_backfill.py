@@ -172,6 +172,94 @@ class QuotaTests(unittest.TestCase):
         ):
             reader.audit_snapshot(now=NOW)
 
+    def test_usage_api_error_reports_structured_permission_without_raw_message(self):
+        def get(url):
+            if "lookupKey" in url:
+                return {"parent": "projects/123/locations/global"}
+            if "consumerQuotaMetrics" in url:
+                return {"metrics": [{
+                    "metric": "youtube.googleapis.com/search_list",
+                    "consumerQuotaLimits": [{
+                        "unit": "1/d/{project}",
+                        "quotaBuckets": [{"effectiveLimit": "100"}],
+                    }],
+                }]}
+            raise ApiError(
+                "http",
+                "403",
+                "secret-project oauth-token",
+                reason="IAM_PERMISSION_DENIED",
+                domain="iam.googleapis.com",
+                metadata={
+                    "permission": "cloudquotas.quotas.get",
+                    "resource": "projects/secret-project",
+                },
+            )
+
+        reader = GoogleQuotaReader(
+            project_number="123", service_account_json=json.dumps({"project_id": PROJECT_ID}),
+            youtube_api_key="test", get_json=get,
+        )
+        with self.assertRaises(QuotaUnavailable) as caught:
+            reader.audit_snapshot(now=NOW)
+        self.assertEqual(
+            str(caught.exception),
+            "Google quota usage read failed (403; permission=cloudquotas.quotas.get)",
+        )
+        self.assertNotIn("secret-project", str(caught.exception))
+
+    def test_usage_api_error_rejects_unstructured_permission_metadata(self):
+        def get(url):
+            if "lookupKey" in url:
+                return {"parent": "projects/123/locations/global"}
+            if "consumerQuotaMetrics" in url:
+                return {"metrics": [{
+                    "metric": "youtube.googleapis.com/search_list",
+                    "consumerQuotaLimits": [{
+                        "unit": "1/d/{project}",
+                        "quotaBuckets": [{"effectiveLimit": "100"}],
+                    }],
+                }]}
+            raise ApiError(
+                "http", "403", "denied", metadata={"permission": "secret.token.value"}
+            )
+
+        reader = GoogleQuotaReader(
+            project_number="123", service_account_json=json.dumps({"project_id": PROJECT_ID}),
+            youtube_api_key="test", get_json=get,
+        )
+        with self.assertRaises(QuotaUnavailable) as caught:
+            reader.audit_snapshot(now=NOW)
+        self.assertEqual(str(caught.exception), "Google quota usage read failed (403)")
+
+    def test_usage_api_error_does_not_classify_non_403_structured_metadata(self):
+        def get(url):
+            if "lookupKey" in url:
+                return {"parent": "projects/123/locations/global"}
+            if "consumerQuotaMetrics" in url:
+                return {"metrics": [{
+                    "metric": "youtube.googleapis.com/search_list",
+                    "consumerQuotaLimits": [{
+                        "unit": "1/d/{project}",
+                        "quotaBuckets": [{"effectiveLimit": "100"}],
+                    }],
+                }]}
+            raise ApiError(
+                "http",
+                "500",
+                "server error",
+                reason="IAM_PERMISSION_DENIED",
+                metadata={"permission": "cloudquotas.quotas.get"},
+            )
+
+        reader = GoogleQuotaReader(
+            project_number="123", service_account_json=json.dumps({"project_id": PROJECT_ID}),
+            youtube_api_key="test", get_json=get,
+        )
+        with self.assertRaises(QuotaUnavailable) as caught:
+            reader.audit_snapshot(now=NOW)
+        self.assertEqual(str(caught.exception), "Google quota usage read failed (500)")
+
     def test_usage_api_error_does_not_expose_unknown_response_or_secrets(self):
         secret = "oauth-token api-key private_key raw-response secret-project"
 
