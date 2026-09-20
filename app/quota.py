@@ -129,7 +129,14 @@ class GoogleQuotaReader:
         def get_json(url: str) -> dict[str, Any]:
             if not credentials.valid:
                 credentials.refresh(Request())
-            return _json_request("GET", url, headers={"Authorization": f"Bearer {credentials.token}"})
+            return _json_request(
+                "GET",
+                url,
+                headers={
+                    "Authorization": f"Bearer {credentials.token}",
+                    "x-goog-user-project": PROJECT_ID,
+                },
+            )
 
         return get_json
 

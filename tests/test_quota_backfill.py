@@ -1,9 +1,11 @@
 import json
 import os
+import sys
+import types
 import unittest
 import urllib.parse
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.clients import ApiError
 from app.collector import IncrementalCollector
@@ -28,6 +30,39 @@ class QuotaTests(unittest.TestCase):
                 "https://www.googleapis.com/auth/cloud-platform.read-only",
                 "https://www.googleapis.com/auth/monitoring.read",
             ),
+        )
+
+    def test_authenticated_rest_requests_explicitly_charge_the_quota_project(self):
+        credentials = MagicMock(valid=True, token="redacted-token")
+        google = types.ModuleType("google")
+        auth = types.ModuleType("google.auth")
+        transport = types.ModuleType("google.auth.transport")
+        transport_requests = types.ModuleType("google.auth.transport.requests")
+        transport_requests.Request = object
+        oauth2 = types.ModuleType("google.oauth2")
+        service_account = types.ModuleType("google.oauth2.service_account")
+        service_account.Credentials = MagicMock()
+        service_account.Credentials.from_service_account_info.return_value = credentials
+        modules = {
+            "google": google,
+            "google.auth": auth,
+            "google.auth.transport": transport,
+            "google.auth.transport.requests": transport_requests,
+            "google.oauth2": oauth2,
+            "google.oauth2.service_account": service_account,
+        }
+        with patch.dict(sys.modules, modules), patch(
+            "app.quota._json_request", return_value={"ok": True}
+        ) as request:
+            get_json = GoogleQuotaReader._authenticated_get({"project_id": PROJECT_ID})
+            self.assertEqual(get_json("https://monitoring.googleapis.com/v3/test"), {"ok": True})
+
+        self.assertEqual(
+            request.call_args.kwargs["headers"],
+            {
+                "Authorization": "Bearer redacted-token",
+                "x-goog-user-project": PROJECT_ID,
+            },
         )
 
     def reader(self, *, used=60, sampled_at=None, parent="projects/123/locations/global", window_start="2026-09-17T07:00:00Z"):
