@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -27,6 +28,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger("socialecho-youtube-incremental")
+
+DAILY_COLLECTION_SECONDS = 14 * 60
 
 app = FastAPI(title="SocialEcho YouTube Incremental", version=BUILD_VERSION)
 _lock = threading.Lock()
@@ -204,6 +207,7 @@ def _execute_backfill(job_id: str, request: BackfillRequest) -> None:
 
 def _execute_daily(job_id: str) -> None:
     started = datetime.now(timezone.utc)
+    collection_deadline = time.monotonic() + DAILY_COLLECTION_SECONDS
     _jobs[job_id] = {"job_id": job_id, "status": "running", "operation": "daily", "started_at": started.isoformat()}
     nyxi: dict[str, Any] = {"status": "failed", "job_id": job_id}
     weekly: dict[str, Any] | None = None
@@ -226,12 +230,14 @@ def _execute_daily(job_id: str) -> None:
             nyxi = collector.run(
                 now=started, commit=True, force=True, job_id=job_id,
                 config_record_id=NYXI_CONFIG_ID, brand="NYXI",
+                deadline=collection_deadline,
             )
             nyxi["job_id"] = job_id
             if started.astimezone(BEIJING).weekday() == 0:
                 try:
                     weekly = collector.refresh_older(
-                        now=started, commit=True, config_record_id=NYXI_CONFIG_ID
+                        now=started, commit=True, config_record_id=NYXI_CONFIG_ID,
+                        deadline=collection_deadline,
                     )
                 except Exception as error:
                     weekly = {"status": "failed", "error_type": type(error).__name__}
@@ -252,6 +258,7 @@ def _execute_daily(job_id: str) -> None:
                 budget = DailySearchBudget.from_nyxi(nyxi)
                 backfill = collector.backfill_budgeted(
                     now=started, job_id=job_id, budget=budget, brand="8BitDo",
+                    deadline=collection_deadline,
                 )
             except Exception as error:
                 logger.exception("daily 8BitDo backfill failed id=%s", job_id)

@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 
 from app.clients import ApiError
@@ -163,6 +164,72 @@ class LocalBudgetTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.metadata["search_calls"], "1")
 
+    def test_search_stops_before_next_page_at_runtime_deadline(self):
+        class PagedYouTube:
+            def __init__(self):
+                self.calls = 0
+
+            def search(self, *_args, **_kwargs):
+                self.calls += 1
+                return {"items": [], "nextPageToken": "next"}
+
+        youtube = PagedYouTube()
+        collector = IncrementalCollector(self.feishu, youtube)
+        with patch("app.collector.time.monotonic", side_effect=[0.0, 100.0]):
+            with self.assertRaises(ApiError) as caught:
+                collector._search(
+                    self.config,
+                    datetime(2026, 7, 1, tzinfo=timezone.utc),
+                    datetime(2026, 7, 2, tzinfo=timezone.utc),
+                    queries=["8bitdo"],
+                    deadline=50.0,
+                )
+
+        self.assertEqual(caught.exception.code, "segment_deadline")
+        self.assertEqual(caught.exception.metadata["search_calls"], "1")
+        self.assertEqual(youtube.calls, 1)
+
+    def test_backfill_stops_inside_segment_when_runtime_deadline_is_reached(self):
+        seen_deadlines = []
+
+        def collect(**kwargs):
+            seen_deadlines.append(kwargs.get("deadline"))
+            raise ApiError(
+                "youtube",
+                "segment_deadline",
+                "runtime deadline reached",
+                metadata={"search_calls": "3"},
+            )
+
+        self.collector._collect_window = collect
+        budget = DailySearchBudget()
+        result = self.collector.backfill_budgeted(
+            now=NOW, job_id="runtime-limit", budget=budget, brand="8BitDo"
+        )
+
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["search_calls"], 3)
+        self.assertEqual(result["budget_used"], 3)
+        self.assertEqual(result["completed_segments"], 0)
+        self.assertIsNotNone(seen_deadlines[0])
+        state = json.loads(self.config["YouTube历史游标"])
+        self.assertEqual(state["last_job_id"], "runtime-limit")
+        self.assertEqual(state["next_end"], "2026-07-13T11:00:42Z")
+
+
+    def test_incremental_and_weekly_stop_when_daily_deadline_is_expired(self):
+        with patch("app.collector.time.monotonic", return_value=100.0):
+            with self.assertRaises(ApiError) as incremental:
+                self.collector.run(
+                    now=NOW, commit=True, force=True, brand="NYXI", deadline=50.0
+                )
+            with self.assertRaises(ApiError) as weekly:
+                self.collector.refresh_older(
+                    now=NOW, commit=True, config_record_id="nyxi", deadline=50.0
+                )
+
+        self.assertEqual(incremental.exception.code, "segment_deadline")
+        self.assertEqual(weekly.exception.code, "segment_deadline")
 
 if __name__ == "__main__":
     unittest.main()

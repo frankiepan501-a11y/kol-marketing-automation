@@ -439,7 +439,8 @@ class IncrementalCollector:
 
     def _search(
         self, config: dict[str, Any], start: datetime, end: datetime,
-        queries: list[str] | None = None,
+        queries: list[str] | None = None, *,
+        deadline: float | None = None,
     ) -> tuple[dict[str, dict[str, list[str]]], int]:
         evidence: dict[str, dict[str, list[str]]] = {}
         calls = 0
@@ -451,6 +452,14 @@ class IncrementalCollector:
         for query in selected:
             token: str | None = None
             for page_number in range(1, 11):
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise ApiError(
+                        "youtube",
+                        "segment_deadline",
+                        "daily runtime deadline reached",
+                        metadata={"search_calls": str(calls)},
+                    )
+
                 calls += 1
                 try:
                     response = self.youtube.search(
@@ -498,16 +507,30 @@ class IncrementalCollector:
         job_id: str,
         refresh_existing_ids: bool,
         queries: list[str] | None = None,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """Collect one explicit window; shared by incremental and history flows.
 
         Historical windows only refresh IDs found in that window. This keeps a
         7-day backfill bounded even when a brand already has thousands of rows.
         """
-        evidence, search_calls = self._search(config, start, end, queries=queries)
+        def ensure_deadline(search_calls: int) -> None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ApiError(
+                    "youtube",
+                    "segment_deadline",
+                    "daily runtime deadline reached",
+                    metadata={"search_calls": str(search_calls)},
+                )
+
+        evidence, search_calls = self._search(
+            config, start, end, queries=queries, deadline=deadline
+        )
+        ensure_deadline(search_calls)
         all_rows = self.feishu.list_records(
             BASE_TOKEN, TABLES["competitor_posts"], field_names=POST_READ_FIELDS
         )
+        ensure_deadline(search_calls)
         current_ids = {
             _text(row.get("帖子ID"))
             for row in all_rows
@@ -526,6 +549,7 @@ class IncrementalCollector:
             if error.service == "youtube":
                 error.metadata.setdefault("search_calls", str(search_calls))
             raise
+        ensure_deadline(search_calls)
         found_ids = {str(video.get("id") or "") for video in videos}
         channel_ids = sorted(
             {
@@ -543,6 +567,7 @@ class IncrementalCollector:
             raise
         batch_id = f"ytbackfill-{now.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         normalized: list[dict[str, Any]] = []
+        ensure_deadline(search_calls)
         for video in videos:
             snippet = video.get("snippet") if isinstance(video.get("snippet"), dict) else {}
             channel_id = str(snippet.get("channelId") or "")
@@ -582,6 +607,7 @@ class IncrementalCollector:
             if row.get("KOL平台ID") and row.get("相关性") != "无关"
         }
 
+        ensure_deadline(search_calls)
         if commit:
             base_rows = [
                 {name: value for name, value in row.items() if name not in POST_SINGLE_SELECT_FIELDS}
@@ -727,6 +753,7 @@ class IncrementalCollector:
     def backfill_budgeted(
         self, *, now: datetime, job_id: str, budget: DailySearchBudget,
         brand: str = "8BitDo", window_days: int = 7,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """Resume one historical window within this daily job's conservative budget."""
 
@@ -779,7 +806,8 @@ class IncrementalCollector:
         completed = 0
         new_posts = 0
         search_calls = 0
-        deadline = time.monotonic() + 20 * 60
+        if deadline is None:
+            deadline = time.monotonic() + 20 * 60
         while pending:
             if time.monotonic() >= deadline:
                 return {
@@ -808,8 +836,27 @@ class IncrementalCollector:
                     platform=DEFAULT_PLATFORM, now=datetime.now(timezone.utc),
                     start=segment_start, end=segment_end, commit=True, job_id=job_id,
                     refresh_existing_ids=False, queries=[str(segment["query"])],
+                    deadline=deadline,
                 )
             except ApiError as error:
+                if error.code == "segment_deadline":
+                    try:
+                        attempted_calls = max(
+                            0, int(error.metadata.get("search_calls", "0"))
+                        )
+                    except ValueError:
+                        attempted_calls = 0
+                    budget.consume(attempted_calls)
+                    search_calls += attempted_calls
+                    save()
+                    return {
+                        "status": "partial",
+                        "message": "本次日任务已到安全时限，保留当前小段下次续跑",
+                        "next_end": rfc3339(end),
+                        "completed_segments": completed,
+                        "search_calls": search_calls,
+                        **budget.summary(),
+                    }
                 if error.service == "youtube" and error.code in YOUTUBE_DAILY_QUOTA_CODES:
                     try:
                         attempted_calls = max(1, int(error.metadata.get("search_calls", "1")))
@@ -862,7 +909,18 @@ class IncrementalCollector:
         config_record_id: str | None = None,
         brand: str | None = None,
         platform: str = DEFAULT_PLATFORM,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
+        def ensure_deadline(search_calls: int = 0) -> None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ApiError(
+                    "youtube",
+                    "segment_deadline",
+                    "daily collection deadline reached",
+                    metadata={"search_calls": str(search_calls)},
+                )
+
+        ensure_deadline()
         config = self._config(
             config_record_id=config_record_id,
             brand=brand,
@@ -874,6 +932,7 @@ class IncrementalCollector:
         events = self.feishu.list_records(
             BASE_TOKEN, TABLES["marketing_events"], field_names=EVENT_READ_FIELDS
         )
+        ensure_deadline()
         decision = schedule_decision(now, events, brand=brand, force=force)
         if not decision.should_run:
             if commit:
@@ -899,10 +958,12 @@ class IncrementalCollector:
             )
 
         start, end = incremental_window(config, now)
-        evidence, search_calls = self._search(config, start, end)
+        evidence, search_calls = self._search(config, start, end, deadline=deadline)
+        ensure_deadline(search_calls)
         all_rows = self.feishu.list_records(
             BASE_TOKEN, TABLES["competitor_posts"], field_names=POST_READ_FIELDS
         )
+        ensure_deadline(search_calls)
         existing_rows = [
             row
             for row in all_rows
@@ -922,6 +983,7 @@ class IncrementalCollector:
             all_rows, target_ids=set(requested_ids)
         )
         videos = self.youtube.videos(requested_ids)
+        ensure_deadline(search_calls)
         found_ids = {str(video.get("id") or "") for video in videos}
         channel_ids = sorted(
             {
@@ -932,6 +994,7 @@ class IncrementalCollector:
             }
         )
         channels = {str(item.get("id") or ""): item for item in self.youtube.channels(channel_ids)}
+        ensure_deadline(search_calls)
         batch_id = f"ytinc-{now.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         normalized: list[dict[str, Any]] = []
         for video in videos:
@@ -981,6 +1044,7 @@ class IncrementalCollector:
             and str(row.get("KOL平台ID")) not in NYXI_OFFICIAL_CHANNEL_IDS
         }
 
+        ensure_deadline(search_calls)
         if commit:
             base_rows = [
                 {name: value for name, value in row.items() if name not in POST_SINGLE_SELECT_FIELDS}
@@ -1062,17 +1126,27 @@ class IncrementalCollector:
         }
 
     def refresh_older(
-        self, *, now: datetime, commit: bool, config_record_id: str
+        self, *, now: datetime, commit: bool, config_record_id: str,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """Refresh one deterministic Monday batch without changing the search waterline."""
+        def ensure_deadline() -> None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ApiError(
+                    "youtube", "segment_deadline", "daily collection deadline reached"
+                )
+
+        ensure_deadline()
         config = self._config(config_record_id=config_record_id, brand="NYXI")
         rows = self.feishu.list_records(
             BASE_TOKEN, TABLES["competitor_posts"], field_names=POST_READ_FIELDS
         )
+        ensure_deadline()
         relevant = [row for row in rows if is_youtube_identity(row, brand="NYXI")]
         index, count, batch = older_refresh_batch(relevant, now)
         ids = [_text(row.get("帖子ID")) for row in batch]
         videos = self.youtube.videos(ids)
+        ensure_deadline()
         by_id = {str(video.get("id") or ""): video for video in videos}
         channel_ids = sorted({
             str(video.get("snippet", {}).get("channelId") or "")
@@ -1082,6 +1156,7 @@ class IncrementalCollector:
             str(item.get("id") or ""): item
             for item in self.youtube.channels(channel_ids)
         }
+        ensure_deadline()
         updates: list[tuple[str, dict[str, Any]]] = []
         for row in batch:
             video = by_id.get(_text(row.get("帖子ID")))
@@ -1097,6 +1172,7 @@ class IncrementalCollector:
             change = build_update(row, incoming)
             if change:
                 updates.append((str(row["_record_id"]), change))
+        ensure_deadline()
         if commit:
             self.feishu.batch_update(BASE_TOKEN, TABLES["competitor_posts"], updates)
         return {

@@ -63,5 +63,11 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertEqual(payload["new_posts"], 3)
 
 
+
+    def test_daily_runtime_deadline_is_shared_by_all_collection_stages(self):
+        main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("DAILY_COLLECTION_SECONDS = 14 * 60", main)
+        self.assertGreaterEqual(main.count("deadline=collection_deadline"), 3)
+
 if __name__ == "__main__":
     unittest.main()
