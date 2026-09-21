@@ -7,6 +7,120 @@ from app import cs_dispatch
 
 
 class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_job_title_route_sends_to_single_active_employee(self):
+        search_result = {"data": {"items": [{
+            "record_id": "rec_role",
+            "fields": {
+                "状态": "待派",
+                "卡片消息ID": "",
+                "入站时间": 1750000000000,
+                "分配运营": "独立站运营专员",
+                "产品": "Controller",
+                "销售平台": "独立站",
+                "客诉摘要": "Connection issue",
+            },
+        }]}}
+        with (
+            patch.object(cs_dispatch, "CS_ASSIST_SECRET", "configured"),
+            patch.object(cs_dispatch, "OBSERVE_CONFIGURED", True),
+            patch.object(cs_dispatch, "OBSERVE_UNION_CONFIGURED", True),
+            patch.object(cs_dispatch, "DISPATCH_NOT_BEFORE_RAW", "1700000000000"),
+            patch.object(cs_dispatch, "DISPATCH_NOT_BEFORE_MS", 1700000000000),
+            patch.object(cs_dispatch, "OBSERVE", False),
+            patch.object(
+                cs_dispatch.feishu,
+                "api",
+                new=AsyncMock(side_effect=[search_result, {}]),
+            ),
+            patch.object(
+                cs_dispatch.feishu,
+                "fetch_users_by_job_title",
+                new=AsyncMock(return_value=[("叶星", "on_ye_xing")]),
+            ),
+            patch.object(
+                cs_dispatch.cs_resources,
+                "active_resources",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                cs_dispatch,
+                "_send_card_result",
+                new=AsyncMock(return_value={
+                    "ok": True,
+                    "message_id": "om_role",
+                    "http_status": 200,
+                    "feishu_code": 0,
+                    "error": "",
+                }),
+            ) as send_card,
+        ):
+            result = await cs_dispatch.run(limit=1)
+
+        self.assertEqual(1, result["sent"])
+        self.assertEqual([], result["fallbacks"])
+        self.assertEqual("on_ye_xing", send_card.await_args.args[0])
+        self.assertEqual("assigned_job_title", result["samples"][0]["收件模式"])
+
+    async def test_job_title_route_without_unique_active_employee_does_not_send(self):
+        search_result = {"data": {"items": [{
+            "record_id": "rec_role_missing",
+            "fields": {
+                "状态": "待派",
+                "卡片消息ID": "",
+                "入站时间": 1750000000000,
+                "分配运营": "独立站运营专员",
+                "销售平台": "独立站",
+            },
+        }]}}
+        with (
+            patch.object(cs_dispatch, "CS_ASSIST_SECRET", "configured"),
+            patch.object(cs_dispatch, "OBSERVE_CONFIGURED", True),
+            patch.object(cs_dispatch, "OBSERVE_UNION_CONFIGURED", True),
+            patch.object(cs_dispatch, "DISPATCH_NOT_BEFORE_RAW", "1700000000000"),
+            patch.object(cs_dispatch, "DISPATCH_NOT_BEFORE_MS", 1700000000000),
+            patch.object(cs_dispatch, "OBSERVE", False),
+            patch.object(
+                cs_dispatch.feishu,
+                "api",
+                new=AsyncMock(return_value=search_result),
+            ),
+            patch.object(
+                cs_dispatch.feishu,
+                "fetch_users_by_job_title",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                cs_dispatch.cs_resources,
+                "active_resources",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                cs_dispatch,
+                "_send_card_result",
+                new=AsyncMock(),
+            ) as send_card,
+        ):
+            result = await cs_dispatch.run(limit=1)
+
+        send_card.assert_not_awaited()
+        self.assertEqual(0, result["sent"])
+        self.assertEqual([], result["fallbacks"])
+        self.assertEqual("job_title_no_active_user", result["send_errors"][0]["error"])
+
+    async def test_job_title_route_with_multiple_active_employees_is_ambiguous(self):
+        with patch.object(
+            cs_dispatch.feishu,
+            "fetch_users_by_job_title",
+            new=AsyncMock(return_value=[
+                ("叶星", "on_ye_xing"),
+                ("另一位运营", "on_second_operator"),
+            ]),
+        ):
+            union_id, route = await cs_dispatch._resolve_target("独立站运营专员")
+
+        self.assertEqual("", union_id)
+        self.assertEqual("job_title_multiple_active_users", route)
+
     def test_netease_smtp_rejected_recipient_is_not_treated_as_accepted(self):
         smtp = MagicMock()
         smtp.__enter__.return_value = smtp

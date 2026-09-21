@@ -6,7 +6,7 @@
 
 分类/路由规则 v1 (Frankie 2026-06-25 封板; 2026-07-24 补 Walmart):
 - 真实客户: 亚马逊单(订单号 3-7-7) → 站点待领星反查(不自动派站点, 防误派);
-  Walmart/沃尔玛 → 林明坚; 美客多单 → 梁俊辉; 独立站 → 张佳烨.
+  Walmart/沃尔玛 → 林明坚; 美客多单 → 梁俊辉; 独立站 → 独立站运营专员岗位.
 - 无订单号且分不清是客户还是分销商 → 默认当客户; 有平台线索则按平台路由, 否则独立站兜底.
 - 非客户: 供应商/B2B/合作 → 标记推 B2B 群; 营销/SEO/平台通知/垃圾 → 忽略归档.
 - 置信度: 操作咨询=AI直答 / 质量补发=AI起草人工审 / 投诉升级·退款=必须人工.
@@ -25,6 +25,10 @@ from . import deepseek, feishu, cs_resources
 # ---- 资源 (非 secret, 可 env 覆盖) ----
 CS_APP_TOKEN = os.environ.get("CS_TICKET_APP_TOKEN", "J2fibLgBZaLGTNsQOPHcQXLonZe")
 T_TICKET = os.environ.get("CS_TICKET_TABLE_ID", "tblAhXMA9uDbGEMS")
+INDEPENDENT_SITE_JOB_TITLE = (
+    os.environ.get("CS_INDEPENDENT_SITE_JOB_TITLE", "独立站运营专员").strip()
+    or "独立站运营专员"
+)
 POWKONG_INBOX_FID = os.environ.get("ZOHO_POWKONG_CS_INBOX_FID", "7855434000000008014")
 B2B_GROUP = os.environ.get("CS_B2B_GROUP_CHAT_ID", "oc_2e878553984592d7396401fdd6a37d61")
 
@@ -1109,7 +1113,7 @@ def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = N
         elif c.get("platform") == "美客多":
             platform, operator = "美客多", "梁俊辉"
         else:
-            platform, operator = "独立站", "张佳烨"
+            platform, operator = "独立站", INDEPENDENT_SITE_JOB_TITLE
 
     brand = _pick(c.get("brand"), ["FUNLAB", "POWKONG"], msg["brand_default"])
     fields = {

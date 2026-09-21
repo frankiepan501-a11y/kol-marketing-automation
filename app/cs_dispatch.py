@@ -72,13 +72,13 @@ _PLACEHOLDER_BLACKLIST = [
     "[price", "[eta", "[quantity", "[xxx", "[your name", "[link", "<placeholder",
 ]
 _PLACEHOLDER_RE = re.compile(r"[\[【][^\]】]{0,30}(待确认|待填|占位|tbd|placeholder)[^\]】]{0,30}[\]】]", re.I)
-# 销售平台→运营 的 open_id(聪哥1号 namespace); 兜底/待定 → 降级 Frankie
+# 固定平台运营姓名→open_id(聪哥1号 namespace)。
+# 独立站不放个人映射：工单保存岗位名，派卡时实时查在职员工并取得 union_id。
 OP_OPENID = {
     "黄奕纯": "ou_1b981067ce8edfd82af7c70c109310e4",
     "陈翔宇": "ou_9c322382284a7a6672a091b9f4c0a551",
     "林明坚": "ou_35aa6883c0598bac5c7e06fcb06f7c4d",
     "余培霓": "ou_40ff10b05fc358f88c5674f053665551",
-    "张佳烨": "ou_d850dab47bdbaea6736709d354de4b0f",
     "梁俊辉": "ou_b9dd2272e72908fe68964d7bba53109f",
 }
 _union_cache = {}
@@ -104,21 +104,36 @@ def _recent_seen(rid: str) -> bool:
     return _recent.get(rid, 0) > now - _RECENT_TTL
 
 
-async def _resolve_union(operator: str) -> str:
-    """运营姓名 → union_id(经聪哥1号 open_id→union, 跨app通用)。兜底/待定/查不到 → 返回''(调用方降级 Frankie)。"""
-    oid = OP_OPENID.get((operator or "").strip())
+async def _resolve_target(operator: str) -> tuple[str, str]:
+    """Resolve one ticket owner to a union_id and route label.
+
+    Independent-site tickets store a stable Feishu job title. Exactly one active
+    employee must hold that title; otherwise the ticket stays unsent so two
+    people cannot act on the same customer ticket.
+    """
+    operator = (operator or "").strip()
+    if operator == _csi.INDEPENDENT_SITE_JOB_TITLE:
+        matches = await feishu.fetch_users_by_job_title(operator)
+        if not matches:
+            return "", "job_title_no_active_user"
+        if len(matches) != 1:
+            return "", "job_title_multiple_active_users"
+        return matches[0][1], "assigned_job_title"
+
+    oid = OP_OPENID.get(operator)
     if not oid:
-        return ""
+        return "", "operator_union_id_unresolved"
     if oid in _union_cache:
-        return _union_cache[oid]
+        return _union_cache[oid], "assigned_operator"
     try:
         d = await feishu.api("GET", f"/contact/v3/users/{oid}?user_id_type=open_id", which="notify")
         u = ((d.get("data", {}) or {}).get("user", {}) or {}).get("union_id", "")
         if u:
             _union_cache[oid] = u
-        return u
+            return u, "assigned_operator"
+        return "", "operator_union_id_unresolved"
     except Exception:
-        return ""
+        return "", "operator_union_id_unresolved"
 
 
 async def _token() -> str:
@@ -227,7 +242,8 @@ def _product_label(f: dict, n: int = 34) -> str:
 
 def _operator_needs_fallback(operator: str) -> bool:
     op = (operator or "").strip()
-    return (not op) or ("待定" in op) or (op not in OP_OPENID)
+    known_role = op == _csi.INDEPENDENT_SITE_JOB_TITLE
+    return (not op) or ("待定" in op) or (op not in OP_OPENID and not known_role)
 
 
 def _card_status_label(f: dict) -> str:
@@ -878,14 +894,28 @@ async def run(limit: int = 10, rids: str = "") -> dict:
             historical_skipped += 1
             continue
         eligible += 1
-        # 观察期统一发 Frankie; 生产期按「分配运营」路由(兜底/待定/查不到 → 降级 Frankie)
+        # 观察期统一发 Frankie；生产期优先按岗位/运营路由。
+        # 岗位无人或多人时拒绝发送，避免误派；旧姓名无法解析时维持 Frankie 兜底。
         operator = _x(f, "分配运营")
-        resolved_union = "" if OBSERVE else await _resolve_union(operator)
-        union = OBSERVE_UNION if OBSERVE else (resolved_union or OBSERVE_UNION)
-        route = "observe_frankie" if OBSERVE else ("assigned_operator" if resolved_union else "fallback_frankie")
+        if OBSERVE:
+            resolved_union, route_error = OBSERVE_UNION, "observe_frankie"
+        else:
+            resolved_union, route_error = await _resolve_target(operator)
+            if route_error.startswith("job_title_"):
+                send_errors.append({
+                    "record_id": rid,
+                    "operator": operator,
+                    "route": "job_title_blocked",
+                    "http_status": 0,
+                    "feishu_code": None,
+                    "error": route_error,
+                })
+                continue
+        union = resolved_union or OBSERVE_UNION
+        route = route_error if resolved_union else "fallback_frankie"
         if route == "fallback_frankie":
             fallbacks.append({"record_id": rid, "operator": operator,
-                              "reason": "operator_union_id_unresolved"})
+                              "reason": route_error})
         send_result = await _send_card_result(
             union,
             _build_card(rid, f, resources=resources),

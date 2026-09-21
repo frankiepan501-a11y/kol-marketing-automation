@@ -7,6 +7,30 @@ from app import cs_ingest
 
 
 class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_independent_site_ticket_routes_to_job_title_not_person(self):
+        message = {
+            "id": "<role-route@example.com>",
+            "id_prefix": "CSF",
+            "frm": "customer@example.com",
+            "subj": "Product question",
+            "body": "Can you help me?",
+            "channel": "邮箱",
+            "brand_default": "FUNLAB",
+            "received_ms": 1700000000000,
+            "attachments": [],
+        }
+        classification = {
+            "is_cs": True,
+            "platform": "独立站",
+            "summary": "Product question",
+        }
+
+        fields = cs_ingest._to_fields(message, classification, resources=[])
+
+        self.assertEqual("独立站", fields["销售平台"])
+        self.assertEqual("独立站运营专员", fields["分配运营"])
+        self.assertNotEqual("张佳烨", fields["分配运营"])
+
     async def test_funlab_missing_credentials_is_reported_as_source_error(self):
         with patch.object(cs_ingest, "NE_USER", ""), \
              patch.object(cs_ingest, "NE_CODE", ""), \
