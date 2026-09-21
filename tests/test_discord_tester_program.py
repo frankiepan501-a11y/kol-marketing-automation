@@ -102,6 +102,27 @@ class DiscordTesterInteractionTests(unittest.IsolatedAsyncioTestCase):
                 await routes.run_direct_campaign(request, authorization="Bearer ")
         to_thread.assert_not_awaited()
 
+    async def test_final10_campaign_admin_endpoint_uses_internal_auth(self):
+        request = AsyncMock()
+        request.json.return_value = {"channel_name": "general", "commit": False}
+        result = {"ok": True, "commit": False}
+        with (patch.object(routes, "_check_internal_auth") as check_auth,
+              patch.object(routes.asyncio, "to_thread", new=AsyncMock(return_value=result)) as to_thread):
+            response = await routes.run_final10_campaign(request, authorization="Bearer internal")
+
+        self.assertEqual(result, response)
+        check_auth.assert_called_once_with("Bearer internal")
+        self.assertEqual(routes.final10_campaign_publisher.publish, to_thread.await_args.args[0])
+        self.assertEqual("general", to_thread.await_args.kwargs["channel_name"])
+        self.assertFalse(to_thread.await_args.kwargs["commit"])
+
+    async def test_final10_campaign_admin_endpoint_rejects_other_channels(self):
+        request = AsyncMock()
+        request.json.return_value = {"channel_name": "announcement", "commit": False}
+        with patch.object(routes, "_check_internal_auth"):
+            with self.assertRaisesRegex(Exception, "channel_name must be general"):
+                await routes.run_final10_campaign(request, authorization="Bearer internal")
+
     async def test_direct_interest_dm_does_not_duplicate_existing_marker(self):
         message = program.direct_interest_dm_payload()
         request = AsyncMock(side_effect=[

@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse
 
 from . import discord_direct_campaign_config as direct_campaign
 from . import discord_direct_campaign as direct_campaign_publisher
+from . import discord_final10_campaign as final10_campaign_publisher
 from . import discord_tester_program
 
 
@@ -362,6 +363,27 @@ async def run_direct_campaign(request: Request, authorization: str = Header(defa
             commit=commit,
             rehearsal_message_id=str(body.get("rehearsal_message_id") or ""),
             rehearsal_user_id=str(body.get("rehearsal_user_id") or ""),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/admin/final10-campaign")
+async def run_final10_campaign(request: Request, authorization: str = Header(default="")):
+    """Publish the approved final-ten post through FUN Bot with duplicate protection."""
+    _check_internal_auth(authorization)
+    body = await request.json()
+    channel_name = str(body.get("channel_name") or "")
+    if channel_name != final10_campaign_publisher.PUBLIC_CHANNEL:
+        raise HTTPException(400, "channel_name must be general")
+    commit = body.get("commit", False)
+    if not isinstance(commit, bool):
+        raise HTTPException(400, "commit must be a boolean")
+    try:
+        return await asyncio.to_thread(
+            final10_campaign_publisher.publish,
+            channel_name=channel_name,
+            commit=commit,
         )
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
