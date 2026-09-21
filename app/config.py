@@ -270,11 +270,9 @@ T_ROI_ATTR_GAP = env("T_ROI_ATTR_GAP", "tbliU8GDl6SU9b4y")
 NOTIFY_CHAT_ID = env("NOTIFY_CHAT_ID", "oc_8b71a652a25ec0dd1c8af2c53e86ed93")
 # 格式: "name1:open_id1,name2:open_id2,..."
 NOTIFY_USERS_STR = env("NOTIFY_USERS",
-    # 2026-06-08: 余琦华已离职(飞书人事 resigned=True), 从默认值移除保持与 Zeabur env 一致。
-    # 注: reviewer/ship_main 角色走职务实时查(已自动过滤离职), 此默认仅 env 未设时兜底。
+    # 运营主审一律按职务实时查；这里仅保留创始人和商务 CC，不放个人运营兜底。
     "潘志聪-Frankie:ou_629ce01f4bc31de078e10fcb038dbf78,"
-    "吴晓丹:ou_c65fc5c31c650790db623640b7ac74f7,"
-    "张佳烨-独立站运营:ou_d850dab47bdbaea6736709d354de4b0f"
+    "吴晓丹:ou_c65fc5c31c650790db623640b7ac74f7"
 )
 NOTIFY_USERS = [(p.split(":", 1)[0], p.split(":", 1)[1]) for p in NOTIFY_USERS_STR.split(",") if ":" in p]
 
@@ -307,7 +305,8 @@ KOL_FRANKIE_MAPPED = bool(KOL_ASSISTANT_FRANKIE_UNION_ID) and any(
     uid == KOL_ASSISTANT_FRANKIE_UNION_ID for _, uid in KOL_NOTIFY_USERS
 )
 KOL_SHIP_CC_MAPPED = any("晓丹" in name for name, _ in KOL_NOTIFY_USERS)
-KOL_REVIEWER_FALLBACK_MAPPED = any("独立站" in name for name, _ in KOL_NOTIFY_USERS)
+# 兼容健康字段名：岗位失败时的安全告警只依赖 KOL 群 + Frankie，不再依赖个人运营。
+KOL_REVIEWER_FALLBACK_MAPPED = bool(NOTIFY_CHAT_ID) and KOL_FRANKIE_MAPPED
 KOL_FEISHU_CREDENTIALS_CONFIGURED = bool(
     FEISHU_KOL_ASSISTANT_APP_ID and FEISHU_KOL_ASSISTANT_APP_SECRET
 )

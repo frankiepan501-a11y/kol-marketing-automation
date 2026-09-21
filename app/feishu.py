@@ -1106,8 +1106,52 @@ def build_contact_info_block(contact_info: dict = None,
 # ===== 按职务实时查在职员工 (KOL媒体助手 contact:contact.base:readonly) =====
 # 遵守 feishu-people-as-source-of-truth 铁律: 不硬编码 open_id, 按职务实时查飞书人事
 # 缓存 1h: 避免每次发卡片都拉一遍部门列表 (大约 7-10 个部门 + 每部门 1 次 user list)
-_job_title_cache = {}  # {title: (timestamp, [(name, open_id), ...])}
+_job_title_cache = {}  # {(identity, departments, title): (timestamp, [(name, union_id), ...])}
 _JOB_TITLE_TTL = 3600
+_role_resolution_alerted_at = {}
+_ROLE_RESOLUTION_ALERT_TTL = 900
+
+
+async def _alert_role_resolution_failure(title: str) -> None:
+    """岗位无人/查询失败时，告警业务群和 Frankie；不把工作卡退回旧个人。"""
+    from . import config
+
+    now = time.time()
+    if now - _role_resolution_alerted_at.get(title, 0) < _ROLE_RESOLUTION_ALERT_TTL:
+        return
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "red",
+            "title": {"tag": "plain_text", "content": "KOL 岗位收件人查询失败"},
+        },
+        "elements": [{
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": (
+                f"未找到在职职务 **{title}**，相关审核/寄样卡已停止派发，"
+                "不会退回旧员工个人。请检查飞书人事职务、员工状态或通讯录权限。"
+            )},
+        }],
+    }
+    sent = False
+    try:
+        await send_card_message(
+            "chat_id", config.NOTIFY_CHAT_ID, card,
+            biz="AUDIT", level="P0", which="kol_assistant",
+        )
+        sent = True
+    except Exception as e:
+        print(f"[resolve_notify_targets] role failure group alert failed: {e}")
+    try:
+        await send_card_message(
+            "union_id", config.KOL_ASSISTANT_FRANKIE_UNION_ID, card,
+            biz="AUDIT", level="P0", which="kol_assistant",
+        )
+        sent = True
+    except Exception as e:
+        print(f"[resolve_notify_targets] role failure Frankie alert failed: {e}")
+    if sent:
+        _role_resolution_alerted_at[title] = now
 
 
 async def resolve_notify_targets(role: str) -> list:
@@ -1116,18 +1160,13 @@ async def resolve_notify_targets(role: str) -> list:
     role:
       - "reviewer": 待审草稿主审 → 独立站运营专员 + Frankie CC (兼容旧调用)
       - "frankie": 仅 Frankie (SLA 48h 异常汇总等创始人例外)
-      - "needs_rewrite": 需人改 → NOTIFY_USERS 全员 (Frankie 必收防质量异常漏看)
+      - "needs_rewrite": 需人改 → 独立站运营专员 + Frankie
       - "ship_main": 寄样确认主审 → 独立站运营专员
       - "ship_cc": 寄样 CC → Frankie + 吴晓丹
 
-    reviewer/ship_main 在职务查询失败时只降级到 KOL_NOTIFY_USERS 关键字过滤。
+    reviewer/needs_rewrite/ship_main 在职务查询失败时告警并停止，不降级到个人名单。
     """
     from . import config
-    if role == "needs_rewrite":
-        if not config.KOL_NOTIFY_USERS:
-            raise RuntimeError("KOL_NOTIFY_USERS is empty; refusing silent notification loss")
-        return list(config.KOL_NOTIFY_USERS)
-
     if role == "ship_cc":
         targets = [u for u in config.KOL_NOTIFY_USERS
                    if u[0].startswith("潘") or "晓丹" in u[0]]
@@ -1142,13 +1181,11 @@ async def resolve_notify_targets(role: str) -> list:
             raise RuntimeError("KOL_ASSISTANT_FRANKIE_UNION_ID is missing")
         return [(config.KOL_FRANKIE_NAME, uid)]
 
-    # reviewer / ship_main 都用职务实时查
+    # reviewer / needs_rewrite / ship_main 都用职务实时查
     by_title = await fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)
     if not by_title:
-        # 降级: 用 NOTIFY_USERS 关键字过滤 "独立站"
-        print(f"[resolve_notify_targets] WARN: job_title={config.KOL_REVIEWER_JOB_TITLE!r} returned empty, fallback")
-        by_title = [u for u in config.KOL_NOTIFY_USERS if "独立站" in u[0]]
-    if not by_title:
+        print(f"[resolve_notify_targets] ERROR: job_title={config.KOL_REVIEWER_JOB_TITLE!r} returned empty")
+        await _alert_role_resolution_failure(config.KOL_REVIEWER_JOB_TITLE)
         raise RuntimeError(
             f"no active KOL reviewer for job_title={config.KOL_REVIEWER_JOB_TITLE!r}"
         )
@@ -1156,9 +1193,9 @@ async def resolve_notify_targets(role: str) -> list:
     if role == "ship_main":
         return by_title
 
-    if role == "reviewer":
+    if role in {"reviewer", "needs_rewrite"}:
         # 独立站运营专员 + Frankie CC, 去重
-        frankie_cc = [u for u in config.KOL_NOTIFY_USERS if u[0].startswith("潘")]
+        frankie_cc = await resolve_notify_targets("frankie")
         seen = set()
         merged = []
         for name, oid in by_title + frankie_cc:
@@ -1172,21 +1209,27 @@ async def resolve_notify_targets(role: str) -> list:
     raise ValueError(f"unknown role: {role!r}")
 
 
-async def fetch_users_by_job_title(title: str):
+async def fetch_users_by_job_title(title: str, *, which: str = "kol_assistant",
+                                   department_ids=None):
     """按职务名拿当前在职员工 [(name, union_id), ...].
-    用 KOL媒体助手 contact API；个人发送继续留在同一 App namespace。
+    默认用 KOL媒体助手 contact API；其他既有业务可显式传 identity。
+    始终返回 union_id，发送方可在自己的 App namespace 安全使用。
     1h 缓存. 失败时返回空列表 (调用方应有降级路径).
     """
-    cached = _job_title_cache.get(title)
+    from . import config
+    if department_ids is None:
+        department_ids = list(config.KOL_CONTACT_DEPARTMENT_IDS) if which == "kol_assistant" else []
+    cache_key = (which, tuple(department_ids), title)
+    cached = _job_title_cache.get(cache_key)
     if cached and (time.time() - cached[0]) < _JOB_TITLE_TTL:
         return cached[1]
 
-    tok = await token("kol_assistant")
     results = []
     try:
+        tok = await token(which)
         # 1. 生产环境直接使用 App 可见范围内的明确部门，避免从根部门枚举报 40004。
         async with httpx.AsyncClient(timeout=30.0) as cli:
-            dept_ids = list(config.KOL_CONTACT_DEPARTMENT_IDS)
+            dept_ids = list(department_ids)
             if dept_ids:
                 depts = [{"open_department_id": dept_id} for dept_id in dept_ids]
             else:
@@ -1199,7 +1242,13 @@ async def fetch_users_by_job_title(title: str):
                     headers={"Authorization": f"Bearer {tok}"},
                 )
                 r.raise_for_status()
-                depts = (r.json().get("data") or {}).get("items") or []
+                dept_payload = r.json()
+                if dept_payload.get("code") != 0:
+                    raise RuntimeError(
+                        f"department query failed: code={dept_payload.get('code')} "
+                        f"msg={dept_payload.get('msg')}"
+                    )
+                depts = (dept_payload.get("data") or {}).get("items") or []
 
             # 2. 按部门列用户 (含 job_title + status)
             seen = set()
@@ -1220,10 +1269,15 @@ async def fetch_users_by_job_title(title: str):
                         headers={"Authorization": f"Bearer {tok}"},
                     )
                     if ur.status_code >= 400:
-                        break
+                        raise RuntimeError(
+                            f"user query failed: dept={dept_id} status={ur.status_code}"
+                        )
                     ud = ur.json()
                     if ud.get("code") != 0:
-                        break
+                        raise RuntimeError(
+                            f"user query failed: dept={dept_id} code={ud.get('code')} "
+                            f"msg={ud.get('msg')}"
+                        )
                     items = (ud.get("data") or {}).get("items") or []
                     for u in items:
                         oid = u.get("union_id")
@@ -1242,11 +1296,13 @@ async def fetch_users_by_job_title(title: str):
                         break
                     page_token = (ud.get("data") or {}).get("page_token") or ""
                     if not page_token:
-                        break
+                        raise RuntimeError(
+                            f"user query pagination failed: dept={dept_id} has_more without page_token"
+                        )
     except Exception as e:
         print(f"[feishu.fetch_users_by_job_title] {title} err: {e}")
         # 失败不缓存, 下次重试
         return []
 
-    _job_title_cache[title] = (time.time(), results)
+    _job_title_cache[cache_key] = (time.time(), results)
     return results

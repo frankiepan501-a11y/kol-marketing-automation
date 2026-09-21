@@ -21,11 +21,11 @@ import httpx
 
 log = logging.getLogger("weekly_report.publisher")
 
-# 收件人列表 (Phase 3.1 硬编码, Phase 3.2 改 job_title 动态查 + 兜底)
-RECIPIENTS_OPEN_IDS = [
-    ("Frankie", "ou_629ce01f4bc31de078e10fcb038dbf78"),
-    ("张佳烨", "ou_d850dab47bdbaea6736709d354de4b0f"),
-]
+# 周报收件人：Frankie 固定抄送；运营负责人按飞书人事职务实时查询。
+# 站外增长助手仍是 PLANNED，本流程继续沿用现有 notify App；岗位查询返回
+# union_id，可跨 App 安全发送，不复用其他 App 的 open_id。
+FRANKIE_OPEN_ID = "ou_629ce01f4bc31de078e10fcb038dbf78"
+OPERATIONS_JOB_TITLE = "独立站运营专员"
 
 # 飞书 wiki 父节点 - 周报 docx 挂这里
 # .strip() 防 user 在 Zeabur env paste 时多个前导/尾随空格 (生产踩过坑)
@@ -412,16 +412,35 @@ def _build_card(title: str, summary: str, doc_url: str, gaps: list, history_url:
     }
 
 
-async def _send_card(open_id: str, card: dict):
+async def resolve_weekly_recipients() -> list:
+    """返回 [(姓名, receive_id_type, receive_id)]，不做个人兜底。"""
+    from app import feishu
+
+    operators = await feishu.fetch_users_by_job_title(
+        OPERATIONS_JOB_TITLE,
+        which="notify",
+        department_ids=[],
+    )
+    if not operators:
+        raise RuntimeError(
+            f"未找到在职职务={OPERATIONS_JOB_TITLE!r}；停止发布，避免周报漏交接"
+        )
+
+    recipients = [("Frankie", "open_id", FRANKIE_OPEN_ID)]
+    recipients.extend((name, "union_id", union_id) for name, union_id in operators)
+    return recipients
+
+
+async def _send_card(receive_type: str, receive_id: str, card: dict):
     """用 notify app 发卡片. 返回 (ok, error_msg).
     Phase 1: 改走 feishu.send_card_message 统一标题格式 (SEO·P2 — SEO 周报)."""
     from app import feishu
     try:
-        await feishu.send_card_message("open_id", open_id, card, biz="SEO", level="P2")
+        await feishu.send_card_message(receive_type, receive_id, card, biz="SEO", level="P2")
         return True, ""
     except Exception as e:
         msg = f"{type(e).__name__}: {str(e)[:300]}"
-        log.warning("send_card to %s failed: %s", open_id, msg)
+        log.warning("send_card to %s:%s failed: %s", receive_type, receive_id, msg)
         return False, msg
 
 
@@ -459,6 +478,9 @@ async def publish(html_str: str, markdown: str, collected: dict, start_date, end
     """4 步发布."""
     log.info("publisher.publish %s ~ %s, html=%dB md=%dB gaps=%d",
               start_date, end_date, len(html_str), len(markdown), len(gaps))
+
+    # 先解析收件人，再创建文档/写历史表。岗位无人时直接停止，避免重试产生重复产物。
+    recipients = await resolve_weekly_recipients()
 
     week_label = f"W{start_date.isocalendar()[1]}"
     title = f"双品牌运营周报 {week_label} · {start_date}~{end_date}"
@@ -514,8 +536,8 @@ async def publish(html_str: str, markdown: str, collected: dict, start_date, end
     history_url = f"https://u1wpma3xuhr.feishu.cn/base/{HISTORY_APP}?table={HISTORY_TABLE}" if html_file_token else ""
     card = _build_card(title, summary, doc_url, gaps, history_url=history_url)
     notified = []
-    for name, oid in RECIPIENTS_OPEN_IDS:
-        ok, err = await _send_card(oid, card)
+    for name, receive_type, receive_id in recipients:
+        ok, err = await _send_card(receive_type, receive_id, card)
         notified.append({"name": name, "ok": ok, "error": err})
     result["actions"].append({"step": "notify", "recipients": notified})
 
@@ -528,7 +550,7 @@ async def publish(html_str: str, markdown: str, collected: dict, start_date, end
             doc_url,
             [],
         )
-        ok, err = await _send_card("ou_629ce01f4bc31de078e10fcb038dbf78", gap_card)
+        ok, err = await _send_card("open_id", FRANKIE_OPEN_ID, gap_card)
         result["actions"].append({"step": "gap_alert", "ok": ok, "error": err, "gap_count": len(gaps)})
 
     return result

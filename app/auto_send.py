@@ -461,11 +461,11 @@ async def _trigger_pause(brand: str, reason: str):
         await feishu.send_card_message("chat_id", config.NOTIFY_CHAT_ID, card)
     except Exception as e:
         print(f"[auto_send PAUSE] 群告警失败: {e}")
-    for _name, _oid in config.NOTIFY_USERS:
+    for _name, _union_id in await feishu.resolve_notify_targets("frankie"):
         try:
-            await feishu.send_card_message("open_id", _oid, card)
+            await feishu.send_card_message("union_id", _union_id, card)
         except Exception as e:
-            print(f"[auto_send PAUSE] 私聊告警失败 {_oid}: {e}")
+            print(f"[auto_send PAUSE] Frankie 私聊告警失败: {e}")
 
 
 def _brand_from_alias(alias: str) -> str:

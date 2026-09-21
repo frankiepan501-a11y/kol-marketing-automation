@@ -161,14 +161,24 @@ class KolR9NoLegacyTests(unittest.TestCase):
         self.assertEqual([("运营", "on_operator")], result)
         self.assertEqual("union_id", client.get.await_args_list[0].kwargs["params"]["user_id_type"])
 
-    def test_empty_kol_notify_users_fail_closed(self):
-        with patch.object(config, "KOL_NOTIFY_USERS", []):
-            with self.assertRaisesRegex(RuntimeError, "refusing silent notification loss"):
-                asyncio.run(feishu.resolve_notify_targets("needs_rewrite"))
+    def test_empty_kol_notify_users_does_not_block_job_title_routing(self):
+        with patch.object(config, "KOL_NOTIFY_USERS", []), patch.object(
+            config, "KOL_ASSISTANT_FRANKIE_UNION_ID", "on_frankie"
+        ), patch.object(
+            feishu,
+            "fetch_users_by_job_title",
+            new=AsyncMock(return_value=[("运营", "on_operator")]),
+        ):
+            result = asyncio.run(feishu.resolve_notify_targets("needs_rewrite"))
+        self.assertEqual(
+            [("运营", "on_operator"), (config.KOL_FRANKIE_NAME, "on_frankie")],
+            result,
+        )
 
     def test_missing_reviewer_and_fallback_fail_closed(self):
         with patch.object(config, "KOL_NOTIFY_USERS", []), \
-             patch.object(feishu, "fetch_users_by_job_title", new=AsyncMock(return_value=[])):
+             patch.object(feishu, "fetch_users_by_job_title", new=AsyncMock(return_value=[])), \
+             patch.object(feishu, "_alert_role_resolution_failure", new=AsyncMock()):
             with self.assertRaisesRegex(RuntimeError, "no active KOL reviewer"):
                 asyncio.run(feishu.resolve_notify_targets("reviewer"))
 
