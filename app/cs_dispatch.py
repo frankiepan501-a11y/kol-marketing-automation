@@ -4,7 +4,7 @@
 客诉摘要 + AI草稿全文 + 输入框 + 按钮) → 回标 卡片消息ID + 状态=待回。
 
 观察期 CS_DISPATCH_OBSERVE=1(默认): 全部卡片发 Frankie 一人(校准路由/草稿质量), 卡片按钮回调
-当前只 ack 不真回客户(安全)。观察稳定后 =0 → 按「分配运营」路由到对应运营(需 open_id→union)。
+当前只 ack 不真回客户(安全)。观察稳定后 =0 → 按「分配运营」路由；岗位值会发给全部在职持岗人。
 凭据走 env(public 仓铁律)。
 """
 import asyncio
@@ -104,36 +104,47 @@ def _recent_seen(rid: str) -> bool:
     return _recent.get(rid, 0) > now - _RECENT_TTL
 
 
-async def _resolve_target(operator: str) -> tuple[str, str]:
-    """Resolve one ticket owner to a union_id and route label.
+async def _resolve_targets(operator: str) -> tuple[list[tuple[str, str]], str]:
+    """Resolve a ticket owner to every intended active recipient.
 
-    Independent-site tickets store a stable Feishu job title. Exactly one active
-    employee must hold that title; otherwise the ticket stays unsent so two
-    people cannot act on the same customer ticket.
+    Independent-site tickets store a stable Feishu job title. During handover,
+    every active employee holding that title receives an identical card; after
+    one employee leaves, the same lookup naturally returns only the successor.
     """
     operator = (operator or "").strip()
     if operator == _csi.INDEPENDENT_SITE_JOB_TITLE:
         matches = await feishu.fetch_users_by_job_title(operator)
-        if not matches:
-            return "", "job_title_no_active_user"
-        if len(matches) != 1:
-            return "", "job_title_multiple_active_users"
-        return matches[0][1], "assigned_job_title"
+        targets, seen = [], set()
+        for name, union_id in matches:
+            union_id = (union_id or "").strip()
+            if union_id and union_id not in seen:
+                seen.add(union_id)
+                targets.append((name, union_id))
+        if not targets:
+            return [], "job_title_no_active_user"
+        route = "assigned_job_title_all" if len(targets) > 1 else "assigned_job_title"
+        return targets, route
 
     oid = OP_OPENID.get(operator)
     if not oid:
-        return "", "operator_union_id_unresolved"
+        return [], "operator_union_id_unresolved"
     if oid in _union_cache:
-        return _union_cache[oid], "assigned_operator"
+        return [(operator, _union_cache[oid])], "assigned_operator"
     try:
         d = await feishu.api("GET", f"/contact/v3/users/{oid}?user_id_type=open_id", which="notify")
         u = ((d.get("data", {}) or {}).get("user", {}) or {}).get("union_id", "")
         if u:
             _union_cache[oid] = u
-            return u, "assigned_operator"
-        return "", "operator_union_id_unresolved"
+            return [(operator, u)], "assigned_operator"
+        return [], "operator_union_id_unresolved"
     except Exception:
-        return "", "operator_union_id_unresolved"
+        return [], "operator_union_id_unresolved"
+
+
+async def _resolve_target(operator: str) -> tuple[str, str]:
+    """Backward-compatible single-recipient view used by older callers/tests."""
+    targets, route = await _resolve_targets(operator)
+    return (targets[0][1] if targets else ""), route
 
 
 async def _token() -> str:
@@ -197,6 +208,39 @@ async def _update_card(message_id: str, card: dict) -> bool:
     except Exception as e:
         print(f"[cs_dispatch._update_card] {message_id} fail: {e}")
         return False
+
+
+def _parse_card_message_ids(value) -> list[str]:
+    """Read legacy single IDs and handover-era JSON arrays from the text field."""
+    if isinstance(value, list):
+        raw = value
+    else:
+        text = value if isinstance(value, str) else ""
+        try:
+            parsed = json.loads(text) if text.strip().startswith("[") else None
+        except json.JSONDecodeError:
+            parsed = None
+        raw = parsed if isinstance(parsed, list) else [text]
+    ids, seen = [], set()
+    for item in raw:
+        mid = item.strip() if isinstance(item, str) else ""
+        if mid and mid not in seen:
+            seen.add(mid)
+            ids.append(mid)
+    return ids
+
+
+async def _update_related_cards(clicked_message_id: str, fields: dict, card: dict) -> bool:
+    """Update the clicked card and every sibling copy for the same ticket."""
+    message_ids, seen = [], set()
+    for mid in [clicked_message_id, *_parse_card_message_ids(_x(fields, "卡片消息ID"))]:
+        if mid and mid not in seen:
+            seen.add(mid)
+            message_ids.append(mid)
+    if not message_ids:
+        return False
+    results = await asyncio.gather(*(_update_card(mid, card) for mid in message_ids))
+    return all(results)
 
 
 def _x(f: dict, key: str) -> str:
@@ -345,12 +389,12 @@ def _card_message_id(event: dict, f: dict) -> str:
         (event.get("message") or {}).get("message_id"),
         (event.get("context") or {}).get("open_message_id"),
         (event.get("context") or {}).get("message_id"),
-        _x(f, "卡片消息ID"),
     ]
     for mid in candidates:
         if isinstance(mid, str) and mid.strip():
             return mid.strip()
-    return ""
+    stored = _parse_card_message_ids(_x(f, "卡片消息ID"))
+    return stored[0] if stored else ""
 
 
 def _ticket_info_md(rid: str, f: dict, status_label: str = "待处理") -> str:
@@ -826,7 +870,8 @@ async def run(limit: int = 10, rids: str = "") -> dict:
         config_errors.append("CS_DISPATCH_NOT_BEFORE_MS")
     if config_errors:
         return {"observe": OBSERVE, "observe_configured": OBSERVE_CONFIGURED,
-                "candidates": 0, "sent": 0, "config_errors": config_errors,
+                "candidates": 0, "sent": 0, "cards_sent": 0,
+                "config_errors": config_errors,
                 "fallbacks": [], "send_errors": [], "samples": []}
     if not CS_ASSIST_SECRET:
         return {"error": "FEISHU_CS_ASSISTANT_APP_SECRET 未配"}
@@ -837,7 +882,7 @@ async def run(limit: int = 10, rids: str = "") -> dict:
         if len(requested_rids) != 1:
             return {"error": "rids must contain exactly one record_id",
                     "config_errors": [], "read_errors": [], "send_errors": [],
-                    "fallbacks": [], "samples": [], "sent": 0}
+                    "fallbacks": [], "samples": [], "sent": 0, "cards_sent": 0}
         items = []
         for rid in requested_rids:
             try:
@@ -875,7 +920,7 @@ async def run(limit: int = 10, rids: str = "") -> dict:
         resources = await cs_resources.active_resources()
     except Exception:
         resources = cs_resources.builtin_resources()
-    sent, eligible, historical_skipped = 0, 0, 0
+    sent, cards_sent, eligible, historical_skipped = 0, 0, 0, 0
     samples, fallbacks, send_errors = [], [], []
     for it in items:
         if sent >= limit:
@@ -895,13 +940,13 @@ async def run(limit: int = 10, rids: str = "") -> dict:
             continue
         eligible += 1
         # 观察期统一发 Frankie；生产期优先按岗位/运营路由。
-        # 岗位无人或多人时拒绝发送，避免误派；旧姓名无法解析时维持 Frankie 兜底。
+        # 岗位路由会向全部在职持岗人分别发卡，供交接期并行带教；岗位无人时拒绝发送。
         operator = _x(f, "分配运营")
         if OBSERVE:
-            resolved_union, route_error = OBSERVE_UNION, "observe_frankie"
+            targets, route_error = [("Frankie", OBSERVE_UNION)], "observe_frankie"
         else:
-            resolved_union, route_error = await _resolve_target(operator)
-            if route_error.startswith("job_title_"):
+            targets, route_error = await _resolve_targets(operator)
+            if route_error == "job_title_no_active_user":
                 send_errors.append({
                     "record_id": rid,
                     "operator": operator,
@@ -911,34 +956,49 @@ async def run(limit: int = 10, rids: str = "") -> dict:
                     "error": route_error,
                 })
                 continue
-        union = resolved_union or OBSERVE_UNION
-        route = route_error if resolved_union else "fallback_frankie"
+        route = route_error if targets else "fallback_frankie"
+        if not targets:
+            targets = [("Frankie", OBSERVE_UNION)]
         if route == "fallback_frankie":
             fallbacks.append({"record_id": rid, "operator": operator,
                               "reason": route_error})
-        send_result = await _send_card_result(
-            union,
-            _build_card(rid, f, resources=resources),
-            idempotency_key=f"cs_dispatch:{rid}",
-        )
-        mid = send_result.get("message_id", "") if send_result.get("ok") else ""
-        if mid:
+        successful_mids = []
+        for target_name, union in targets:
+            idempotency_key = f"cs_dispatch:{rid}"
+            if len(targets) > 1:
+                recipient_key = hashlib.sha256(union.encode("utf-8")).hexdigest()[:12]
+                idempotency_key += f":{recipient_key}"
+            send_result = await _send_card_result(
+                union,
+                _build_card(rid, f, resources=resources),
+                idempotency_key=idempotency_key,
+            )
+            mid = send_result.get("message_id", "") if send_result.get("ok") else ""
+            if mid:
+                successful_mids.append(mid)
+                cards_sent += 1
+            else:
+                send_errors.append({"record_id": rid, "operator": operator,
+                                    "target": target_name, "route": route,
+                                    "http_status": send_result.get("http_status"),
+                                    "feishu_code": send_result.get("feishu_code"),
+                                    "error": send_result.get("error", "")})
+        if successful_mids:
+            stored_mids = (successful_mids[0] if len(successful_mids) == 1
+                           else json.dumps(successful_mids, ensure_ascii=False,
+                                           separators=(",", ":")))
             await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
-                             {"fields": {"卡片消息ID": mid, "状态": "待回"}}, which="notify")
+                             {"fields": {"卡片消息ID": stored_mids, "状态": "待回"}}, which="notify")
             sent += 1
             if len(samples) < 12:
                 samples.append({"产品": _x(f, "产品"), "平台": _x(f, "销售平台"),
                                 "建议运营": operator, "收件模式": route,
+                                "收件人数": len(successful_mids),
                                 "摘要": _x(f, "客诉摘要")[:40]})
-        else:
-            send_errors.append({"record_id": rid, "operator": operator, "route": route,
-                                "http_status": send_result.get("http_status"),
-                                "feishu_code": send_result.get("feishu_code"),
-                                "error": send_result.get("error", "")})
     return {"observe": OBSERVE, "observe_configured": OBSERVE_CONFIGURED,
             "candidates": len(items), "eligible": eligible,
             "historical_skipped": historical_skipped,
-            "sent": sent, "config_errors": [],
+            "sent": sent, "cards_sent": cards_sent, "config_errors": [],
             "fallbacks": fallbacks, "read_errors": read_errors,
             "send_errors": send_errors, "samples": samples}
 
@@ -1470,7 +1530,7 @@ async def _show_callback_error(event: dict, result: dict) -> None:
             "tag": "div",
             "text": {"tag": "lark_md", "content": f"**本次没有发给客户**\n原因：{reason}\n请修正后重试。"},
         })
-        await _update_card(_card_message_id(event, f), card)
+        await _update_related_cards(_card_message_id(event, f), f, card)
     except Exception as exc:
         print(f"[cs_dispatch._show_callback_error] rid={rid} err={exc}")
 
@@ -1596,7 +1656,7 @@ async def _escalate_async(rid: str, f: dict, tag: str, summary: str, msg_id: str
         await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
                          {"fields": {"状态": "已升级"}}, which="notify")
         await _notify_frankie(f"⬆️ 工单升级\n{tag}\n{summary}")
-        await _update_card(msg_id, _build_result_card(
+        await _update_related_cards(msg_id, f, _build_result_card(
             rid, f, "purple", "已升级",
             "⬆️ [客服·已升级]",
             "已通知 Frankie/负责人介入；当前负责人不用继续处理这张卡。",
@@ -1604,7 +1664,7 @@ async def _escalate_async(rid: str, f: dict, tag: str, summary: str, msg_id: str
         ))
     except Exception as e:
         print(f"[cs_dispatch._escalate_async] rid={rid} err={e}")
-        await _update_card(msg_id, _build_result_card(
+        await _update_related_cards(msg_id, f, _build_result_card(
             rid, f, "red", "升级失败",
             "❌ [客服·升级失败]",
             f"升级通知失败：{str(e)[:120]}",
@@ -1619,7 +1679,7 @@ async def _reassign_async(rid: str, f: dict, tag: str, op: str, summary: str, ms
         ))
         if not notice_mid:
             await _notify_frankie(f"🔁 改派请求（原派 {op}）\n{tag}\n{summary}")
-        await _update_card(msg_id, _build_result_card(
+        await _update_related_cards(msg_id, f, _build_result_card(
             rid, f, "blue", "已请求改派",
             "🔁 [客服·已请求改派]",
             "已通知 Frankie/负责人重新分配；当前负责人不用在这张卡上回客户。",
@@ -1628,7 +1688,7 @@ async def _reassign_async(rid: str, f: dict, tag: str, op: str, summary: str, ms
         ))
     except Exception as e:
         print(f"[cs_dispatch._reassign_async] err={e}")
-        await _update_card(msg_id, _build_result_card(
+        await _update_related_cards(msg_id, f, _build_result_card(
             rid, f, "red", "改派失败",
             "❌ [客服·改派失败]",
             f"改派通知失败：{str(e)[:120]}",
@@ -1651,21 +1711,16 @@ async def _undo_reassign_async(rid: str, f: dict, source_msg_id: str = "",
             resources = await cs_resources.active_resources()
         except Exception:
             resources = cs_resources.builtin_resources()
-        target = target_msg_id or _x(f, "卡片消息ID") or source_msg_id
-        restored = await _update_card(target, _build_card(rid, f2, resources=resources))
-        if source_msg_id and source_msg_id != target:
-            await _update_card(source_msg_id, _build_result_card(
-                rid, f2, "green", "已发回原负责人",
-                "✅ [客服·已发回原负责人]",
-                f"已恢复给 {owner or '原负责人'}；请在原卡继续处理。",
-                "这次操作不会回复客户，也不会新建工单。"
-            ))
+        target = target_msg_id or _card_message_id({}, f) or source_msg_id
+        restored = await _update_related_cards(
+            target, f2, _build_card(rid, f2, resources=resources)
+        )
         if not restored and source_msg_id:
             await _notify_frankie(f"⚠️ 客服卡片恢复失败\n{rid}\n请手动检查原卡 message_id={target}")
     except Exception as e:
         print(f"[cs_dispatch._undo_reassign_async] rid={rid} err={e}")
         if source_msg_id:
-            await _update_card(source_msg_id, _build_result_card(
+            await _update_related_cards(source_msg_id, f, _build_result_card(
                 rid, f, "red", "恢复失败",
                 "❌ [客服·恢复失败]",
                 f"恢复原负责人失败：{str(e)[:120]}",
@@ -1685,7 +1740,7 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = 
     try:
         ok, detail, outbound_id = await _dispatch_reply(f, reply)
         if not ok:
-            await _update_card(msg_id, _build_result_card(
+            await _update_related_cards(msg_id, f, _build_result_card(
                 rid, f, "red", "发送失败",
                 "❌ [客服·发送失败]",
                 f"未发给客户：{detail}",
@@ -1696,7 +1751,7 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = 
             return
         success = True
         if CS_REPLY_DRY_RUN_TO:
-            await _update_card(msg_id, _build_result_card(
+            await _update_related_cards(msg_id, f, _build_result_card(
                 rid, f, "blue", "DRY-RUN已提交",
                 "🧪 [客服·DRY-RUN已提交]",
                 detail,
@@ -1708,7 +1763,7 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = 
                                      "回复时间": int(time.time() * 1000),
                                      "回复人": _operator_label(event),
                                      "最近出站Message-ID": outbound_id[:1000]}}, which="notify")
-        await _update_card(msg_id, _build_result_card(
+        await _update_related_cards(msg_id, f, _build_result_card(
             rid, f, "green", "已回复",
             "✅ [客服·已回复]",
             f"已发送给客户：{detail}",
@@ -1727,7 +1782,7 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = 
             )
         except Exception as persist_exc:
             print(f"[cs_dispatch._send_async pending evidence persist] rid={rid} err={persist_exc}")
-        await _update_card(msg_id, _build_result_card(
+        await _update_related_cards(msg_id, f, _build_result_card(
             rid, f, "orange", "等待发送凭证",
             "⚠️ [客服·待核实]",
             f"发送通道已受理，但系统还没在已发送箱确认凭证：{str(e)[:100]}",
@@ -1750,7 +1805,7 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = 
                 )
             except Exception as persist_exc:
                 print(f"[cs_dispatch._send_async verified persist] rid={rid} err={persist_exc}")
-            await _update_card(msg_id, _build_result_card(
+            await _update_related_cards(msg_id, f, _build_result_card(
                 rid, f, "orange", "客户已收到·工单待修复",
                 "⚠️ [客服·勿重复发送]",
                 f"已取得真实发送凭证，但工单状态回写失败：{str(e)[:100]}",
@@ -1761,7 +1816,7 @@ async def _send_async(rid: str, f: dict, reply: str, event: dict, msg_id: str = 
                     u, f"⚠️ 客服工单回写失败\n{tag}\n客户已收到且有出站凭证；请勿重发，需修复工单状态。"
                 )
         else:
-            await _update_card(msg_id, _build_result_card(
+            await _update_related_cards(msg_id, f, _build_result_card(
                 rid, f, "red", "发送异常",
                 "❌ [客服·发送异常]",
                 f"发送异常：{str(e)[:120]}",
@@ -1805,7 +1860,7 @@ async def handle_callback(event: dict) -> dict:
     if act == "escalate":
         # 去重(防飞书回调 timeout 重试重复通知 Frankie): 已升级 / 5min 内已升过 → 拦下
         if _x(f, "状态") == "已升级" or _recent_seen(f"{rid}:esc"):
-            _spawn(_update_card(msg_id, _build_result_card(
+            _spawn(_update_related_cards(msg_id, f, _build_result_card(
                 rid, f, "purple", "已升级",
                 "⬆️ [客服·已升级]",
                 "该工单已升级过，无需重复点击。",
@@ -1813,7 +1868,7 @@ async def handle_callback(event: dict) -> dict:
             )))
             return _toast("该工单已升级 ✓ 无需重复")
         _recent[f"{rid}:esc"] = time.time()
-        _spawn(_update_card(msg_id, _build_result_card(
+        _spawn(_update_related_cards(msg_id, f, _build_result_card(
             rid, f, "purple", "升级提交中",
             "⬆️ [客服·升级提交中]",
             "正在通知 Frankie/负责人；这张卡不用继续回客户。",
@@ -1825,21 +1880,21 @@ async def handle_callback(event: dict) -> dict:
     if act == "undo_reassign":
         status = _x(f, "状态")
         if status in ("已回复", "已解决", "已升级"):
-            _spawn(_update_card(msg_id, _build_result_card(
+            _spawn(_update_related_cards(msg_id, f, _build_result_card(
                 rid, f, "red", "不能恢复",
                 "❌ [客服·不能恢复]",
                 f"工单已进入终态：{status}，不能恢复到待回。",
                 "避免把已经回复/升级的工单重新放回运营待办。"
             )))
             return _toast("工单已进入终态，不能恢复", "error")
-        target_mid = (val.get("target_mid") or _x(f, "卡片消息ID") or msg_id).strip()
+        target_mid = (val.get("target_mid") or _card_message_id({}, f) or msg_id).strip()
         return_to = (val.get("return_to") or _x(f, "分配运营") or "").strip()
         _spawn(_undo_reassign_async(rid, f, msg_id, target_mid, return_to))
         return _toast("已发回原负责人 ✓")
 
     if act == "reassign":
         if _recent_seen(f"{rid}:rea"):
-            _spawn(_update_card(msg_id, _build_result_card(
+            _spawn(_update_related_cards(msg_id, f, _build_result_card(
                 rid, f, "blue", "已请求改派",
                 "🔁 [客服·已请求改派]",
                 "已提交过改派请求，无需重复点击。",
@@ -1848,7 +1903,7 @@ async def handle_callback(event: dict) -> dict:
             )))
             return _toast("已通知改派 ✓ 无需重复")
         _recent[f"{rid}:rea"] = time.time()
-        _spawn(_update_card(msg_id, _build_result_card(
+        _spawn(_update_related_cards(msg_id, f, _build_result_card(
             rid, f, "blue", "改派提交中",
             "🔁 [客服·改派提交中]",
             "正在通知 Frankie/负责人重新分配；这张卡不用继续回客户。",
@@ -1882,7 +1937,7 @@ async def handle_callback(event: dict) -> dict:
             return _toast(resource_block, "error")
         pending_id = _pending_outbound_id(f)
         if pending_id:
-            _spawn(_update_card(msg_id, _build_result_card(
+            _spawn(_update_related_cards(msg_id, f, _build_result_card(
                 rid, f, "orange", "等待发送凭证",
                 "⚠️ [客服·待核实]",
                 "发送通道曾受理此回复，但已发送箱凭证尚未确认。",
@@ -1891,7 +1946,7 @@ async def handle_callback(event: dict) -> dict:
             return _toast("该回复已被通道受理、正在核实，请勿重复发送", "error")
         # 🚨 去重①(内存即时): 正在发送中 / 刚发完 5min 内(防 bitable 读后写延迟漏判) → 拦下
         if rid in _inflight or _recent_seen(rid):
-            _spawn(_update_card(msg_id, _build_result_card(
+            _spawn(_update_related_cards(msg_id, f, _build_result_card(
                 rid, f, "green", "已提交/处理中",
                 "✅ [客服·已提交]",
                 "该工单正在发送或刚已发送，请勿重复点击。",
@@ -1900,7 +1955,7 @@ async def handle_callback(event: dict) -> dict:
             return _toast("该回复正在发送或刚已发送，请勿重复点击")
         # 🚨 去重②(持久): 工单已终态(已回复/已解决/已升级) → 跨进程/重启/超 5min 兜底
         if _x(f, "状态") in ("已回复", "已解决", "已升级"):
-            _spawn(_update_card(msg_id, _build_result_card(
+            _spawn(_update_related_cards(msg_id, f, _build_result_card(
                 rid, f, "green" if _x(f, "状态") in ("已回复", "已解决") else "purple",
                 _x(f, "状态"),
                 f"✅ [客服·{_x(f, '状态')}]",
@@ -1912,7 +1967,7 @@ async def handle_callback(event: dict) -> dict:
         # DRY-RUN 或 LIVE → 异步真发(立即返回 toast, 防飞书卡片回调 >3s timeout+重试导致重复发送)
         _inflight.add(rid)
         _recent[rid] = time.time()  # 立即标记, 防 bitable 读后写延迟下的重复
-        _spawn(_update_card(msg_id, _build_result_card(
+        _spawn(_update_related_cards(msg_id, f, _build_result_card(
             rid, f, "green", "发送提交中",
             "✅ [客服·发送提交中]",
             "已收到操作，正在发送给客户。",
