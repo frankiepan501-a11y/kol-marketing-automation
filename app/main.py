@@ -62,6 +62,7 @@ async def stop_discord_tester_role_sync():
         await runtime.stop()
 
 _ALERT_COOLDOWN = 3600
+_FEISHU_DATA_NOT_READY_INCIDENT = "feishu-bitable:1254607"
 _alert_last = {}
 _endpoint_alert_dedup = EndpointAlertDedup(
     config.KOL_ENDPOINT_ALERT_DEDUP_PATH,
@@ -133,8 +134,8 @@ def _endpoint_failure_context(endpoint: str, transient: bool) -> dict:
             "status": "飞书数据未就绪（系统已重试仍失败）",
             "stage": "读取 KOL 邮件草稿表，做去重和 24h 限速检查",
             "impact": "本轮 auto-send 没有进入发信队列；没有证据显示已误发邮件。",
-            "owner_action": "运营无需处理草稿。Frankie 只需观察；如果 1h 后仍重复出现，再查飞书表状态或 Zeabur 日志。",
-            "next_try": "下次 cron 会自动再试；同 endpoint 1h 内只提醒 1 次，避免刷屏。",
+            "owner_action": "运营无需处理草稿。系统会继续自动重试；只有持续故障才提醒 Frankie。",
+            "next_try": "单次瞬态失败不提醒；持续 30 分钟后提醒 1 次，未恢复时每 6 小时最多再提醒 1 次。",
         }
     if endpoint == "/auto-send/run":
         return {
@@ -144,6 +145,15 @@ def _endpoint_failure_context(endpoint: str, transient: bool) -> dict:
             "impact": "本轮 auto-send 可能未完成；需先确认是否有草稿被卡住。",
             "owner_action": "Frankie 或技术侧检查 Zeabur 日志、飞书表字段和 Zoho 状态；运营先不要手动改草稿状态。",
             "next_try": "下次 cron 会自动再试；同 endpoint 1h 内只提醒 1 次。",
+        }
+    if transient:
+        return {
+            "title": "KOL 飞书读表持续失败",
+            "status": "飞书数据未就绪（多个后台任务已重试）",
+            "stage": "KOL 自动任务读取飞书多维表格",
+            "impact": "列出的任务在对应轮次未完成；系统没有证据显示发生误发邮件。",
+            "owner_action": "运营无需重复触发。系统继续自动重试，技术侧只在持续故障时介入。",
+            "next_try": "同一根因合并为一条；持续 30 分钟后提醒，未恢复时每 6 小时最多提醒 1 次。",
         }
     return {
         "title": "系统任务运行失败",
@@ -223,7 +233,15 @@ async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
         "/ship-recon/", "/weekly-report/", "/media-archive/",
     )
     is_kol_endpoint = str(endpoint).startswith(kol_prefixes)
-    if is_kol_endpoint:
+    transient_incident = None
+    is_data_not_ready = is_kol_endpoint and _is_feishu_data_not_ready(error, trace)
+    if is_data_not_ready:
+        transient_incident = _endpoint_alert_dedup.record_incident_failure(
+            _FEISHU_DATA_NOT_READY_INCIDENT, endpoint,
+        )
+        if transient_incident is None:
+            return
+    elif is_kol_endpoint:
         if not _endpoint_alert_dedup.claim(endpoint):
             return
     else:
@@ -233,7 +251,10 @@ async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
             return
         _alert_last[endpoint] = now
 
-    card, level = _build_endpoint_failure_card(endpoint, error, trace)
+    display_endpoint = endpoint
+    if transient_incident:
+        display_endpoint = ", ".join(transient_incident["endpoints"])
+    card, level = _build_endpoint_failure_card(display_endpoint, error, trace)
     delivered = False
     try:
         # 2026-06-08 不进群(Frankie #4)。端点失败=infra 故障, 运营无法处理 → 保持只私聊 Frankie
@@ -253,8 +274,47 @@ async def _alert_endpoint_failure(endpoint: str, error: str, trace: str = ""):
     except Exception as e:
         print(f"[_alert_endpoint_failure] {endpoint} self-alert fail: {e}")
     finally:
-        if is_kol_endpoint and not delivered:
+        if is_data_not_ready and not delivered:
+            _endpoint_alert_dedup.release_incident_alert(
+                _FEISHU_DATA_NOT_READY_INCIDENT,
+            )
+        elif is_kol_endpoint and not delivered:
             _endpoint_alert_dedup.release(endpoint)
+
+
+async def _resolve_feishu_data_not_ready_incident(endpoint: str):
+    """Send one recovery receipt only if the merged incident was alerted."""
+    recovered = _endpoint_alert_dedup.resolve_incident_endpoint(
+        _FEISHU_DATA_NOT_READY_INCIDENT, endpoint,
+    )
+    if not recovered:
+        return
+    duration_minutes = max(1, round(recovered["duration_seconds"] / 60))
+    endpoints = ", ".join(recovered["endpoints"])
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "green",
+            "title": {"tag": "plain_text", "content": "🟢 [KOL·P3] 飞书读表已恢复 · 自动任务恢复运行"},
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": (
+                "**结论**\n飞书 Bitable 的 `1254607 Data not ready` 已恢复。\n\n"
+                f"**受影响任务**\n`{endpoints}`\n\n"
+                f"**持续时间**\n约 {duration_minutes} 分钟\n\n"
+                "**系统处理**\n后续 cron 会正常继续；运营无需补做或重复触发。"
+            )}},
+        ],
+    }
+    for name, union_id in config.KOL_NOTIFY_USERS:
+        if name.startswith("潘"):
+            try:
+                await feishu.send_card_message(
+                    "union_id", union_id, card, biz="AUDIT", level="P3",
+                    which="kol_assistant",
+                )
+            except Exception as exc:
+                print(f"[_resolve_feishu_data_not_ready_incident] recovery card fail: {exc}")
 
 
 def _cleanup_b2b_mail_jobs():
@@ -2052,10 +2112,12 @@ async def run_dashboard(authorization: str = Header(default=""), async_mode: boo
 
         async def _job():
             try:
-                result = await dashboard.run()
+                with feishu.kol_background_read_recovery():
+                    result = await dashboard.run()
                 _dashboard_refresh_jobs[job_id].update(
                     status="success", finished_at=datetime_now_string(), result=result,
                 )
+                await _resolve_feishu_data_not_ready_incident("/dashboard/refresh")
                 print(f"[dashboard_refresh] background done ok={result.get('ok', True)}")
             except Exception as e:
                 tr = _tb.format_exc()[-1200:]
@@ -2238,10 +2300,12 @@ async def _start_auto_send_job() -> dict:
 
     async def _job():
         try:
-            result = await auto_send.run()
+            with feishu.kol_background_read_recovery():
+                result = await auto_send.run()
             _auto_send_jobs[job_id].update(
                 status="success", finished_at=datetime_now_string(), result=result,
             )
+            await _resolve_feishu_data_not_ready_incident("/auto-send/run")
         except Exception as exc:
             tr = _tb.format_exc()[-1000:]
             _auto_send_jobs[job_id].update(
@@ -3749,6 +3813,10 @@ async def _start_launch_runtime_job(*, campaign_id: str, mode: str,
                 stage="completed", stage_detail={"status": job_status},
                 stage_started_ts=time.time(),
             )
+            if mode == "autonomous":
+                await _resolve_feishu_data_not_ready_incident(
+                    "/launch/runtime/autonomous",
+                )
             outcome_error_count = len(
                 (result.get("outcome_reconcile") or {}).get("errors") or []
             )

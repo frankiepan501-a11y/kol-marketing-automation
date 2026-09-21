@@ -91,6 +91,32 @@ class FeishuFetchAllRecordsTests(unittest.TestCase):
         self.assertEqual(1, api.await_count)
         sleep.assert_not_awaited()
 
+    def test_product_table_receives_background_recovery(self):
+        failure = feishu.FeishuAPIError(method="GET", path="/records",
+            status_code=400, feishu_code=1254607, feishu_msg="Data not ready")
+        success = {"data": {"items": [], "has_more": False}}
+        with patch.object(feishu.config, "T_PRODUCT", "product-test"), \
+             patch.object(feishu, "api", new=AsyncMock(side_effect=[failure, success])) as api, \
+             patch("asyncio.sleep", new=AsyncMock()) as sleep:
+            with feishu.kol_background_read_recovery():
+                rows = asyncio.run(feishu.fetch_all_records("product-test"))
+        self.assertEqual([], rows)
+        self.assertEqual(2, api.await_count)
+        sleep.assert_awaited_once_with(30)
+
+    def test_get_record_receives_background_recovery_for_product(self):
+        failure = feishu.FeishuAPIError(method="GET", path="/records/rec1",
+            status_code=400, feishu_code=1254607, feishu_msg="Data not ready")
+        success = {"data": {"record": {"record_id": "rec1", "fields": {}}}}
+        with patch.object(feishu.config, "T_PRODUCT", "product-test"), \
+             patch.object(feishu, "api", new=AsyncMock(side_effect=[failure, success])) as api, \
+             patch("asyncio.sleep", new=AsyncMock()) as sleep:
+            with feishu.kol_background_read_recovery():
+                row = asyncio.run(feishu.get_record("product-test", "rec1"))
+        self.assertEqual("rec1", row["record_id"])
+        self.assertEqual(2, api.await_count)
+        sleep.assert_awaited_once_with(30)
+
     def test_kol_transient_later_page_recovers_without_losing_first_page(self):
         calls = []
 

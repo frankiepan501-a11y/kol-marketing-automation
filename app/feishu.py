@@ -22,6 +22,18 @@ def kol_background_read_recovery():
         _kol_background_recovery.reset(scope)
 
 
+def _kol_background_recovery_tables() -> set[str]:
+    """Tables used by long-running KOL jobs; reads only, never writes."""
+    names = (
+        "T_KOL", "T_EDITOR", "T_DRAFT", "T_PRODUCT", "T_DASH",
+        "T_LAUNCH_CAMPAIGN", "T_LAUNCH_PARTICIPANT",
+    )
+    return {
+        str(getattr(config, name, "") or "") for name in names
+        if getattr(config, name, "")
+    }
+
+
 class FeishuAPIError(RuntimeError):
     """Structured API failure without exposing authorization headers."""
 
@@ -310,7 +322,7 @@ async def fetch_all_records(table_id: str, field_names: list = None, page_size: 
     # Only KOL core reads receive the extra recovery window. Shared consumers
     # and all writes retain their existing retry policy. Budget is per scan,
     # not per page, so a large table cannot multiply the delay indefinitely.
-    kol_core_tables = {config.T_KOL, config.T_EDITOR, config.T_DRAFT}
+    kol_core_tables = _kol_background_recovery_tables()
     recovery_delays = (
         (30, 60) if _kol_background_recovery.get() and table_id in kol_core_tables else ()
     )
@@ -442,8 +454,28 @@ async def search_records(table_id: str, filters: list, field_names: list = None)
 
 
 async def get_record(table_id: str, record_id: str):
-    r = await api("GET", f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records/{record_id}")
-    return r["data"]["record"]
+    import asyncio
+    path = f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{table_id}/records/{record_id}"
+    recovery_delays = (
+        (30, 60)
+        if _kol_background_recovery.get() and table_id in _kol_background_recovery_tables()
+        else ()
+    )
+    for attempt in range(len(recovery_delays) + 1):
+        try:
+            r = await api("GET", path)
+            return r["data"]["record"]
+        except FeishuAPIError as exc:
+            if exc.feishu_code != 1254607 or attempt >= len(recovery_delays):
+                raise
+            delay = recovery_delays[attempt]
+            print(
+                f"[kol.read_recovery] table={table_id} record={record_id} "
+                f"recovery={attempt + 1}/{len(recovery_delays)} "
+                f"delay_seconds={delay} code=1254607"
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError("unreachable get_record recovery state")
 
 
 async def probe_kol_bitable_access() -> dict:

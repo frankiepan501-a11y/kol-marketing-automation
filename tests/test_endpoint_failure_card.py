@@ -118,10 +118,70 @@ class EndpointFailureCardTests(unittest.TestCase):
         self.assertIn("飞书数据未就绪", text)
         self.assertIn("运营无需处理草稿", text)
         self.assertIn("没有证据显示已误发邮件", text)
-        self.assertIn("下次 cron 会自动再试", text)
+        self.assertIn("持续 30 分钟后提醒", text)
+        self.assertIn("每 6 小时最多再提醒 1 次", text)
         self.assertIn("飞书 log_id", text)
         self.assertIn("202607231202194A328CC", text)
         self.assertNotIn("Trace 末段", text)
+
+    def test_first_data_not_ready_failure_is_silent_and_uses_root_cause_key(self):
+        record = Mock(return_value=None)
+        sender = AsyncMock(return_value="om_should_not_send")
+        with patch.object(main._endpoint_alert_dedup, "record_incident_failure", new=record), \
+             patch.object(main.feishu, "send_card_message", new=sender):
+            asyncio.run(main._alert_endpoint_failure(
+                "/auto-send/run", "Feishu code=1254607 Data not ready",
+            ))
+
+        record.assert_called_once_with(
+            "feishu-bitable:1254607", "/auto-send/run",
+        )
+        sender.assert_not_awaited()
+
+    def test_data_not_ready_incident_merges_endpoints_into_one_card(self):
+        incident = {
+            "endpoints": ["/auto-send/run", "/dashboard/refresh"],
+            "duration_seconds": 1801.0,
+            "alert_count": 1,
+        }
+        sender = AsyncMock(return_value="om_merged")
+        with patch.object(
+                 main._endpoint_alert_dedup, "record_incident_failure",
+                 return_value=incident,
+             ), patch.object(
+                 main.config, "KOL_NOTIFY_USERS", [("潘志聪", "on_frankie")],
+             ), patch.object(main.feishu, "send_card_message", new=sender):
+            asyncio.run(main._alert_endpoint_failure(
+                "/dashboard/refresh", "Feishu code=1254607 Data not ready",
+            ))
+
+        sender.assert_awaited_once()
+        text = json.dumps(sender.await_args.args[2], ensure_ascii=False)
+        self.assertIn("/auto-send/run", text)
+        self.assertIn("/dashboard/refresh", text)
+        self.assertIn("同一根因合并为一条", text)
+
+    def test_recovery_card_is_sent_only_after_alerted_incident_recovers(self):
+        sender = AsyncMock(return_value="om_recovered")
+        recovered = {
+            "endpoints": ["/auto-send/run"],
+            "duration_seconds": 1900.0,
+            "alert_count": 1,
+        }
+        with patch.object(
+                 main._endpoint_alert_dedup, "resolve_incident_endpoint",
+                 side_effect=[None, recovered],
+             ), patch.object(
+                 main.config, "KOL_NOTIFY_USERS", [("潘志聪", "on_frankie")],
+             ), patch.object(main.feishu, "send_card_message", new=sender):
+            asyncio.run(main._resolve_feishu_data_not_ready_incident("/auto-send/run"))
+            asyncio.run(main._resolve_feishu_data_not_ready_incident("/auto-send/run"))
+
+        sender.assert_awaited_once()
+        self.assertIn(
+            "飞书读表已恢复",
+            sender.await_args.args[2]["header"]["title"]["content"],
+        )
 
     def test_non_transient_failure_card_uses_p1_and_clear_action(self):
         card, level = main._build_endpoint_failure_card(
