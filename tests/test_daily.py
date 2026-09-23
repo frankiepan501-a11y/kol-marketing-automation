@@ -36,10 +36,15 @@ class FakeFeishu:
 
 
 class ConfigReadFallbackFeishu(FakeFeishu):
-    def __init__(self, error_code="1254607", *, always_fail=False):
+    def __init__(
+        self, error_code="1254607", *, always_fail=False,
+        list_error_code="1254607", list_failures=0,
+    ):
         super().__init__()
         self.error_code = error_code
         self.always_fail = always_fail
+        self.list_error_code = list_error_code
+        self.list_failures = list_failures
         self.get_record_calls = 0
         self.list_record_calls = 0
 
@@ -51,6 +56,8 @@ class ConfigReadFallbackFeishu(FakeFeishu):
 
     def list_records(self, _base, table_id, *_, **__):
         self.list_record_calls += 1
+        if self.list_record_calls <= self.list_failures:
+            raise ApiError("feishu", self.list_error_code, "simulated record list failure")
         return [
             {"_record_id": "other-record", "竞品品牌": "Other"},
             {"_record_id": "recvrM7WDZ0ZV9", **dict(self.config)},
@@ -79,6 +86,24 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "99991672")
         self.assertEqual(fake.get_record_calls, 1)
         self.assertEqual(fake.list_record_calls, 0)
+
+    @patch("app.daily.time.sleep", return_value=None)
+    def test_record_list_data_not_ready_is_retried_but_other_errors_are_not_swallowed(self, sleep):
+        transient = ConfigReadFallbackFeishu(always_fail=True, list_failures=1)
+        self.assertEqual(DailyReporter(transient).begin(NOW)["state"], "collecting")
+        self.assertEqual(transient.list_record_calls, 3)
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            [0.25, 0.75, 0.25, 0.25, 0.75],
+        )
+
+        fatal = ConfigReadFallbackFeishu(
+            always_fail=True, list_error_code="99991672", list_failures=1,
+        )
+        with self.assertRaises(ApiError) as raised:
+            DailyReporter(fatal).begin(NOW)
+        self.assertEqual(raised.exception.code, "99991672")
+        self.assertEqual(fatal.list_record_calls, 1)
 
     @patch("app.daily.time.sleep", return_value=None)
     def test_report_deduplication_survives_record_list_fallback(self, _sleep):

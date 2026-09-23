@@ -49,10 +49,19 @@ class DailyReporter:
                     raise
                 if attempt < len(CONFIG_READ_RETRY_DELAYS):
                     time.sleep(CONFIG_READ_RETRY_DELAYS[attempt])
-        for record in self.feishu.list_records(BASE_TOKEN, TABLES["keyword_config"]):
-            if str(record.get("_record_id") or "") == NYXI_CONFIG_ID:
-                return record
-        raise ApiError("feishu", "record_not_found", "NYXI daily config was not found in record list")
+        for attempt in range(len(CONFIG_READ_RETRY_DELAYS) + 1):
+            try:
+                records = self.feishu.list_records(BASE_TOKEN, TABLES["keyword_config"])
+            except ApiError as error:
+                if error.code != "1254607" or attempt == len(CONFIG_READ_RETRY_DELAYS):
+                    raise
+                time.sleep(CONFIG_READ_RETRY_DELAYS[attempt])
+                continue
+            for record in records:
+                if str(record.get("_record_id") or "") == NYXI_CONFIG_ID:
+                    return record
+            raise ApiError("feishu", "record_not_found", "NYXI daily config was not found in record list")
+        raise AssertionError("unreachable")
 
     def _write(self, ledger: dict[str, Any]) -> None:
         self.feishu.batch_update(
