@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from app.clients import ApiError
 from app.collector import (
@@ -21,6 +22,7 @@ from app.core import (
     query_groups,
     schedule_decision,
 )
+from app.constants import TABLES
 
 
 class FakeJobTests(unittest.TestCase):
@@ -167,6 +169,103 @@ class ScheduleTests(unittest.TestCase):
 
 
 class IncrementalTests(unittest.TestCase):
+    @staticmethod
+    def _config_read_feishu(
+        *, get_error="1254607", list_errors=0, list_error_code="1254607"
+    ):
+        class ConfigReadFeishu:
+            def __init__(self):
+                self.get_calls = 0
+                self.config_list_calls = 0
+
+            def get_record(self, *_args, **_kwargs):
+                self.get_calls += 1
+                raise ApiError("feishu", get_error, "config read failed")
+
+            def list_records(self, _base, table_id, **_kwargs):
+                if table_id == TABLES["keyword_config"]:
+                    self.config_list_calls += 1
+                    if self.config_list_calls <= list_errors:
+                        raise ApiError("feishu", list_error_code, "config list failed")
+                    return [
+                        {
+                            "_record_id": "other-config",
+                            "启用": False,
+                            "平台": "YouTube",
+                            "竞品品牌": "Other",
+                            "关键词": "other",
+                        },
+                        {
+                            "_record_id": "nyxi-config",
+                            "启用": True,
+                            "平台": "YouTube",
+                            "竞品品牌": "NYXI",
+                            "关键词": "nyxi",
+                        },
+                    ]
+                if table_id == TABLES["marketing_events"]:
+                    return []
+                raise AssertionError(f"unexpected table: {table_id}")
+
+        return ConfigReadFeishu()
+
+    @patch("app.collector.time.sleep")
+    def test_run_falls_back_to_exact_config_record_after_1254607(self, _sleep):
+        feishu = self._config_read_feishu()
+        result = IncrementalCollector(feishu, object()).run(
+            now=datetime(2026, 9, 23, 16, 30, tzinfo=BEIJING),
+            commit=False,
+            config_record_id="nyxi-config",
+        )
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(feishu.get_calls, 3)
+        self.assertEqual(feishu.config_list_calls, 1)
+
+    @patch("app.collector.time.sleep")
+    def test_run_retries_1254607_from_config_list(self, _sleep):
+        feishu = self._config_read_feishu(list_errors=1)
+        result = IncrementalCollector(feishu, object()).run(
+            now=datetime(2026, 9, 23, 16, 30, tzinfo=BEIJING),
+            commit=False,
+            config_record_id="nyxi-config",
+        )
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(feishu.config_list_calls, 2)
+
+    @patch("app.collector.time.sleep")
+    def test_run_does_not_swallow_other_config_read_errors(self, _sleep):
+        feishu = self._config_read_feishu(get_error="99991663")
+
+        with self.assertRaises(ApiError) as caught:
+            IncrementalCollector(feishu, object()).run(
+                now=datetime(2026, 9, 23, 16, 30, tzinfo=BEIJING),
+                commit=False,
+                config_record_id="nyxi-config",
+            )
+
+        self.assertEqual(caught.exception.code, "99991663")
+        self.assertEqual(feishu.get_calls, 1)
+        self.assertEqual(feishu.config_list_calls, 0)
+
+    @patch("app.collector.time.sleep")
+    def test_run_does_not_swallow_other_config_list_errors(self, _sleep):
+        feishu = self._config_read_feishu(
+            list_errors=1, list_error_code="99991663"
+        )
+
+        with self.assertRaises(ApiError) as caught:
+            IncrementalCollector(feishu, object()).run(
+                now=datetime(2026, 9, 23, 16, 30, tzinfo=BEIJING),
+                commit=False,
+                config_record_id="nyxi-config",
+            )
+
+        self.assertEqual(caught.exception.code, "99991663")
+        self.assertEqual(feishu.get_calls, 3)
+        self.assertEqual(feishu.config_list_calls, 1)
+
     def test_backfill_window_uses_dedicated_cursor_and_ignores_daily_summary(self):
         now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
         config = {

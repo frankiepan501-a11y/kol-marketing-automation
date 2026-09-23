@@ -42,6 +42,7 @@ NYXI_OFFICIAL_CHANNEL_IDS = frozenset({
     "UCIY4yC2qUCPcM7ws-xTARYg",
     "UCbvp-CTcH3Mhtj2UWsSy8sA",
 })
+CONFIG_READ_RETRY_DELAYS = (0.25, 0.75)
 
 
 def is_recent_post(row: dict[str, Any], now: datetime, days: int = 30) -> bool:
@@ -355,9 +356,46 @@ class IncrementalCollector:
         platform: str = DEFAULT_PLATFORM,
     ) -> dict[str, Any]:
         if config_record_id:
-            config = self.feishu.get_record(
-                BASE_TOKEN, TABLES["keyword_config"], config_record_id
-            )
+            config = None
+            for attempt in range(len(CONFIG_READ_RETRY_DELAYS) + 1):
+                try:
+                    config = self.feishu.get_record(
+                        BASE_TOKEN, TABLES["keyword_config"], config_record_id
+                    )
+                    break
+                except ApiError as error:
+                    if error.code != "1254607":
+                        raise
+                    if attempt < len(CONFIG_READ_RETRY_DELAYS):
+                        time.sleep(CONFIG_READ_RETRY_DELAYS[attempt])
+            if config is None:
+                for attempt in range(len(CONFIG_READ_RETRY_DELAYS) + 1):
+                    try:
+                        rows = self.feishu.list_records(
+                            BASE_TOKEN,
+                            TABLES["keyword_config"],
+                            field_names=CONFIG_READ_FIELDS,
+                        )
+                    except ApiError as error:
+                        if error.code != "1254607" or attempt == len(CONFIG_READ_RETRY_DELAYS):
+                            raise
+                        time.sleep(CONFIG_READ_RETRY_DELAYS[attempt])
+                        continue
+                    config = next(
+                        (
+                            row
+                            for row in rows
+                            if str(row.get("_record_id") or "") == config_record_id
+                        ),
+                        None,
+                    )
+                    if config is None:
+                        raise ApiError(
+                            "feishu",
+                            "record_not_found",
+                            "monitoring config was not found in record list",
+                        )
+                    break
             config = {name: config.get(name) for name in CONFIG_READ_FIELDS} | {
                 "_record_id": config_record_id
             }
