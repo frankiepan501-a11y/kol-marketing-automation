@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,6 +16,7 @@ NYXI_CONFIG_ID = "recvrM7WDZ0ZV9"
 REPORT_CHAT_ID = "oc_4ddd938ddb73201ed7354337eb2226ac"
 REPORT_APP_ID = "cli_aa143b0a11b89be4"
 RECEIPT_FIELD = "YouTube日报回执JSON"
+CONFIG_READ_RETRY_DELAYS = (0.25, 0.75)
 
 
 def business_key(now: datetime) -> str:
@@ -39,7 +41,18 @@ class DailyReporter:
         self.feishu = feishu
 
     def _read(self) -> dict[str, Any]:
-        return self.feishu.get_record(BASE_TOKEN, TABLES["keyword_config"], NYXI_CONFIG_ID)
+        for attempt in range(len(CONFIG_READ_RETRY_DELAYS) + 1):
+            try:
+                return self.feishu.get_record(BASE_TOKEN, TABLES["keyword_config"], NYXI_CONFIG_ID)
+            except ApiError as error:
+                if error.code != "1254607":
+                    raise
+                if attempt < len(CONFIG_READ_RETRY_DELAYS):
+                    time.sleep(CONFIG_READ_RETRY_DELAYS[attempt])
+        for record in self.feishu.list_records(BASE_TOKEN, TABLES["keyword_config"]):
+            if str(record.get("_record_id") or "") == NYXI_CONFIG_ID:
+                return record
+        raise ApiError("feishu", "record_not_found", "NYXI daily config was not found in record list")
 
     def _write(self, ledger: dict[str, Any]) -> None:
         self.feishu.batch_update(

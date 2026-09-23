@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from app.clients import ApiError
 from app.collector import is_recent_post, older_refresh_batch
@@ -34,7 +35,64 @@ class FakeFeishu:
         return self.rows
 
 
+class ConfigReadFallbackFeishu(FakeFeishu):
+    def __init__(self, error_code="1254607", *, always_fail=False):
+        super().__init__()
+        self.error_code = error_code
+        self.always_fail = always_fail
+        self.get_record_calls = 0
+        self.list_record_calls = 0
+
+    def get_record(self, *_):
+        self.get_record_calls += 1
+        if self.always_fail or self.get_record_calls <= 3:
+            raise ApiError("feishu", self.error_code, "simulated record read failure")
+        return super().get_record(*_)
+
+    def list_records(self, _base, table_id, *_, **__):
+        self.list_record_calls += 1
+        return [
+            {"_record_id": "other-record", "竞品品牌": "Other"},
+            {"_record_id": "recvrM7WDZ0ZV9", **dict(self.config)},
+        ]
+
+
 class DailyTests(unittest.TestCase):
+    @patch("app.daily.time.sleep", return_value=None)
+    def test_data_not_ready_retries_then_reads_same_config_from_record_list(self, sleep):
+        fake = ConfigReadFallbackFeishu()
+
+        entry = DailyReporter(fake).begin(NOW)
+
+        self.assertEqual(entry["state"], "collecting")
+        self.assertEqual(entry["first_waterline"], "2026-09-20 16:30:00")
+        self.assertEqual(fake.get_record_calls, 4)
+        self.assertEqual(fake.list_record_calls, 1)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.25, 0.75])
+
+    def test_non_data_not_ready_error_is_not_swallowed(self):
+        fake = ConfigReadFallbackFeishu("99991672")
+
+        with self.assertRaises(ApiError) as raised:
+            DailyReporter(fake).begin(NOW)
+
+        self.assertEqual(raised.exception.code, "99991672")
+        self.assertEqual(fake.get_record_calls, 1)
+        self.assertEqual(fake.list_record_calls, 0)
+
+    @patch("app.daily.time.sleep", return_value=None)
+    def test_report_deduplication_survives_record_list_fallback(self, _sleep):
+        fake = ConfigReadFallbackFeishu(always_fail=True)
+        reporter = DailyReporter(fake)
+
+        reporter.begin(NOW)
+        first = reporter.send_once(NOW, "测试", job_id="one")
+        second = reporter.send_once(NOW, "测试", job_id="two")
+
+        self.assertEqual(first["status"], "sent")
+        self.assertEqual(second["status"], "already_sent")
+        self.assertEqual(len(fake.sent), 1)
+
     def test_recent_only_and_weekly_rotation(self):
         recent = {"发布时间": "2026-09-15 10:00:00", "帖子ID": "aaaaaaaaaaa"}
         old = [
