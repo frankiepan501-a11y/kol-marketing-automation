@@ -82,6 +82,8 @@ OP_OPENID = {
     "梁俊辉": "ou_b9dd2272e72908fe68964d7bba53109f",
 }
 _union_cache = {}
+TEMP_SITE_OPERATOR = os.environ.get("CS_INDEPENDENT_SITE_TEMP_OPERATOR", "").strip()
+TEMP_SITE_FRANKIE_ONLY = os.environ.get("CS_INDEPENDENT_SITE_TEMP_FRANKIE_ONLY", "1") != "0"
 
 _tok = {"v": "", "exp": 0.0}
 
@@ -113,6 +115,25 @@ async def _resolve_targets(operator: str) -> tuple[list[tuple[str, str]], str]:
     """
     operator = (operator or "").strip()
     if operator == _csi.INDEPENDENT_SITE_JOB_TITLE:
+        if TEMP_SITE_OPERATOR:
+            # Reuse the existing platform-operator identity, not every Amazon employee.
+            oid = OP_OPENID.get(TEMP_SITE_OPERATOR)
+            if not oid:
+                return [], "job_title_no_active_user"
+            try:
+                payload = await feishu.api(
+                    "GET", f"/contact/v3/users/{oid}?user_id_type=open_id", which="notify")
+                user = (payload.get("data") or {}).get("user") or {}
+                status = user.get("status") or {}
+                if (user.get("name") != TEMP_SITE_OPERATOR or not status.get("is_activated")
+                        or status.get("is_resigned") or status.get("is_frozen")
+                        or status.get("is_exited") or not user.get("union_id")):
+                    return [], "job_title_no_active_user"
+                if TEMP_SITE_FRANKIE_ONLY:
+                    return [("Frankie", OBSERVE_UNION)], "temporary_site_frankie_test"
+                return [(user["name"], user["union_id"])], "temporary_site_operator"
+            except Exception:
+                return [], "job_title_no_active_user"
         matches = await feishu.fetch_users_by_job_title(operator)
         targets, seen = [], set()
         for name, union_id in matches:

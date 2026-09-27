@@ -323,6 +323,9 @@ KOL_FEISHU_CONFIG_READY = all((
 # KOL/编辑 草稿待审通知的"主审"职务 (按飞书人事「职务」列原文, feishu-people-as-source-of-truth 铁律)
 # 2026-05-15: draft_router._notify_human_review + sla_check L1 都用此职务实时查在职名单
 KOL_REVIEWER_JOB_TITLE = env("KOL_REVIEWER_JOB_TITLE", "独立站运营专员")
+# Separate existing-partnership handoff from new prospecting and general reports.
+KOL_PARTNERSHIP_JOB_TITLE = env("KOL_PARTNERSHIP_JOB_TITLE", "").strip()
+KOL_PARTNERSHIP_FRANKIE_ONLY = env("KOL_PARTNERSHIP_FRANKIE_ONLY", "1") != "0"
 
 # KOL SLA 汇总卡 (2026-08-23): P1 每次 SLA cron 发负责人私聊；P2 仅北京时间指定小时发每日汇总。
 # 默认保留 Frankie-only 生产闸：新版本部署后仍只发 Frankie；样卡确认并明确切 0 后才触达运营。

@@ -299,7 +299,7 @@ async def _notify_warm_recap_card(draft_rid: str, kol_name: str, product_name: s
     ci = await feishu.resolve_contact_info(contact_rid, ctype) if contact_rid else {}
     card = _build_warm_recap_card(draft_rid, kol_name, product_name, subject, brief_md,
                                    contact_info=ci, brand=brand, email=email)
-    targets = await feishu.resolve_notify_targets("reviewer")  # [(name, union_id), ...]
+    targets = await feishu.resolve_partnership_targets("reviewer")  # [(name, union_id), ...]
     sent = 0
     _unions = []  # 看板「关联运营」 + /card/resend 撤老卡用
     _mids = {}

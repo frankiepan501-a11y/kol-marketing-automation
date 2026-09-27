@@ -1154,7 +1154,29 @@ async def _alert_role_resolution_failure(title: str) -> None:
         _role_resolution_alerted_at[title] = now
 
 
-async def resolve_notify_targets(role: str) -> list:
+def is_existing_partnership_draft(fields: dict) -> bool:
+    """Only explicit reply/fulfilment sources, never cold/followup/unknown."""
+    return ext(fields.get("邮件草稿来源")) in {
+        "reply", "affiliate_quote", "ship_confirm", "tracking_followup", "warm_recap",
+    }
+
+
+async def resolve_partnership_targets(role: str = "reviewer") -> list:
+    from . import config
+    if not config.KOL_PARTNERSHIP_JOB_TITLE:
+        return await resolve_notify_targets(role)
+    if config.KOL_PARTNERSHIP_FRANKIE_ONLY:
+        return await resolve_notify_targets("frankie")
+    return await resolve_notify_targets(role, job_title=config.KOL_PARTNERSHIP_JOB_TITLE)
+
+
+async def resolve_draft_notify_targets(role: str, fields: dict) -> list:
+    if is_existing_partnership_draft(fields):
+        return await resolve_partnership_targets(role)
+    return await resolve_notify_targets(role)
+
+
+async def resolve_notify_targets(role: str, *, job_title: str = "") -> list:
     """统一草稿通知 targets 决策 (2026-05-17 A9 抽 helper, 消除 draft_router/sla_check 重复).
 
     role:
@@ -1182,12 +1204,13 @@ async def resolve_notify_targets(role: str) -> list:
         return [(config.KOL_FRANKIE_NAME, uid)]
 
     # reviewer / needs_rewrite / ship_main 都用职务实时查
-    by_title = await fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)
+    title = job_title or config.KOL_REVIEWER_JOB_TITLE
+    by_title = await fetch_users_by_job_title(title)
     if not by_title:
-        print(f"[resolve_notify_targets] ERROR: job_title={config.KOL_REVIEWER_JOB_TITLE!r} returned empty")
-        await _alert_role_resolution_failure(config.KOL_REVIEWER_JOB_TITLE)
+        print(f"[resolve_notify_targets] ERROR: job_title={title!r} returned empty")
+        await _alert_role_resolution_failure(title)
         raise RuntimeError(
-            f"no active KOL reviewer for job_title={config.KOL_REVIEWER_JOB_TITLE!r}"
+            f"no active KOL reviewer for job_title={title!r}"
         )
 
     if role == "ship_main":

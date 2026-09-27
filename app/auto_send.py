@@ -1186,7 +1186,7 @@ async def _create_tracking_followup_draft(parent_rec: dict, sender_alias: str, s
             contact_info=_ci, brand=_brand, email=_email, contact_type=_ctype)
         _unions = []  # 看板「关联运营」 + /card/resend 撤老卡用
         _mids = {}
-        for _nm, _oid in await feishu.resolve_notify_targets("reviewer"):
+        for _nm, _oid in await feishu.resolve_partnership_targets("reviewer"):
             uid = await feishu.open_id_to_union_id(_oid)
             if uid:
                 msg_id = await feishu.send_card_via_app3("union_id", uid, track_card)

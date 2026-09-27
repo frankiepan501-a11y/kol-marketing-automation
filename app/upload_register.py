@@ -109,7 +109,7 @@ async def _scan(spec: dict, now_ms: int) -> list:
 
 async def run(dry_run: bool = False) -> dict:
     now_ms = int(time.time() * 1000)
-    targets = await feishu.resolve_notify_targets("reviewer")
+    targets = await feishu.resolve_partnership_targets("reviewer")
     unions = []
     for _nm, oid in targets:
         uid = await feishu.open_id_to_union_id(oid)

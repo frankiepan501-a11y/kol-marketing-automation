@@ -229,6 +229,10 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
         )
         header_template = "orange"
 
+    if (config.KOL_PARTNERSHIP_JOB_TITLE and items and all(
+            feishu.is_existing_partnership_draft(rec.get("fields", {})) for rec in items)):
+        owner = config.KOL_PARTNERSHIP_JOB_TITLE
+        action_text = action_text.replace("独立站运营专员", owner)
     filter_note = "系统已自动排除处理完的邮件；这里只显示等待超过 24 小时、仍需要审核的邮件。"
 
     return {
@@ -332,6 +336,31 @@ async def collect_sla_overdue_drafts(now_ms: int) -> dict:
     }
 
 
+async def _send_routed_review_digest(items, now_ms, legacy_targets, level):
+    if not config.KOL_PARTNERSHIP_JOB_TITLE or config.KOL_SLA_CARD_FRANKIE_ONLY:
+        return await _send_digest(legacy_targets,
+            build_sla_digest_card(items, now_ms, audience="reviewer", level=level), level=level)
+    result = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
+    for partnership in (True, False):
+        subset = [rec for rec in items
+                  if feishu.is_existing_partnership_draft(rec.get("fields", {})) == partnership]
+        if not subset:
+            continue
+        try:
+            targets = (await feishu.resolve_partnership_targets("ship_main") if partnership
+                       else await feishu.resolve_notify_targets("ship_main"))
+            card = build_sla_digest_card(subset, now_ms, audience="reviewer", level=level)
+            delivery = await _send_digest(targets, card, level=level)
+            result["sent"] += delivery["sent"]
+            result["failed"] += delivery["failed"]
+            result["errors"].extend(delivery["errors"])
+            result["message_ids"].extend(delivery["message_ids"])
+        except Exception as exc:
+            result["failed"] += 1
+            result["errors"].append(f"partnership={partnership}: {str(exc)[:120]}")
+    return result
+
+
 async def _layer1_review_overdue(now_ms: int) -> dict:
     """Send at most one reviewer P1 digest, one Frankie 48h digest, and one daily reviewer P2 digest."""
     collected = await collect_sla_overdue_drafts(now_ms)
@@ -345,6 +374,10 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
     frankie_targets = await feishu.resolve_notify_targets("frankie")
     if config.KOL_SLA_CARD_FRANKIE_ONLY:
         reviewer_targets = frankie_targets
+    elif config.KOL_PARTNERSHIP_JOB_TITLE:
+        # Resolve only the needed group below; a vacant legacy role must not
+        # prevent existing-partnership reminders from reaching their new owner.
+        reviewer_targets = []
     else:
         reviewer_targets = await feishu.resolve_notify_targets("ship_main")
     reviewer_delivery = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
@@ -352,11 +385,7 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
     p2_delivery = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
 
     if p1_items:
-        reviewer_delivery = await _send_digest(
-            reviewer_targets,
-            build_sla_digest_card(p1_items, now_ms, audience="reviewer", level="P1"),
-            level="P1",
-        )
+        reviewer_delivery = await _send_routed_review_digest(p1_items, now_ms, reviewer_targets, "P1")
     if p1_over_48h:
         frankie_delivery = await _send_digest(
             frankie_targets,
@@ -385,11 +414,7 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
                 print(f"[sla_check digest] P2 daily claim failed, skip send: {e}")
             else:
                 p2_claim_persisted = True
-                p2_delivery = await _send_digest(
-                    reviewer_targets,
-                    build_sla_digest_card(p2_due_today, now_ms, audience="reviewer", level="P2"),
-                    level="P2",
-                )
+                p2_delivery = await _send_routed_review_digest(p2_due_today, now_ms, reviewer_targets, "P2")
 
     reminder_timestamps_written = int(p2_claim_persisted)
     delivered_items = []

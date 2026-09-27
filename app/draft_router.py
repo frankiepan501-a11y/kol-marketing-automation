@@ -354,7 +354,7 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
             card["elements"].insert(1, {"tag": "hr"})
         # 2026-05-17 A9: 改用 feishu.resolve_notify_targets helper (统一决策)
         role = "needs_rewrite" if path == "需人改" else "reviewer"
-        targets = await feishu.resolve_notify_targets(role)
+        targets = await feishu.resolve_draft_notify_targets(role, f)
         # 2026-05-29: cold/reply 互动审核卡 (负责人卡上直接 通过/否决/重生, 无需跳表格)
         # (联系人/产品/品牌/收件人 已在上方提前算, 群信息卡 + 操作卡共用)
         action_card = _build_review_action_card(record_id, rec, score, summary, reasons_text,
@@ -661,7 +661,7 @@ async def _ship_confirm_targets() -> tuple:
     2026-05-17 A9: 改用 feishu.resolve_notify_targets helper
     Returns: (main_targets, cc_targets) 都是 [(name, open_id), ...]
     """
-    main = await feishu.resolve_notify_targets("ship_main")
+    main = await feishu.resolve_partnership_targets("ship_main")
     cc = await feishu.resolve_notify_targets("ship_cc")
     return main, cc
 
