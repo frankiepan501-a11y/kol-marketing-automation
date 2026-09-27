@@ -1156,7 +1156,11 @@ async def _alert_role_resolution_failure(title: str) -> None:
 
 def is_existing_partnership_draft(fields: dict) -> bool:
     """Only explicit reply/fulfilment sources, never cold/followup/unknown."""
-    return ext(fields.get("邮件草稿来源")) in {
+    source = ext(fields.get("邮件草稿来源"))
+    draft_id = ext(fields.get("邮件草稿ID"))
+    if source == "followup" and draft_id.startswith(("reminder-", "nudge-")):
+        return True
+    return source in {
         "reply", "affiliate_quote", "ship_confirm", "tracking_followup", "warm_recap",
     }
 

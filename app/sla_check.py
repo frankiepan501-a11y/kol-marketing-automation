@@ -120,12 +120,13 @@ def _p2_already_notified_today(rec: dict, now_ms: int) -> bool:
     return bool(sent_at and _local_date(sent_at) == _local_date(now_ms))
 
 
-def _claim_p2_daily_run(now_ms: int) -> bool:
+def _claim_p2_daily_run(now_ms: int, group: str = "") -> bool:
     """Atomically claim today's P2 run, independent of any draft remaining pending."""
     day = _local_date(now_ms).isoformat()
     state_dir = config.KOL_SLA_STATE_DIR
     os.makedirs(state_dir, exist_ok=True)
-    claim_path = os.path.join(state_dir, f"p2-{day}.claimed")
+    assert group in ("", "existing", "legacy")
+    claim_path = os.path.join(state_dir, f"p2-{day}{('-' + group) if group else ''}.claimed")
     try:
         fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
@@ -135,22 +136,24 @@ def _claim_p2_daily_run(now_ms: int) -> bool:
     return True
 
 
-def _release_p2_daily_claim(now_ms: int) -> None:
+def _release_p2_daily_claim(now_ms: int, group: str = "") -> None:
     day = _local_date(now_ms).isoformat()
-    claim_path = os.path.join(config.KOL_SLA_STATE_DIR, f"p2-{day}.claimed")
+    assert group in ("", "existing", "legacy")
+    claim_path = os.path.join(config.KOL_SLA_STATE_DIR, f"p2-{day}{('-' + group) if group else ''}.claimed")
     try:
         os.unlink(claim_path)
     except FileNotFoundError:
         pass
 
 
-async def _p2_marker_exists_today(now_ms: int) -> bool:
+async def _p2_marker_exists_today(now_ms: int, group: str = "") -> bool:
     """Bitable marker survives service restarts even after the claimed draft leaves the queue."""
     marked = await feishu.search_records(config.T_DRAFT, [
         {"field_name": "SLA已升级", "operator": "is", "value": ["true"]},
-    ], field_names=["邮件草稿来源", "卡片发送时间", "SLA已升级"])
+    ], field_names=["邮件草稿ID", "邮件草稿来源", "卡片发送时间", "SLA已升级"])
     return any(
         _draft_source(rec) not in P1_DRAFT_SOURCES and _p2_already_notified_today(rec, now_ms)
+        and (not group or feishu.is_existing_partnership_draft(rec.get("fields", {})) == (group == "existing"))
         for rec in marked
     )
 
@@ -299,7 +302,7 @@ async def _send_digest(targets: list, card: dict, *, level: str) -> dict:
 async def collect_sla_overdue_drafts(now_ms: int) -> dict:
     """Read-only collection and classification used by production and the Frankie-only preflight."""
     field_names = [
-        "邮件主题", "邮件草稿来源", "邮件草稿状态", "对象类型", "AI评分",
+        "邮件主题", "邮件草稿ID", "邮件草稿来源", "邮件草稿状态", "对象类型", "AI评分",
         "生成时间", "寄样阶段", "审批意见", "SLA已升级", "卡片发送时间",
     ]
     waiting_review = await feishu.search_records(config.T_DRAFT, [
@@ -321,6 +324,14 @@ async def collect_sla_overdue_drafts(now_ms: int) -> dict:
     # 同小时重试、人工重跑或服务重启都不会再发第二张。
     p2_already_sent_today = any(_p2_already_notified_today(rec, now_ms) for rec in p2_items)
     p2_due_today = [] if p2_already_sent_today else list(p2_items)
+    if config.KOL_PARTNERSHIP_JOB_TITLE and not config.KOL_SLA_CARD_FRANKIE_ONLY:
+        # The two business owners have independent daily reminders.
+        p2_due_today = []
+        for partnership in (True, False):
+            subset = [rec for rec in p2_items if
+                      feishu.is_existing_partnership_draft(rec.get("fields", {})) == partnership]
+            if not any(_p2_already_notified_today(rec, now_ms) for rec in subset):
+                p2_due_today.extend(subset)
     p1_over_48h = [
         rec for rec in p1_items
         if _draft_age_hours(rec, now_ms) >= SLA_HOURS_FRANKIE_EXCEPTION
@@ -340,7 +351,7 @@ async def _send_routed_review_digest(items, now_ms, legacy_targets, level):
     if not config.KOL_PARTNERSHIP_JOB_TITLE or config.KOL_SLA_CARD_FRANKIE_ONLY:
         return await _send_digest(legacy_targets,
             build_sla_digest_card(items, now_ms, audience="reviewer", level=level), level=level)
-    result = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
+    result = {"sent": 0, "failed": 0, "errors": [], "message_ids": [], "delivered_record_ids": []}
     for partnership in (True, False):
         subset = [rec for rec in items
                   if feishu.is_existing_partnership_draft(rec.get("fields", {})) == partnership]
@@ -355,9 +366,51 @@ async def _send_routed_review_digest(items, now_ms, legacy_targets, level):
             result["failed"] += delivery["failed"]
             result["errors"].extend(delivery["errors"])
             result["message_ids"].extend(delivery["message_ids"])
+            if delivery["sent"] and not delivery["failed"]:
+                result["delivered_record_ids"].extend(rec.get("record_id") for rec in subset)
         except Exception as exc:
             result["failed"] += 1
             result["errors"].append(f"partnership={partnership}: {str(exc)[:120]}")
+    return result
+
+
+async def _send_p2_handoff(items, now_ms):
+    """Two fixed recipient groups, each retaining the existing once/day safety gate."""
+    result = {"sent": 0, "failed": 0, "errors": [], "message_ids": [],
+              "delivered_record_ids": [], "claim_record_ids": []}
+    for group in ("existing", "legacy"):
+        subset = [rec for rec in items if
+                  feishu.is_existing_partnership_draft(rec.get("fields", {})) == (group == "existing")]
+        if not subset:
+            continue
+        try:
+            # Failure to resolve a recipient must not consume this group's daily claim.
+            targets = (await feishu.resolve_partnership_targets("ship_main") if group == "existing"
+                       else await feishu.resolve_notify_targets("ship_main"))
+            if not targets:
+                raise RuntimeError("empty P2 recipients")
+            if await _p2_marker_exists_today(now_ms, group) or not _claim_p2_daily_run(now_ms, group):
+                continue
+            rid = min(rec["record_id"] for rec in subset)
+            try:
+                await feishu.update_record(config.T_DRAFT, rid, {
+                    "SLA已升级": True, "卡片发送时间": now_ms})
+            except Exception:
+                _release_p2_daily_claim(now_ms, group)
+                raise
+            result["claim_record_ids"].append(rid)
+            delivery = await _send_digest(targets,
+                build_sla_digest_card(subset, now_ms, audience="reviewer", level="P2"), level="P2")
+            result["sent"] += delivery["sent"]
+            result["failed"] += delivery["failed"]
+            result["errors"].extend(delivery["errors"])
+            result["message_ids"].extend(delivery["message_ids"])
+            if delivery["sent"] and not delivery["failed"]:
+                result["delivered_record_ids"].extend(rec["record_id"] for rec in subset)
+            # An uncertain send keeps its own claim, never blindly re-send it.
+        except Exception as exc:
+            result["failed"] += 1
+            result["errors"].append(f"{group}: {type(exc).__name__}")
     return result
 
 
@@ -394,7 +447,10 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
         )
     p2_claim_record_id = ""
     p2_claim_persisted = False
-    if p2_due_today and _is_p2_digest_hour(now_ms):
+    grouped_p2 = bool(config.KOL_PARTNERSHIP_JOB_TITLE and not config.KOL_SLA_CARD_FRANKIE_ONLY)
+    if p2_due_today and _is_p2_digest_hour(now_ms) and grouped_p2:
+        p2_delivery = await _send_p2_handoff(p2_due_today, now_ms)
+    if p2_due_today and _is_p2_digest_hour(now_ms) and not grouped_p2:
         already_marked = await _p2_marker_exists_today(now_ms)
         locally_claimed = False if already_marked else _claim_p2_daily_run(now_ms)
         if not already_marked and locally_claimed:
@@ -416,10 +472,12 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
                 p2_claim_persisted = True
                 p2_delivery = await _send_routed_review_digest(p2_due_today, now_ms, reviewer_targets, "P2")
 
-    reminder_timestamps_written = int(p2_claim_persisted)
+    reminder_timestamps_written = int(p2_claim_persisted) + len(p2_delivery.get("claim_record_ids", []))
     delivered_items = []
     if p2_delivery["sent"]:
-        delivered_items.extend(p2_due_today)
+        delivered_ids = p2_delivery.get("delivered_record_ids")
+        delivered_items.extend(rec for rec in p2_due_today
+                               if delivered_ids is None or rec.get("record_id") in delivered_ids)
     if delivered_items:
         seen_delivered = set()
         for rec in delivered_items:
@@ -427,7 +485,7 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
             if not rid or rid in seen_delivered:
                 continue
             seen_delivered.add(rid)
-            if rid == p2_claim_record_id:
+            if rid == p2_claim_record_id or rid in p2_delivery.get("claim_record_ids", []):
                 continue
             try:
                 await feishu.update_record(config.T_DRAFT, rid, {"卡片发送时间": now_ms})
@@ -454,6 +512,7 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
         "reviewer_message_ids": reviewer_delivery["message_ids"],
         "frankie_message_ids": frankie_delivery["message_ids"],
         "p2_message_ids": p2_delivery["message_ids"],
+        "delivery_errors": reviewer_delivery["errors"] + frankie_delivery["errors"] + p2_delivery["errors"],
     }
 
 
