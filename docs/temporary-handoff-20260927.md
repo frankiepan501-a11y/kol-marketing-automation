@@ -4,7 +4,20 @@
 
 User authorizes independent-site customer service to 陈翔宇, and existing KOL/media fulfilment to 杨佳敬 (exact job title 商务BD专员). SocialEcho interaction replies are separately assigned to the foreign-trade team; Discord/tester incidents and synthetic social-review cards are NOT included.
 
-Status: local implementation and tests only; new flags default inactive/staged. Not a completed production handoff. Existing dirty enrich/scoring/launch files must not be committed with this change.
+Status (2026-09-27): scoped production release a46caf2 is RUNNING on kol-automation, deployment 6ab8edcea26d1d2fd28529c7, release branch handoff-p0-20260927. DTC remains on master and was not deployed. Historical notes below describe earlier gates, not the latest state. Old-ticket transfer is in progress; recipient client confirmation remains open. Existing dirty enrich/scoring/launch files are excluded.
+
+## Production acceptance and permission decision
+
+- 1118 tests passed on a clean release worktree; six n8n guard assertions passed. Both code-review axes completed.
+- The Event Hub YjTXaoWAcy89xZpT now contains Temporary Handoff Authorization after Parse Message. Its original 80 nodes are unchanged. Guard failures stop processing before business handlers; execution 1406533 reached the handler and 1406534 was denied before it.
+- CS callbacks independently enforce current independent-site owner or Frankie. Actual live synthetic-terminal replay allows Chen, rejects a former/fake identity, and makes no repeated state change. KOL readonly live authorization allows Yang, rejects an invalid identity.
+- User confirmed screenshots of synthetic CS escalation and KOL rejection with original buttons removed. These are replay tests, not user approvals of real customer business.
+- CS temporary operator=陈翔宇; partnership title=商务BD专员; both Frankie-only flags=0. New prospecting retains its original role; SocialEcho/Discord and DTC are outside this change.
+- EMAIL_DRY_RUN_TO was enabled during deployment then removed and redeployed. Auto Send, Hourly Autonomous Refill, Daily Feedback Control were briefly paused and all three restored to their original active=true state. No real mail pipeline was invoked for testing.
+- User chose card-only handling with existing Base permissions unchanged. Yang's direct KOL permission remains view; no advanced permissions enabled. If a workflow requires direct table editing, list the specific gap rather than granting whole-Base edit.
+- Four existing-partnership pending drafts were resent to Yang with receipts and readback, original 待修改 state preserved. Three old cards could not be patched because Feishu returned 230013 (bot unavailable to former recipient); six other old cards were retired. Backend authorization still rejects non-current operators. Do not falsely mark all old card visuals removed.
+- CS transfer completed for all 139 unclosed records (136 waiting, three escalated), excluding synthetic/closed records. All owner writes and unchanged statuses were read back individually and by final filtered scan. Ten waiting cards sent to Chen; 126 remain unsent (ten within 30 days, 116 older). Three escalated cases need priority review. All 136 old CS cards could not be visually retired; sampled same-App GET/PATCH returned 230013. Callback owner enforcement is live. Recipient client acknowledgement remains pending.
+- Receipt journal (IDs/status only; no customer bodies): C:/tmp/handoff-transfer-20260927/receipts.jsonl. Do not rerun sends without checking this journal.
 
 ## Configuration
 
@@ -15,7 +28,7 @@ Status: local implementation and tests only; new flags default inactive/staged. 
 
 Explicit reply/affiliate_quote/ship_confirm/tracking_followup/warm_recap drafts use the partnership route. Cold/followup/unknown sources retain their existing route; this does not authorize new outreach. Ship confirmation, tracking-card notification, warm recap, upload registration and SLA source-separated digests use the new resolver. Mail body, mail sending and approval conditions are unchanged.
 
-## Verification and remaining gates
+## Historical implementation checkpoint (before production acceptance above)
 
 - Live readonly contact lookup: 商务BD专员 matched 杨佳敬; 陈翔宇 active, title 亚马逊运营专员; old 独立站运营专员 still matched 叶星. These are current lookup observations, not completion of HR departure.
 - Final 1112 local tests passed (0 failures/errors); existing user work was present during this full-suite run.
