@@ -18,7 +18,9 @@ Explicit reply/affiliate_quote/ship_confirm/tracking_followup/warm_recap drafts 
 ## Verification and remaining gates
 
 - Live readonly contact lookup: 商务BD专员 matched 杨佳敬; 陈翔宇 active, title 亚马逊运营专员; old 独立站运营专员 still matched 叶星. These are current lookup observations, not completion of HR departure.
-- 1109 local tests passed (0 failures/errors); existing user work was present during this full-suite run.
+- Final 1112 local tests passed (0 failures/errors); existing user work was present during this full-suite run.
+- Local commits: e0a1d43 and f9ddd12. Review fixes include explicit reminder-/nudge- fulfilment scope, independent existing/legacy P2 claims, success-group-only record marking, and categorized CS identity errors. Both review axes re-reviewed with no new blocking findings; a persistent-marker isolation test was then added and passed.
+- Readonly backlog count (before any test records): 136 waiting CS tickets and 3 escalated tickets under 张佳烨; 4 pending KOL drafts (1 reply, 3 warm_recap, all 待修改). Closed and non-CS records are excluded from handoff.
 - Production version, recipient availability in sending App, Base operation permissions, actual Frankie-only card/callback acceptance and unclosed-ticket migration still need validation before enabling.
 - Prior cards and associated owners must be audited and handed over with bounded record IDs; do not reset completed statuses, clear all message IDs, or mass re-send. A changed future resolver alone does not migrate old cards.
 - `auto_send.py` change is limited to the tracking notification resolver. Before deployment use the required email test guard and avoid running mail pipelines against real rows; never conflate recipient flags with EMAIL_DRY_RUN_TO.
