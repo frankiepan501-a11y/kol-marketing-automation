@@ -1534,6 +1534,18 @@ async def _show_callback_error(event: dict, result: dict) -> None:
     event = normalize_callback_event(event)
     _, _, _, rid = _callback_action(event)
     reason = str(((result.get("toast") or {}).get("content") or "处理失败")[:180])
+    if result.get("handoff_denied"):
+        # Never rebuild actionable cards for a departed/unauthorized operator.
+        message_id = _card_message_id(event, {})
+        if message_id:
+            await _update_card(message_id, {
+                "config": {"wide_screen_mode": True},
+                "header": {"template": "grey", "title": {
+                    "tag": "plain_text", "content": "客服工单已交接 · 本次未发送"}},
+                "elements": [{"tag": "div", "text": {"tag": "lark_md",
+                    "content": "此旧卡已失效，请由当前负责人处理。没有发送客户邮件。"}}],
+            })
+        return
     if not rid:
         return
     try:
@@ -1875,7 +1887,31 @@ async def handle_callback(event: dict) -> dict:
                                which="notify")
         f = ((rec.get("data", {}) or {}).get("record", {}) or {}).get("fields", {}) or {}
     except Exception:
-        f = {}
+        return _toast("无法读取工单，未执行操作，请稍后重试", "error")
+    if not f:
+        return _toast("工单不存在，未执行操作", "error")
+    if TEMP_SITE_OPERATOR and _x(f, "销售平台") == "独立站":
+        op = event.get("operator") or {}
+        uid = op.get("union_id") or ""
+        try:
+            if not uid and op.get("open_id"):
+                async with httpx.AsyncClient(timeout=15) as client:
+                    response = await client.get(
+                        f"https://open.feishu.cn/open-apis/contact/v3/users/{op['open_id']}",
+                        params={"user_id_type": "open_id"},
+                        headers={"Authorization": f"Bearer {await _token()}"})
+                    user = (response.json().get("data") or {}).get("user") or {}
+                    uid = user.get("union_id") or ""
+            targets, _ = await _resolve_targets(_csi.INDEPENDENT_SITE_JOB_TITLE)
+            permitted = {target_uid for _, target_uid in targets}
+            permitted.add(OBSERVE_UNION)
+            permitted.discard("")
+        except Exception:
+            permitted = set()
+        if not uid or uid not in permitted:
+            result = _toast("此工单已交接，只有当前负责人或Frankie可以操作", "error")
+            result["handoff_denied"] = True
+            return result
     tag = f"{_x(f, '品牌')}·{_x(f, '销售平台')}·{_x(f, '客户标识')}"
     msg_id = _card_message_id(event, f)
 

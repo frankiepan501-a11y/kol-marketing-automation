@@ -2057,6 +2057,14 @@ async def cs_callback(request: Request, authorization: str = Header(default=""))
         return {"toast": {"type": "error", "content": "处理失败，请稍后重试"}}
 
 
+@app.post("/handoff/authorize-kol")
+async def handoff_authorize_kol(request: Request, authorization: str = Header(default="")):
+    """Read-only gate used before the existing Event Hub dispatches KOL actions."""
+    _check_auth(authorization)
+    from .handoff_authorization import authorize_kol
+    return await authorize_kol(await request.json())
+
+
 @app.get("/amz/feishu/callback")
 async def amz_feishu_callback_health():
     """Public health probe for the Amazon assistant Feishu callback URL."""
