@@ -59,16 +59,21 @@ try {
     timeout: 15000,
   });
   const returnedRuns = Array.isArray(response.workflow_runs) ? response.workflow_runs : [];
-  runs = returnedRuns.slice().sort((left, right) => {
-    const leftAt = Date.parse(left.created_at || '');
-    const rightAt = Date.parse(right.created_at || '');
-    if (Number.isFinite(leftAt) && Number.isFinite(rightAt) && leftAt !== rightAt) return rightAt - leftAt;
-    return Number(right.run_number || right.id || 0) - Number(left.run_number || left.id || 0);
-  });
+  runs = returnedRuns
+    .map((run) => ({run, createdAtMs: Date.parse(run.created_at || '')}))
+    .filter((entry) => Number.isFinite(entry.createdAtMs))
+    .sort((left, right) => {
+      if (left.createdAtMs !== right.createdAtMs) return right.createdAtMs - left.createdAtMs;
+      return Number(right.run.run_number || right.run.id || 0) - Number(left.run.run_number || left.run.id || 0);
+    })
+    .map((entry) => entry.run);
+  if (returnedRuns.length && !runs.length) {
+    throw new Error('GitHub API returned workflow runs with no valid created_at timestamps');
+  }
   const candidateLatest = runs[0] || null;
   if (candidateLatest) {
     const candidateLatestAt = Date.parse(candidateLatest.created_at || '');
-    if (!Number.isFinite(candidateLatestAt) || candidateLatestAt < apiWindowStartMs) {
+    if (candidateLatestAt < apiWindowStartMs) {
       runs = [];
       throw new Error('GitHub API returned a stale or invalid workflow-runs response outside the requested 24-hour window');
     }

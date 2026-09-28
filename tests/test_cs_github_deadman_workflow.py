@@ -93,6 +93,26 @@ def test_unordered_response_uses_newest_success_and_stays_silent():
     assert result["requests"][0]["headers"]["Cache-Control"] == "no-cache"
 
 
+def test_already_newest_first_success_stays_silent():
+    payload = [_run(1312, timedelta(minutes=5)), _run(1177, timedelta(days=19))]
+
+    result = _run_code_node(payload)
+
+    assert result["results"] == [[]]
+    assert result["state"]["lastRunId"] == "1312"
+
+
+def test_invalid_high_id_timestamp_cannot_hide_fresh_success():
+    malformed = _run(999999, timedelta(minutes=1), "failure")
+    malformed["created_at"] = "not-a-timestamp"
+    payload = [malformed, _run(1312, timedelta(minutes=5))]
+
+    result = _run_code_node(payload)
+
+    assert result["results"] == [[]]
+    assert result["state"]["lastRunId"] == "1312"
+
+
 def test_two_latest_failures_alert_with_newest_run_link():
     payload = [
         _run(1400, timedelta(minutes=20), "failure"),

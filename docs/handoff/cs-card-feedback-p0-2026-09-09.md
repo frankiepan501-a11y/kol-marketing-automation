@@ -89,6 +89,6 @@ Frankie 已明确授权开启正式发送。Zeabur 使用单变量接口新增 `
 
 - 症状：反向巡检在 GitHub 当天已有多次成功运行时，仍把 2026-09-08 的 run `34279549938` 当成“最近一次成功”，发出“距今 28022 分钟”的 P1 误报。
 - 根因：Code 节点对无鉴权 GitHub API 的返回结果没有新鲜度防护，直接把 `runs[0]`、`find` 和 `slice(0,2)` 当成已按时间排序的最新结果；一旦共享出口/CDN 返回 HTTP 200 的陈旧数组，就会把旧成功错误解释为主巡检停摆。
-- 候选修复：`scripts/n8n/patch_cs_github_deadman.ps1` 给官方 workflow-runs API 增加滚动 24 小时 `created` 条件和 no-cache 请求头，对返回数组显式按 `created_at/run_number` 倒序；窗口外陈旧响应按 GitHub API 异常处理，两次连续出现才告警，且不再附旧 run 链接。
+- 候选修复：`scripts/n8n/patch_cs_github_deadman.ps1` 给官方 workflow-runs API 增加滚动 24 小时 `created` 条件和 no-cache 请求头，对有效 `created_at` 的记录显式倒序，并隔离时间戳损坏的记录；窗口外陈旧响应按 GitHub API 异常处理，两次连续出现才告警，且不再附旧 run 链接。
 - 安全边界：只改 n8n `YLVywhEu3lLwXmKo` 的 `Check GitHub watchdog heartbeat` Code 节点；客服助手 App、通知对象、3 个节点、2 组连接、正式 cron `43 17 */4 * * *`、8 小时阈值和 24 小时冷却均不变。不读写客服工单，不发送客户邮件。
-- 本地验证：固定数据回放覆盖“旧成功在前/新成功在后”“最近两次失败乱序”“陈旧 API 响应不附旧链接”和 dry-run 写入闸，共 4 项通过；全仓 `1249 passed, 54 subtests passed`。生产 PUT/activate 与静默自然执行尚待 Frankie 明确确认。
+- 本地验证：固定数据回放覆盖“旧成功在前/新成功在后”“最新成功本来就在前”“损坏时间戳不能遮住新成功”“最近两次失败乱序”“陈旧 API 响应不附旧链接”和 dry-run 写入闸，共 6 项通过；GitHub 当前 `#1310/#1311/#1312` 三次成功数据回放输出 0 条告警；全仓 `1251 passed, 54 subtests passed`。生产 PUT/activate 与静默自然执行尚待 Frankie 明确确认。
