@@ -1512,7 +1512,13 @@ def _card_form_values(action: dict) -> dict:
 def normalize_callback_event(payload: dict) -> dict:
     """Unwrap the two real Feishu envelopes forwarded by the n8n callback."""
     nested = payload.get("event") if isinstance(payload, dict) else None
-    return nested if isinstance(nested, dict) else (payload or {})
+    event = nested if isinstance(nested, dict) else (payload or {})
+    # Legacy callbacks put the same-App actor open_id at the top level.
+    # Normalize before the fast-path claim so either delivery carries identity.
+    # Never replace a supplied modern operator with a conflicting legacy field.
+    if not event.get("operator") and event.get("open_id"):
+        return {**event, "operator": {"open_id": event["open_id"]}}
+    return event
 
 
 def _callback_action(event: dict) -> tuple[dict, dict, str, str]:
