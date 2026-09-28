@@ -2,6 +2,12 @@
 
 ## Scope and status
 
+### 2026-09-28 CS legacy actor hotfix
+
+Chen's real click delivered legacy top-level open_id and schema-2 operator identities. Legacy could claim the fast-path slot first, fail the new owner gate, and suppress the valid duplicate. Fixed normalize_callback_event to copy legacy same-App open_id into operator without replacing modern identities. Commit91383bd; deployment6ab9ee7427a5f36e2c663d7e RUNNING. Same release branch; DTC/env/schedules/permissions unchanged.
+
+Regression was red before the fix; nine targeted and 1121 clean-worktree full tests pass. Standards review: zero blocking findings. Spec review: zero blocking findings; P1 noted legacy failure-DM may omit the operator because union_id is not persisted, while original-card error feedback remains. Both delivery orders tested; live synthetic terminal replays with Chen identity pass for both shapes. No customer send was replayed. Seven of yesterday's ten cards were confirmed erroneous denial cards, still pending and without pending outbound receipts; restored those original cards and read back the recovery notice, left three other cards untouched. Actual operator business-send acceptance remains pending.
+
 User authorizes independent-site customer service to 陈翔宇, and existing KOL/media fulfilment to 杨佳敬 (exact job title 商务BD专员). SocialEcho interaction replies are separately assigned to the foreign-trade team; Discord/tester incidents and synthetic social-review cards are NOT included.
 
 Status (2026-09-27): scoped production release a46caf2 is RUNNING on kol-automation, deployment 6ab8edcea26d1d2fd28529c7, release branch handoff-p0-20260927. DTC remains on master and was not deployed. Historical notes below describe earlier gates, not the latest state. Old-ticket transfer is in progress; recipient client confirmation remains open. Existing dirty enrich/scoring/launch files are excluded.
