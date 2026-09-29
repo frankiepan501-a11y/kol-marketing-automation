@@ -18,6 +18,7 @@ from .core import BEIJING, is_youtube_video_id, scalar
 from .job_status import durable_job_snapshot_many, finished_status
 from .daily import DailyReporter, NYXI_CONFIG_ID, format_report
 from .quota import DailySearchBudget
+from .diagnostics import safe_failure
 
 BUILD_VERSION = os.environ.get("BUILD_VERSION", "dev")
 COMMIT_ENABLED = os.environ.get("COMMIT_ENABLED", "0") == "1"
@@ -243,7 +244,7 @@ def _execute_daily(job_id: str) -> None:
                     weekly = {"status": "failed", "error_type": type(error).__name__}
         except Exception as error:
             logger.exception("daily NYXI failed id=%s", job_id)
-            nyxi = {"status": "failed", "job_id": job_id, "error_type": type(error).__name__}
+            nyxi = {"status": "failed", "job_id": job_id, "error_stage": "nyxi_incremental", **safe_failure(error)}
             try:
                 collector.mark_failure(error, config_record_id=NYXI_CONFIG_ID, job_id=job_id)
             except Exception:

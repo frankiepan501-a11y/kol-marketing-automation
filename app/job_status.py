@@ -14,7 +14,8 @@ def finished_status(job: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
         return 500, {
             "detail": {
                 "job_id": job.get("job_id"),
-                "error_type": job.get("error_type"),
+                **{key: job.get(key) or (job.get("nyxi") or {}).get(key)
+                   for key in ("error_type", "error_service", "error_code", "error_stage")},
             }
         }
     return 200, job
