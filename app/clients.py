@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -198,12 +199,16 @@ class FeishuClient:
     ) -> dict[str, Any]:
         if not self._token:
             self._refresh()
-        result = _json_request(
-            method,
-            f"{self.BASE}{path}",
-            headers={"Authorization": f"Bearer {self._token}"},
-            body=body,
-        )
+        for attempt in range(3):
+            result = _json_request(
+                method,
+                f"{self.BASE}{path}",
+                headers={"Authorization": f"Bearer {self._token}"},
+                body=body,
+            )
+            if method != "GET" or str(result.get("code")) != "1254607" or attempt == 2:
+                break
+            time.sleep(2 * (attempt + 1))
         code = result.get("code", 0)
         if code == 99991663 and retry_auth:
             self._refresh()

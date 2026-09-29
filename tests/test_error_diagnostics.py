@@ -1,9 +1,25 @@
 import unittest
+from unittest.mock import patch
+from app.clients import FeishuClient
 from app.clients import ApiError
 from app.diagnostics import safe_failure
 from app.job_status import finished_status
 
 class ErrorDiagnosticsTests(unittest.TestCase):
+    def test_transient_read_retries_same_page(self):
+        client = FeishuClient('test', 'test')
+        client._token = 'test'
+        with patch('app.clients._json_request', side_effect=[{'code':1254607}, {'code':0,'data':{}}]) as request, patch('app.clients.time.sleep'):
+            self.assertEqual(client.request('GET', '/test'), {'code':0,'data':{}})
+            self.assertEqual(request.call_count, 2)
+
+    def test_write_is_never_retried(self):
+        client = FeishuClient('test', 'test')
+        client._token = 'test'
+        with patch('app.clients._json_request', return_value={'code':1254607}) as request:
+            with self.assertRaises(ApiError): client.request('POST', '/test')
+            self.assertEqual(request.call_count, 1)
+
     def test_api_code_survives_without_message_or_metadata(self):
         error = ApiError('feishu', '1254607', 'secret-url-token', metadata={'key': 'secret'})
         result = safe_failure(error)
