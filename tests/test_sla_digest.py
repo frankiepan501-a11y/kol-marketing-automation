@@ -261,8 +261,9 @@ class SlaDigestTests(unittest.TestCase):
 
         self.assertIn("先看对方原邮件", payload)
         self.assertIn("没问题点「通过」", payload)
-        self.assertIn("需要修改就先改正文", payload)
-        self.assertIn("不适合发送就点「否决」或「退回重做」", payload)
+        self.assertIn("需修改则填修改方向并点「退回重生」", payload)
+        self.assertNotIn("需要修改就先改正文", payload)
+        self.assertIn("不适合点「否决」", payload)
         self.assertIn("系统已自动排除处理完的邮件", payload)
         self.assertIn("请先看完相关邮件和邮件草稿", payload)
         self.assertEqual(payload.count("打开待审核邮件列表"), 1)

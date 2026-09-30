@@ -197,9 +197,10 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
     """Build an actionable queue-management card; this card never approves or sends email itself."""
     oldest = max((_draft_age_hours(rec, now_ms) for rec in items), default=0)
     review_steps = (
-        "1. 点下面按钮打开待审核邮件。\n"
-        "2. 先看对方原邮件，再检查系统生成的邮件草稿。\n"
-        "3. 没问题点「通过」；需要修改就先改正文；不适合发送就点「否决」或「退回重做」。"
+        "1. 下方链接仅供查看；请在 KOL媒体助手私聊找到对应审核卡。\n"
+        "2. 先看对方原邮件（首次联系无原邮件），再检查邮件草稿。\n"
+        "3. 在审核卡核对，没问题点「通过」，不适合点「否决」；需修改则填修改方向并点「退回重生」。\n"
+        "4. 缺少审核卡或确需手工改正文，请反馈记录链接，不要自行扩大表格权限。"
     )
     if audience == "frankie":
         title = f"有 {len(items)} 封重要邮件超过 48 小时没处理"
@@ -228,13 +229,16 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
         deadline = "今天 4 小时内处理"
         action_text = (
             f"{review_steps}\n"
-            "4. **看到“待补运单信息”时，先补齐运单号和物流商，再检查正文并点「通过」。**"
+            "5. **看到“待补运单信息”时，在寄样卡先补齐运单号和物流商，再检查正文并点「通过」。**"
         )
         header_template = "orange"
 
     if (config.KOL_PARTNERSHIP_JOB_TITLE and items and all(
             feishu.is_existing_partnership_draft(rec.get("fields", {})) for rec in items)):
         owner = config.KOL_PARTNERSHIP_JOB_TITLE
+        action_text = action_text.replace("独立站运营专员", owner)
+    else:
+        owner = config.KOL_REVIEWER_JOB_TITLE
         action_text = action_text.replace("独立站运营专员", owner)
     filter_note = "系统已自动排除处理完的邮件；这里只显示等待超过 24 小时、仍需要审核的邮件。"
 
@@ -264,7 +268,7 @@ def build_sla_digest_card(items: list, now_ms: int, *, audience: str, level: str
                  "url": _queue_url(), "type": "primary"},
             ]},
             {"tag": "note", "elements": [
-                {"tag": "plain_text", "content": "这张卡只提醒你有哪些邮件要处理；实际审核在邮件草稿表完成。处理后不用回复这张卡。"},
+                {"tag": "plain_text", "content": "这张卡只作提醒；请到对应审核卡处理。表格用于查看，不要求新增编辑权限。"},
             ]},
         ],
     }

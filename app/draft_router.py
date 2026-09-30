@@ -20,6 +20,66 @@ SCORE_RETRY_THRESHOLD = 5      # < 此分退回重生
 MAX_RETRIES = 2                # 重生上限
 
 
+async def notify_new_hybrid_review(record_id: str) -> dict:
+    """Only the fresh enrich AI-exception exit calls this; never scan old drafts.
+
+    Persist an attempt before sending. An ambiguous send/receipt failure blocks
+    automatic re-entry until a human reconciles it, including after UUID expiry.
+    """
+    import json
+    import hashlib
+    from .card_resend import _build_resend_card
+
+    rec = await feishu.get_record(config.T_DRAFT, record_id)
+    f = rec.get("fields", {})
+    if (ext(f.get("邮件草稿状态")) != "待审"
+            or ext(f.get("审核路径")) != "待人审"
+            or ext(f.get("邮件草稿来源")) != "cold"
+            or "[hybrid-ai-exception]" not in ext(f.get("AI评分理由"))):
+        raise RuntimeError("not a pending hybrid AI cold draft")
+    if "[hybrid-card-attempt]" in ext(f.get("卡片发送错误")):
+        raise RuntimeError("previous card attempt needs reconciliation; do not resend")
+    refs = json.loads(ext(f.get("卡片个人消息IDs")) or "{}")
+    if not isinstance(refs, dict):
+        raise RuntimeError("invalid card receipt map; do not resend")
+    targets = await feishu.resolve_draft_notify_targets("reviewer", f)
+    uids = list(dict.fromkeys(uid for _, uid in targets if uid))
+    if not uids:
+        raise RuntimeError("no current reviewer")
+    card = await _build_resend_card(record_id, rec)
+    delivered = 0
+    for uid in uids:
+        if refs.get(uid):
+            continue
+        marker = f"[hybrid-card-attempt] {uid}: 派卡结果待核对，禁止自动补发"
+        await feishu.update_record(config.T_DRAFT, record_id, {"卡片发送错误": marker})
+        check = await feishu.get_record(config.T_DRAFT, record_id)
+        if ext(check.get("fields", {}).get("卡片发送错误")) != marker:
+            raise RuntimeError("card attempt marker not persisted; no card sent")
+        mid = await feishu.send_card_message(
+            "union_id", uid, card, which="kol_assistant",
+            message_uuid=hashlib.sha256(f"hybrid-review:{record_id}:{uid}".encode()).hexdigest()[:50],
+        )
+        if not mid:
+            raise RuntimeError("card send returned no receipt; reconcile before retry")
+        refs[uid] = feishu.pack_kol_message_ref(mid)
+        path = (f"/bitable/v1/apps/{config.FEISHU_APP_TOKEN}/tables/{config.T_DRAFT}"
+                f"/records/{record_id}?user_id_type=union_id")
+        await feishu.api("PUT", path, {"fields": {
+            "卡片个人消息IDs": json.dumps(refs, ensure_ascii=False),
+            "关联运营": [{"id": key} for key in refs],
+            "卡片发送时间": int(time.time() * 1000),
+        }})
+        check = await feishu.get_record(config.T_DRAFT, record_id)
+        saved = json.loads(ext(check.get("fields", {}).get("卡片个人消息IDs")) or "{}")
+        if saved.get(uid) != refs[uid]:
+            raise RuntimeError("card receipt not persisted; reconcile before retry")
+        await feishu.update_record(config.T_DRAFT, record_id, {"卡片发送错误": ""})
+        delivered += 1
+    await feishu.update_record(config.T_DRAFT, record_id, {"卡片发送状态": "已发送"})
+    return {"delivered": delivered, "already_delivered": len(uids) - delivered}
+
+
 def _inbound_reply_elements(inbound_reply: dict) -> list:
     """渲染「KOL 这封回复说了什么」段 (2026-06-03 卡片合并: 并入原 reply_monitor 独立知会卡的内容).
     inbound_reply = reply_monitor.classify_intent 结果 dict(type/summary/key_quote/suggested_action)."""
@@ -530,7 +590,7 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
     gap = ext(f.get("匹配不足"))
     angle = ext(f.get("建议切入点"))
     hit_kw = ext(f.get("命中关键词"))
-    body_show = body if len(body) <= 1800 else body[:1800] + "\n…(正文过长已截断, 点「去表格改」看全文)"
+    body_show = body if len(body) <= 1800 else body[:1800] + "\n…(正文过长已截断，点「查看草稿全文」看完再审核)"
     val = {"app_token": config.FEISHU_APP_TOKEN, "table_id": config.T_DRAFT, "record_id": record_id}
     ci = contact_info or {}
     who_label = "媒体人" if contact_type == "媒体人" else "KOL"
@@ -575,11 +635,11 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**📧 主题**\n{subject}"}},
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**✉️ 正文**\n{body_show}"}},
         {"tag": "hr"},
-        {"tag": "div", "text": {"tag": "lark_md", "content": "👇 **卡片上直接审核**(无需跳表格)"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": "👇 **卡片上直接审核**。通过后进入真实发送流程；需修改可在下方填写方向并退回重生。表格只需查看权限，确需手工改正文请反馈权限缺口。"}},
         {"tag": "action", "actions": [
             {"tag": "button", "text": {"tag": "plain_text", "content": "✅ 通过"}, "type": "primary", "value": dict(val, action="draft_approve")},
             {"tag": "button", "text": {"tag": "plain_text", "content": "❌ 否决"}, "type": "danger", "value": dict(val, action="draft_reject")},
-            {"tag": "button", "text": {"tag": "plain_text", "content": "📝 去表格改正文"}, "type": "default", "url": base_url},
+            {"tag": "button", "text": {"tag": "plain_text", "content": "📝 查看草稿全文"}, "type": "default", "url": f"{base_url}&record={record_id}"},
         ]},
         # 2026-06-02 退回重生方案A: form 卡, 运营可选填「重生方向」→ 真重生一版(3信号:上一版+方向+阶段), 不再只标状态卡住.
         {"tag": "div", "text": {"tag": "lark_md", "content": "🔁 **想重新生成一版?** 下面可选填重生方向(留空也行, 系统按上一版问题+当前阶段改), 再点退回重生:"}},
