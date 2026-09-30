@@ -628,6 +628,14 @@ async def run(only_brand: str = "", only_sender: str = ""):
             # 2026-06-17: 传当前收件箱品牌 → find_draft 同品牌优先(防跨品牌错配产品, 见 find_draft docstring)
             draft, all_matched = await find_draft(contact["record_id"], ctype, brand=brand)
             if not draft: continue
+            # Keep inbound mail pending in Zoho for this session. Do not mark it
+            # processed, classify, mutate cooperation state, or generate a card.
+            from . import nyxi_trial
+            if nyxi_trial.owns_draft(draft):
+                results.append({"brand": brand, "from": from_addr,
+                                "message_id": msg_id,
+                                "skipped": "nyxi_session_owned"})
+                continue
             # Plan A (2026-05-19): 删掉旧的 `if 是否回复: continue` 短路 —
             # 它会把 KOL 第 2 轮+ 回信 (含给地址那封) 全量丢弃。
             # 防重复处理改由下方 V3-C dedup 块决定 ([MID:] 精确 + body[:200]

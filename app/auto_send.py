@@ -599,7 +599,10 @@ async def scan_ready() -> tuple:
     run_cold_keys = set()
     product_cache = {}
 
+    from . import nyxi_trial
     for rec in sorted(items, key=_ready_order):
+        if nyxi_trial.owns_draft(rec):
+            continue
         f = rec["fields"]
         send_status = ext(f.get("发送状态"))
         if send_status and send_status not in ("未发", ""):
@@ -677,6 +680,9 @@ async def scan_ready() -> tuple:
 
 # ===== 2. 发一封 =====
 async def send_one(rec: dict, *, activity_release=None) -> dict:
+    from . import nyxi_trial
+    if nyxi_trial.owns_draft(rec):
+        return nyxi_trial.hold_result(rec)
     f = rec["fields"]
     rid = rec["record_id"]
     if is_proactive_product_outreach_source(f.get("邮件草稿来源")):

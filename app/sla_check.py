@@ -317,7 +317,10 @@ async def collect_sla_overdue_drafts(now_ms: int) -> dict:
         rec for rec in waiting_tracking
         if rec.get("record_id") not in {row.get("record_id") for row in waiting_review}
     ]
-    overdue = [rec for rec in all_items if _draft_age_hours(rec, now_ms) >= SLA_HOURS_REVIEW]
+    from . import nyxi_trial
+    overdue = [rec for rec in all_items
+               if not nyxi_trial.owns_draft(rec)
+               and _draft_age_hours(rec, now_ms) >= SLA_HOURS_REVIEW]
     p1_items = [rec for rec in overdue if _draft_source(rec) in P1_DRAFT_SOURCES]
     p2_items = [rec for rec in overdue if _draft_source(rec) not in P1_DRAFT_SOURCES]
     # “每日一张”用任一 P2 记录的当日提醒时间作为持久标记。只要今天已经留痕，

@@ -57,6 +57,9 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
     """
     # 1. 读草稿
     rec = await feishu.get_record(config.T_DRAFT, record_id)
+    from . import nyxi_trial
+    if nyxi_trial.owns_draft(rec):
+        return nyxi_trial.hold_result(rec)
     f = rec["fields"]
     subject = ext(f.get("邮件主题"))
     body = ext(f.get("邮件正文"))

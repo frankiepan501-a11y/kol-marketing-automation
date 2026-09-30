@@ -38,6 +38,9 @@ def next_send_time(country_iso: str, from_dt: datetime = None):
 
 async def generate_followup(round_num: int, first_draft: dict, kol: dict, product: dict,
                              brand: str, signature: str, lang: str):
+    from . import nyxi_trial
+    if nyxi_trial.owns_draft(first_draft):
+        raise ValueError("NYXI session-owned draft: automatic follow-up disabled")
     kf = kol["fields"]
     pf = product["fields"]
     # 海外营销邮件优先用「产品英文名」, 缺则降级中文剥前缀
@@ -122,6 +125,12 @@ async def run():
         first = next((d for d in group if ext(d["fields"].get("Follow-up轮次")) == "第1封"
                       and "已发" in str(ext(d["fields"].get("发送状态")))), None)
         if not first: continue
+        from . import nyxi_trial
+        if nyxi_trial.owns_draft(first):
+            stats["skipped"] += 1
+            stats["details"].append({"record_id": first["record_id"],
+                                     "skipped": "nyxi_session_owned"})
+            continue
 
         # KOL 状态守门
         kol = kol_map.get(kid)
