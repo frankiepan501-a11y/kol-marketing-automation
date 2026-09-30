@@ -51,10 +51,10 @@ class KolRoleHandoffRoutingTests(unittest.TestCase):
         with patch.object(
             feishu, "token", new=AsyncMock(side_effect=RuntimeError("token unavailable"))
         ), patch.object(feishu, "_alert_role_resolution_failure", new=alert):
-            with self.assertRaisesRegex(RuntimeError, "no active KOL reviewer"):
+            with self.assertRaisesRegex(feishu.RoleLookupError, "contact query failed"):
                 asyncio.run(feishu.resolve_notify_targets("reviewer"))
 
-        alert.assert_awaited_once_with("独立站运营专员")
+        alert.assert_awaited_once_with("独立站运营专员", query_error="contact query failed: RuntimeError")
 
     def test_job_title_partial_department_failure_discards_partial_people(self):
         class Response:
