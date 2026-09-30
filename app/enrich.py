@@ -1067,9 +1067,16 @@ async def write_drafts_and_route(task_rid: str, product_rid: str, brand: str,
             })
             continue
         if generation_mode == "ai":
+            try:
+                card_delivery = await draft_router.notify_new_hybrid_review(rid)
+            except Exception as exc:
+                # Keep the draft pending. Never rerun the model or send email.
+                card_delivery = {"error": "审核卡派发或登记失败，需单条核对", "record_id": rid}
+                print(f"[enrich] review_card_failed rid={rid} type={type(exc).__name__}")
             results.append({
                 "kol": s["kol_name"], "rid": rid, "score": 7,
                 "path": "待人审", "generation_mode": "ai",
+                "card_delivery": card_delivery,
             })
             continue
         # ban-phrase 失败 → 跳过 auto router, 强制走人审通道
@@ -1257,10 +1264,12 @@ async def enrich_task(task_record: dict, seen_kb: set = None,
     auto_count = sum(1 for r in routed if r.get("path") == "自动通过")
     human_count = sum(1 for r in routed if r.get("path") in ("待人审", "需人改"))
     retry_count = sum(1 for r in routed if r.get("path") == "退回重生")
+    card_failures = [r["rid"] for r in routed if r.get("card_delivery", {}).get("error")]
     await feishu.update_record(config.T_TASK_KOL, task_rid, {
         "任务状态": "5-草稿待审",
         "通过阈值数": len(passed),
         "备注": (
+            (f"审核卡失败{len(card_failures)}条({','.join(card_failures)}) / " if card_failures else "") +
             f"映射规则{mapping['matched_rules']} / 自动通过 {auto_count} / "
             f"待人审 {human_count} / 退回 {retry_count} / 模型跳过 {model_skipped}"
         )[:200],
@@ -1280,6 +1289,7 @@ async def enrich_task(task_record: dict, seen_kb: set = None,
         "passed": len(passed),
         "auto_pass": auto_count,
         "human_review": human_count,
+        "review_card_failures": card_failures,
         "retry": retry_count,
     }
 

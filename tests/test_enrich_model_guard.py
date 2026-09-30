@@ -543,12 +543,14 @@ class EnrichTemplateRoutingTests(unittest.IsolatedAsyncioTestCase):
              mock.patch("app.enrich.feishu.get_record", new=mock.AsyncMock(return_value={"fields": {}})), \
              mock.patch("app.enrich.feishu.update_record", new=mock.AsyncMock()) as update, \
              mock.patch("app.enrich._next_send_time", return_value=(1234567890, "test-window")), \
-             mock.patch("app.enrich.draft_router.route_draft", new=mock.AsyncMock()) as route:
+             mock.patch("app.enrich.draft_router.route_draft", new=mock.AsyncMock()) as route, \
+             mock.patch("app.enrich.draft_router.notify_new_hybrid_review", new=mock.AsyncMock()) as notify:
             result = await enrich.write_drafts_and_route(
                 "task_1", "product_1", "FUNLAB", "partner@example.com", "Mia", passed,
             )
 
         self.assertEqual("自动通过", result[0]["path"])
+        notify.assert_not_awaited()
         self.assertEqual(0, route.await_count)
         self.assertEqual("自动通过", create.await_args.args[1]["审核路径"])
         self.assertEqual("自动通过", create.await_args.args[1]["邮件草稿状态"])
@@ -568,19 +570,34 @@ class EnrichTemplateRoutingTests(unittest.IsolatedAsyncioTestCase):
             "highlights": "Localized exception", "angle": "Localization",
             "utm_url": "https://example.com/controller?utm_source=kol", "utm_id": "",
         }]
-        with mock.patch("app.enrich.feishu.search_records", new=mock.AsyncMock(return_value=[])), \
+        with mock.patch("app.enrich.feishu.search_records", new=mock.AsyncMock(return_value=[])) as search, \
              mock.patch("app.enrich.feishu.create_record", new=mock.AsyncMock(return_value="draft_2")) as create, \
              mock.patch("app.enrich.feishu.update_record", new=mock.AsyncMock()) as update, \
              mock.patch("app.enrich._next_send_time", return_value=(1234567890, "test-window")), \
-             mock.patch("app.enrich.draft_router.route_draft", new=mock.AsyncMock()) as route:
+             mock.patch("app.enrich.draft_router.route_draft", new=mock.AsyncMock()) as route, \
+             mock.patch("app.enrich.draft_router.notify_new_hybrid_review", new=mock.AsyncMock(return_value={"delivered": 1}), create=True) as notify:
             result = await enrich.write_drafts_and_route(
                 "task_2", "product_1", "FUNLAB", "partner@example.com", "Mia", passed,
             )
+            notify.assert_awaited_once_with("draft_2")
+            notify.side_effect = RuntimeError("send failed")
+            failed = await enrich.write_drafts_and_route(
+                "task_2", "product_1", "FUNLAB", "partner@example.com", "Mia", passed,
+            )
+            self.assertIn("error", failed[0]["card_delivery"])
+            self.assertEqual("待人审", failed[0]["path"])
+            notify.reset_mock()
+            search.return_value = [{"record_id": "old", "fields": {"邮件草稿状态": "待审"}}]
+            await enrich.write_drafts_and_route(
+                "task_2", "product_1", "FUNLAB", "partner@example.com", "Mia", passed,
+            )
+            notify.assert_not_awaited()
 
         self.assertEqual("待人审", result[0]["path"])
         self.assertEqual(0, route.await_count)
         self.assertEqual("待人审", create.await_args.args[1]["审核路径"])
         self.assertEqual("待审", create.await_args.args[1]["邮件草稿状态"])
+        self.assertEqual({"delivered": 1}, result[0]["card_delivery"])
 
 
 if __name__ == "__main__":
