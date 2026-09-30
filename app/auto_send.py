@@ -733,6 +733,8 @@ async def send_one(rec: dict, *, activity_release=None) -> dict:
     if _link_rid:
         try:
             _c = await feishu.get_record(_link_tbl, _link_rid)
+            if nyxi_trial.owns_contact(_c):
+                return nyxi_trial.hold_result(rec)
             if ext(_c["fields"].get("邮箱验真状态")) == "无效":
                 await feishu.update_record(config.T_DRAFT, rid, {
                     "发送状态": "失败",
@@ -743,7 +745,9 @@ async def send_one(rec: dict, *, activity_release=None) -> dict:
                 })
                 return {"rid": rid, "ok": False, "error": "contact email 无效 (bounced), skipped"}
         except Exception as e:
-            print(f"[auto_send] 邮箱验真状态 gate check fail (放行): {e}")
+            return {"rid": rid, "ok": False, "skipped": True,
+                    "error": "联系人停发/任务归属读取失败，本轮停止发送",
+                    "reason": "contact_gate_unavailable"}
 
     # 2026-06-10: A 类 MCN/聚合域名静态黑名单 — 整域作废地址(频道名@代投域名硬拼, 实测整域退信),
     # 退 1 次即拉黑(不等退信率攒够). 与下方动态退信率守卫互补(那个针对真实大媒体域名)。

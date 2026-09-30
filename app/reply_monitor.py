@@ -228,7 +228,7 @@ async def _get_sent_drafts():
     items = await feishu.search_records(
         config.T_DRAFT,
         [{"field_name": "邮件草稿状态", "operator": "is", "value": ["已发送"]}],
-        field_names=["关联KOL", "关联媒体人", "关联产品", "邮件草稿来源", "是否回复",
+        field_names=["邮件草稿ID", "关联KOL", "关联媒体人", "关联产品", "邮件草稿来源", "是否回复",
                      "回复原文", "发送时间", "邮件主题", "发送邮箱",  # 2026-06-17: 加发送邮箱供 find_draft 同品牌过滤
                      "寄样阶段", "场景标签"],  # 2026-06-17 #1: 供 _contact_stage_label_by_brand 按品牌线算阶段
     )
@@ -624,6 +624,12 @@ async def run(only_brand: str = "", only_sender: str = ""):
 
             contact, ctype = await find_contact(from_addr)
             if not contact: continue
+            from .nyxi_trial import owns_contact
+            if owns_contact(contact):
+                results.append({"brand": brand, "from": from_addr,
+                                "message_id": msg_id, "folder_id": folder_id,
+                                "skipped": "nyxi_session_owned"})
+                continue
 
             # 2026-06-17: 传当前收件箱品牌 → find_draft 同品牌优先(防跨品牌错配产品, 见 find_draft docstring)
             draft, all_matched = await find_draft(contact["record_id"], ctype, brand=brand)

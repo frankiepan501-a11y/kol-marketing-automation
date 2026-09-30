@@ -98,6 +98,10 @@ async def run() -> dict:
     unverified = 0
     details = []
     for rec in stuck:
+        from .nyxi_trial import owns_draft
+        if owns_draft(rec):
+            details.append({"rid": rec["record_id"], "result": "nyxi_session_owned"})
+            continue
         f = rec["fields"]
         rid = rec["record_id"]
         # 取联系人邮箱

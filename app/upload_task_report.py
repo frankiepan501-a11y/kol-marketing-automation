@@ -112,13 +112,18 @@ async def _compute_spec(spec, drafts, week):
     """算单端(KOL 或 媒体人)的按产品 rows."""
     tasks = await feishu.fetch_all_records(spec["task"])
     pool_recs = await feishu.fetch_all_records(spec["pool"])
+    from .nyxi_trial import legacy_rows
+    from .nyxi_trial import owns_contact
+    reserved_ids = {r["record_id"] for r in pool_recs if owns_contact(r)}
+    pool_recs = legacy_rows(pool_recs, contacts=True)
+    drafts = legacy_rows(drafts)
     by_id = {r["record_id"]: r["fields"] for r in pool_recs}
     pool_fields = [r["fields"] for r in pool_recs]
 
     prod_obj, prod_sent, prod_reply = {}, {}, {}
     for d in drafts:
         f = d["fields"]
-        kids = _xids(f.get(spec["link"]))
+        kids = set(_xids(f.get(spec["link"]))) - reserved_ids
         if not kids:
             continue
         pids = _xids(f.get("关联产品"))

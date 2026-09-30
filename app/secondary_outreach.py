@@ -137,6 +137,9 @@ async def _eligible_kols():
             {"field_name": "合作状态", "operator": "is", "value": [status]}
         ])
         for r in items:
+            from .nyxi_trial import owns_contact
+            if owns_contact(r):
+                continue
             f = r["fields"]
             email = ext(f.get("邮箱"))
             if not email or "@" not in email or email.startswith("待补"):

@@ -621,6 +621,9 @@ async def draft_reply(
     Returns:
         新建的草稿 record_id (如已生成); None 如果意图不需要回复
     """
+    from .nyxi_trial import owns_contact
+    if owns_contact(contact_record):
+        return None
     cf = contact_record["fields"]
     if contact_type == "editor":
         contact_name = ext(cf.get("媒体人姓名"))

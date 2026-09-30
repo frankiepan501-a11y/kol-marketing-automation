@@ -86,6 +86,9 @@ async def _scan(spec: dict, now_ms: int) -> list:
         spec["table"], [{"field_name": "上次寄样订单号", "operator": "isNotEmpty", "value": []}])
     cands = []
     for r in items:
+        from .nyxi_trial import owns_contact
+        if owns_contact(r):
+            continue
         f = r["fields"]
         if f.get(spec["date_field"]):
             continue  # 已有成功事件(自动捕获已拿到, 无需提醒)

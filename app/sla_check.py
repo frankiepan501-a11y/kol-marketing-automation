@@ -532,6 +532,10 @@ async def _layer2_content_reminder(now_ms: int) -> dict:
     not_yet = 0
 
     for rec in items:
+        from .nyxi_trial import owns_draft
+        if owns_draft(rec):
+            skipped += 1
+            continue
         f = rec["fields"]
         rid = rec["record_id"]
 
@@ -640,6 +644,10 @@ async def _layer3_no_content_30d(now_ms: int) -> dict:
     not_yet = 0
 
     for rec in items:
+        from .nyxi_trial import owns_draft
+        if owns_draft(rec):
+            skipped += 1
+            continue
         f = rec["fields"]
         rid = rec["record_id"]
         if f.get("内容产出30d标记"):
@@ -761,6 +769,10 @@ async def _layer4_low_roi_60d(now_ms: int) -> dict:
     not_yet = 0
 
     for rec in items:
+        from .nyxi_trial import owns_draft
+        if owns_draft(rec):
+            skipped += 1
+            continue
         f = rec["fields"]
         rid = rec["record_id"]
         if f.get("低ROI60d标记"):
@@ -863,6 +875,10 @@ async def _layer1c_auto_sign_by_carrier(now_ms: int) -> dict:
     not_yet = 0
     skipped = 0
     for rec in items:
+        from .nyxi_trial import owns_draft
+        if owns_draft(rec):
+            skipped += 1
+            continue
         f = rec["fields"]
         rid = rec["record_id"]
         if int(f.get("签收时间") or 0):       # 已有签收时间, 别覆盖
@@ -928,6 +944,10 @@ async def _layer_soft_nudge(now_ms: int) -> dict:
     triggered, skipped, not_yet = 0, 0, 0
 
     for rec in items:
+        from .nyxi_trial import owns_draft
+        if owns_draft(rec):
+            skipped += 1
+            continue
         f = rec["fields"]
         rid = rec["record_id"]
 

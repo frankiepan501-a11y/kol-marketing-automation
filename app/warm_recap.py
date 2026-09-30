@@ -99,6 +99,9 @@ async def _has_warm_recap(contact_rid: str, link_field: str) -> bool:
 
 async def build_for_ship_draft(ship_draft: dict) -> dict:
     """给一条 寄样阶段=已签收 的草稿生成暖信草稿. Returns {ok, rid|skip, reason}."""
+    from .nyxi_trial import owns_draft, hold_result
+    if owns_draft(ship_draft):
+        return hold_result(ship_draft)
     sf = ship_draft["fields"]
     ctype = ext(sf.get("对象类型")) or "KOL"
     is_editor = (ctype == "媒体人")

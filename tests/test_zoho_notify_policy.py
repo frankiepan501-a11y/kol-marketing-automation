@@ -137,5 +137,52 @@ class NotifyPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.access.assert_not_awaited()
 
 
+    async def test_receipt_saved_before_verification(self):
+        self.setup_send()
+        events = []
+        async def persist(mid):
+            events.append(("persist", mid))
+        async def verify(*args, **kwargs):
+            self.assertEqual(events, [("persist", "accepted-id")])
+            return {"status": "verified"}
+        with patch.object(zoho, "verify_sent_after", AsyncMock(side_effect=verify)):
+            await zoho.send_email("FUNLAB", "person@example.invalid", "test", "x" * 100,
+                                  notify=False, on_accepted=persist)
+
+    async def test_receipt_failure_or_cancel_preserves_accepted_id(self):
+        self.setup_send()
+        for error in (RuntimeError("store unavailable"), asyncio.CancelledError()):
+            with self.subTest(error=type(error).__name__), \
+                 patch.object(zoho, "verify_sent_after", AsyncMock()) as verify:
+                with self.assertRaises(zoho.SentVerificationError) as caught:
+                    await zoho.send_email("FUNLAB", "person@example.invalid", "test", "x" * 100,
+                                          notify=False, on_accepted=AsyncMock(side_effect=error))
+                self.assertEqual(caught.exception.message_id, "accepted-id")
+                self.assertFalse(caught.exception.verification["receipt_persisted"])
+                verify.assert_not_awaited()
+
+    async def test_silent_reply_timeout_never_falls_back_to_second_send(self):
+        self.setup_send()
+        with patch.dict("os.environ", {"EMAIL_DRY_RUN_TO": ""}), \
+             patch.object(zoho, "_send_reply", AsyncMock(side_effect=TimeoutError("unknown result"))):
+            with self.assertRaises(TimeoutError):
+                await zoho.send_email("FUNLAB", "person@example.invalid", "test", "x" * 100,
+                                      reply_to_msg_id="inbound", notify=False)
+        self._send_now.assert_not_awaited()
+
+    async def test_default_cannot_use_receipt_hook(self):
+        with self.assertRaises(ValueError):
+            await zoho.send_email("FUNLAB", "person@example.invalid", "test", "x" * 100,
+                                  on_accepted=AsyncMock())
+        self.access.assert_not_awaited()
+
+
+    async def test_sync_receipt_callback_rejected_before_send(self):
+        self.setup_send()
+        with self.assertRaises(ValueError):
+            await zoho.send_email("FUNLAB", "person@example.invalid", "test", "x" * 100,
+                                  notify=False, on_accepted=lambda mid: None)
+        self._send_now.assert_not_awaited()
+
 if __name__ == '__main__':
     unittest.main()

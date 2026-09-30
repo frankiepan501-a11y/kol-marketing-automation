@@ -286,6 +286,9 @@ def _check_ban_phrases(body: str) -> list:
 
 def _allows_new_cold_outreach(fields: dict) -> bool:
     """空路由兼容旧数据；显式待核对/沿用线程/禁开发都不得进入常规冷开发。"""
+    from .nyxi_trial import owns_contact
+    if owns_contact({"fields": fields or {}}):
+        return False
     route = ext((fields or {}).get("触达路由状态"))
     if "[CONTROLLED_IMPORT]" in ext((fields or {}).get("迁移备注")):
         # 飞书单选可能静默丢值；带受控标记的空路由必须失败关闭。

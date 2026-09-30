@@ -434,7 +434,7 @@ async def _send_reply(brand: str, orig_msg_id: str, to_addr: str,
 
 # ===== 主入口 — 签名向后兼容 (新增可选 reply_to_msg_id, 默认 None = 行为不变) =====
 async def send_email(brand: str, to_addr: str, subject: str, body: str,
-                     reply_to_msg_id: str = None, *, notify: bool = True):
+                     reply_to_msg_id: str = None, *, notify: bool = True, on_accepted=None):
     """发送邮件 — V2: layer-1 短 body 拒发 + layer-2 draft 沙盒验证 + layer-3 30s sent 抽检.
 
     DRY-RUN: 如果 env `EMAIL_DRY_RUN_TO` 有值, 自动把 to 改成此邮箱,
@@ -444,6 +444,12 @@ async def send_email(brand: str, to_addr: str, subject: str, body: str,
     """
     if not isinstance(notify, bool):
         raise ValueError("notify must be a boolean")
+    if on_accepted is not None:
+        import inspect
+        is_async = (inspect.iscoroutinefunction(on_accepted)
+                    or inspect.iscoroutinefunction(getattr(on_accepted, "__call__", None)))
+        if notify or not is_async:
+            raise ValueError("on_accepted requires notify=False and an async callable")
     html_body = _ensure_html(body)
 
     real_to = to_addr
@@ -489,11 +495,25 @@ async def send_email(brand: str, to_addr: str, subject: str, body: str,
         try:
             msg_id = await _send_reply(brand, reply_to_msg_id, to_addr, subject, html_body)
         except Exception as e:
+            if not notify:
+                # A timeout can mean accepted: never issue a second send.
+                raise
             # reply 端点失败 (orig msgId 失效/跨账户等) → 降级新邮件, 保证邮件仍发出 (线程化是增强非必需)
             print(f"[zoho.send_email] _send_reply fail, 降级 _send_now: orig={reply_to_msg_id} err={str(e)[:160]}")
             msg_id = await _send_now(brand, to_addr, subject, html_body)
     else:
         msg_id = await _send_now(brand, to_addr, subject, html_body)
+
+    if on_accepted is not None:
+        try:
+            if not msg_id:
+                raise ValueError("accepted response has no message ID")
+            await on_accepted(msg_id)
+        except (Exception, asyncio.CancelledError) as exc:
+            raise SentVerificationError(msg_id, {
+                "status": "unverified", "message_id": msg_id,
+                "error_type": type(exc).__name__,
+                "receipt_persisted": False}) from exc
 
     # === Layer-3: 30s 后台抽检 sent folder (非阻塞) ===
     expected_text_len = len(_strip_html(html_body))

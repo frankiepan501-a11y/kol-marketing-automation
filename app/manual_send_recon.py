@@ -27,6 +27,9 @@ async def run(dry_run: bool = False) -> dict:
     pool = {}
     for tbl, ctype, name_f in ((config.T_KOL, "KOL", "账号名"), (config.T_EDITOR, "媒体人", "媒体人姓名")):
         for r in await feishu.fetch_all_records(tbl):
+            from .nyxi_trial import owns_contact
+            if owns_contact(r):
+                continue
             f = r["fields"]
             em = ext(f.get("邮箱")).strip().lower()
             if em and "@" in em:

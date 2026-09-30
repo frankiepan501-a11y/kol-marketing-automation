@@ -18,7 +18,7 @@ from .feishu import ext, xrid
 
 D60 = 60 * 86400 * 1000
 REPORT_READ_TIMEOUT_SECONDS = 180
-DRAFT_FIELDS = ["关联KOL", "关联媒体人", "发送状态", "发送时间", "是否回复"]
+DRAFT_FIELDS = ["邮件草稿ID", "关联KOL", "关联媒体人", "发送状态", "发送时间", "是否回复"]
 
 # KOL=带货上稿(affiliate) / 媒体人=earned media 报道. 成功口径+无回应阈值不同(方法论 reference-media-relations-playbook)
 SPECS = [
@@ -61,10 +61,13 @@ def _classify(cf: dict, last_send_ms: int, now_ms: int, spec: dict) -> str:
 
 
 def _contact_fields(spec: dict) -> list:
-    return [
+    fields = [
         spec["name"], spec["date"], "合作状态", "邮箱验真状态",
         "上次寄样订单号", "寄样次数", "上次寄样日期",
     ]
+    if spec["label"] == "KOL":
+        fields.append("迁移备注")
+    return fields
 
 
 async def _fetch_report_rows(table_id: str, field_names: list, label: str) -> list:
@@ -82,6 +85,10 @@ async def _fetch_report_rows(table_id: str, field_names: list, label: str) -> li
 
 
 async def _compute(spec: dict, drafts: list, rows: list, now_ms: int) -> dict:
+    from .nyxi_trial import legacy_rows
+    drafts = legacy_rows(drafts)
+    if spec["label"] == "KOL":
+        rows = legacy_rows(rows, contacts=True)
     last_send, replied = {}, set()
     for d in drafts:
         f = d["fields"]
