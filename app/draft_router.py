@@ -527,7 +527,7 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
     gap = ext(f.get("匹配不足"))
     angle = ext(f.get("建议切入点"))
     hit_kw = ext(f.get("命中关键词"))
-    body_show = body if len(body) <= 1800 else body[:1800] + "\n…(正文过长已截断, 点「去表格改」看全文)"
+    body_show = body if len(body) <= 1800 else body[:1800] + "\n…(正文过长已截断，点「查看草稿全文」看完再审核)"
     val = {"app_token": config.FEISHU_APP_TOKEN, "table_id": config.T_DRAFT, "record_id": record_id}
     ci = contact_info or {}
     who_label = "媒体人" if contact_type == "媒体人" else "KOL"
@@ -572,11 +572,11 @@ def _build_review_action_card(record_id: str, rec: dict, score: int, summary: st
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**📧 主题**\n{subject}"}},
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**✉️ 正文**\n{body_show}"}},
         {"tag": "hr"},
-        {"tag": "div", "text": {"tag": "lark_md", "content": "👇 **卡片上直接审核**(无需跳表格)"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": "👇 **卡片上直接审核**。通过后进入真实发送流程；需修改可在下方填写方向并退回重生。表格只需查看权限，确需手工改正文请反馈权限缺口。"}},
         {"tag": "action", "actions": [
             {"tag": "button", "text": {"tag": "plain_text", "content": "✅ 通过"}, "type": "primary", "value": dict(val, action="draft_approve")},
             {"tag": "button", "text": {"tag": "plain_text", "content": "❌ 否决"}, "type": "danger", "value": dict(val, action="draft_reject")},
-            {"tag": "button", "text": {"tag": "plain_text", "content": "📝 去表格改正文"}, "type": "default", "url": base_url},
+            {"tag": "button", "text": {"tag": "plain_text", "content": "📝 查看草稿全文"}, "type": "default", "url": f"{base_url}&record={record_id}"},
         ]},
         # 2026-06-02 退回重生方案A: form 卡, 运营可选填「重生方向」→ 真重生一版(3信号:上一版+方向+阶段), 不再只标状态卡住.
         {"tag": "div", "text": {"tag": "lark_md", "content": "🔁 **想重新生成一版?** 下面可选填重生方向(留空也行, 系统按上一版问题+当前阶段改), 再点退回重生:"}},
@@ -675,8 +675,26 @@ async def batch_review_pending() -> dict:
         {"field_name": "邮件草稿状态", "operator": "is", "value": ["待审"]},
     ])
     processed = []
+    repaired_missing_card = False
     for rec in items:
         if rec["fields"].get("AI评分") is not None:
+            f = rec["fields"]
+            # Hybrid generation deliberately bypasses the AI reviewer. Repair only
+            # its missing human entry, once per scan; never rescore or approve it.
+            if (not repaired_missing_card
+                    and ext(f.get("邮件草稿状态")) == "待审"
+                    and ext(f.get("AI评分理由")).startswith("[hybrid-ai-exception]")
+                    and not ext(f.get("卡片个人消息IDs"))
+                    and ext(f.get("邮件正文"))):
+                repaired_missing_card = True
+                try:
+                    result = await _notify_human_review(
+                        rec["record_id"], rec, int(f.get("AI评分") or 0),
+                        bool(f.get("承诺命中")), ext(f.get("AI评分理由")), "",
+                        ext(f.get("审核路径")) or "待人审")
+                    processed.append({"record_id": rec["record_id"], "card_repair": result})
+                except Exception as e:
+                    processed.append({"record_id": rec["record_id"], "error": str(e)[:200]})
             continue  # 已审过
         try:
             r = await route_draft(rec["record_id"])
