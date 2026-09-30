@@ -1,0 +1,119 @@
+import asyncio
+import sys
+import types
+import unittest
+from contextlib import ExitStack
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from app import zoho
+
+
+class NotifyPolicyTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.dict('os.environ', {'EMAIL_DRY_RUN_TO': 'test@example.invalid'}))
+        self.access = self.stack.enter_context(patch.object(zoho, 'access', AsyncMock(return_value='test-token')))
+        self.stack.enter_context(patch.object(zoho.config, 'BRAND_CONFIG', {'FUNLAB': {'account_id': 'test-account'}}))
+        self.client = MagicMock()
+        self.client.__aenter__ = AsyncMock(return_value=self.client)
+        self.client.__aexit__ = AsyncMock(return_value=None)
+        self.client.get = AsyncMock()
+        self.stack.enter_context(patch.object(zoho.httpx, 'AsyncClient', return_value=self.client))
+        self.stack.enter_context(patch.object(zoho.asyncio, 'sleep', AsyncMock()))
+        self.notifications = types.ModuleType('app.feishu')
+        self.notifications.resolve_notify_targets = AsyncMock(return_value=[('reviewer', 'test-user')])
+        self.notifications.send_card_message = AsyncMock()
+        import app
+        self.stack.enter_context(patch.dict(sys.modules, {'app.feishu': self.notifications}))
+        self.stack.enter_context(patch.object(app, 'feishu', self.notifications, create=True))
+
+    def response(self, body='x' * 100, status=200):
+        self.client.get.return_value = MagicMock(status_code=status)
+        self.client.get.return_value.json.return_value = {'data': {'content': body}}
+
+    async def test_silent_normal_still_reads_content(self):
+        self.response()
+        result = await zoho.verify_sent_after('FUNLAB', 'm1', 'sent', 100, notify=False)
+        self.assertEqual(result['status'], 'verified')
+        self.client.get.assert_awaited_once()
+        self.notifications.resolve_notify_targets.assert_not_awaited()
+
+    async def test_silent_truncation_returns_failure_without_notification(self):
+        self.response('short')
+        result = await zoho.verify_sent_after('FUNLAB', 'm1', 'sent', 100, notify=False)
+        self.assertEqual(result['status'], 'truncated')
+        self.notifications.resolve_notify_targets.assert_not_awaited()
+        self.notifications.send_card_message.assert_not_awaited()
+
+    async def test_default_truncation_preserves_existing_notification(self):
+        self.response('short')
+        result = await zoho.verify_sent_after('FUNLAB', 'm1', 'sent', 100)
+        self.assertEqual(result['status'], 'truncated')
+        self.notifications.send_card_message.assert_awaited_once()
+
+    async def test_unavailable_content_is_not_success(self):
+        self.response(status=404)
+        result = await zoho.verify_sent_after('FUNLAB', 'm1', 'sent', 100, notify=False)
+        self.assertEqual(result['status'], 'unverified')
+        self.notifications.resolve_notify_targets.assert_not_awaited()
+
+    async def test_network_error_is_not_success(self):
+        self.client.get.side_effect = TimeoutError('test')
+        result = await zoho.verify_sent_after('FUNLAB', 'm1', 'sent', 100, notify=False)
+        self.assertEqual(result['status'], 'unverified')
+        self.notifications.resolve_notify_targets.assert_not_awaited()
+
+    def setup_send(self):
+        for name, value in [('_get_folder_ids', ('draft', 'sent')), ('create_draft', 'draft-id'),
+                            ('get_draft_body', '<p>' + 'x' * 100 + '</p>'),
+                            ('get_draft_subject', 'test subject'), ('delete_draft', None),
+                            ('_send_now', 'accepted-id')]:
+            setattr(self, name, self.stack.enter_context(patch.object(zoho, name, AsyncMock(return_value=value))))
+        self.validate = self.stack.enter_context(patch.object(zoho, '_validate_draft'))
+
+    async def test_silent_send_waits_and_retains_accepted_id_on_failure(self):
+        self.setup_send()
+        self.response('short')
+        with self.assertRaises(zoho.SentVerificationError) as caught:
+            await zoho.send_email('FUNLAB', 'person@example.invalid', 'test subject', 'x' * 100, notify=False)
+        self.assertEqual(caught.exception.message_id, 'accepted-id')
+        self.assertTrue(caught.exception.send_accepted)
+        self._send_now.assert_awaited_once()
+        self.validate.assert_called_once()
+        self.notifications.send_card_message.assert_not_awaited()
+
+    async def test_silent_send_success_keeps_draft_and_sent_checks(self):
+        self.setup_send()
+        self.response('x' * 1000)
+        mid = await zoho.send_email('FUNLAB', 'person@example.invalid', 'test subject', 'x' * 100, notify=False)
+        self.assertEqual(mid, 'accepted-id')
+        self.get_draft_body.assert_awaited_once()
+        self.delete_draft.assert_awaited_once()
+        self.client.get.assert_awaited_once()
+        self.assertEqual(self._send_now.await_args.args[1], 'test@example.invalid')
+
+    async def test_draft_failure_prevents_real_send(self):
+        self.setup_send()
+        self.validate.side_effect = zoho.DraftValidationError('test failure')
+        with self.assertRaises(zoho.DraftValidationError):
+            await zoho.send_email('FUNLAB', 'person@example.invalid', 'test subject', 'x' * 100, notify=False)
+        self._send_now.assert_not_awaited()
+        self.delete_draft.assert_awaited_once()
+
+    async def test_concurrent_calls_do_not_share_notification_policy(self):
+        self.response('short')
+        await asyncio.gather(
+            zoho.verify_sent_after('FUNLAB', 'quiet', 'sent', 100, notify=False),
+            zoho.verify_sent_after('FUNLAB', 'default', 'sent', 100))
+        self.notifications.send_card_message.assert_awaited_once()
+        self.assertIn('default', str(self.notifications.send_card_message.await_args))
+
+    async def test_bad_policy_rejected_before_any_api(self):
+        with self.assertRaises(ValueError):
+            await zoho.send_email('FUNLAB', 'person@example.invalid', 'test', 'x' * 100, notify='false')
+        self.access.assert_not_awaited()
+
+
+if __name__ == '__main__':
+    unittest.main()

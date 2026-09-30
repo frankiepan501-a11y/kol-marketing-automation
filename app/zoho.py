@@ -24,6 +24,20 @@ class DraftValidationError(Exception):
     pass
 
 
+class SentVerificationError(Exception):
+    """Zoho accepted the send, but content verification failed. Never resend.
+
+    Keep message_id so the caller can reconcile this send instead of retrying it.
+    Acceptance is not proof of delivery.
+    """
+
+    def __init__(self, message_id: str, verification: dict):
+        self.message_id = message_id
+        self.verification = verification
+        self.send_accepted = True
+        super().__init__(f"sent verification {verification['status']}; message_id={message_id}; do not resend")
+
+
 # ===== OAuth token =====
 async def refresh_access(brand: str):
     cfg = config.BRAND_CONFIG[brand]
@@ -299,7 +313,7 @@ def _validate_draft(raw_body: str, raw_subject: str,
 
 # ===== V2 layer-3: 30s 后 sent folder 抽检 =====
 async def verify_sent_after(brand: str, msg_id: str, sent_fid: str,
-                             expected_text_len: int, delay: int = 30):
+                             expected_text_len: int, delay: int = 30, *, notify: bool = True):
     """后台 task: sleep N 秒 → 拉 sent folder raw → 长度对比 → 异常发飞书告警.
 
     失败不阻塞主流程, 只飞书告警. 双重保险防 draft-vs-send 渲染差异漏网。
@@ -318,7 +332,7 @@ async def verify_sent_after(brand: str, msg_id: str, sent_fid: str,
                 # 30s 后 sent folder 还查不到很常见 (Zoho 索引延迟), 不告警
                 print(f"[zoho.verify_sent WARN] brand={brand} msg={msg_id} "
                       f"sent folder lookup {r.status_code} (索引延迟, 跳过)")
-                return
+                return {"status": "unverified", "message_id": msg_id, "http_status": r.status_code}
             sent_body = r.json().get("data", {}).get("content", "") or ""
             sent_text_len = len(_strip_html(sent_body))
             if expected_text_len >= 50 and sent_text_len < expected_text_len * 0.7:
@@ -332,6 +346,9 @@ async def verify_sent_after(brand: str, msg_id: str, sent_fid: str,
                     f"draft 验证通过但 sent 截断 — 可能渲染管线分歧, 立即查看"
                 )
                 print(f"[zoho.verify_sent ALERT] {msg}")
+                if not notify:
+                    return {"status": "truncated", "message_id": msg_id,
+                            "expected_length": expected_text_len, "actual_length": sent_text_len}
                 card = {
                     "header": {
                         "title": {"tag": "plain_text", "content": "Zoho sent 抽检异常"},
@@ -351,11 +368,16 @@ async def verify_sent_after(brand: str, msg_id: str, sent_fid: str,
                             print(f"[zoho.verify_sent feishu alert fail] {e}")
                 except Exception as e:
                     print(f"[zoho.verify_sent feishu import fail] {e}")
+                return {"status": "truncated", "message_id": msg_id,
+                        "expected_length": expected_text_len, "actual_length": sent_text_len}
             else:
                 print(f"[zoho.verify_sent OK] brand={brand} msg={msg_id} "
                       f"sent={sent_text_len} expected={expected_text_len}")
+                return {"status": "verified", "message_id": msg_id,
+                        "expected_length": expected_text_len, "actual_length": sent_text_len}
     except Exception as e:
         print(f"[zoho.verify_sent ERROR] brand={brand} msg={msg_id} err={e}")
+        return {"status": "unverified", "message_id": msg_id, "error_type": type(e).__name__}
 
 
 # ===== 真发 (内部, 走现有 messages POST) =====
@@ -412,7 +434,7 @@ async def _send_reply(brand: str, orig_msg_id: str, to_addr: str,
 
 # ===== 主入口 — 签名向后兼容 (新增可选 reply_to_msg_id, 默认 None = 行为不变) =====
 async def send_email(brand: str, to_addr: str, subject: str, body: str,
-                     reply_to_msg_id: str = None):
+                     reply_to_msg_id: str = None, *, notify: bool = True):
     """发送邮件 — V2: layer-1 短 body 拒发 + layer-2 draft 沙盒验证 + layer-3 30s sent 抽检.
 
     DRY-RUN: 如果 env `EMAIL_DRY_RUN_TO` 有值, 自动把 to 改成此邮箱,
@@ -420,6 +442,8 @@ async def send_email(brand: str, to_addr: str, subject: str, body: str,
 
     校验失败抛 DraftValidationError, auto_send 现有 except 已能处理为"发送失败".
     """
+    if not isinstance(notify, bool):
+        raise ValueError("notify must be a boolean")
     html_body = _ensure_html(body)
 
     real_to = to_addr
@@ -473,6 +497,14 @@ async def send_email(brand: str, to_addr: str, subject: str, body: str,
 
     # === Layer-3: 30s 后台抽检 sent folder (非阻塞) ===
     expected_text_len = len(_strip_html(html_body))
+    if not notify:
+        # A session-owned send must finish its check before returning. Do not
+        # silently discard verification, notify Feishu, or retry an accepted send.
+        result = await verify_sent_after(
+            brand, msg_id, sent_fid, expected_text_len, delay=30, notify=False)
+        if result["status"] != "verified":
+            raise SentVerificationError(msg_id, result)
+        return msg_id
     task = asyncio.create_task(
         verify_sent_after(brand, msg_id, sent_fid, expected_text_len, delay=30)
     )
