@@ -675,26 +675,8 @@ async def batch_review_pending() -> dict:
         {"field_name": "邮件草稿状态", "operator": "is", "value": ["待审"]},
     ])
     processed = []
-    repaired_missing_card = False
     for rec in items:
         if rec["fields"].get("AI评分") is not None:
-            f = rec["fields"]
-            # Hybrid generation deliberately bypasses the AI reviewer. Repair only
-            # its missing human entry, once per scan; never rescore or approve it.
-            if (not repaired_missing_card
-                    and ext(f.get("邮件草稿状态")) == "待审"
-                    and ext(f.get("AI评分理由")).startswith("[hybrid-ai-exception]")
-                    and not ext(f.get("卡片个人消息IDs"))
-                    and ext(f.get("邮件正文"))):
-                repaired_missing_card = True
-                try:
-                    result = await _notify_human_review(
-                        rec["record_id"], rec, int(f.get("AI评分") or 0),
-                        bool(f.get("承诺命中")), ext(f.get("AI评分理由")), "",
-                        ext(f.get("审核路径")) or "待人审")
-                    processed.append({"record_id": rec["record_id"], "card_repair": result})
-                except Exception as e:
-                    processed.append({"record_id": rec["record_id"], "error": str(e)[:200]})
             continue  # 已审过
         try:
             r = await route_draft(rec["record_id"])
