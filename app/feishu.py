@@ -1112,13 +1112,23 @@ _role_resolution_alerted_at = {}
 _ROLE_RESOLUTION_ALERT_TTL = 900
 
 
-async def _alert_role_resolution_failure(title: str) -> None:
+async def _alert_role_resolution_failure(title: str, *, query_error: str = "") -> None:
     """岗位无人/查询失败时，告警业务群和 Frankie；不把工作卡退回旧个人。"""
     from . import config
 
     now = time.time()
-    if now - _role_resolution_alerted_at.get(title, 0) < _ROLE_RESOLUTION_ALERT_TTL:
+    alert_key = (title, bool(query_error))
+    if now - _role_resolution_alerted_at.get(alert_key, 0) < _ROLE_RESOLUTION_ALERT_TTL:
         return
+    description = (
+        f"职务 **{title}** 的通讯录查询失败，无法确认当前接手人；"
+        "这不代表岗位无人，请勿据此修改人事资料或扩大权限。"
+        f"本次通知派发已中止，不会退回旧员工个人。错误：{query_error}。"
+        "请系统维护人员核查查询结果及本次漏发。"
+    ) if query_error else (
+        f"未找到在职职务 **{title}**，相关审核/寄样卡已停止派发，"
+        "不会退回旧员工个人。请检查飞书人事职务、员工状态或通讯录权限。"
+    )
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -1127,10 +1137,7 @@ async def _alert_role_resolution_failure(title: str) -> None:
         },
         "elements": [{
             "tag": "div",
-            "text": {"tag": "lark_md", "content": (
-                f"未找到在职职务 **{title}**，相关审核/寄样卡已停止派发，"
-                "不会退回旧员工个人。请检查飞书人事职务、员工状态或通讯录权限。"
-            )},
+            "text": {"tag": "lark_md", "content": description},
         }],
     }
     sent = False
@@ -1151,7 +1158,7 @@ async def _alert_role_resolution_failure(title: str) -> None:
     except Exception as e:
         print(f"[resolve_notify_targets] role failure Frankie alert failed: {e}")
     if sent:
-        _role_resolution_alerted_at[title] = now
+        _role_resolution_alerted_at[alert_key] = now
 
 
 def is_existing_partnership_draft(fields: dict) -> bool:
@@ -1209,7 +1216,11 @@ async def resolve_notify_targets(role: str, *, job_title: str = "") -> list:
 
     # reviewer / needs_rewrite / ship_main 都用职务实时查
     title = job_title or config.KOL_REVIEWER_JOB_TITLE
-    by_title = await fetch_users_by_job_title(title)
+    try:
+        by_title = await fetch_users_by_job_title(title, strict=True)
+    except RoleLookupError as exc:
+        await _alert_role_resolution_failure(title, query_error=str(exc))
+        raise
     if not by_title:
         print(f"[resolve_notify_targets] ERROR: job_title={title!r} returned empty")
         await _alert_role_resolution_failure(title)
@@ -1236,12 +1247,43 @@ async def resolve_notify_targets(role: str, *, job_title: str = "") -> list:
     raise ValueError(f"unknown role: {role!r}")
 
 
+class RoleLookupError(RuntimeError):
+    """Contact query failed; distinct from a successful empty employee list."""
+
+
+async def _role_contact_get(client, url, *, params, headers):
+    """Retry only read-only transient failures, at most 3 attempts per page."""
+    import asyncio
+    for attempt in range(3):
+        try:
+            response = await client.get(url, params=params, headers=headers)
+            status = response.status_code
+            if status in {500, 502, 503, 504}:
+                detail = f"HTTP {status}"
+            elif status >= 400:
+                raise RoleLookupError(f"HTTP {status}")
+            else:
+                payload = response.json()
+                code = payload.get("code")
+                if code == 0:
+                    return payload
+                if code != 40003:
+                    raise RoleLookupError(f"Feishu code={code}")
+                detail = "Feishu code=40003 Internal Error"
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            detail = type(exc).__name__
+        if attempt == 2:
+            raise RoleLookupError(f"{detail}; attempts=3")
+        print(f"[role_contact_get] {detail}; retry={attempt + 1}/2")
+        await asyncio.sleep(attempt + 1)
+
+
 async def fetch_users_by_job_title(title: str, *, which: str = "kol_assistant",
-                                   department_ids=None):
+                                   department_ids=None, strict: bool = False):
     """按职务名拿当前在职员工 [(name, union_id), ...].
     默认用 KOL媒体助手 contact API；其他既有业务可显式传 identity。
     始终返回 union_id，发送方可在自己的 App namespace 安全使用。
-    1h 缓存. 失败时返回空列表 (调用方应有降级路径).
+    1h 缓存. strict=True 区分查询失败与岗位无人；旧调用保留空列表契约。
     """
     from . import config
     if department_ids is None:
@@ -1255,26 +1297,19 @@ async def fetch_users_by_job_title(title: str, *, which: str = "kol_assistant",
     try:
         tok = await token(which)
         # 1. 生产环境直接使用 App 可见范围内的明确部门，避免从根部门枚举报 40004。
-        async with httpx.AsyncClient(timeout=30.0) as cli:
+        async with httpx.AsyncClient(timeout=10.0) as cli:
             dept_ids = list(department_ids)
             if dept_ids:
                 depts = [{"open_department_id": dept_id} for dept_id in dept_ids]
             else:
                 # 仅保留给本地开发/旧测试环境；生产 readiness 会因未配置部门而降级。
-                r = await cli.get(
+                dept_payload = await _role_contact_get(cli,
                     "https://open.feishu.cn/open-apis/contact/v3/departments",
                     params={"page_size": 50, "fetch_child": "true",
                             "parent_department_id": "0",
                             "department_id_type": "open_department_id"},
                     headers={"Authorization": f"Bearer {tok}"},
                 )
-                r.raise_for_status()
-                dept_payload = r.json()
-                if dept_payload.get("code") != 0:
-                    raise RuntimeError(
-                        f"department query failed: code={dept_payload.get('code')} "
-                        f"msg={dept_payload.get('msg')}"
-                    )
                 depts = (dept_payload.get("data") or {}).get("items") or []
 
             # 2. 按部门列用户 (含 job_title + status)
@@ -1290,21 +1325,11 @@ async def fetch_users_by_job_title(title: str, *, which: str = "kol_assistant",
                               "department_id_type": "open_department_id"}
                     if page_token:
                         params["page_token"] = page_token
-                    ur = await cli.get(
+                    ud = await _role_contact_get(cli,
                         "https://open.feishu.cn/open-apis/contact/v3/users",
                         params=params,
                         headers={"Authorization": f"Bearer {tok}"},
                     )
-                    if ur.status_code >= 400:
-                        raise RuntimeError(
-                            f"user query failed: dept={dept_id} status={ur.status_code}"
-                        )
-                    ud = ur.json()
-                    if ud.get("code") != 0:
-                        raise RuntimeError(
-                            f"user query failed: dept={dept_id} code={ud.get('code')} "
-                            f"msg={ud.get('msg')}"
-                        )
                     items = (ud.get("data") or {}).get("items") or []
                     for u in items:
                         oid = u.get("union_id")
@@ -1329,6 +1354,10 @@ async def fetch_users_by_job_title(title: str, *, which: str = "kol_assistant",
     except Exception as e:
         print(f"[feishu.fetch_users_by_job_title] {title} err: {e}")
         # 失败不缓存, 下次重试
+        if strict:
+            if isinstance(e, RoleLookupError):
+                raise
+            raise RoleLookupError(f"contact query failed: {type(e).__name__}") from e
         return []
 
     _job_title_cache[cache_key] = (time.time(), results)
