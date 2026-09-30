@@ -39,6 +39,14 @@ class NewHybridReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, (await draft_router.notify_new_hybrid_review("new"))["delivered"])
         self.send.assert_awaited_once()
 
+    async def test_nyxi_draft_never_enters_new_card_exit(self):
+        self.fields["邮件草稿ID"] = "nyxi-trial-20260930-first"
+        result = await draft_router.notify_new_hybrid_review("new")
+        self.assertEqual("nyxi_session_owned", result["reason"])
+        self.targets.assert_not_awaited()
+        self.send.assert_not_awaited()
+        self.update.assert_not_awaited()
+
     async def test_send_failure_blocks_retry(self):
         self.send.side_effect = TimeoutError()
         with self.assertRaises(TimeoutError):

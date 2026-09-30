@@ -31,6 +31,9 @@ async def notify_new_hybrid_review(record_id: str) -> dict:
     from .card_resend import _build_resend_card
 
     rec = await feishu.get_record(config.T_DRAFT, record_id)
+    from . import nyxi_trial
+    if nyxi_trial.owns_draft(rec):
+        return nyxi_trial.hold_result(rec)
     f = rec.get("fields", {})
     if (ext(f.get("邮件草稿状态")) != "待审"
             or ext(f.get("审核路径")) != "待人审"
