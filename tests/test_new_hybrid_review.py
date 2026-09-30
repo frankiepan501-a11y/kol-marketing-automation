@@ -47,6 +47,16 @@ class NewHybridReviewTests(unittest.IsolatedAsyncioTestCase):
             await draft_router.notify_new_hybrid_review("new")
         self.send.assert_awaited_once()
 
+    async def test_second_recipient_failure_keeps_first_receipt(self):
+        self.targets.return_value = [("BD", "union_bd"), ("Frankie", "union_f")]
+        self.send.side_effect = ["om_first", TimeoutError()]
+        with self.assertRaises(TimeoutError):
+            await draft_router.notify_new_hybrid_review("new")
+        self.assertIn("union_bd", json.loads(self.fields["卡片个人消息IDs"]))
+        with self.assertRaisesRegex(RuntimeError, "reconciliation"):
+            await draft_router.notify_new_hybrid_review("new")
+        self.assertEqual(2, self.send.await_count)
+
     async def test_receipt_write_failure_blocks_retry(self):
         self.api.side_effect = RuntimeError("write failed")
         with self.assertRaises(RuntimeError):
