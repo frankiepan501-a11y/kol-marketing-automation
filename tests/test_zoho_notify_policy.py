@@ -101,6 +101,28 @@ class NotifyPolicyTests(unittest.IsolatedAsyncioTestCase):
         self._send_now.assert_not_awaited()
         self.delete_draft.assert_awaited_once()
 
+    async def test_cancel_after_acceptance_keeps_receipt(self):
+        self.setup_send()
+        with patch.object(zoho, 'verify_sent_after', AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(zoho.SentVerificationError) as caught:
+                await zoho.send_email('FUNLAB', 'person@example.invalid', 'test', 'x' * 100, notify=False)
+        self.assertEqual(caught.exception.message_id, 'accepted-id')
+        self.assertTrue(caught.exception.send_accepted)
+        self.assertEqual(caught.exception.verification['error_type'], 'CancelledError')
+        self._send_now.assert_awaited_once()
+
+    async def test_default_send_retains_background_check_and_cleanup(self):
+        self.setup_send()
+        self.response('x' * 1000)
+        mid = await zoho.send_email('FUNLAB', 'person@example.invalid', 'test', 'x' * 100)
+        self.assertEqual(mid, 'accepted-id')
+        pending = list(zoho._pending_verify_tasks)
+        self.assertEqual(len(pending), 1)
+        await asyncio.gather(*pending)
+        # Done callbacks execute before gather returns.
+        self.assertFalse(zoho._pending_verify_tasks)
+        self.client.get.assert_awaited_once()
+
     async def test_concurrent_calls_do_not_share_notification_policy(self):
         self.response('short')
         await asyncio.gather(

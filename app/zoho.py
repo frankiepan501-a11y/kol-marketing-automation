@@ -500,8 +500,16 @@ async def send_email(brand: str, to_addr: str, subject: str, body: str,
     if not notify:
         # A session-owned send must finish its check before returning. Do not
         # silently discard verification, notify Feishu, or retry an accepted send.
-        result = await verify_sent_after(
-            brand, msg_id, sent_fid, expected_text_len, delay=30, notify=False)
+        try:
+            result = await verify_sent_after(
+                brand, msg_id, sent_fid, expected_text_len, delay=30, notify=False)
+        except asyncio.CancelledError as exc:
+            # The send is irreversible. Preserve its receipt even when an outer
+            # timeout cancels verification; a generic cancellation could trigger
+            # a duplicate retry. The caller must reconcile this message ID.
+            raise SentVerificationError(msg_id, {
+                "status": "unverified", "message_id": msg_id,
+                "error_type": "CancelledError"}) from exc
         if result["status"] != "verified":
             raise SentVerificationError(msg_id, result)
         return msg_id
