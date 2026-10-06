@@ -305,7 +305,7 @@ KOL_FRANKIE_MAPPED = bool(KOL_ASSISTANT_FRANKIE_UNION_ID) and any(
     uid == KOL_ASSISTANT_FRANKIE_UNION_ID for _, uid in KOL_NOTIFY_USERS
 )
 KOL_SHIP_CC_MAPPED = any("晓丹" in name for name, _ in KOL_NOTIFY_USERS)
-# 兼容健康字段名：岗位失败时的安全告警只依赖 KOL 群 + Frankie，不再依赖个人运营。
+# 兼容健康字段名：KOL 业务群通知仍需群配置；岗位失败告警单独只发 Frankie。
 KOL_REVIEWER_FALLBACK_MAPPED = bool(NOTIFY_CHAT_ID) and KOL_FRANKIE_MAPPED
 KOL_FEISHU_CREDENTIALS_CONFIGURED = bool(
     FEISHU_KOL_ASSISTANT_APP_ID and FEISHU_KOL_ASSISTANT_APP_SECRET
@@ -323,7 +323,7 @@ KOL_FEISHU_CONFIG_READY = all((
 # KOL/编辑 草稿待审通知的"主审"职务 (按飞书人事「职务」列原文, feishu-people-as-source-of-truth 铁律)
 # 2026-05-15: draft_router._notify_human_review + sla_check L1 都用此职务实时查在职名单
 KOL_REVIEWER_JOB_TITLE = env("KOL_REVIEWER_JOB_TITLE", "独立站运营专员")
-# 临时空岗接手：仅将需要岗位主审的 KOL 操作卡交给 Frankie；关掉即恢复岗位路由。
+# 临时空岗接手：将 KOL 岗位通知及操作卡交给 Frankie；关掉即恢复岗位路由。
 KOL_TEMP_FRANKIE_OWNER = env("KOL_TEMP_FRANKIE_OWNER", "0") == "1"
 # Separate existing-partnership handoff from new prospecting and general reports.
 KOL_PARTNERSHIP_JOB_TITLE = env("KOL_PARTNERSHIP_JOB_TITLE", "").strip()

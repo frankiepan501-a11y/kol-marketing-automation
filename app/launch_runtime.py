@@ -1398,7 +1398,8 @@ async def _notify_operator_review(*, campaign_id: str, activity: dict,
                 "系统已先检查国家、语言、平台、粉丝范围、邮箱和全局重复触达。"
                 "请只打开达人主页，核对近3个月内容品类、实际语言及缺失资料，"
                 "在活动专属审核视图回填通过 / 待补资料 / 排除和原因。"
-                "本批无需 Frankie 逐条审核。"
+                + ("请 Frankie 只审核上述边界项。" if config.KOL_TEMP_FRANKIE_OWNER
+                 else "本批无需 Frankie 逐条审核。")
             )}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"[打开活动参与记录]({table_url})"}},
         ],
