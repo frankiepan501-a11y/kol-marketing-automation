@@ -1367,7 +1367,9 @@ async def _notify_operator_review(*, campaign_id: str, activity: dict,
                                   created: int) -> dict:
     if created <= 0:
         return {"sent": 0, "targets": 0}
-    targets = await feishu.fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE)
+    targets = (await feishu.resolve_notify_targets("frankie")
+               if config.KOL_TEMP_FRANKIE_OWNER
+               else await feishu.fetch_users_by_job_title(config.KOL_REVIEWER_JOB_TITLE))
     if not targets:
         return {"sent": 0, "targets": 0, "error": "未找到在职KOL运营审核人"}
     activity_name = (
@@ -1406,7 +1408,8 @@ async def _notify_operator_review(*, campaign_id: str, activity: dict,
     for name, open_id in targets:
         try:
             await feishu.send_card_message(
-                "open_id", open_id, card, biz="KOL", level="P2",
+                "union_id" if config.KOL_TEMP_FRANKIE_OWNER else "open_id",
+                open_id, card, biz="KOL", level="P2",
             )
             sent += 1
         except Exception as exc:

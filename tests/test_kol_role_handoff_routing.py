@@ -16,6 +16,28 @@ from app import auto_send, config, feishu, zoho
 
 
 class KolRoleHandoffRoutingTests(unittest.TestCase):
+    def test_role_failure_alert_only_frankie(self):
+        sender = AsyncMock(return_value="om_test")
+        feishu._role_resolution_alerted_at.clear()
+        with patch.object(feishu, "send_card_message", new=sender), patch.object(
+            config, "KOL_ASSISTANT_FRANKIE_UNION_ID", "on_frankie"
+        ):
+            asyncio.run(feishu._alert_role_resolution_failure("商务BD专员"))
+        sender.assert_awaited_once()
+        self.assertEqual(("union_id", "on_frankie"), sender.await_args.args[:2])
+
+    def test_temporary_frankie_owner_handles_empty_reviewer_role(self):
+        lookup = AsyncMock(return_value=[])
+        with patch.object(config, "KOL_TEMP_FRANKIE_OWNER", True, create=True), patch.object(
+            config, "KOL_ASSISTANT_FRANKIE_UNION_ID", "on_frankie"
+        ), patch.object(feishu, "fetch_users_by_job_title", new=lookup):
+            for role in ("reviewer", "needs_rewrite", "ship_main"):
+                self.assertEqual([(config.KOL_FRANKIE_NAME, "on_frankie")],
+                                 asyncio.run(feishu.resolve_notify_targets(role)))
+            self.assertEqual([(config.KOL_FRANKIE_NAME, "on_frankie")],
+                             asyncio.run(feishu.resolve_partnership_targets("reviewer")))
+        lookup.assert_not_awaited()
+
     def test_needs_rewrite_uses_current_job_title_and_frankie_not_static_people(self):
         with patch.object(
             feishu,

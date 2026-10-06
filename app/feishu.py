@@ -1113,7 +1113,7 @@ _ROLE_RESOLUTION_ALERT_TTL = 900
 
 
 async def _alert_role_resolution_failure(title: str, *, query_error: str = "") -> None:
-    """岗位无人/查询失败时，告警业务群和 Frankie；不把工作卡退回旧个人。"""
+    """岗位无人/查询失败时仅告警 Frankie；不把工作卡退回旧个人。"""
     from . import config
 
     now = time.time()
@@ -1140,25 +1140,15 @@ async def _alert_role_resolution_failure(title: str, *, query_error: str = "") -
             "text": {"tag": "lark_md", "content": description},
         }],
     }
-    sent = False
-    try:
-        await send_card_message(
-            "chat_id", config.NOTIFY_CHAT_ID, card,
-            biz="AUDIT", level="P0", which="kol_assistant",
-        )
-        sent = True
-    except Exception as e:
-        print(f"[resolve_notify_targets] role failure group alert failed: {e}")
     try:
         await send_card_message(
             "union_id", config.KOL_ASSISTANT_FRANKIE_UNION_ID, card,
             biz="AUDIT", level="P0", which="kol_assistant",
         )
-        sent = True
     except Exception as e:
         print(f"[resolve_notify_targets] role failure Frankie alert failed: {e}")
-    if sent:
-        _role_resolution_alerted_at[alert_key] = now
+        return
+    _role_resolution_alerted_at[alert_key] = now
 
 
 def is_existing_partnership_draft(fields: dict) -> bool:
@@ -1174,6 +1164,8 @@ def is_existing_partnership_draft(fields: dict) -> bool:
 
 async def resolve_partnership_targets(role: str = "reviewer") -> list:
     from . import config
+    if config.KOL_TEMP_FRANKIE_OWNER:
+        return await resolve_notify_targets("frankie")
     if not config.KOL_PARTNERSHIP_JOB_TITLE:
         return await resolve_notify_targets(role)
     if config.KOL_PARTNERSHIP_FRANKIE_ONLY:
@@ -1213,6 +1205,9 @@ async def resolve_notify_targets(role: str, *, job_title: str = "") -> list:
         if not uid:
             raise RuntimeError("KOL_ASSISTANT_FRANKIE_UNION_ID is missing")
         return [(config.KOL_FRANKIE_NAME, uid)]
+
+    if config.KOL_TEMP_FRANKIE_OWNER and role in {"reviewer", "needs_rewrite", "ship_main"}:
+        return await resolve_notify_targets("frankie")
 
     # reviewer / needs_rewrite / ship_main 都用职务实时查
     title = job_title or config.KOL_REVIEWER_JOB_TITLE

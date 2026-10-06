@@ -323,6 +323,8 @@ KOL_FEISHU_CONFIG_READY = all((
 # KOL/编辑 草稿待审通知的"主审"职务 (按飞书人事「职务」列原文, feishu-people-as-source-of-truth 铁律)
 # 2026-05-15: draft_router._notify_human_review + sla_check L1 都用此职务实时查在职名单
 KOL_REVIEWER_JOB_TITLE = env("KOL_REVIEWER_JOB_TITLE", "独立站运营专员")
+# 临时空岗接手：仅将需要岗位主审的 KOL 操作卡交给 Frankie；关掉即恢复岗位路由。
+KOL_TEMP_FRANKIE_OWNER = env("KOL_TEMP_FRANKIE_OWNER", "0") == "1"
 # Separate existing-partnership handoff from new prospecting and general reports.
 KOL_PARTNERSHIP_JOB_TITLE = env("KOL_PARTNERSHIP_JOB_TITLE", "").strip()
 KOL_PARTNERSHIP_FRANKIE_ONLY = env("KOL_PARTNERSHIP_FRANKIE_ONLY", "1") != "0"
