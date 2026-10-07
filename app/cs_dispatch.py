@@ -211,14 +211,15 @@ async def _send_card(union_id: str, card: dict, idempotency_key: str = "") -> st
     return result.get("message_id", "") if result.get("ok") else ""
 
 
-async def _update_card(message_id: str, card: dict) -> bool:
+async def _update_card_result(message_id: str, card: dict) -> dict:
     """Update a CS assistant card with the same app that sent it.
 
     Card action feedback must be visible on the original card; toast alone is too
     easy to miss when operators handle multiple tickets in one chat.
     """
     if not message_id:
-        return False
+        return {"ok": False, "http_status": 0, "feishu_code": None,
+                "error": "missing message_id"}
     try:
         tok = await _token()
         async with httpx.AsyncClient(timeout=30.0) as c:
@@ -226,10 +227,49 @@ async def _update_card(message_id: str, card: dict) -> bool:
                               headers={"Authorization": f"Bearer {tok}"},
                               json={"content": json.dumps(card, ensure_ascii=False)})
             d = r.json()
-        return d.get("code") == 0
+        ok = d.get("code") == 0
+        return {"ok": ok, "http_status": r.status_code, "feishu_code": d.get("code"),
+                "error": "" if ok else str(d.get("msg") or f"HTTP {r.status_code}")[:300]}
     except Exception as e:
-        print(f"[cs_dispatch._update_card] {message_id} fail: {e}")
-        return False
+        return {"ok": False, "http_status": 0, "feishu_code": None,
+                "error": f"{type(e).__name__}: {str(e)[:240]}"}
+
+
+async def _update_card(message_id: str, card: dict) -> bool:
+    """Backward-compatible boolean card update used by callback handlers."""
+    return bool((await _update_card_result(message_id, card)).get("ok"))
+
+
+async def _card_customer_readback(message_id: str, customer: str) -> dict:
+    """Read the patched card back with the sending CS app and verify its customer."""
+    if not message_id or not customer:
+        return {"ok": False, "http_status": 0, "feishu_code": None,
+                "error": "missing message_id or customer"}
+    last = {"ok": False, "http_status": 0, "feishu_code": None,
+            "error": "customer not present in card readback"}
+    try:
+        tok = await _token()
+        for attempt in range(3):
+            async with httpx.AsyncClient(timeout=30.0) as c:
+                response = await c.get(
+                    f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}",
+                    headers={"Authorization": f"Bearer {tok}"},
+                )
+                data = response.json()
+            last = {"ok": False, "http_status": response.status_code,
+                    "feishu_code": data.get("code"),
+                    "error": str(data.get("msg") or "customer not present in card readback")[:300]}
+            items = (data.get("data") or {}).get("items") or []
+            content = (((items[0].get("body") or {}).get("content")) if items else "") or ""
+            if data.get("code") == 0 and customer.lower() in content.lower():
+                return {"ok": True, "http_status": response.status_code,
+                        "feishu_code": 0, "error": ""}
+            if attempt < 2:
+                await asyncio.sleep(0.5)
+    except Exception as exc:
+        last = {"ok": False, "http_status": 0, "feishu_code": None,
+                "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
+    return last
 
 
 def _parse_card_message_ids(value) -> list[str]:
@@ -1049,6 +1089,44 @@ async def send_preview_card(rid: str) -> dict:
             "sent_to": "observe_union", "status": _x(f, "状态")}
 
 
+async def refresh_ticket_card(rid: str) -> dict:
+    """Refresh pending card copies in place after a deterministic ticket correction."""
+    rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                           which="notify")
+    f = ((rec.get("data") or {}).get("record") or {}).get("fields") or {}
+    if not f:
+        return {"ok": False, "record_id": rid, "error": "record not found"}
+    message_ids = _parse_card_message_ids(_x(f, "卡片消息ID"))
+    if not message_ids:
+        return {"ok": True, "record_id": rid, "cards_updated": 0,
+                "message_ids": [], "skipped": "no_existing_card"}
+    if _x(f, "状态") != "待回":
+        return {"ok": True, "record_id": rid, "cards_updated": 0,
+                "message_ids": message_ids, "skipped": "ticket_not_pending"}
+    try:
+        resources = await cs_resources.active_resources()
+    except Exception:
+        resources = cs_resources.builtin_resources()
+    card = _build_card(rid, f, resources=resources)
+    results = await asyncio.gather(*(_update_card_result(mid, card) for mid in message_ids))
+    updated = sum(bool(item.get("ok")) for item in results)
+    customer = _x(f, "客户标识")
+    verified_results = await asyncio.gather(*(
+        _card_customer_readback(mid, customer) if result.get("ok") else asyncio.sleep(
+            0, result=result)
+        for mid, result in zip(message_ids, results)
+    ))
+    verified = sum(bool(item.get("ok")) for item in verified_results)
+    readback_errors = [
+        {"message_id": mid, "http_status": item.get("http_status"),
+         "feishu_code": item.get("feishu_code"), "error": item.get("error")}
+        for mid, item in zip(message_ids, verified_results) if not item.get("ok")
+    ]
+    return {"ok": updated == len(message_ids) and verified == len(message_ids),
+            "record_id": rid, "cards_updated": updated, "cards_verified": verified,
+            "message_ids": message_ids, "card_readback_errors": readback_errors}
+
+
 # ===== 回客户真实渠道发送 (CSP=Powkong Zoho / CSF=Funlab 网易 SMTP / CSD·CSDT=Discord) =====
 def _placeholder_hit(text: str) -> str:
     """回复正文含未替换占位符 → 返回命中片段(供拦截), 否则 ''。"""
@@ -1392,10 +1470,13 @@ async def _dispatch_reply(f: dict, reply: str) -> tuple:
     brand = _x(f, "品牌")
     thread = _x(f, "线程ID")
     customer = _x(f, "客户标识")
-    cust_email = parseaddr(customer)[1] or customer
+    cust_email = _csi._valid_customer_email(customer)
     subj = "Re: " + _orig_subject(f)
     html = _to_html(reply)
     dry_run_to = _validated_cs_dry_run_to()
+
+    if prefix in ("CSP", "CSZ", "CSF") and not cust_email:
+        return False, "客户邮箱无效或为平台/系统地址，已阻止发送", ""
 
     if dry_run_to:
         target = _route_label(prefix, channel, cust_email, thread)
@@ -1489,14 +1570,64 @@ def _operator_label(event: dict) -> str:
     return (op.get("union_id") or op.get("open_id") or "运营自助")[:60]
 
 
-async def _notify_union(union: str, text: str):
+async def _send_text_result(union: str, text: str, idempotency_key: str = "") -> dict:
     try:
         tok = await _token()
+        params = {"receive_id_type": "union_id"}
+        if idempotency_key:
+            params["uuid"] = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
         async with httpx.AsyncClient(timeout=30.0) as c:
-            await c.post("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=union_id",
-                         headers={"Authorization": f"Bearer {tok}"},
-                         json={"receive_id": union, "msg_type": "text",
-                               "content": json.dumps({"text": text}, ensure_ascii=False)})
+            response = await c.post(
+                "https://open.feishu.cn/open-apis/im/v1/messages",
+                params=params,
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"receive_id": union, "msg_type": "text",
+                      "content": json.dumps({"text": text}, ensure_ascii=False)},
+            )
+            data = response.json()
+        message_id = ((data.get("data") or {}).get("message_id")
+                      if data.get("code") == 0 else "") or ""
+        return {"ok": bool(message_id), "message_id": message_id,
+                "http_status": response.status_code, "feishu_code": data.get("code"),
+                "error": "" if message_id else str(data.get("msg") or "send failed")[:300]}
+    except Exception as exc:
+        return {"ok": False, "message_id": "", "http_status": 0,
+                "feishu_code": None, "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
+
+
+async def notify_customer_email_fix(corrected_count: int, cards_updated: int,
+                                    ambiguous_count: int, run_id: str) -> dict:
+    """Notify Chen Xiangyu via the CS Assistant identity after verified correction."""
+    targets, route = await _resolve_targets("陈翔宇")
+    if not targets:
+        return {"ok": False, "route": route, "message_ids": [],
+                "error": "陈翔宇在客服助手身份下无法解析"}
+    title = feishu.format_title_str(
+        biz="CUS", level="P1", title="Shopify 客户邮箱识别已修复", suffix="客服助手"
+    )
+    text = (
+        f"{title}\n"
+        f"已纠正 {int(corrected_count)} 张工单，原卡已更新 {int(cards_updated)} 张。\n"
+        "系统现会优先识别 Reply-To 或表单正文中唯一的客户邮箱，并阻止回复到 "
+        "mailer@shopify.com 等平台地址。\n"
+        f"仍需人工核对的多邮箱工单：{int(ambiguous_count)} 张。请以后以更新后的卡片为准。"
+    )
+    results = []
+    for name, union_id in targets:
+        result = await _send_text_result(
+            union_id, text,
+            idempotency_key=f"cs-shopify-email-fix:{run_id}:{union_id}",
+        )
+        results.append({"name": name, **result})
+    return {"ok": bool(results) and all(item.get("ok") for item in results),
+            "route": route,
+            "message_ids": [item.get("message_id") for item in results if item.get("message_id")],
+            "results": results}
+
+
+async def _notify_union(union: str, text: str):
+    try:
+        await _send_text_result(union, text)
     except Exception:
         pass
 

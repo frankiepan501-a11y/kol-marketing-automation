@@ -21,6 +21,7 @@ import time
 import httpx
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid, parseaddr
+from urllib.parse import quote
 from . import deepseek, feishu, cs_resources
 
 # ---- 资源 (非 secret, 可 env 覆盖) ----
@@ -148,6 +149,85 @@ def _field_text(v) -> str:
 
 def _customer_email(v: str) -> str:
     return (parseaddr(v or "")[1] or v or "").strip().lower()
+
+
+_EMAIL_RE = re.compile(
+    r"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+$",
+    re.I,
+)
+_FORM_EMAIL_RE = re.compile(
+    r"(?:\b(?:alternate\s+)?e[\s-]?mail(?:\s+(?:address|adresse))?"
+    r"|correo\s+electr[oó]nico|adresse\s+e-?mail|indirizzo\s+e-?mail"
+    r"|e-?mailadres|e-?mailadresse|电子邮箱|电子邮件|邮箱|メールアドレス|メール)"
+    r"\s*[:：]\s*(?:mailto:)?<?"
+    r"([A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+)>?",
+    re.I,
+)
+_PLATFORM_SYSTEM_EMAILS = {
+    "mailer@shopify.com",
+    "noreply@shopify.com",
+    "no-reply@shopify.com",
+}
+
+
+def _is_platform_or_system_email(v: str) -> bool:
+    email = _customer_email(v)
+    if not email:
+        return False
+    if email in _PLATFORM_SYSTEM_EMAILS:
+        return True
+    local, _, domain = email.partition("@")
+    if domain in {"shopify.com", "shopifyemail.com"} and local in {
+            "mailer", "noreply", "no-reply", "donotreply", "do-not-reply"}:
+        return True
+    return email in {
+        _customer_email(ZOHO_CS_FROM),
+        _customer_email(FIREFLY_CS_FROM),
+        _customer_email(NE_USER),
+    } - {""}
+
+
+def _valid_customer_email(v: str) -> str:
+    email = _customer_email(v)
+    if not _EMAIL_RE.fullmatch(email) or _is_platform_or_system_email(email):
+        return ""
+    return email
+
+
+def _labeled_customer_emails(body: str) -> list[str]:
+    emails = []
+    for match in _FORM_EMAIL_RE.finditer(body or ""):
+        email = _valid_customer_email(match.group(1))
+        if email and email not in emails:
+            emails.append(email)
+    return emails
+
+
+def _message_customer_email(msg: dict) -> str:
+    """Resolve the real customer mailbox without trusting platform relays."""
+    reply_to = _valid_customer_email(
+        msg.get("reply_to") or msg.get("replyToAddress") or msg.get("replyTo") or ""
+    )
+    if reply_to:
+        return reply_to
+    sender = _customer_email(msg.get("frm") or "")
+    subject = (msg.get("subj") or "").lower()
+    contact_form = (_is_platform_or_system_email(sender)
+                    or "customer message" in subject or "contact form" in subject
+                    or "kundennachricht" in subject)
+    if contact_form:
+        labeled = _labeled_customer_emails(msg.get("body") or "")
+        if len(labeled) == 1:
+            return labeled[0]
+        if len(labeled) > 1 or _is_platform_or_system_email(sender):
+            return ""
+    return _valid_customer_email(sender)
+
+
+def _customer_identifier(msg: dict) -> str:
+    if (msg.get("channel") or "") != "邮箱":
+        return str(msg.get("frm") or "").strip()
+    return _message_customer_email(msg)
 
 
 def _safe_filename(name: str, fallback: str = "customer-evidence.bin") -> str:
@@ -527,6 +607,8 @@ async def _zoho_message(tok: str, account_id: str, folder_id: str, meta: dict,
     return {"id": mid, "id_prefix": id_prefix, "frm": meta.get("fromAddress", ""),
             "subj": meta.get("subject", ""), "received_ms": int(meta.get("receivedTime") or 0),
             "body": body, "channel": "邮箱", "brand_default": brand,
+            "reply_to": (meta.get("replyToAddress") or meta.get("replyTo")
+                         or meta.get("replyAddress") or ""),
             "in_reply_to": meta.get("inReplyTo") or meta.get("inReplyToHeader") or "",
             "references": meta.get("references") or "",
             "mail_thread_id": meta.get("threadId") or "", "attachments": attachments}
@@ -794,6 +876,7 @@ def _fetch_funlab_sync(limit: int) -> list:
             out.append({"id": msgid, "id_prefix": "CSF", "frm": frm, "subj": subj,
                         "received_ms": received_ms, "body": _extract_body(msg)[:8000],
                         "channel": "邮箱", "brand_default": "FUNLAB",
+                        "reply_to": (msg.get("Reply-To", "") or "").strip(),
                         "in_reply_to": (msg.get("In-Reply-To", "") or "").strip(),
                         "references": (msg.get("References", "") or "").strip(),
                         "mail_thread_id": "",
@@ -860,6 +943,7 @@ def _fetch_funlab_one_sync(message_id: str, scan_limit: int = 500) -> dict:
             return {"id": msgid, "id_prefix": "CSF", "frm": frm, "subj": subj,
                     "received_ms": received_ms, "body": _extract_body(msg)[:8000],
                     "channel": "邮箱", "brand_default": "FUNLAB",
+                    "reply_to": (msg.get("Reply-To", "") or "").strip(),
                     "in_reply_to": (msg.get("In-Reply-To", "") or "").strip(),
                     "references": (msg.get("References", "") or "").strip(),
                     "mail_thread_id": "",
@@ -1029,7 +1113,7 @@ def _seen_in_history(f: dict, msg_id: str) -> bool:
 def _match_waiting_info_ticket(msg: dict, waiting: list) -> dict | None:
     """Find an existing wait-info ticket for a customer's later email reply."""
     msg_tokens = _message_tokens(msg)
-    sender = _customer_email(msg.get("frm"))
+    sender = _message_customer_email(msg)
     msg_prefix = (msg.get("id_prefix") or "").upper()
     msg_brand = (msg.get("brand_default") or "").upper()
     mail_thread_id = str(msg.get("mail_thread_id") or "").strip()
@@ -1200,8 +1284,10 @@ async def _send_info_request(msg: dict, fields: dict, reply: str) -> tuple[str, 
         raise ValueError(f"补询模板含禁止承诺/占位符: {hit}")
     html = _to_html(reply)
     subject = _orig_subject_from_msg(msg)
-    customer = _customer_email(fields.get("客户标识", ""))
+    customer = _valid_customer_email(fields.get("客户标识", ""))
     prefix = msg.get("id_prefix")
+    if not customer:
+        return "blocked_invalid_customer", ""
     if CS_INFO_REQUEST_DRY_RUN_TO:
         target = f"{prefix}:{customer}"
         banner = (f'<div style="background:#fff3cd;padding:8px;border:1px solid #ffc107;margin-bottom:12px">'
@@ -1317,7 +1403,7 @@ def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = N
         "品牌": brand,
         "销售平台": _pick(platform, PLATFORM_OPTS, "未知"),
         "产品": (c.get("product") or "")[:200],
-        "客户标识": msg["frm"],
+        "客户标识": _customer_identifier(msg),
         "订单号": order_no,
         "客诉摘要": summary[:500],
         "原文": (msg["subj"] + "\n\n" + msg["body"])[:8000],
@@ -1375,6 +1461,9 @@ def _info_send_update(fields: dict, mode: str, outbound_msg_id: str = "") -> dic
         count = int(float(_field_text(fields.get("补充信息次数")) or 0))
     elif mode == "replay_blocked":
         note = "系统补询: 历史回放安全闸已拦截，未自动发给客户。"
+        count = int(float(_field_text(fields.get("补充信息次数")) or 0))
+    elif mode == "blocked_invalid_customer":
+        note = "系统补询: 客户邮箱无效或属于平台/系统地址，已阻止发送并等待人工核对。"
         count = int(float(_field_text(fields.get("补充信息次数")) or 0))
     else:
         note = f"系统补询: 未发送，mode={mode}。"
@@ -1540,6 +1629,97 @@ async def backfill_evidence(record_id: str, dry_run: bool = False, scan_limit: i
             "saved_count": fields.get("客户附件数量", 0),
             "status": fields.get("客户附件状态"),
             "summary": fields.get("客户附件摘要", "")[:1000]}
+
+
+async def backfill_shopify_customer_emails(record_id: str = "", dry_run: bool = True,
+                                            scan_limit: int = 2000) -> dict:
+    """Correct Shopify relay addresses only when one labeled customer email exists."""
+    if not dry_run and not record_id:
+        raise ValueError("commit requires one record_id for replayable correction")
+    scan_limit = max(1, min(int(scan_limit or 2000), 5000))
+    if record_id:
+        response = await feishu.api(
+            "GET",
+            f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{record_id}",
+            which="notify",
+        )
+        record = ((response.get("data") or {}).get("record") or {})
+        records = ([{"record_id": record_id, "fields": record.get("fields") or {}}]
+                   if record else [])
+    else:
+        records, page_token, seen_tokens = [], "", set()
+        while len(records) < scan_limit:
+            path = (f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}"
+                    f"/records?page_size=200"
+                    + (f"&page_token={quote(page_token, safe='')}" if page_token else ""))
+            response = await feishu.api("GET", path, which="notify")
+            data = response.get("data") or {}
+            records.extend(data.get("items") or [])
+            if not data.get("has_more") or len(records) >= scan_limit:
+                break
+            next_token = str(data.get("page_token") or "")
+            if not next_token or next_token in seen_tokens:
+                raise RuntimeError("shopify customer email backfill received invalid page_token")
+            seen_tokens.add(next_token)
+            page_token = next_token
+        records = records[:scan_limit]
+
+    updated_ids, verified_ids, ambiguous_ids, unresolved_ids = [], [], [], []
+    candidates = 0
+    for record in records:
+        rid = str(record.get("record_id") or "").strip()
+        fields = record.get("fields") or {}
+        current = _customer_email(_field_text(fields.get("客户标识")))
+        original = _field_text(fields.get("原文"))
+        labeled = _labeled_customer_emails(original)
+        history = _field_text(fields.get("沟通历史摘要"))
+        note = "系统纠偏: 客户邮箱已从 Shopify平台代发地址改为表单内唯一客户邮箱。"
+        replayable_corrected = (len(labeled) == 1 and current == labeled[0]
+                                and note in history)
+        if not rid or (current not in _PLATFORM_SYSTEM_EMAILS and not replayable_corrected):
+            continue
+        candidates += 1
+        if len(labeled) != 1:
+            (ambiguous_ids if len(labeled) > 1 else unresolved_ids).append(rid)
+            continue
+        if replayable_corrected:
+            updated_ids.append(rid)
+            if not dry_run:
+                verified_ids.append(rid)
+            continue
+        history_without_note = history.replace(note, "").strip()
+        update = {"客户标识": labeled[0],
+                  "沟通历史摘要": (note + "\n" + history_without_note).strip()[:5000]}
+        if not dry_run:
+            await feishu.api(
+                "PUT",
+                f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{rid}",
+                {"fields": update},
+                which="notify",
+            )
+            readback = await feishu.api(
+                "GET",
+                f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{rid}",
+                which="notify",
+            )
+            readback_fields = (((readback.get("data") or {}).get("record") or {})
+                               .get("fields") or {})
+            readback_email = _customer_email(_field_text(readback_fields.get("客户标识")))
+            if readback_email != labeled[0]:
+                raise RuntimeError(f"customer email readback mismatch for {rid}")
+            verified_ids.append(rid)
+        updated_ids.append(rid)
+
+    return {
+        "ok": True, "dry_run": dry_run, "scanned": len(records),
+        "candidates": candidates, "updated": len(updated_ids),
+        "verified": len(verified_ids),
+        "ambiguous": len(ambiguous_ids), "unresolved": len(unresolved_ids),
+        "updated_record_ids": updated_ids,
+        "verified_record_ids": verified_ids,
+        "ambiguous_record_ids": ambiguous_ids,
+        "unresolved_record_ids": unresolved_ids,
+    }
 
 
 # ===== 主入口 =====

@@ -7,6 +7,161 @@ from app import cs_ingest
 
 
 class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_zoho_message_retains_reply_to_address(self):
+        meta = {
+            "messageId": "m1",
+            "fromAddress": "mailer@shopify.com",
+            "replyToAddress": "buyer@example.com",
+            "subject": "New customer message",
+            "receivedTime": "1",
+        }
+        with patch.object(cs_ingest, "_zget", new=AsyncMock(return_value={
+                "data": {"content": "Email: buyer@example.com"},
+             })), \
+             patch.object(cs_ingest, "_fetch_zoho_attachments", new=AsyncMock(return_value=[])):
+            msg = await cs_ingest._zoho_message(
+                "token", "account", "inbox", meta, "CSP", "POWKONG"
+            )
+
+        self.assertEqual("buyer@example.com", msg["reply_to"])
+
+    async def test_shopify_email_backfill_updates_only_unique_customer_address(self):
+        records = [{
+            "record_id": "rec_unique",
+            "fields": {
+                "客户标识": "mailer@shopify.com",
+                "原文": "New customer message\n\nE-Mail: buyer@example.com Comment: Help.",
+                "沟通历史摘要": "首封已入库。",
+            },
+        }, {
+            "record_id": "rec_ambiguous",
+            "fields": {
+                "客户标识": "mailer@shopify.com",
+                "原文": "E-Mail: first@example.com Alternate Email: second@example.com",
+            },
+        }, {
+            "record_id": "rec_normal",
+            "fields": {
+                "客户标识": "normal@example.com",
+                "原文": "Email: normal@example.com",
+            },
+        }]
+        writes = []
+
+        async def api(method, path, body=None, which="notify"):
+            if method == "GET":
+                if path.endswith("/records/rec_unique"):
+                    return {"data": {"record": {"fields": {
+                        **records[0]["fields"],
+                        "客户标识": "buyer@example.com",
+                    }}}}
+                return {"data": {"items": records, "has_more": False}}
+            if method == "PUT":
+                writes.append((path, body))
+                return {"code": 0}
+            raise AssertionError((method, path))
+
+        with patch.object(cs_ingest.feishu, "api", new=api):
+            result = await cs_ingest.backfill_shopify_customer_emails(dry_run=True)
+
+        self.assertEqual(3, result["scanned"])
+        self.assertEqual(1, result["updated"])
+        self.assertEqual(0, result["verified"])
+        self.assertEqual(1, result["ambiguous"])
+        self.assertEqual(["rec_unique"], result["updated_record_ids"])
+        self.assertEqual(0, len(writes))
+
+        reads = 0
+
+        async def single_api(method, path, body=None, which="notify"):
+            nonlocal reads
+            if method == "GET":
+                reads += 1
+                fields = dict(records[0]["fields"])
+                fields["沟通历史摘要"] = "x" * 4999
+                if reads > 1:
+                    fields["客户标识"] = "buyer@example.com"
+                    fields["沟通历史摘要"] = (
+                        "系统纠偏: 客户邮箱已从 Shopify平台代发地址改为表单内唯一客户邮箱。\n"
+                        + fields["沟通历史摘要"]
+                    )[:5000]
+                return {"data": {"record": {"fields": fields}}}
+            if method == "PUT":
+                writes.append((path, body))
+                return {"code": 0}
+            raise AssertionError((method, path))
+
+        with patch.object(cs_ingest.feishu, "api", new=single_api):
+            committed = await cs_ingest.backfill_shopify_customer_emails(
+                record_id="rec_unique", dry_run=False,
+            )
+
+        self.assertEqual(1, committed["updated"])
+        self.assertEqual(1, committed["verified"])
+        self.assertEqual(1, len(writes))
+        self.assertEqual("buyer@example.com", writes[0][1]["fields"]["客户标识"])
+        self.assertIn("Shopify平台代发地址", writes[0][1]["fields"]["沟通历史摘要"])
+
+        already_corrected = {
+            "data": {"record": {"fields": {
+                **records[0]["fields"],
+                "客户标识": "buyer@example.com",
+                "沟通历史摘要": "系统纠偏: 客户邮箱已从 Shopify平台代发地址改为表单内唯一客户邮箱。",
+            }}}
+        }
+        with patch.object(cs_ingest.feishu, "api", new=AsyncMock(
+                return_value=already_corrected)) as replay_api:
+            replayed = await cs_ingest.backfill_shopify_customer_emails(
+                record_id="rec_unique", dry_run=False,
+            )
+        self.assertEqual(1, replayed["verified"])
+        self.assertEqual(["rec_unique"], replayed["verified_record_ids"])
+        self.assertEqual(1, replay_api.await_count)
+
+    async def test_shopify_backfill_encodes_page_token_and_commit_requires_one_record(self):
+        paths = []
+
+        async def api(method, path, body=None, which="notify"):
+            paths.append(path)
+            if len(paths) == 1:
+                return {"data": {"items": [], "has_more": True,
+                                  "page_token": "a+b/c="}}
+            return {"data": {"items": [], "has_more": False}}
+
+        with patch.object(cs_ingest.feishu, "api", new=api):
+            await cs_ingest.backfill_shopify_customer_emails(dry_run=True)
+        self.assertIn("page_token=a%2Bb%2Fc%3D", paths[1])
+        with self.assertRaisesRegex(ValueError, "record_id"):
+            await cs_ingest.backfill_shopify_customer_emails(dry_run=False)
+
+    async def test_customer_email_backfill_endpoint_requires_confirm_and_refreshes_cards(self):
+        from app import main as app_main
+
+        result = {
+            "ok": True, "dry_run": False, "updated": 1, "verified": 1,
+            "updated_record_ids": ["rec_unique"],
+            "verified_record_ids": ["rec_unique"], "ambiguous": 0,
+        }
+        with patch.object(app_main, "_check_auth"), \
+             patch.object(app_main.cs_ingest, "backfill_shopify_customer_emails",
+                          new=AsyncMock(return_value=result)) as backfill, \
+             patch.object(app_main.cs_dispatch, "refresh_ticket_card",
+                          new=AsyncMock(return_value={
+                              "ok": True, "record_id": "rec_unique",
+                              "cards_updated": 1, "cards_verified": 1,
+                          })) as refresh:
+            response = await app_main.run_cs_customer_email_backfill(
+                authorization="Bearer test", record_id="rec_unique",
+                dry_run=False, confirm=True,
+                update_cards=True, run_id="fix-20261007",
+            )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(1, response["cards_updated"])
+        self.assertEqual(1, response["cards_verified"])
+        backfill.assert_awaited_once()
+        refresh.assert_awaited_once_with("rec_unique")
+
     async def test_firefly_paginates_past_kol_mail_before_applying_limit(self):
         kol_page = [{"messageId": f"k{i}", "toAddress": "partner@fireflyfunlab.com",
                      "fromAddress": "creator@example.com", "subject": "Collaboration"}

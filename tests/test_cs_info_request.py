@@ -102,6 +102,55 @@ class CsInfoRequestTests(unittest.TestCase):
         self.assertEqual("林明坚", fields["分配运营"])
         self.assertNotEqual("独立站", fields["销售平台"])
 
+    def test_shopify_contact_form_uses_labeled_customer_email(self):
+        msg = base_msg(
+            "Country code: AT Name: Martin Stefan "
+            "E-Mail: martin.j.stefan@gmail.com Phone: - "
+            "Comment: Please help with order PK1959.",
+            "New customer message on September 30",
+        )
+        msg["id_prefix"] = "CSP"
+        msg["frm"] = "mailer@shopify.com"
+        msg["brand_default"] = "POWKONG"
+        fields = cs_ingest._to_fields(msg, {
+            "is_cs": True,
+            "is_amazon": False,
+            "brand": "POWKONG",
+            "platform": "独立站",
+            "complaint_type": "售后",
+            "product": "POWKONG Cubedock 2",
+            "order_no": "PK1959",
+            "language": "德",
+            "summary": "客户反馈订单十天未处理。",
+            "confidence": "AI起草人工审",
+            "draft_reply": "Dear Martin, thank you for contacting us.",
+        }, resources=[])
+
+        self.assertEqual("martin.j.stefan@gmail.com", fields["客户标识"])
+
+    def test_shopify_contact_form_with_ambiguous_emails_fails_closed(self):
+        msg = base_msg(
+            "E-Mail: first@example.com Alternate Email: second@example.com Comment: Help.",
+            "New customer message",
+        )
+        msg["id_prefix"] = "CSP"
+        msg["frm"] = "mailer@shopify.com"
+        fields = cs_ingest._to_fields(msg, {
+            "is_cs": True,
+            "is_amazon": False,
+            "brand": "POWKONG",
+            "platform": "独立站",
+            "complaint_type": "售后",
+            "product": "controller",
+            "order_no": "",
+            "language": "EN",
+            "summary": "Customer asks for help.",
+            "confidence": "AI起草人工审",
+            "draft_reply": "Dear customer, thank you.",
+        }, resources=[])
+
+        self.assertEqual("", fields["客户标识"])
+
     def test_waiting_ticket_match_uses_outbound_message_id(self):
         incoming = base_msg("My order number is 123-4567890-1234567.", "Re: Firefly issue")
         incoming["id"] = "<customer-reply@example.com>"

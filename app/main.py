@@ -705,6 +705,7 @@ async def health():
     return {
         "status": "ok" if kol_ai_configured and kol_feishu_ready else "degraded",
         "cs_card_fix_version": "2026-09-09-p0-v2",
+        "cs_customer_email_fix_version": "2026-10-07-shopify-v1",
         "kol_ai_configured": kol_ai_configured,
         "kol_feishu_migration": {
             "route_mode": "target_only",
@@ -1798,6 +1799,64 @@ async def run_cs_evidence_backfill(authorization: str = Header(default=""),
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/cs/evidence/backfill", str(e), tr)
         return {"ok": False, "error": str(e), "trace": tr}
+
+
+@app.post("/cs/customer-email/backfill")
+async def run_cs_customer_email_backfill(
+        authorization: str = Header(default=""), record_id: str = "",
+        dry_run: bool = True, scan_limit: int = 2000, update_cards: bool = False,
+        confirm: bool = False, run_id: str = ""):
+    """Correct Shopify relay addresses only when the form has one unique email."""
+    _check_auth(authorization)
+    if not dry_run and not confirm:
+        raise HTTPException(400, "commit requires confirm=true")
+    if not dry_run and not record_id.strip():
+        raise HTTPException(400, "commit requires one record_id")
+    try:
+        result = await cs_ingest.backfill_shopify_customer_emails(
+            record_id=record_id, dry_run=dry_run, scan_limit=scan_limit,
+        )
+        card_results = []
+        if not dry_run and update_cards:
+            for rid in result.get("verified_record_ids") or result.get("updated_record_ids") or []:
+                card_results.append(await cs_dispatch.refresh_ticket_card(rid))
+        cards_updated = sum(int(item.get("cards_updated") or 0) for item in card_results)
+        cards_verified = sum(int(item.get("cards_verified") or 0) for item in card_results)
+        ok = bool(result.get("ok")) and all(item.get("ok") for item in card_results)
+        return {**result, "ok": ok, "run_id": run_id,
+                "cards_updated": cards_updated, "cards_verified": cards_verified,
+                "card_results": card_results}
+    except HTTPException:
+        raise
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/customer-email/backfill", str(e), tr)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+
+@app.post("/cs/customer-email/fix-notify")
+async def run_cs_customer_email_fix_notify(
+        authorization: str = Header(default=""), corrected_count: int = 0,
+        cards_updated: int = 0, ambiguous_count: int = 0,
+        run_id: str = "", confirm: bool = False):
+    """Send one idempotent completion notice to Chen Xiangyu with the CS app."""
+    _check_auth(authorization)
+    if not confirm or not run_id.strip():
+        raise HTTPException(400, "confirm=true and run_id are required")
+    try:
+        result = await cs_dispatch.notify_customer_email_fix(
+            corrected_count=corrected_count, cards_updated=cards_updated,
+            ambiguous_count=ambiguous_count, run_id=run_id.strip(),
+        )
+        if not result.get("ok"):
+            return JSONResponse(status_code=424, content=result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/customer-email/fix-notify", str(e), tr)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 
 @app.post("/cs/evidence/preview-card")

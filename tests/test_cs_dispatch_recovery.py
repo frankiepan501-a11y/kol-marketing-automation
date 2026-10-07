@@ -203,6 +203,20 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertEqual(["om_ye", "om_zhang"], [c.args[0] for c in update.await_args_list])
 
+    async def test_update_card_executes_patch_with_cs_app_token(self):
+        response = MagicMock()
+        response.json.return_value = {"code": 0}
+        client = MagicMock()
+        client.patch = AsyncMock(return_value=response)
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(cs_dispatch, "_token", new=AsyncMock(return_value="token")), \
+             patch.object(cs_dispatch.httpx, "AsyncClient", return_value=client):
+            ok = await cs_dispatch._update_card("om_test", {"type": "card"})
+
+        self.assertTrue(ok)
+        client.patch.assert_awaited_once()
+
     def test_netease_smtp_rejected_recipient_is_not_treated_as_accepted(self):
         smtp = MagicMock()
         smtp.__enter__.return_value = smtp
@@ -289,6 +303,96 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 await cs_dispatch._dispatch_reply(fields, "A complete customer reply.")
 
         netease_send.assert_not_awaited()
+
+    async def test_platform_sender_is_blocked_before_provider_call(self):
+        fields = {
+            "工单ID": "CSP-inbound", "品牌": "POWKONG", "渠道": "邮箱",
+            "销售平台": "独立站", "客户标识": "mailer@shopify.com",
+            "邮件主题": "New customer message",
+        }
+        with patch.object(cs_dispatch, "CS_REPLY_DRY_RUN_TO", ""), \
+             patch.object(cs_dispatch, "_zoho_send", new=AsyncMock(
+                 return_value="provider-id")) as zoho_send, \
+             patch.object(cs_dispatch, "_verify_zoho_outbound", new=AsyncMock(
+                 return_value="provider-id")):
+            ok, detail, evidence = await cs_dispatch._dispatch_reply(
+                fields, "A complete customer reply."
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("平台/系统地址", detail)
+        self.assertEqual("", evidence)
+        zoho_send.assert_not_awaited()
+
+    async def test_refresh_ticket_card_uses_corrected_customer_email(self):
+        fields = {
+            "工单ID": "CSP-inbound", "品牌": "POWKONG", "渠道": "邮箱",
+            "销售平台": "独立站", "客户标识": "buyer@example.com",
+            "状态": "待回", "卡片消息ID": '["om_one","om_two"]',
+            "产品": "POWKONG Cubedock 2", "客诉类型": "售后",
+            "AI置信度": "AI起草人工审", "分配运营": "独立站运营专员",
+            "客诉摘要": "Customer asks for support.", "AI草稿": "Dear customer",
+        }
+        response = {"data": {"record": {"fields": fields}}}
+        with patch.object(cs_dispatch.feishu, "api", new=AsyncMock(return_value=response)), \
+             patch.object(cs_dispatch.cs_resources, "active_resources", new=AsyncMock(
+                 return_value=[])), \
+             patch.object(cs_dispatch, "_update_card_result", new=AsyncMock(
+                 return_value={"ok": True, "http_status": 200,
+                               "feishu_code": 0, "error": ""})) as update_card, \
+             patch.object(cs_dispatch, "_card_customer_readback", new=AsyncMock(
+                 return_value={"ok": True, "http_status": 200,
+                               "feishu_code": 0, "error": ""})) as readback:
+            result = await cs_dispatch.refresh_ticket_card("rec_unique")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(2, result["cards_updated"])
+        self.assertEqual(2, result["cards_verified"])
+        self.assertEqual([], result["card_readback_errors"])
+        self.assertEqual(["om_one", "om_two"], result["message_ids"])
+        self.assertEqual(2, update_card.await_count)
+        self.assertEqual(2, readback.await_count)
+        rendered = json.dumps(update_card.await_args_list[0].args[1], ensure_ascii=False)
+        self.assertIn("buyer@example.com", rendered)
+
+    async def test_refresh_ticket_card_reports_patch_provider_error(self):
+        fields = {
+            "工单ID": "CSP-inbound", "品牌": "POWKONG", "渠道": "邮箱",
+            "销售平台": "独立站", "客户标识": "buyer@example.com",
+            "状态": "待回", "卡片消息ID": "om_one", "产品": "Controller",
+            "客诉类型": "售后", "AI置信度": "AI起草人工审",
+            "分配运营": "独立站运营专员", "客诉摘要": "Help",
+            "AI草稿": "Dear customer",
+        }
+        response = {"data": {"record": {"fields": fields}}}
+        with patch.object(cs_dispatch.feishu, "api", new=AsyncMock(return_value=response)), \
+             patch.object(cs_dispatch.cs_resources, "active_resources", new=AsyncMock(
+                 return_value=[])), \
+             patch.object(cs_dispatch, "_update_card_result", new=AsyncMock(return_value={
+                 "ok": False, "http_status": 400, "feishu_code": 230001,
+                 "error": "message not found",
+             })):
+            result = await cs_dispatch.refresh_ticket_card("rec_unique")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(400, result["card_readback_errors"][0]["http_status"])
+        self.assertEqual(230001, result["card_readback_errors"][0]["feishu_code"])
+
+    async def test_notify_customer_email_fix_targets_chen_with_same_app_identity(self):
+        with patch.object(cs_dispatch, "_resolve_targets", new=AsyncMock(
+                 return_value=([("陈翔宇", "on_chen")], "assigned_operator"))), \
+             patch.object(cs_dispatch, "_send_text_result", new=AsyncMock(return_value={
+                 "ok": True, "message_id": "om_notice", "error": "",
+             })) as send:
+            result = await cs_dispatch.notify_customer_email_fix(
+                corrected_count=1, cards_updated=1, ambiguous_count=0,
+                run_id="fix-20261007",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(["om_notice"], result["message_ids"])
+        self.assertEqual("on_chen", send.await_args.args[0])
+        self.assertIn("[CUS·P1]", send.await_args.args[1])
 
     async def test_live_send_callback_acks_before_slow_network_work_and_dedupes_twin_delivery(self):
         gate = asyncio.Event()
