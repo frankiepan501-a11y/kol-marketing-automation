@@ -13,7 +13,7 @@ Shopify 联系表单邮件的外层发件人是 `mailer@shopify.com`，旧逻辑
 
 ## 改动文件
 
-- `app/cs_ingest.py`：保留 Reply-To、提取表单邮箱、平台地址拦截、存量工单纠偏与写后回读。
+- `app/cs_ingest.py`：保留 Reply-To、提取表单邮箱、平台地址拦截、存量工单纠偏与写后读回。
 - `app/cs_dispatch.py`：发送前二次拦截、原卡 PATCH 与回读、陈翔宇完成通知。
 - `app/main.py`：增加受控纠偏/通知接口和部署版本标记。
 - `tests/test_cs_info_request.py`
@@ -24,8 +24,17 @@ Shopify 联系表单邮件的外层发件人是 `mailer@shopify.com`，旧逻辑
 
 - `git diff --check` 通过。
 - 三个改动模块 `py_compile` 通过。
-- `tests/test_cs_*.py` 共 101 项通过。
-- 生产验收应依次执行：健康版本检查 → 纠偏 dry-run → `confirm=true` 写入并更新原卡 → 工单及卡片回读 → 通知陈翔宇并保留 `message_id`。
+- `tests/test_cs_*.py` 共 103 项通过，功能提交全量 1,213 项通过；最后通知文案修改后 35 项 dispatch 测试通过。
+
+## 生产结果
+
+- 生产提交：`333e463d5ce5672c48ecd67d7f89c6ed9847bf76`。
+- Zeabur deployment：`6ac6107c4a4c47e13ede672b` / `RUNNING`；`/health` 版本标记 `2026-10-07-shopify-v1`。
+- dry-run 扫描 1,920 条，112 条唯一可确定工单已单条写回并读回通过。
+- 32 张原卡已原位更新并回读通过；6 张旧卡超过飞书 14 天更新期，卡片不能再改，对应工单已纠正。
+- 2 条无法唯一确认客户邮箱的旧工单未自动改值，已通知陈翔宇人工核对。
+- 陈翔宇通知：`message_id=om_x100b6354b140f8acc31031aa35e71f9`。
+- 写回期间临时邮件 dry-run 保护已删除，最终 `CS_REPLY_LIVE=1`，正式发送已恢复。
 
 ## 回滚
 
@@ -35,5 +44,6 @@ Shopify 联系表单邮件的外层发件人是 `mailer@shopify.com`，旧逻辑
 
 ## 剩余风险
 
-- 没有 Email/E-Mail 标签或存在多个候选邮箱的旧表单不会自动纠偏，需人工确认。
+- 没有 Email/E-Mail 标签或存在多个候选邮箱的旧表单不会自动纠偏；本次有 2 条已交陈翔宇人工确认。
+- 飞书原卡超过 14 天后不能 PATCH；历史卡片可能仍显示旧值，处理时以工单最新字段为准。
 - 新增语言标签前应先补回归样本，不应放宽成“抓正文任意邮箱”。
