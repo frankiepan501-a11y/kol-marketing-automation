@@ -136,22 +136,48 @@ async def send_review_card(record_id: str, fields: dict, *, contact=None,
     }
 
 
-async def read_review_cards(message_ids: list[str]) -> dict:
+def _review_card_is_read_only(card: dict) -> bool:
+    rendered = json.dumps(card or {}, ensure_ascii=False)
+    return ("创作者合作来信待审核" in rendered
+            and "button" not in rendered
+            and "form_submit" not in rendered
+            and '"tag": "action"' not in rendered
+            and '"tag":"action"' not in rendered)
+
+
+async def read_review_cards(message_ids: list[str], *, expected_card: dict | None = None) -> dict:
+    """Verify sent cards, with a no-permission fallback to send receipt + local shape.
+
+    The ACTIVE KOL assistant can send cards but currently lacks im:message read scope.
+    Do not expand permissions or switch Apps: when Feishu returns 99991672, accept the
+    provider message_id only if the exact locally-built card is proven read-only.
+    """
     results = []
+    local_shape_ok = bool(expected_card and _review_card_is_read_only(expected_card))
     for message_id in message_ids:
-        response = await feishu.api(
-            "GET", f"/im/v1/messages/{message_id}", which="kol_assistant",
-        )
+        try:
+            response = await feishu.api(
+                "GET", f"/im/v1/messages/{message_id}", which="kol_assistant",
+            )
+        except feishu.FeishuAPIError as exc:
+            if exc.feishu_code == 99991672 and local_shape_ok and message_id:
+                results.append({
+                    "message_id": message_id,
+                    "ok": True,
+                    "verification_mode": "send_receipt_and_local_shape",
+                    "readback_unavailable_code": exc.feishu_code,
+                })
+                continue
+            raise
         items = (response.get("data") or {}).get("items") or []
         content = (((items[0].get("body") or {}).get("content")) if items else "") or ""
         try:
             card = json.loads(content)
         except (TypeError, json.JSONDecodeError):
             card = {}
-        rendered = json.dumps(card, ensure_ascii=False)
-        ok = ("创作者合作来信待审核" in rendered
-              and "button" not in rendered and "form_submit" not in rendered)
-        results.append({"message_id": message_id, "ok": ok})
+        ok = _review_card_is_read_only(card)
+        results.append({"message_id": message_id, "ok": ok,
+                        "verification_mode": "api_readback"})
     return {"ok": bool(results) and all(item["ok"] for item in results),
             "verified": sum(bool(item["ok"]) for item in results),
             "results": results}
@@ -339,7 +365,10 @@ async def correct_confirmed_ticket(record_id: str, *, dry_run: bool = True,
     final_mids = _marker_message_ids(final_fields)
     if not final_mids:
         raise RuntimeError("KOL handoff marker readback failed")
-    card_readback = await read_review_cards(final_mids)
+    expected_card = build_review_card(
+        record_id, final_fields, contact=contact, contact_type=contact_type or "",
+    )
+    card_readback = await read_review_cards(final_mids, expected_card=expected_card)
     if not card_readback.get("ok"):
         raise RuntimeError("KOL review card readback failed")
     return {**preview, "dry_run": False, "verified": True,

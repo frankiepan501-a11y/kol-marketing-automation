@@ -75,6 +75,45 @@ class CustomerServiceKolHandoffTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(1, result["verified"])
 
+    async def test_readback_permission_gap_uses_send_receipt_and_local_shape(self):
+        card = cs_kol_handoff.build_review_card(
+            "rec_ticket",
+            {"品牌": "FUNLAB", "客户标识": "creator@example.com",
+             "客诉摘要": "Creator collaboration."},
+        )
+        denied = cs_kol_handoff.feishu.FeishuAPIError(
+            method="GET", path="/im/v1/messages/om_card", status_code=400,
+            feishu_code=99991672, feishu_msg="missing message read scope",
+        )
+        with patch.object(cs_kol_handoff.feishu, "api",
+                          new=AsyncMock(side_effect=denied)):
+            result = await cs_kol_handoff.read_review_cards(
+                ["om_card"], expected_card=card,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, result["verified"])
+        self.assertEqual("send_receipt_and_local_shape",
+                         result["results"][0]["verification_mode"])
+
+    async def test_readback_permission_gap_rejects_actionable_local_card(self):
+        card = cs_kol_handoff.build_review_card(
+            "rec_ticket",
+            {"品牌": "FUNLAB", "客户标识": "creator@example.com",
+             "客诉摘要": "Creator collaboration."},
+        )
+        card["elements"].append({"tag": "action", "actions": [{"tag": "button"}]})
+        denied = cs_kol_handoff.feishu.FeishuAPIError(
+            method="GET", path="/im/v1/messages/om_card", status_code=400,
+            feishu_code=99991672, feishu_msg="missing message read scope",
+        )
+        with patch.object(cs_kol_handoff.feishu, "api",
+                          new=AsyncMock(side_effect=denied)):
+            with self.assertRaises(cs_kol_handoff.feishu.FeishuAPIError):
+                await cs_kol_handoff.read_review_cards(
+                    ["om_card"], expected_card=card,
+                )
+
     async def test_commit_rejects_records_outside_confirmed_scope(self):
         with self.assertRaisesRegex(ValueError, "outside"):
             await cs_kol_handoff.correct_confirmed_ticket(
