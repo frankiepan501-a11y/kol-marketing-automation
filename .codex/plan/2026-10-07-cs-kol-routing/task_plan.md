@@ -35,5 +35,5 @@
 - [completed] 2. 最小代码修复与定向测试
 - [completed] 3. 全量测试、代码审查、提交推送
 - [completed] 4. 部署与生产回读
-- [in_progress] 5. 纠正 3 条工单并发送 KOL 审核卡
-- [pending] 6. 修复记录与收尾
+- [completed] 5. 纠正 3 条工单并发送 KOL 审核卡
+- [completed] 6. 修复记录与收尾
