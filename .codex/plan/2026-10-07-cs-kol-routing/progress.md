@@ -44,3 +44,9 @@
 - 新定向回归：56 passed。
 - 双人代码复核确认此前 P1 均已关闭：没有可发送草稿、没有固定群扩散、旧旁路标记不阻断补偿、同邮箱建档有串行与建后重复检查、卡片模糊失败禁止自动重发。
 - 全量回归：1394 passed，67 subtests passed。
+- 生产分支 `handoff-p0-20260927` 已快进到 `6782184afe22f3fd22173b44da3c9180149502cb`；Zeabur deployment `6ac660eb0ed04f22ed092f55` 精确运行该提交，状态 `RUNNING`。
+- 3 条生产 dry-run 均通过：1 条复用已有 KOL，2 条新建受控主记录；不创建邮件草稿，不自动发邮件。
+- 3 条正式迁移均 `verified=true`：主记录 3/3、跟进记录 3/3、新 KOL 入站卡 3/3、旧旁路卡迁移 3/3；达人邮件发送 0。
+- 新建受控 KOL 主记录为 `reczz28KZ9ikcDha`、`reczz28KZAJu3maX`；跟进记录为 `reczz28KZ99z8kDk`、`reczz28KZ9ojwTrl`、`reczz28KZAPnVtE7`。
+- 已用聪哥分身1号通知陈翔宇不再按客服工单处理；`message_id=om_x100b63526d8064a4c4c5383ed1072e8`。
+- 修复记录已更新：`docs/handoff/cs-kol-routing-fix-2026-10-07.md`。当前系统修复清单已清空，剩余仅为 KOL 运营按卡片补资料和审核。
