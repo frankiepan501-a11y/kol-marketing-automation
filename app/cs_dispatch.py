@@ -1150,17 +1150,25 @@ def _mail_text(message) -> str:
     return re.sub(r"\s+", " ", " ".join(chunks)).strip()
 
 
+def _zoho_profile(profile: str = "powkong") -> tuple:
+    if profile == "firefly":
+        return _csi._firefly_ztoken, _csi.ZFACC, _csi.FIREFLY_CS_FROM
+    return _csi._ztoken, _csi.ZACC, ZOHO_CS_FROM
+
+
 async def _verify_zoho_outbound(provider_id: str, expected_to: str,
-                                expected_html: str, timeout_s: float = 55.0) -> str:
+                                expected_html: str, timeout_s: float = 55.0,
+                                profile: str = "powkong") -> str:
     """Return a Zoho message id only after sent-folder and raw-body readback."""
     if not provider_id or provider_id == "ok":
         raise RuntimeError("Zoho 未返回可核对的 Message-ID")
-    tok = await _csi._ztoken()
+    token_fn, account_id, _ = _zoho_profile(profile)
+    tok = await token_fn()
     headers = {"Authorization": f"Zoho-oauthtoken {tok}"}
     deadline = time.monotonic() + timeout_s
     async with httpx.AsyncClient(timeout=30.0) as c:
         folders_resp = await c.get(
-            f"https://mail.zoho.com/api/accounts/{_csi.ZACC}/folders", headers=headers
+            f"https://mail.zoho.com/api/accounts/{account_id}/folders", headers=headers
         )
         folders_resp.raise_for_status()
         folders = folders_resp.json().get("data") or []
@@ -1171,7 +1179,7 @@ async def _verify_zoho_outbound(provider_id: str, expected_to: str,
         sent_id = sent["folderId"]
         while time.monotonic() < deadline:
             view = await c.get(
-                f"https://mail.zoho.com/api/accounts/{_csi.ZACC}/messages/view"
+                f"https://mail.zoho.com/api/accounts/{account_id}/messages/view"
                 f"?folderId={sent_id}&limit=100&start=0", headers=headers
             )
             view.raise_for_status()
@@ -1180,7 +1188,7 @@ async def _verify_zoho_outbound(provider_id: str, expected_to: str,
             if hit:
                 actual_to = parseaddr(hit.get("toAddress") or "")[1].lower()
                 raw_resp = await c.get(
-                    f"https://mail.zoho.com/api/accounts/{_csi.ZACC}/folders/{sent_id}"
+                    f"https://mail.zoho.com/api/accounts/{account_id}/folders/{sent_id}"
                     f"/messages/{provider_id}/content", headers=headers
                 )
                 raw_resp.raise_for_status()
@@ -1277,11 +1285,13 @@ async def _verify_netease_outbound(provider_id: str, expected_to: str,
     )
 
 
-async def _zoho_send(to_addr: str, subject: str, html: str, reply_to_msgid: str = "") -> str:
-    """Powkong 客服 Zoho 发信; 带 reply_to_msgid 走 action:reply 串原 thread, 失败降级新邮件。"""
-    tok = await _csi._ztoken()
-    base = f"https://mail.zoho.com/api/accounts/{_csi.ZACC}/messages"
-    url, payload = base, {"fromAddress": ZOHO_CS_FROM, "toAddress": to_addr,
+async def _zoho_send(to_addr: str, subject: str, html: str, reply_to_msgid: str = "",
+                      profile: str = "powkong") -> str:
+    """Zoho 客服发信；profile 显式隔离 Powkong 与 Firefly 账号。"""
+    token_fn, account_id, from_addr = _zoho_profile(profile)
+    tok = await token_fn()
+    base = f"https://mail.zoho.com/api/accounts/{account_id}/messages"
+    url, payload = base, {"fromAddress": from_addr, "toAddress": to_addr,
                           "subject": subject, "content": html, "mailFormat": "html"}
     if reply_to_msgid:
         url = f"{base}/{reply_to_msgid}"
@@ -1291,7 +1301,7 @@ async def _zoho_send(to_addr: str, subject: str, html: str, reply_to_msgid: str 
         d = r.json()
     if (d.get("status", {}) or {}).get("code") != 200:
         if reply_to_msgid:  # reply 端点失败(原 msgId 失效) → 降级普通新邮件
-            return await _zoho_send(to_addr, subject, html, "")
+            return await _zoho_send(to_addr, subject, html, "", profile=profile)
         raise Exception(f"Zoho 发送失败: {str(d)[:300]}")
     return (d.get("data", {}) or {}).get("messageId", "ok")
 
@@ -1355,6 +1365,8 @@ def _route_label(prefix: str, channel: str, cust_email: str, thread: str) -> str
         return f"Powkong邮箱:{cust_email}"
     if prefix == "CSF":
         return f"Funlab邮箱:{cust_email}"
+    if prefix == "CSZ":
+        return f"Firefly Zoho邮箱:{cust_email}"
     if prefix in ("CSDT", "CSD"):
         return f"Discord:{thread}"
     return f"{channel}:{cust_email or thread}"
@@ -1393,10 +1405,12 @@ async def _dispatch_reply(f: dict, reply: str) -> tuple:
         # DRY-RUN 也要走与真客户相同的邮箱服务商，否则 FUNLAB 工单会
         # 被 POWKONG Zoho 凭证故障误伤，而且无法验证真正的网易发信链路。
         use_netease = prefix == "CSF" or (prefix in ("CSD", "CSDT") and brand == "FUNLAB")
+        zoho_profile = "firefly" if prefix == "CSZ" else "powkong"
         if use_netease:
             provider_id = await _netease_send(dry_run_to, dry_subject, dry_body, "")
         else:
-            provider_id = await _zoho_send(dry_run_to, dry_subject, dry_body, "")
+            provider_id = await _zoho_send(dry_run_to, dry_subject, dry_body, "",
+                                            profile=zoho_profile)
         try:
             if use_netease:
                 evidence = await _verify_netease_outbound(
@@ -1404,7 +1418,7 @@ async def _dispatch_reply(f: dict, reply: str) -> tuple:
                 )
             else:
                 evidence = await _verify_zoho_outbound(
-                    provider_id, dry_run_to, dry_body
+                    provider_id, dry_run_to, dry_body, profile=zoho_profile
                 )
         except Exception as exc:
             raise OutboundEvidenceError(provider_id, f"DRY-RUN→{dry_run_to}", str(exc)) from exc
@@ -1419,6 +1433,17 @@ async def _dispatch_reply(f: dict, reply: str) -> tuple:
         except Exception as exc:
             raise OutboundEvidenceError(provider_id, f"Zoho→{cust_email}", str(exc)) from exc
         return True, f"Zoho→{cust_email}", evidence
+    if prefix == "CSZ":  # Firefly 官方 Zoho 邮箱
+        if "@" not in cust_email:
+            return False, "无有效客户邮箱", ""
+        provider_id = await _zoho_send(cust_email, subj, html, thread, profile="firefly")
+        try:
+            evidence = await _verify_zoho_outbound(
+                provider_id, cust_email, html, profile="firefly"
+            )
+        except Exception as exc:
+            raise OutboundEvidenceError(provider_id, f"Firefly Zoho→{cust_email}", str(exc)) from exc
+        return True, f"Firefly Zoho→{cust_email}", evidence
     if prefix == "CSF":  # Funlab → 网易 SMTP
         if "@" not in cust_email:
             return False, "无有效客户邮箱", ""

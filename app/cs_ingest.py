@@ -1,6 +1,7 @@
 """客服助手 v0 — 邮箱采集 → AI 分类/路由 → 写客服工单台
 
 源: ① Powkong support@powkong.com (Zoho API)  ② Funlab support@funlabswitch.com (网易企业邮箱 IMAP)
+    ③ Firefly support@fireflyfunlab.com (Zoho API)
 只采集+分类+写工单台(只读观察), 不发卡、不回客户。所有凭据走 env(public 仓铁律)。
 设计稿: memory `cs-channel-apiization-2026-06-24`。
 
@@ -30,6 +31,7 @@ INDEPENDENT_SITE_JOB_TITLE = (
     or "独立站运营专员"
 )
 POWKONG_INBOX_FID = os.environ.get("ZOHO_POWKONG_CS_INBOX_FID", "7855434000000008014")
+FIREFLY_INBOX_FID = os.environ.get("ZOHO_FUNLAB_CS_INBOX_FID", "")
 B2B_GROUP = os.environ.get("CS_B2B_GROUP_CHAT_ID", "oc_2e878553984592d7396401fdd6a37d61")
 
 # ---- Zoho POWKONG_CS (env, secret) ----
@@ -38,6 +40,14 @@ ZSEC = os.environ.get("ZOHO_POWKONG_CS_CLIENT_SECRET", "")
 ZRT = os.environ.get("ZOHO_POWKONG_CS_REFRESH_TOKEN", "")
 ZACC = os.environ.get("ZOHO_POWKONG_CS_ACCOUNT_ID", "")
 ZREGION = os.environ.get("ZOHO_REGION", ".com")
+
+# ---- Zoho FUNLAB / Firefly (env, secret; 和 KOL FUNLAB 账号同一 OAuth 配置) ----
+ZFCID = os.environ.get("ZOHO_FUNLAB_CLIENT_ID", "")
+ZFSEC = os.environ.get("ZOHO_FUNLAB_CLIENT_SECRET", "")
+ZFRT = os.environ.get("ZOHO_FUNLAB_REFRESH_TOKEN", "")
+ZFACC = os.environ.get("ZOHO_FUNLAB_ACCOUNT_ID", "")
+FIREFLY_SUPPORT_TO = os.environ.get("ZOHO_FUNLAB_CS_TO", "support@fireflyfunlab.com")
+FIREFLY_CS_FROM = os.environ.get("ZOHO_FUNLAB_CS_FROM", "support@fireflyfunlab.com")
 
 # ---- 网易 FUNLAB_CS (env, secret) ----
 NE_USER = os.environ.get("NETEASE_FUNLAB_CS_USER", "")
@@ -376,14 +386,22 @@ async def _lookup_amazon_route(order_id: str):
         return None, None
 
 
-# ===== 源 ① Powkong (Zoho) =====
-async def _ztoken() -> str:
+# ===== 源 ①/③ Zoho (Powkong / Firefly) =====
+async def _ztoken_for(client_id: str, client_secret: str, refresh_token: str) -> str:
     async with httpx.AsyncClient(timeout=30.0) as c:
         r = await c.post(f"https://accounts.zoho{ZREGION}/oauth/v2/token",
-                         data={"refresh_token": ZRT, "client_id": ZCID,
-                               "client_secret": ZSEC, "grant_type": "refresh_token"})
+                         data={"refresh_token": refresh_token, "client_id": client_id,
+                               "client_secret": client_secret, "grant_type": "refresh_token"})
         r.raise_for_status()
         return r.json()["access_token"]
+
+
+async def _ztoken() -> str:
+    return await _ztoken_for(ZCID, ZSEC, ZRT)
+
+
+async def _firefly_ztoken() -> str:
+    return await _ztoken_for(ZFCID, ZFSEC, ZFRT)
 
 
 async def _zget(url: str, tok: str) -> dict:
@@ -400,16 +418,18 @@ async def _zget_bytes(url: str, tok: str) -> tuple[bytes, str]:
         return r.content, r.headers.get("content-type", "application/octet-stream").split(";")[0]
 
 
-async def _fetch_zoho_attachments(tok: str, folder_id: str, message_id: str) -> list[dict]:
+async def _fetch_zoho_attachments(tok: str, folder_id: str, message_id: str,
+                                  account_id: str = "") -> list[dict]:
     """Best-effort Zoho Mail attachment extraction.
 
     Zoho returns attachment descriptors under slightly different shapes across
     accounts. Keep parsing defensive and only persist customer evidence-like
     files.
     """
+    account_id = account_id or ZACC
     try:
         info = await _zget(
-            f"https://mail.zoho.com/api/accounts/{ZACC}/folders/{folder_id}"
+            f"https://mail.zoho.com/api/accounts/{account_id}/folders/{folder_id}"
             f"/messages/{message_id}/attachmentinfo", tok)
     except Exception:
         return []
@@ -438,7 +458,7 @@ async def _fetch_zoho_attachments(tok: str, folder_id: str, message_id: str) -> 
         if not meta.get("skipped_reason"):
             try:
                 data, real_ct = await _zget_bytes(
-                    f"https://mail.zoho.com/api/accounts/{ZACC}/folders/{folder_id}"
+                    f"https://mail.zoho.com/api/accounts/{account_id}/folders/{folder_id}"
                     f"/messages/{message_id}/attachments/{aid}", tok)
                 if len(data) > CS_ATTACHMENT_MAX_BYTES:
                     meta["skipped_reason"] = f"超过 {CS_ATTACHMENT_MAX_MB:g}MB 上限"
@@ -453,57 +473,138 @@ async def _fetch_zoho_attachments(tok: str, folder_id: str, message_id: str) -> 
     return out
 
 
-async def _fetch_powkong(limit: int) -> list:
-    if not (ZCID and ZRT and ZACC):
-        return []
-    tok = await _ztoken()
-    listing = await _zget(
-        f"https://mail.zoho.com/api/accounts/{ZACC}/messages/view"
-        f"?folderId={POWKONG_INBOX_FID}&limit={limit}&start=0", tok)
-    out = []
-    for m in (listing.get("data") or []):
-        mid = m.get("messageId")
-        if not mid:
-            continue
-        try:
-            content = await _zget(
-                f"https://mail.zoho.com/api/accounts/{ZACC}/folders/{POWKONG_INBOX_FID}"
-                f"/messages/{mid}/content", tok)
-            d = content.get("data")
-            body = _strip_html(d.get("content", "") if isinstance(d, dict) else "")
-        except Exception:
-            body = ""
-        attachments = await _fetch_zoho_attachments(tok, POWKONG_INBOX_FID, mid)
-        attachments.extend(_extract_evidence_links(body))
-        out.append({"id": mid, "id_prefix": "CSP", "frm": m.get("fromAddress", ""),
-                    "subj": m.get("subject", ""), "received_ms": int(m.get("receivedTime") or 0),
-                    "body": body, "channel": "邮箱", "brand_default": "POWKONG",
-                    "in_reply_to": m.get("inReplyTo") or m.get("inReplyToHeader") or "",
-                    "references": m.get("references") or "",
-                    "mail_thread_id": m.get("threadId") or "",
-                    "attachments": attachments})
-    return out
+def _require_config(config: dict[str, str]) -> None:
+    missing = [name for name, value in config.items() if not value]
+    if missing:
+        raise RuntimeError("缺少邮箱配置: " + ", ".join(missing))
 
 
-async def _fetch_powkong_one(message_id: str) -> dict:
-    if not (ZCID and ZRT and ZACC and message_id):
+async def _zoho_inbox_id(tok: str, account_id: str, configured: str = "") -> str:
+    if configured:
+        return configured
+    folders = await _zget(f"https://mail.zoho.com/api/accounts/{account_id}/folders", tok)
+    hit = next((f for f in (folders.get("data") or [])
+                if (f.get("folderType") or "").lower() == "inbox"
+                or (f.get("folderName") or "").lower() in ("inbox", "收件箱")), None)
+    if not hit or not hit.get("folderId"):
+        raise RuntimeError("Zoho 未找到收件箱文件夹")
+    return str(hit["folderId"])
+
+
+def _firefly_customer_message(meta: dict) -> bool:
+    """Keep Firefly support mail while excluding unrelated KOL/partner mail."""
+    to_addr = (meta.get("toAddress") or "").lower()
+    sender = _customer_email(meta.get("fromAddress") or "")
+    subject = (meta.get("subject") or "").lower()
+    if FIREFLY_SUPPORT_TO.lower() in to_addr:
+        return True
+    return (sender == "mailer@shopify.com"
+            and any(x in subject for x in ("new customer message", "contact form")))
+
+
+async def _zoho_message(tok: str, account_id: str, folder_id: str, meta: dict,
+                         id_prefix: str, brand: str) -> dict:
+    mid = str(meta.get("messageId") or "")
+    if not mid:
         return {}
-    tok = await _ztoken()
-    body = ""
     try:
         content = await _zget(
-            f"https://mail.zoho.com/api/accounts/{ZACC}/folders/{POWKONG_INBOX_FID}"
-            f"/messages/{message_id}/content", tok)
+            f"https://mail.zoho.com/api/accounts/{account_id}/folders/{folder_id}"
+            f"/messages/{mid}/content", tok)
         d = content.get("data")
         body = _strip_html(d.get("content", "") if isinstance(d, dict) else "")
     except Exception:
         body = ""
-    attachments = await _fetch_zoho_attachments(tok, POWKONG_INBOX_FID, message_id)
+    attachments = await _fetch_zoho_attachments(tok, folder_id, mid, account_id=account_id)
     attachments.extend(_extract_evidence_links(body))
-    return {"id": message_id, "id_prefix": "CSP", "frm": "", "subj": "",
-            "received_ms": 0, "body": body, "channel": "邮箱", "brand_default": "POWKONG",
-            "in_reply_to": "", "references": "", "mail_thread_id": "",
-            "attachments": attachments}
+    return {"id": mid, "id_prefix": id_prefix, "frm": meta.get("fromAddress", ""),
+            "subj": meta.get("subject", ""), "received_ms": int(meta.get("receivedTime") or 0),
+            "body": body, "channel": "邮箱", "brand_default": brand,
+            "in_reply_to": meta.get("inReplyTo") or meta.get("inReplyToHeader") or "",
+            "references": meta.get("references") or "",
+            "mail_thread_id": meta.get("threadId") or "", "attachments": attachments}
+
+
+async def _fetch_zoho(limit: int, *, tok: str, account_id: str, folder_id: str,
+                       id_prefix: str, brand: str, predicate=None) -> list:
+    listing = await _zget(
+        f"https://mail.zoho.com/api/accounts/{account_id}/messages/view"
+        f"?folderId={folder_id}&limit={limit}&start=0", tok)
+    out = []
+    for meta in (listing.get("data") or []):
+        if predicate and not predicate(meta):
+            continue
+        item = await _zoho_message(tok, account_id, folder_id, meta, id_prefix, brand)
+        if item:
+            out.append(item)
+    return out
+
+
+async def _fetch_zoho_one(message_id: str, *, tok: str, account_id: str, folder_id: str,
+                           id_prefix: str, brand: str, scan_limit: int = 500,
+                           predicate=None) -> dict:
+    page_size = 200
+    scanned = 0
+    while scanned < scan_limit:
+        take = min(page_size, scan_limit - scanned)
+        listing = await _zget(
+            f"https://mail.zoho.com/api/accounts/{account_id}/messages/view"
+            f"?folderId={folder_id}&limit={take}&start={scanned}", tok)
+        rows = listing.get("data") or []
+        hit = next((m for m in rows if str(m.get("messageId") or "") == str(message_id)), None)
+        if hit:
+            if predicate and not predicate(hit):
+                return {}
+            return await _zoho_message(tok, account_id, folder_id, hit, id_prefix, brand)
+        scanned += len(rows)
+        if len(rows) < take:
+            break
+    return {}
+
+
+async def _fetch_powkong(limit: int) -> list:
+    _require_config({"ZOHO_POWKONG_CS_CLIENT_ID": ZCID,
+                     "ZOHO_POWKONG_CS_CLIENT_SECRET": ZSEC,
+                     "ZOHO_POWKONG_CS_REFRESH_TOKEN": ZRT,
+                     "ZOHO_POWKONG_CS_ACCOUNT_ID": ZACC})
+    tok = await _ztoken()
+    folder_id = await _zoho_inbox_id(tok, ZACC, POWKONG_INBOX_FID)
+    return await _fetch_zoho(limit, tok=tok, account_id=ZACC, folder_id=folder_id,
+                             id_prefix="CSP", brand="POWKONG")
+
+
+async def _fetch_powkong_one(message_id: str, scan_limit: int = 500) -> dict:
+    _require_config({"ZOHO_POWKONG_CS_CLIENT_ID": ZCID,
+                     "ZOHO_POWKONG_CS_CLIENT_SECRET": ZSEC,
+                     "ZOHO_POWKONG_CS_REFRESH_TOKEN": ZRT,
+                     "ZOHO_POWKONG_CS_ACCOUNT_ID": ZACC})
+    tok = await _ztoken()
+    folder_id = await _zoho_inbox_id(tok, ZACC, POWKONG_INBOX_FID)
+    return await _fetch_zoho_one(message_id, tok=tok, account_id=ZACC, folder_id=folder_id,
+                                 id_prefix="CSP", brand="POWKONG", scan_limit=scan_limit)
+
+
+async def _fetch_firefly(limit: int) -> list:
+    _require_config({"ZOHO_FUNLAB_CLIENT_ID": ZFCID,
+                     "ZOHO_FUNLAB_CLIENT_SECRET": ZFSEC,
+                     "ZOHO_FUNLAB_REFRESH_TOKEN": ZFRT,
+                     "ZOHO_FUNLAB_ACCOUNT_ID": ZFACC})
+    tok = await _firefly_ztoken()
+    folder_id = await _zoho_inbox_id(tok, ZFACC, FIREFLY_INBOX_FID)
+    return await _fetch_zoho(limit, tok=tok, account_id=ZFACC, folder_id=folder_id,
+                             id_prefix="CSZ", brand="FUNLAB", predicate=_firefly_customer_message)
+
+
+async def _fetch_firefly_one(message_id: str, scan_limit: int = 500) -> dict:
+    _require_config({"ZOHO_FUNLAB_CLIENT_ID": ZFCID,
+                     "ZOHO_FUNLAB_CLIENT_SECRET": ZFSEC,
+                     "ZOHO_FUNLAB_REFRESH_TOKEN": ZFRT,
+                     "ZOHO_FUNLAB_ACCOUNT_ID": ZFACC})
+    tok = await _firefly_ztoken()
+    folder_id = await _zoho_inbox_id(tok, ZFACC, FIREFLY_INBOX_FID)
+    return await _fetch_zoho_one(message_id, tok=tok, account_id=ZFACC, folder_id=folder_id,
+                                 id_prefix="CSZ", brand="FUNLAB", scan_limit=scan_limit,
+                                 predicate=_firefly_customer_message)
 
 
 # ===== 源 ② Funlab (网易 IMAP, 同步, 跑在线程里) =====
@@ -962,11 +1063,19 @@ def _orig_subject_from_msg(msg: dict) -> str:
     return "Re: " + (subj or "your message")
 
 
-async def _zoho_send_reply(to_addr: str, subject: str, html: str, reply_to_msgid: str = "") -> str:
-    tok = await _ztoken()
-    base = f"https://mail.zoho.com/api/accounts/{ZACC}/messages"
+def _zoho_profile(profile: str = "powkong") -> tuple:
+    if profile == "firefly":
+        return _firefly_ztoken, ZFACC, FIREFLY_CS_FROM
+    return _ztoken, ZACC, ZOHO_CS_FROM
+
+
+async def _zoho_send_reply(to_addr: str, subject: str, html: str,
+                            reply_to_msgid: str = "", profile: str = "powkong") -> str:
+    token_fn, account_id, from_addr = _zoho_profile(profile)
+    tok = await token_fn()
+    base = f"https://mail.zoho.com/api/accounts/{account_id}/messages"
     url = f"{base}/{reply_to_msgid}" if reply_to_msgid else base
-    payload = {"fromAddress": ZOHO_CS_FROM, "toAddress": to_addr, "subject": subject,
+    payload = {"fromAddress": from_addr, "toAddress": to_addr, "subject": subject,
                "content": html, "mailFormat": "html"}
     if reply_to_msgid:
         payload["action"] = "reply"
@@ -1017,12 +1126,16 @@ async def _send_info_request(msg: dict, fields: dict, reply: str) -> tuple[str, 
         banner = (f'<div style="background:#fff3cd;padding:8px;border:1px solid #ffc107;margin-bottom:12px">'
                   f'<strong>CS INFO REQUEST DRY-RUN</strong> — 本应发往 <code>{target}</code>，真客户不会收到。</div>')
         mid = await _zoho_send_reply(CS_INFO_REQUEST_DRY_RUN_TO,
-                                     f"[CS-INFO-DRY-RUN→{target}] {subject}", banner + html, "")
+                                     f"[CS-INFO-DRY-RUN→{target}] {subject}", banner + html, "",
+                                     profile="firefly" if prefix == "CSZ" else "powkong")
         return "dry_run", mid
     if not CS_INFO_REQUEST_LIVE:
         return "disabled", ""
     if prefix == "CSP":
         return "live", await _zoho_send_reply(customer, subject, html, msg.get("id", ""))
+    if prefix == "CSZ":
+        return "live", await _zoho_send_reply(customer, subject, html, msg.get("id", ""),
+                                                profile="firefly")
     if prefix == "CSF":
         return "live", await _netease_send(customer, subject, html, msg.get("id", ""))
     return "unsupported", ""
@@ -1313,7 +1426,9 @@ async def backfill_evidence(record_id: str, dry_run: bool = False, scan_limit: i
     if prefix == "CSF":
         msg = await _fetch_funlab_one(thread_id, scan_limit=scan_limit)
     elif prefix == "CSP":
-        msg = await _fetch_powkong_one(thread_id)
+        msg = await _fetch_powkong_one(thread_id, scan_limit=scan_limit)
+    elif prefix == "CSZ":
+        msg = await _fetch_firefly_one(thread_id, scan_limit=scan_limit)
     else:
         return {"ok": False, "record_id": record_id, "error": f"unsupported ticket prefix: {prefix or ticket}"}
 
@@ -1335,34 +1450,74 @@ async def backfill_evidence(record_id: str, dry_run: bool = False, scan_limit: i
 async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
               message_id: str = "", scan_limit: int = 500,
               allow_info_request: bool = True) -> dict:
-    if message_id and source != "funlab":
-        raise ValueError("single-message replay supports source=funlab only")
+    allowed_sources = ("all", "funlab", "powkong", "firefly", "discord")
+    if source not in allowed_sources:
+        raise ValueError("source must be all|funlab|powkong|firefly|discord")
+    replay_sources = ("funlab", "powkong", "firefly")
+    if message_id and source not in replay_sources:
+        raise ValueError("single-message replay supports source=funlab|powkong|firefly")
     src_err = {}
+    source_health = {}
     msgs = []
+
+    def add_source(name: str, rows: list) -> None:
+        msgs.extend(rows)
+        source_health[name] = {
+            "status": "ok",
+            "fetched": len(rows),
+            "latest_received_ms": max((int(x.get("received_ms") or 0) for x in rows), default=0),
+        }
+
+    def fail_source(name: str, exc: Exception) -> None:
+        src_err[name] = str(exc)[:200]
+        source_health[name] = {"status": "error", "fetched": 0,
+                               "latest_received_ms": 0, "error": str(exc)[:200]}
+
     if source in ("all", "powkong"):
         try:
-            msgs += await _fetch_powkong(limit)
+            if message_id:
+                one = await _fetch_powkong_one(message_id, scan_limit=scan_limit)
+                if not one:
+                    raise RuntimeError(
+                        f"requested message_id was not found in the latest {scan_limit} messages"
+                    )
+                add_source("powkong", [one])
+            else:
+                add_source("powkong", await _fetch_powkong(limit))
         except Exception as e:
-            src_err["powkong"] = str(e)[:200]
+            fail_source("powkong", e)
     if source in ("all", "funlab"):
         try:
             if message_id:
                 one = await _fetch_funlab_one(message_id, scan_limit=scan_limit)
                 if one:
-                    msgs.append(one)
+                    add_source("funlab", [one])
                 else:
-                    src_err["funlab"] = (
+                    raise RuntimeError(
                         f"requested message_id was not found in the latest {scan_limit} messages"
                     )
             else:
-                msgs += await _fetch_funlab(limit)
+                add_source("funlab", await _fetch_funlab(limit))
         except Exception as e:
-            src_err["funlab"] = str(e)[:200]
+            fail_source("funlab", e)
+    if source in ("all", "firefly"):
+        try:
+            if message_id:
+                one = await _fetch_firefly_one(message_id, scan_limit=scan_limit)
+                if not one:
+                    raise RuntimeError(
+                        f"requested message_id was not found in the latest {scan_limit} messages"
+                    )
+                add_source("firefly", [one])
+            else:
+                add_source("firefly", await _fetch_firefly(limit))
+        except Exception as e:
+            fail_source("firefly", e)
     if source in ("all", "discord"):
         try:
-            msgs += await _fetch_discord(limit)
+            add_source("discord", await _fetch_discord(limit))
         except Exception as e:
-            src_err["discord"] = str(e)[:200]
+            fail_source("discord", e)
 
     try:
         resources = await cs_resources.active_resources()
@@ -1443,4 +1598,4 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
 
     return {"sources": source, "fetched": len(msgs), "new": new_cnt, "skipped": skip_cnt,
             "errors": err_cnt, "source_errors": src_err, "dry_run": dry_run,
-            "replay_mode": bool(message_id), "samples": samples}
+            "source_health": source_health, "replay_mode": bool(message_id), "samples": samples}

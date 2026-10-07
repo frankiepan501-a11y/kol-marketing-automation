@@ -7,6 +7,30 @@ from app import cs_dispatch
 
 
 class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_firefly_zoho_ticket_reply_uses_firefly_zoho_profile(self):
+        fields = {
+            "工单ID": "CSZ-1791344517645162600",
+            "品牌": "FUNLAB",
+            "渠道": "邮箱",
+            "客户标识": "customer@example.com",
+            "邮件主题": "Order FL1077",
+            "线程ID": "1791343823058144400",
+        }
+        with patch.object(cs_dispatch, "CS_REPLY_DRY_RUN_TO", ""), \
+             patch.object(cs_dispatch, "_zoho_send", new=AsyncMock(
+                 return_value="1792000000000000000")) as zoho_send, \
+             patch.object(cs_dispatch, "_verify_zoho_outbound", new=AsyncMock(
+                 return_value="1792000000000000000")) as verify:
+            ok, detail, evidence = await cs_dispatch._dispatch_reply(
+                fields, "We have processed your refund."
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual("1792000000000000000", evidence)
+        self.assertIn("Firefly Zoho", detail)
+        self.assertEqual("firefly", zoho_send.await_args.kwargs["profile"])
+        self.assertEqual("firefly", verify.await_args.kwargs["profile"])
+
     async def test_job_title_route_sends_to_single_active_employee(self):
         search_result = {"data": {"items": [{
             "record_id": "rec_role",

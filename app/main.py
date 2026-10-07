@@ -1638,8 +1638,8 @@ async def run_warm_recap(authorization: str = Header(default="")):
 @app.post("/cs/ingest")
 async def run_cs_ingest(authorization: str = Header(default=""),
                         source: str = "all", limit: int = 20, dry_run: bool = False):
-    """客服助手 v0: 拉客服邮箱(Powkong=Zoho / Funlab=网易IMAP) → DeepSeek 分类/路由 → 写工单台(只读观察).
-    ?source=all|powkong|funlab / ?limit=N / ?dry_run=true 只分类不写表(返回 samples)."""
+    """客服助手: 拉客服邮箱(Powkong/Firefly=Zoho, Funlab=网易IMAP) → 分类/路由 → 写工单台.
+    ?source=all|powkong|firefly|funlab / ?limit=N / ?dry_run=true 只分类不写表。"""
     _check_auth(authorization)
     try:
         result = await cs_ingest.run(source=source, limit=limit, dry_run=dry_run)
@@ -1660,6 +1660,9 @@ async def replay_cs_ingest(request: Request, authorization: str = Header(default
     """受控单封回放；message_id 放请求体，避免出现在 URL/网关访问日志。"""
     _check_auth(authorization)
     payload = await request.json()
+    source = str(payload.get("source") or "funlab").strip().lower()
+    if source not in ("funlab", "powkong", "firefly"):
+        raise HTTPException(400, "source must be funlab, powkong, or firefly")
     message_id = str(payload.get("message_id") or "").strip()
     if not message_id:
         raise HTTPException(400, "message_id is required")
@@ -1670,7 +1673,7 @@ async def replay_cs_ingest(request: Request, authorization: str = Header(default
         raise HTTPException(400, "scan_limit must be an integer from 1 to 2000")
     try:
         result = await cs_ingest.run(
-            source="funlab",
+            source=source,
             limit=scan_limit,
             dry_run=dry_run,
             message_id=message_id,

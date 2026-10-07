@@ -7,6 +7,20 @@ from app import cs_ingest
 
 
 class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_firefly_filter_accepts_support_and_shopify_contact_but_rejects_partner_mail(self):
+        self.assertTrue(cs_ingest._firefly_customer_message({
+            "toAddress": "support@fireflyfunlab.com", "fromAddress": "buyer@example.com",
+            "subject": "Order FL1077",
+        }))
+        self.assertTrue(cs_ingest._firefly_customer_message({
+            "toAddress": "partner@fireflyfunlab.com", "fromAddress": "mailer@shopify.com",
+            "subject": "New customer message on October 7",
+        }))
+        self.assertFalse(cs_ingest._firefly_customer_message({
+            "toAddress": "partner@fireflyfunlab.com", "fromAddress": "creator@example.com",
+            "subject": "Collaboration proposal",
+        }))
+
     def test_independent_site_ticket_routes_to_job_title_not_person(self):
         message = {
             "id": "<role-route@example.com>",
@@ -42,6 +56,34 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, result["fetched"])
         self.assertIn("funlab", result["source_errors"])
         self.assertIn("NETEASE_FUNLAB_CS_USER", result["source_errors"]["funlab"])
+
+    async def test_powkong_missing_credentials_is_reported_as_source_error(self):
+        with patch.object(cs_ingest, "ZCID", ""), \
+             patch.object(cs_ingest, "ZSEC", ""), \
+             patch.object(cs_ingest, "ZRT", ""), \
+             patch.object(cs_ingest, "ZACC", ""), \
+             patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(return_value=set())), \
+             patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])):
+            result = await cs_ingest.run(source="powkong", limit=1, dry_run=True)
+
+        self.assertEqual(0, result["fetched"])
+        self.assertIn("powkong", result["source_errors"])
+        self.assertIn("ZOHO_POWKONG_CS_CLIENT_ID", result["source_errors"]["powkong"])
+
+    async def test_firefly_zoho_missing_credentials_is_reported_as_source_error(self):
+        with patch.object(cs_ingest, "ZFCID", ""), \
+             patch.object(cs_ingest, "ZFSEC", ""), \
+             patch.object(cs_ingest, "ZFRT", ""), \
+             patch.object(cs_ingest, "ZFACC", ""), \
+             patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(return_value=set())), \
+             patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])):
+            result = await cs_ingest.run(source="firefly", limit=1, dry_run=True)
+
+        self.assertEqual(0, result["fetched"])
+        self.assertIn("firefly", result["source_errors"])
+        self.assertIn("ZOHO_FUNLAB_CLIENT_ID", result["source_errors"]["firefly"])
 
     async def test_single_funlab_message_can_be_replayed_in_dry_run(self):
         message = {
@@ -81,6 +123,47 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["replay_mode"])
         self.assertEqual(1, result["fetched"])
         self.assertEqual(1, result["new"])
+
+    async def test_single_firefly_message_can_be_replayed_in_dry_run(self):
+        message = {
+            "id": "1791344517645162600",
+            "id_prefix": "CSZ",
+            "frm": "customer@example.com",
+            "subj": "Re: Order FL1077",
+            "body": "I agree to the refund.",
+            "channel": "邮箱",
+            "brand_default": "FUNLAB",
+            "attachments": [],
+        }
+        fields = {
+            "品牌": "FUNLAB",
+            "销售平台": "独立站",
+            "分配运营": "独立站运营专员",
+            "状态": "待派",
+            "客诉摘要": "Customer approved refund",
+        }
+        with patch.object(cs_ingest, "_fetch_firefly_one", new=AsyncMock(return_value=message)) as fetch_one, \
+             patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(return_value=set())), \
+             patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest, "_classify", new=AsyncMock(return_value={"is_cs": True})), \
+             patch.object(cs_ingest, "_to_fields", return_value=fields), \
+             patch.object(cs_ingest.feishu, "api", new=AsyncMock()) as api:
+            result = await cs_ingest.run(
+                source="firefly",
+                limit=1,
+                dry_run=True,
+                message_id="1791344517645162600",
+                scan_limit=750,
+            )
+
+        fetch_one.assert_awaited_once_with("1791344517645162600", scan_limit=750)
+        api.assert_not_awaited()
+        self.assertTrue(result["replay_mode"])
+        self.assertEqual(1, result["fetched"])
+        self.assertEqual(1, result["new"])
+        self.assertEqual(1, result["source_health"]["firefly"]["fetched"])
+        self.assertEqual("ok", result["source_health"]["firefly"]["status"])
 
     async def test_ingest_endpoint_returns_424_when_a_source_failed(self):
         from app import main as app_main
@@ -123,6 +206,25 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response["ok"])
         run.assert_awaited_once_with(source="funlab", limit=750, dry_run=True,
                                      message_id="<one@example.com>", scan_limit=750,
+                                     allow_info_request=False)
+
+    async def test_replay_endpoint_accepts_explicit_firefly_source(self):
+        from app import main as app_main
+
+        request = SimpleNamespace(json=AsyncMock(return_value={
+            "source": "firefly", "message_id": "1791344517645162600",
+            "dry_run": True, "scan_limit": 750,
+        }))
+        result = {"sources": "firefly", "fetched": 1, "new": 1, "skipped": 0,
+                  "errors": 0, "source_errors": {}, "dry_run": True,
+                  "replay_mode": True, "samples": []}
+        with patch.object(app_main, "_check_auth"), \
+             patch.object(app_main.cs_ingest, "run", new=AsyncMock(return_value=result)) as run:
+            response = await app_main.replay_cs_ingest(request, authorization="Bearer test")
+
+        self.assertTrue(response["ok"])
+        run.assert_awaited_once_with(source="firefly", limit=750, dry_run=True,
+                                     message_id="1791344517645162600", scan_limit=750,
                                      allow_info_request=False)
 
     async def test_commit_replay_never_sends_customer_info_request(self):
