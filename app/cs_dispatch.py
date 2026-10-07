@@ -1610,7 +1610,8 @@ async def notify_customer_email_fix(corrected_count: int, cards_updated: int,
         f"已纠正 {int(corrected_count)} 张工单，原卡已更新 {int(cards_updated)} 张。\n"
         "系统现会优先识别 Reply-To 或表单正文中唯一的客户邮箱，并阻止回复到 "
         "mailer@shopify.com 等平台地址。\n"
-        f"仍需人工核对的多邮箱工单：{int(ambiguous_count)} 张。请以后以更新后的卡片为准。"
+        f"仍需人工核对的“无法唯一确认客户邮箱”工单：{int(ambiguous_count)} 张。"
+        "请以后以更新后的卡片为准。"
     )
     results = []
     for name, union_id in targets:
