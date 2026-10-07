@@ -1818,6 +1818,11 @@ async def _show_callback_error(event: dict, result: dict) -> None:
     event = normalize_callback_event(event)
     _, _, _, rid = _callback_action(event)
     reason = str(((result.get("toast") or {}).get("content") or "处理失败")[:180])
+    if result.get("retired_non_cs"):
+        # The ticket has already left the customer-service workflow.  In
+        # particular, do not let a click on an expired legacy card rebuild the
+        # replacement retirement notice into an actionable CS error card.
+        return
     if result.get("handoff_denied"):
         # Never rebuild actionable cards for a departed/unauthorized operator.
         message_id = _card_message_id(event, {})
@@ -2175,7 +2180,9 @@ async def handle_callback(event: dict) -> dict:
     if not f:
         return _toast("工单不存在，未执行操作", "error")
     if _x(f, "状态") == "归档非客服":
-        return _toast("此客服卡已作废并转交 KOL，未执行任何客服操作", "error")
+        result = _toast("此客服卡已作废并转交 KOL，未执行任何客服操作", "error")
+        result["retired_non_cs"] = True
+        return result
     if TEMP_SITE_OPERATOR and _x(f, "销售平台") == "独立站":
         op = event.get("operator") or {}
         uid = op.get("union_id") or ""

@@ -676,6 +676,31 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
         dispatch.assert_not_awaited()
         self.assertEqual("error", result["toast"]["type"])
         self.assertIn("已作废", result["toast"]["content"])
+        self.assertTrue(result["retired_non_cs"])
+
+    async def test_expired_archived_card_click_keeps_replacement_notice_read_only(self):
+        event = {
+            "open_message_id": "om_expired",
+            "action": {
+                "value": {"act": "send_reply", "rid": "rec_archived"},
+                "form_value": {"custom_reply": "Please send this reply."},
+            },
+        }
+        result = {
+            "toast": {"type": "error", "content": "此客服卡已作废并转交 KOL，未执行任何客服操作"},
+            "retired_non_cs": True,
+        }
+        cs_dispatch._callback_fast_inflight.add("rec_archived:send_reply")
+        with patch.object(cs_dispatch, "handle_callback", new=AsyncMock(return_value=result)), \
+             patch.object(cs_dispatch, "_update_related_cards", new=AsyncMock()) as update_related, \
+             patch.object(cs_dispatch, "_update_card", new=AsyncMock()) as update_card, \
+             patch.object(cs_dispatch.feishu, "api", new=AsyncMock()) as api:
+            await cs_dispatch._run_fast_callback_job(event, "rec_archived:send_reply")
+
+        update_related.assert_not_awaited()
+        update_card.assert_not_awaited()
+        api.assert_not_awaited()
+        self.assertNotIn("rec_archived:send_reply", cs_dispatch._callback_fast_inflight)
 
     async def test_persisted_pending_outbound_marker_blocks_resend_after_restart(self):
         record = {"data": {"record": {"fields": {
