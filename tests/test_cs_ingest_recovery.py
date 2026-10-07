@@ -29,6 +29,38 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["customer-1"], [x["id"] for x in rows])
         self.assertEqual(2, zget.await_count)
 
+    async def test_known_thread_does_not_hide_new_message_in_same_thread(self):
+        meta = {"messageId": "m2", "threadId": "t1",
+                "toAddress": "support@powkong.com", "receivedTime": "200"}
+        with patch.object(cs_ingest, "_zget", new=AsyncMock(return_value={"data": [meta]})), \
+             patch.object(cs_ingest, "_zoho_message", new=AsyncMock(return_value={
+                 "id": "m2", "id_prefix": "CSP", "received_ms": 200,
+                 "mail_thread_id": "t1",
+             })) as fetch_message:
+            rows = await cs_ingest._fetch_zoho(
+                1, tok="token", account_id="account", folder_id="inbox",
+                id_prefix="CSP", brand="POWKONG", scan_limit=200,
+                known_keys={"CSP:thread:t1"},
+            )
+
+        self.assertEqual(["m2"], [x["id"] for x in rows])
+        fetch_message.assert_awaited_once()
+
+    async def test_scan_limit_exhaustion_is_reported(self):
+        rows = [{"messageId": f"known-{i}", "receivedTime": str(1000 - i)}
+                for i in range(200)]
+        known = {f"CSP:msg:known-{i}" for i in range(200)}
+        with patch.object(cs_ingest, "_zget", new=AsyncMock(return_value={"data": rows})):
+            result = await cs_ingest._fetch_zoho(
+                1, tok="token", account_id="account", folder_id="inbox",
+                id_prefix="CSP", brand="POWKONG", scan_limit=200,
+                known_keys=known,
+            )
+
+        self.assertEqual([], result)
+        self.assertTrue(cs_ingest._SOURCE_SCAN_EXHAUSTED["CSP"])
+        cs_ingest._SOURCE_SCAN_EXHAUSTED.pop("CSP", None)
+
     def test_unknown_zoho_profile_fails_closed(self):
         with self.assertRaises(ValueError):
             cs_ingest._zoho_profile("firelfy")
@@ -128,22 +160,58 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
                   "mail_thread_id": "t2"}
         cs_ingest._SOURCE_WATERMARKS.pop("powkong", None)
         cs_ingest._SOURCE_HEADS.pop("CSP", None)
+        cs_ingest._SOURCE_FILTERED_HEADS.pop("CSP", None)
+        cs_ingest._SOURCE_WATERMARK_REGRESSIONS.pop("powkong", None)
         common = [
             patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(
-                side_effect=[{"m1"}, {"m2"}])),
+                side_effect=[{"m1"}, {"m2"}, {"m2"}])),
             patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=[])),
             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])),
             patch.object(cs_ingest, "_fetch_powkong", new=AsyncMock(
-                side_effect=[[first], [second]])),
+                side_effect=[[first], [second], [second]])),
         ]
         with common[0], common[1], common[2], common[3]:
             ok = await cs_ingest.run(source="powkong", limit=1, dry_run=True)
+            diagnostic = await cs_ingest.run(source="powkong", limit=1, dry_run=True)
             regressed = await cs_ingest.run(source="powkong", limit=1, dry_run=True)
 
         self.assertEqual("ok", ok["source_health"]["powkong"]["status"])
+        self.assertEqual("diagnostic", diagnostic["source_health"]["powkong"]["status"])
+        self.assertNotIn("powkong", diagnostic["source_errors"])
         self.assertEqual("anomaly", regressed["source_health"]["powkong"]["status"])
-        self.assertIn("watermark regressed", regressed["source_errors"]["powkong"])
+        self.assertIn("watermark regressed twice", regressed["source_errors"]["powkong"])
         cs_ingest._SOURCE_WATERMARKS.pop("powkong", None)
+        cs_ingest._SOURCE_WATERMARK_REGRESSIONS.pop("powkong", None)
+
+    async def test_new_reply_in_known_thread_reaches_waiting_info_handler(self):
+        message = {
+            "id": "m2", "id_prefix": "CSP", "mail_thread_id": "t1",
+            "frm": "buyer@example.com", "subj": "Re: order details",
+            "body": "My order is 123-1234567-1234567 on Amazon US.",
+            "channel": "邮箱", "brand_default": "POWKONG", "received_ms": 200,
+            "attachments": [],
+        }
+        waiting = [{"record_id": "rec_wait", "fields": {
+            "工单ID": "CSP-m1", "品牌": "POWKONG",
+            "客户标识": "buyer@example.com", "线程ID": "m1",
+            "沟通历史摘要": "MAIL_THREAD_ID:t1",
+        }}]
+        with patch.object(cs_ingest, "_fetch_powkong", new=AsyncMock(return_value=[message])), \
+             patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(return_value={
+                 "CSP:msg:m1", "CSP:thread:t1",
+             })), \
+             patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=waiting)), \
+             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest, "_handle_waiting_info_reply", new=AsyncMock(return_value={
+                 "action": "wait_reply_rerouted", "record_id": "rec_wait",
+             })) as handle, \
+             patch.object(cs_ingest, "_classify", new=AsyncMock()) as classify:
+            result = await cs_ingest.run(source="powkong", limit=1, dry_run=True)
+
+        handle.assert_awaited_once()
+        classify.assert_not_awaited()
+        self.assertEqual(1, result["new"])
+        self.assertEqual(0, result["skipped"])
 
     async def test_single_funlab_message_can_be_replayed_in_dry_run(self):
         message = {
@@ -310,6 +378,9 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         send_info.assert_not_awaited()
         self.assertEqual(1, result["new"])
         self.assertEqual(0, result["errors"])
+        self.assertEqual([{"message_id": "<history@example.com>",
+                           "ticket_id": "", "record_id": "rec_history"}],
+                         result["created_records"])
 
     async def test_commit_replay_reports_missing_created_record_id(self):
         message = {"id": "<missing-write@example.com>", "id_prefix": "CSF",

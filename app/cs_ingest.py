@@ -91,6 +91,9 @@ AMZ_ORDER_RE = re.compile(r"\d{3}-\d{7}-\d{7}")
 STATUS_WAIT_INFO = "待客户补充"
 _SOURCE_WATERMARKS: dict[str, int] = {}
 _SOURCE_HEADS: dict[str, int] = {}
+_SOURCE_FILTERED_HEADS: dict[str, int] = {}
+_SOURCE_SCAN_EXHAUSTED: dict[str, bool] = {}
+_SOURCE_WATERMARK_REGRESSIONS: dict[str, int] = {}
 
 # ---- 领星反查 (亚马逊订单号 → sid → 店铺 country → 运营) ----
 LX_PROXY_URL = os.environ.get("LINGXING_PROXY_URL", "")
@@ -536,6 +539,8 @@ async def _fetch_zoho(limit: int, *, tok: str, account_id: str, folder_id: str,
     ceiling = max(target, scan_limit or target)
     out = []
     scanned = 0
+    filtered_head = 0
+    scan_exhausted = False
     while scanned < ceiling and len(out) < target:
         take = min(200, ceiling - scanned)
         listing = await _zget(
@@ -549,11 +554,9 @@ async def _fetch_zoho(limit: int, *, tok: str, account_id: str, folder_id: str,
         for meta in rows:
             if predicate and not predicate(meta):
                 continue
+            filtered_head = max(filtered_head, int(meta.get("receivedTime") or 0))
             msg_id = str(meta.get("messageId") or "").strip()
-            mail_thread = str(meta.get("threadId") or "").strip()
             keys = {f"{id_prefix}:msg:{msg_id}", f"{id_prefix}-{msg_id}"}
-            if mail_thread:
-                keys.add(f"{id_prefix}:thread:{mail_thread}")
             if known_keys and (keys & known_keys):
                 continue
             item = await _zoho_message(tok, account_id, folder_id, meta, id_prefix, brand)
@@ -564,6 +567,10 @@ async def _fetch_zoho(limit: int, *, tok: str, account_id: str, folder_id: str,
         scanned += len(rows)
         if len(rows) < take:
             break
+        if scanned >= ceiling and len(out) < target:
+            scan_exhausted = True
+    _SOURCE_FILTERED_HEADS[id_prefix] = filtered_head
+    _SOURCE_SCAN_EXHAUSTED[id_prefix] = scan_exhausted
     return out
 
 
@@ -1528,23 +1535,36 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
     def add_source(name: str, rows: list) -> None:
         msgs.extend(rows)
         prefix_by_source = {"powkong": "CSP", "firefly": "CSZ"}
+        prefix = prefix_by_source.get(name, "")
         processed_latest = max((int(x.get("received_ms") or 0) for x in rows), default=0)
         latest = (processed_latest if message_id else
-                  int(_SOURCE_HEADS.get(prefix_by_source.get(name, ""), processed_latest) or 0))
+                  int(_SOURCE_FILTERED_HEADS.get(prefix, processed_latest) or 0))
+        mailbox_head = (processed_latest if message_id else
+                        int(_SOURCE_HEADS.get(prefix, latest) or 0))
         previous = int(_SOURCE_WATERMARKS.get(name) or 0)
         status = "ok"
         if not message_id and latest and previous and latest < previous:
+            confirmations = int(_SOURCE_WATERMARK_REGRESSIONS.get(name) or 0) + 1
+            _SOURCE_WATERMARK_REGRESSIONS[name] = confirmations
+            status = "diagnostic" if confirmations < 2 else "anomaly"
+            if status == "anomaly":
+                src_err[name] = (
+                    f"mailbox watermark regressed twice: previous={previous}, current={latest}"
+                )
+        elif not message_id and prefix and _SOURCE_SCAN_EXHAUSTED.get(prefix, False):
             status = "anomaly"
             src_err[name] = (
-                f"mailbox watermark regressed: previous={previous}, current={latest}"
+                f"mailbox scan exhausted at {ZOHO_SCAN_LIMIT} messages before filling the batch"
             )
         elif not message_id and latest >= previous:
+            _SOURCE_WATERMARK_REGRESSIONS.pop(name, None)
             _SOURCE_WATERMARKS[name] = latest
         source_health[name] = {
             "status": status,
             "fetched": len(rows),
             "latest_received_ms": latest,
             "latest_processed_ms": processed_latest,
+            "mailbox_head_ms": mailbox_head,
             "watermark_received_ms": max(previous, latest),
         }
 
@@ -1620,14 +1640,14 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
     waiting = await _waiting_info_tickets()
     new_cnt, skip_cnt, err_cnt = 0, 0, 0
     samples = []
+    created_records = []
     for m in msgs:
         prefix = (m.get("id_prefix") or "").upper()
         msg_id = str(m.get("id") or "").strip()
         mail_thread_id = str(m.get("mail_thread_id") or "").strip()
-        dedup_keys = {f"{prefix}:msg:{msg_id}", f"{prefix}-{msg_id}"}
-        if mail_thread_id:
-            dedup_keys.add(f"{prefix}:thread:{mail_thread_id}")
-        if not msg_id or (dedup_keys & existing) or msg_id in existing:
+        message_keys = {f"{prefix}:msg:{msg_id}", f"{prefix}-{msg_id}"}
+        thread_key = f"{prefix}:thread:{mail_thread_id}" if mail_thread_id else ""
+        if not msg_id or (message_keys & existing) or msg_id in existing:
             skip_cnt += 1
             continue
         waiting_match = _match_waiting_info_ticket(m, waiting)
@@ -1651,6 +1671,9 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                 new_cnt += 1
             except Exception:
                 err_cnt += 1
+            continue
+        if thread_key and thread_key in existing:
+            skip_cnt += 1
             continue
         try:
             c = await _classify(m)
@@ -1693,10 +1716,16 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                 continue
             if rid and (m.get("attachments") or []):
                 await _save_attachments_to_ticket(rid, m.get("attachments") or [], dry_run=False)
-            existing.update(dedup_keys)
+            existing.update(message_keys)
+            if thread_key:
+                existing.add(thread_key)
+            created_records.append({"message_id": msg_id,
+                                    "ticket_id": fields.get("工单ID", ""),
+                                    "record_id": rid})
         new_cnt += 1
 
     return {"sources": source, "fetched": fetched_count, "threads_considered": len(msgs),
             "new": new_cnt, "skipped": skip_cnt,
             "errors": err_cnt, "source_errors": src_err, "dry_run": dry_run,
-            "source_health": source_health, "replay_mode": bool(message_id), "samples": samples}
+            "source_health": source_health, "replay_mode": bool(message_id),
+            "created_records": created_records, "samples": samples}
