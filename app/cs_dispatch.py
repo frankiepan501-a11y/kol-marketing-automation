@@ -1178,20 +1178,72 @@ async def resolve_ticket_to_kol(rid: str) -> dict:
     )
     results = await asyncio.gather(*(_update_card_result(mid, card) for mid in message_ids))
     updated = sum(bool(item.get("ok")) for item in results)
+    expired = [
+        mid for mid, result in zip(message_ids, results)
+        if result.get("feishu_code") == 230031
+    ]
     verified_results = await asyncio.gather(*(
         _closed_card_readback(mid, "已转KOL处理") if result.get("ok") else asyncio.sleep(
-            0, result=result)
+            0, result={"ok": result.get("feishu_code") == 230031,
+                       "expired": result.get("feishu_code") == 230031,
+                       "feishu_code": result.get("feishu_code"),
+                       "error": result.get("error", "")})
         for mid, result in zip(message_ids, results)
     ))
-    verified = sum(bool(item.get("ok")) for item in verified_results)
+    verified = sum(bool(item.get("ok")) and not item.get("expired")
+                   for item in verified_results)
+    replacement = {"ok": True, "sent": 0, "verified": 0, "message_ids": []}
+    if expired:
+        replacement_card = _build_result_card(
+            rid, f, "grey", "已转KOL", "🟢 [CUS·P3] 旧客服卡作废通知",
+            "这不是独立站客诉，已转交 KOL 媒体助手。",
+            "原客服卡超过 14 天，飞书不允许原地更新；该工单已归档为非客服，"
+            "旧卡按钮即使点击也会被系统拒绝。陈翔宇无需处理。",
+        )
+        targets, route = await _resolve_targets(_csi.INDEPENDENT_SITE_JOB_TITLE)
+        sent_results = []
+        for name, union_id in targets:
+            sent = await _send_card_result(
+                union_id,
+                replacement_card,
+                idempotency_key=f"cs-kol-expired-replacement:{rid}:{union_id}",
+            )
+            sent_results.append({"name": name, **sent})
+        replacement_mids = [item.get("message_id") for item in sent_results
+                            if item.get("ok") and item.get("message_id")]
+        replacement_reads = await asyncio.gather(*(
+            _closed_card_readback(mid, "旧客服卡作废通知") for mid in replacement_mids
+        )) if replacement_mids else []
+        replacement_ok = (bool(targets) and len(replacement_mids) == len(targets)
+                          and all(item.get("ok") for item in replacement_reads))
+        if replacement_ok:
+            stored = (replacement_mids[0] if len(replacement_mids) == 1 else
+                      json.dumps(replacement_mids, ensure_ascii=False, separators=(",", ":")))
+            await feishu.api(
+                "PUT", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                {"fields": {"卡片消息ID": stored}}, which="notify",
+            )
+        replacement = {
+            "ok": replacement_ok,
+            "route": route,
+            "sent": len(replacement_mids),
+            "verified": sum(bool(item.get("ok")) for item in replacement_reads),
+            "message_ids": replacement_mids,
+            "results": sent_results,
+        }
     errors = [
         {"message_id": mid, "update": update_result, "readback": readback_result}
         for mid, update_result, readback_result in zip(message_ids, results, verified_results)
-        if not update_result.get("ok") or not readback_result.get("ok")
+        if ((not update_result.get("ok") and update_result.get("feishu_code") != 230031)
+            or not readback_result.get("ok"))
     ]
-    return {"ok": updated == len(message_ids) and verified == len(message_ids),
+    originals_safe = all(result.get("ok") or result.get("feishu_code") == 230031
+                         for result in results)
+    readbacks_safe = all(item.get("ok") for item in verified_results)
+    return {"ok": originals_safe and readbacks_safe and replacement.get("ok", True),
             "record_id": rid, "cards_updated": updated, "cards_verified": verified,
-            "message_ids": message_ids, "errors": errors}
+            "message_ids": message_ids, "expired_cards": expired,
+            "replacement": replacement, "errors": errors}
 
 
 # ===== 回客户真实渠道发送 (CSP=Powkong Zoho / CSF=Funlab 网易 SMTP / CSD·CSDT=Discord) =====
@@ -2122,6 +2174,8 @@ async def handle_callback(event: dict) -> dict:
         return _toast("无法读取工单，未执行操作，请稍后重试", "error")
     if not f:
         return _toast("工单不存在，未执行操作", "error")
+    if _x(f, "状态") == "归档非客服":
+        return _toast("此客服卡已作废并转交 KOL，未执行任何客服操作", "error")
     if TEMP_SITE_OPERATOR and _x(f, "销售平台") == "独立站":
         op = event.get("operator") or {}
         uid = op.get("union_id") or ""

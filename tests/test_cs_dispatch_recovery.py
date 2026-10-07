@@ -71,6 +71,36 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["actionable"])
 
+    async def test_expired_customer_card_is_replaced_with_read_only_notice(self):
+        record = {"data": {"record": {"fields": {
+            "工单ID": "CSZ-old", "状态": "归档非客服", "品牌": "FUNLAB",
+            "客户标识": "creator@example.com", "卡片消息ID": "om_old",
+        }}}}
+        api = AsyncMock(side_effect=[record, {}])
+        with patch.object(cs_dispatch.feishu, "api", new=api), \
+             patch.object(cs_dispatch, "_update_card_result", new=AsyncMock(return_value={
+                 "ok": False, "http_status": 400, "feishu_code": 230031,
+                 "error": "Message can only be updated within fourteen days.",
+             })), \
+             patch.object(cs_dispatch, "_resolve_targets", new=AsyncMock(return_value=(
+                 [("陈翔宇", "on_chen")], "temporary_site_operator",
+             ))), \
+             patch.object(cs_dispatch, "_send_card_result", new=AsyncMock(return_value={
+                 "ok": True, "message_id": "om_replacement", "http_status": 200,
+                 "feishu_code": 0, "error": "",
+             })), \
+             patch.object(cs_dispatch, "_closed_card_readback", new=AsyncMock(return_value={
+                 "ok": True, "http_status": 200, "feishu_code": 0, "error": "",
+             })):
+            result = await cs_dispatch.resolve_ticket_to_kol("rec_old")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(["om_old"], result["expired_cards"])
+        self.assertEqual(1, result["replacement"]["sent"])
+        self.assertEqual(1, result["replacement"]["verified"])
+        written = api.await_args_list[-1].args[2]["fields"]
+        self.assertEqual("om_replacement", written["卡片消息ID"])
+
     def test_unknown_zoho_profile_fails_closed(self):
         with self.assertRaises(ValueError):
             cs_dispatch._zoho_profile("firelfy")
@@ -623,6 +653,29 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], writes)
         self.assertEqual("error", result["toast"]["type"])
         self.assertIn("未发送", result["toast"]["content"])
+
+    async def test_archived_non_customer_ticket_blocks_expired_card_actions(self):
+        record = {"data": {"record": {"fields": {
+            "状态": "归档非客服", "渠道": "邮箱", "品牌": "FUNLAB",
+            "销售平台": "未知", "客户标识": "creator@example.com",
+            "AI草稿": "", "卡片消息ID": "om_expired",
+        }}}}
+        event = {
+            "open_message_id": "om_expired",
+            "action": {
+                "value": {"act": "send_reply", "rid": "rec_archived"},
+                "form_value": {"custom_reply": "Please send this reply."},
+            },
+        }
+        with patch.object(cs_dispatch, "CS_REPLY_LIVE", True), \
+             patch.object(cs_dispatch, "CS_REPLY_DRY_RUN_TO", ""), \
+             patch.object(cs_dispatch.feishu, "api", new=AsyncMock(return_value=record)), \
+             patch.object(cs_dispatch, "_dispatch_reply", new=AsyncMock()) as dispatch:
+            result = await cs_dispatch.handle_callback(event)
+
+        dispatch.assert_not_awaited()
+        self.assertEqual("error", result["toast"]["type"])
+        self.assertIn("已作废", result["toast"]["content"])
 
     async def test_persisted_pending_outbound_marker_blocks_resend_after_restart(self):
         record = {"data": {"record": {"fields": {
