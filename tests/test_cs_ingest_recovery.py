@@ -75,6 +75,19 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(cs_ingest._match_waiting_info_ticket(msg, waiting))
 
+    def test_waiting_info_matches_provider_thread_even_if_sender_changes(self):
+        msg = {"id": "m2", "id_prefix": "CSZ", "brand_default": "FUNLAB",
+               "mail_thread_id": "thread-1077", "frm": "mailer@shopify.com",
+               "in_reply_to": "", "references": ""}
+        waiting = [{"record_id": "rec_firefly", "fields": {
+            "工单ID": "CSZ-m1", "品牌": "FUNLAB",
+            "客户标识": "buyer@example.com", "线程ID": "m1",
+            "沟通历史摘要": "首封问题\nMAIL_THREAD_ID:thread-1077",
+        }}]
+
+        self.assertEqual("rec_firefly",
+                         cs_ingest._match_waiting_info_ticket(msg, waiting)["record_id"])
+
     def test_firefly_filter_accepts_support_and_shopify_contact_but_rejects_partner_mail(self):
         self.assertTrue(cs_ingest._firefly_customer_message({
             "toAddress": "support@fireflyfunlab.com", "fromAddress": "buyer@example.com",
@@ -183,6 +196,50 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         cs_ingest._SOURCE_WATERMARKS.pop("powkong", None)
         cs_ingest._SOURCE_WATERMARK_REGRESSIONS.pop("powkong", None)
 
+    async def test_zero_filtered_watermark_is_confirmed_as_regression(self):
+        cs_ingest._SOURCE_WATERMARKS["firefly"] = 500
+        cs_ingest._SOURCE_FILTERED_HEADS["CSZ"] = 0
+        cs_ingest._SOURCE_HEADS["CSZ"] = 800
+        cs_ingest._SOURCE_SCAN_EXHAUSTED["CSZ"] = False
+        cs_ingest._SOURCE_WATERMARK_REGRESSIONS.pop("firefly", None)
+        with patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(return_value=set())), \
+             patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest, "_fetch_firefly", new=AsyncMock(return_value=[])):
+            diagnostic = await cs_ingest.run(source="firefly", limit=1, dry_run=True)
+            anomaly = await cs_ingest.run(source="firefly", limit=1, dry_run=True)
+
+        self.assertEqual("diagnostic", diagnostic["source_health"]["firefly"]["status"])
+        self.assertEqual("anomaly", anomaly["source_health"]["firefly"]["status"])
+        self.assertIn("watermark regressed twice", anomaly["source_errors"]["firefly"])
+        for bucket, key in ((cs_ingest._SOURCE_WATERMARKS, "firefly"),
+                            (cs_ingest._SOURCE_WATERMARK_REGRESSIONS, "firefly"),
+                            (cs_ingest._SOURCE_FILTERED_HEADS, "CSZ"),
+                            (cs_ingest._SOURCE_HEADS, "CSZ"),
+                            (cs_ingest._SOURCE_SCAN_EXHAUSTED, "CSZ")):
+            bucket.pop(key, None)
+
+    async def test_scan_exhaustion_below_known_watermark_stays_quiet(self):
+        cs_ingest._SOURCE_WATERMARKS["powkong"] = 500
+        cs_ingest._SOURCE_FILTERED_HEADS["CSP"] = 500
+        cs_ingest._SOURCE_HEADS["CSP"] = 800
+        cs_ingest._SOURCE_SCAN_EXHAUSTED["CSP"] = True
+        cs_ingest._SOURCE_SCAN_OLDEST["CSP"] = 400
+        with patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(return_value=set())), \
+             patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest, "_fetch_powkong", new=AsyncMock(return_value=[])):
+            result = await cs_ingest.run(source="powkong", limit=20, dry_run=True)
+
+        self.assertEqual("ok", result["source_health"]["powkong"]["status"])
+        self.assertNotIn("powkong", result["source_errors"])
+        for bucket, key in ((cs_ingest._SOURCE_WATERMARKS, "powkong"),
+                            (cs_ingest._SOURCE_FILTERED_HEADS, "CSP"),
+                            (cs_ingest._SOURCE_HEADS, "CSP"),
+                            (cs_ingest._SOURCE_SCAN_EXHAUSTED, "CSP"),
+                            (cs_ingest._SOURCE_SCAN_OLDEST, "CSP")):
+            bucket.pop(key, None)
+
     async def test_new_reply_in_known_thread_reaches_waiting_info_handler(self):
         message = {
             "id": "m2", "id_prefix": "CSP", "mail_thread_id": "t1",
@@ -210,6 +267,30 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         handle.assert_awaited_once()
         classify.assert_not_awaited()
+        self.assertEqual(1, result["new"])
+        self.assertEqual(0, result["skipped"])
+
+    async def test_new_reply_in_known_thread_creates_new_action_when_not_waiting(self):
+        message = {
+            "id": "m2", "id_prefix": "CSP", "mail_thread_id": "t1",
+            "frm": "buyer@example.com", "subj": "Still not solved",
+            "body": "The problem is still not solved.", "channel": "邮箱",
+            "brand_default": "POWKONG", "received_ms": 200, "attachments": [],
+        }
+        fields = {"工单ID": "CSP-m2", "品牌": "POWKONG", "销售平台": "独立站",
+                  "分配运营": "独立站运营专员", "状态": "待派",
+                  "客诉摘要": "Still not solved"}
+        with patch.object(cs_ingest, "_fetch_powkong", new=AsyncMock(return_value=[message])), \
+             patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(return_value={
+                 "CSP:msg:m1", "CSP:thread:t1",
+             })), \
+             patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest, "_classify", new=AsyncMock(return_value={"is_cs": True})) as classify, \
+             patch.object(cs_ingest, "_to_fields", return_value=fields):
+            result = await cs_ingest.run(source="powkong", limit=1, dry_run=True)
+
+        classify.assert_awaited_once()
         self.assertEqual(1, result["new"])
         self.assertEqual(0, result["skipped"])
 

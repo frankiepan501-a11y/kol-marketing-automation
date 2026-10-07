@@ -93,6 +93,7 @@ _SOURCE_WATERMARKS: dict[str, int] = {}
 _SOURCE_HEADS: dict[str, int] = {}
 _SOURCE_FILTERED_HEADS: dict[str, int] = {}
 _SOURCE_SCAN_EXHAUSTED: dict[str, bool] = {}
+_SOURCE_SCAN_OLDEST: dict[str, int] = {}
 _SOURCE_WATERMARK_REGRESSIONS: dict[str, int] = {}
 
 # ---- 领星反查 (亚马逊订单号 → sid → 店铺 country → 运营) ----
@@ -540,6 +541,7 @@ async def _fetch_zoho(limit: int, *, tok: str, account_id: str, folder_id: str,
     out = []
     scanned = 0
     filtered_head = 0
+    oldest_scanned = 0
     scan_exhausted = False
     while scanned < ceiling and len(out) < target:
         take = min(200, ceiling - scanned)
@@ -547,6 +549,11 @@ async def _fetch_zoho(limit: int, *, tok: str, account_id: str, folder_id: str,
             f"https://mail.zoho.com/api/accounts/{account_id}/messages/view"
             f"?folderId={folder_id}&limit={take}&start={scanned}", tok)
         rows = listing.get("data") or []
+        row_times = [int(x.get("receivedTime") or 0) for x in rows
+                     if int(x.get("receivedTime") or 0) > 0]
+        if row_times:
+            page_oldest = min(row_times)
+            oldest_scanned = min(oldest_scanned, page_oldest) if oldest_scanned else page_oldest
         if scanned == 0:
             _SOURCE_HEADS[id_prefix] = max(
                 (int(x.get("receivedTime") or 0) for x in rows), default=0
@@ -571,6 +578,7 @@ async def _fetch_zoho(limit: int, *, tok: str, account_id: str, folder_id: str,
             scan_exhausted = True
     _SOURCE_FILTERED_HEADS[id_prefix] = filtered_head
     _SOURCE_SCAN_EXHAUSTED[id_prefix] = scan_exhausted
+    _SOURCE_SCAN_OLDEST[id_prefix] = oldest_scanned
     return out
 
 
@@ -1022,6 +1030,7 @@ def _match_waiting_info_ticket(msg: dict, waiting: list) -> dict | None:
     sender = _customer_email(msg.get("frm"))
     msg_prefix = (msg.get("id_prefix") or "").upper()
     msg_brand = (msg.get("brand_default") or "").upper()
+    mail_thread_id = str(msg.get("mail_thread_id") or "").strip()
     same_sender = []
     for row in waiting:
         f = row.get("fields", {}) or {}
@@ -1032,6 +1041,10 @@ def _match_waiting_info_ticket(msg: dict, waiting: list) -> dict | None:
             continue
         if msg_brand and ticket_brand and msg_brand != ticket_brand:
             continue
+        if mail_thread_id and re.search(
+                rf"(?:^|\s)MAIL_THREAD_ID:{re.escape(mail_thread_id)}(?:\s|;|$)",
+                _field_text(f.get("沟通历史摘要"))):
+            return row
         if msg_tokens and (msg_tokens & _ticket_tokens(f)):
             return row
         if sender and sender == _customer_email(_field_text(f.get("客户标识"))):
@@ -1543,7 +1556,7 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                         int(_SOURCE_HEADS.get(prefix, latest) or 0))
         previous = int(_SOURCE_WATERMARKS.get(name) or 0)
         status = "ok"
-        if not message_id and latest and previous and latest < previous:
+        if not message_id and previous and latest < previous:
             confirmations = int(_SOURCE_WATERMARK_REGRESSIONS.get(name) or 0) + 1
             _SOURCE_WATERMARK_REGRESSIONS[name] = confirmations
             status = "diagnostic" if confirmations < 2 else "anomaly"
@@ -1551,7 +1564,8 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                 src_err[name] = (
                     f"mailbox watermark regressed twice: previous={previous}, current={latest}"
                 )
-        elif not message_id and prefix and _SOURCE_SCAN_EXHAUSTED.get(prefix, False):
+        elif (not message_id and prefix and _SOURCE_SCAN_EXHAUSTED.get(prefix, False)
+              and (not previous or int(_SOURCE_SCAN_OLDEST.get(prefix) or 0) > previous)):
             status = "anomaly"
             src_err[name] = (
                 f"mailbox scan exhausted at {ZOHO_SCAN_LIMIT} messages before filling the batch"
@@ -1644,9 +1658,7 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
     for m in msgs:
         prefix = (m.get("id_prefix") or "").upper()
         msg_id = str(m.get("id") or "").strip()
-        mail_thread_id = str(m.get("mail_thread_id") or "").strip()
         message_keys = {f"{prefix}:msg:{msg_id}", f"{prefix}-{msg_id}"}
-        thread_key = f"{prefix}:thread:{mail_thread_id}" if mail_thread_id else ""
         if not msg_id or (message_keys & existing) or msg_id in existing:
             skip_cnt += 1
             continue
@@ -1671,9 +1683,6 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                 new_cnt += 1
             except Exception:
                 err_cnt += 1
-            continue
-        if thread_key and thread_key in existing:
-            skip_cnt += 1
             continue
         try:
             c = await _classify(m)
@@ -1717,8 +1726,6 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
             if rid and (m.get("attachments") or []):
                 await _save_attachments_to_ticket(rid, m.get("attachments") or [], dry_run=False)
             existing.update(message_keys)
-            if thread_key:
-                existing.add(thread_key)
             created_records.append({"message_id": msg_id,
                                     "ticket_id": fields.get("工单ID", ""),
                                     "record_id": rid})
