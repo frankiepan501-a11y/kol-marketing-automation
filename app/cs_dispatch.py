@@ -1153,7 +1153,9 @@ def _mail_text(message) -> str:
 def _zoho_profile(profile: str = "powkong") -> tuple:
     if profile == "firefly":
         return _csi._firefly_ztoken, _csi.ZFACC, _csi.FIREFLY_CS_FROM
-    return _csi._ztoken, _csi.ZACC, ZOHO_CS_FROM
+    if profile == "powkong":
+        return _csi._ztoken, _csi.ZACC, ZOHO_CS_FROM
+    raise ValueError(f"unsupported Zoho profile: {profile}")
 
 
 async def _verify_zoho_outbound(provider_id: str, expected_to: str,

@@ -7,6 +7,10 @@ from app import cs_dispatch
 
 
 class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_unknown_zoho_profile_fails_closed(self):
+        with self.assertRaises(ValueError):
+            cs_dispatch._zoho_profile("firelfy")
+
     async def test_firefly_zoho_ticket_reply_uses_firefly_zoho_profile(self):
         fields = {
             "工单ID": "CSZ-1791344517645162600",

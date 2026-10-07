@@ -7,7 +7,9 @@
 - `support@powkong.com`：配置不全时不再默默返回 0 封，而是明确报错并由现有端点告警路由通知。
 - `support@fireflyfunlab.com`：新增 Firefly Zoho 客服邮箱源，工单前缀为 `CSZ`；仅收客服地址邮件及 Shopify 联系表单通知，不把 KOL/合作邮件当客诉。
 - `support@funlabswitch.com`：保留原网易企业邮箱源，工单前缀仍为 `CSF`。
-- 三个邮箱源各自返回 `status / fetched / latest_received_ms`，某一源失败时不会被其他源的成功掩盖。
+- 三个邮箱源各自返回 `status / fetched / latest_received_ms`，水位从工单台恢复，若邮箱水位倒退会显式报错；某一源失败不会被其他源的成功掩盖。
+- Zoho 按页扫描至多 1000 封，先过滤 Firefly 客服邮件再取本轮处理数，避免客诉被 KOL/合作邮件挤出窗口。
+- Zoho 以“邮箱源 + mail thread”去重，同一客户会话只建一条工单；不同邮箱即使 provider ID 相同也不会互相吞掉。
 - `CSZ` 工单点击回复时使用 Firefly Zoho 账号；`CSP` 仍用 Powkong Zoho，`CSF` 仍用网易。
 
 ## 根因
@@ -25,7 +27,7 @@
 
 ## 验证
 
-- 本次定向测试：采集 13 条、派卡/回信 29 条，全部通过。
+- 本次定向测试：采集 17 条、派卡/回信 30 条，全部通过。
 - 全库 1188 条测试中，本次相关测试通过；另有 4 条 KOL/Zoho 旧测试在未改代码的基线提交上也同样失败，不属于本次回归。
 
 ## 生产收尾

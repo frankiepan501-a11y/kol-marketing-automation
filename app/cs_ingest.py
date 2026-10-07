@@ -48,6 +48,7 @@ ZFRT = os.environ.get("ZOHO_FUNLAB_REFRESH_TOKEN", "")
 ZFACC = os.environ.get("ZOHO_FUNLAB_ACCOUNT_ID", "")
 FIREFLY_SUPPORT_TO = os.environ.get("ZOHO_FUNLAB_CS_TO", "support@fireflyfunlab.com")
 FIREFLY_CS_FROM = os.environ.get("ZOHO_FUNLAB_CS_FROM", "support@fireflyfunlab.com")
+ZOHO_SCAN_LIMIT = max(200, min(int(os.environ.get("CS_ZOHO_SCAN_LIMIT", "1000") or "1000"), 5000))
 
 # ---- 网易 FUNLAB_CS (env, secret) ----
 NE_USER = os.environ.get("NETEASE_FUNLAB_CS_USER", "")
@@ -88,6 +89,8 @@ LANG_OPTS = ["EN", "中文", "德", "法", "西", "葡", "日", "其他"]
 CONF_OPTS = ["AI直答", "AI起草人工审", "必须人工"]
 AMZ_ORDER_RE = re.compile(r"\d{3}-\d{7}-\d{7}")
 STATUS_WAIT_INFO = "待客户补充"
+_SOURCE_WATERMARKS: dict[str, int] = {}
+_SOURCE_HEADS: dict[str, int] = {}
 
 # ---- 领星反查 (亚马逊订单号 → sid → 店铺 country → 运营) ----
 LX_PROXY_URL = os.environ.get("LINGXING_PROXY_URL", "")
@@ -526,17 +529,41 @@ async def _zoho_message(tok: str, account_id: str, folder_id: str, meta: dict,
 
 
 async def _fetch_zoho(limit: int, *, tok: str, account_id: str, folder_id: str,
-                       id_prefix: str, brand: str, predicate=None) -> list:
-    listing = await _zget(
-        f"https://mail.zoho.com/api/accounts/{account_id}/messages/view"
-        f"?folderId={folder_id}&limit={limit}&start=0", tok)
+                       id_prefix: str, brand: str, predicate=None,
+                       scan_limit: int = 0, known_keys: set | None = None) -> list:
+    """Read newest-first pages until enough matching messages are collected."""
+    target = max(1, limit)
+    ceiling = max(target, scan_limit or target)
     out = []
-    for meta in (listing.get("data") or []):
-        if predicate and not predicate(meta):
-            continue
-        item = await _zoho_message(tok, account_id, folder_id, meta, id_prefix, brand)
-        if item:
-            out.append(item)
+    scanned = 0
+    while scanned < ceiling and len(out) < target:
+        take = min(200, ceiling - scanned)
+        listing = await _zget(
+            f"https://mail.zoho.com/api/accounts/{account_id}/messages/view"
+            f"?folderId={folder_id}&limit={take}&start={scanned}", tok)
+        rows = listing.get("data") or []
+        if scanned == 0:
+            _SOURCE_HEADS[id_prefix] = max(
+                (int(x.get("receivedTime") or 0) for x in rows), default=0
+            )
+        for meta in rows:
+            if predicate and not predicate(meta):
+                continue
+            msg_id = str(meta.get("messageId") or "").strip()
+            mail_thread = str(meta.get("threadId") or "").strip()
+            keys = {f"{id_prefix}:msg:{msg_id}", f"{id_prefix}-{msg_id}"}
+            if mail_thread:
+                keys.add(f"{id_prefix}:thread:{mail_thread}")
+            if known_keys and (keys & known_keys):
+                continue
+            item = await _zoho_message(tok, account_id, folder_id, meta, id_prefix, brand)
+            if item:
+                out.append(item)
+                if len(out) >= target:
+                    break
+        scanned += len(rows)
+        if len(rows) < take:
+            break
     return out
 
 
@@ -562,7 +589,7 @@ async def _fetch_zoho_one(message_id: str, *, tok: str, account_id: str, folder_
     return {}
 
 
-async def _fetch_powkong(limit: int) -> list:
+async def _fetch_powkong(limit: int, known_keys: set | None = None) -> list:
     _require_config({"ZOHO_POWKONG_CS_CLIENT_ID": ZCID,
                      "ZOHO_POWKONG_CS_CLIENT_SECRET": ZSEC,
                      "ZOHO_POWKONG_CS_REFRESH_TOKEN": ZRT,
@@ -570,7 +597,8 @@ async def _fetch_powkong(limit: int) -> list:
     tok = await _ztoken()
     folder_id = await _zoho_inbox_id(tok, ZACC, POWKONG_INBOX_FID)
     return await _fetch_zoho(limit, tok=tok, account_id=ZACC, folder_id=folder_id,
-                             id_prefix="CSP", brand="POWKONG")
+                             id_prefix="CSP", brand="POWKONG", scan_limit=ZOHO_SCAN_LIMIT,
+                             known_keys=known_keys)
 
 
 async def _fetch_powkong_one(message_id: str, scan_limit: int = 500) -> dict:
@@ -584,7 +612,7 @@ async def _fetch_powkong_one(message_id: str, scan_limit: int = 500) -> dict:
                                  id_prefix="CSP", brand="POWKONG", scan_limit=scan_limit)
 
 
-async def _fetch_firefly(limit: int) -> list:
+async def _fetch_firefly(limit: int, known_keys: set | None = None) -> list:
     _require_config({"ZOHO_FUNLAB_CLIENT_ID": ZFCID,
                      "ZOHO_FUNLAB_CLIENT_SECRET": ZFSEC,
                      "ZOHO_FUNLAB_REFRESH_TOKEN": ZFRT,
@@ -592,7 +620,8 @@ async def _fetch_firefly(limit: int) -> list:
     tok = await _firefly_ztoken()
     folder_id = await _zoho_inbox_id(tok, ZFACC, FIREFLY_INBOX_FID)
     return await _fetch_zoho(limit, tok=tok, account_id=ZFACC, folder_id=folder_id,
-                             id_prefix="CSZ", brand="FUNLAB", predicate=_firefly_customer_message)
+                             id_prefix="CSZ", brand="FUNLAB", predicate=_firefly_customer_message,
+                             scan_limit=ZOHO_SCAN_LIMIT, known_keys=known_keys)
 
 
 async def _fetch_firefly_one(message_id: str, scan_limit: int = 500) -> dict:
@@ -923,11 +952,30 @@ async def _existing_thread_ids() -> set:
         d = await feishu.api("GET", path, which="notify")
         data = d.get("data", {})
         for it in data.get("items", []):
-            v = it.get("fields", {}).get("线程ID")
+            fields = it.get("fields", {}) or {}
+            ticket_id = _field_text(fields.get("工单ID"))
+            prefix = ticket_id.split("-", 1)[0].upper() if "-" in ticket_id else ""
+            source_by_prefix = {"CSP": "powkong", "CSZ": "firefly", "CSF": "funlab"}
+            source_name = source_by_prefix.get(prefix)
+            try:
+                received_ms = int(float(_field_text(fields.get("入站时间")) or 0))
+            except (TypeError, ValueError):
+                received_ms = 0
+            if source_name and received_ms:
+                _SOURCE_WATERMARKS[source_name] = max(
+                    int(_SOURCE_WATERMARKS.get(source_name) or 0), received_ms
+                )
+            v = fields.get("线程ID")
             if isinstance(v, list) and v:
                 v = v[0].get("text") if isinstance(v[0], dict) else v[0]
-            if v:
-                ids.add(str(v).strip())
+            if prefix and v:
+                ids.add(f"{prefix}:msg:{str(v).strip()}")
+            if ticket_id:
+                ids.add(ticket_id)
+            history = _field_text(fields.get("沟通历史摘要"))
+            if prefix:
+                for mail_thread in re.findall(r"MAIL_THREAD_ID:([^\s;]+)", history):
+                    ids.add(f"{prefix}:thread:{mail_thread.strip()}")
         if data.get("has_more"):
             page = data.get("page_token", "")
         else:
@@ -965,9 +1013,18 @@ def _match_waiting_info_ticket(msg: dict, waiting: list) -> dict | None:
     """Find an existing wait-info ticket for a customer's later email reply."""
     msg_tokens = _message_tokens(msg)
     sender = _customer_email(msg.get("frm"))
+    msg_prefix = (msg.get("id_prefix") or "").upper()
+    msg_brand = (msg.get("brand_default") or "").upper()
     same_sender = []
     for row in waiting:
         f = row.get("fields", {}) or {}
+        ticket_id = _field_text(f.get("工单ID"))
+        ticket_prefix = ticket_id.split("-", 1)[0].upper() if "-" in ticket_id else ""
+        ticket_brand = _field_text(f.get("品牌")).upper()
+        if msg_prefix and ticket_prefix and msg_prefix != ticket_prefix:
+            continue
+        if msg_brand and ticket_brand and msg_brand != ticket_brand:
+            continue
         if msg_tokens and (msg_tokens & _ticket_tokens(f)):
             return row
         if sender and sender == _customer_email(_field_text(f.get("客户标识"))):
@@ -1066,7 +1123,9 @@ def _orig_subject_from_msg(msg: dict) -> str:
 def _zoho_profile(profile: str = "powkong") -> tuple:
     if profile == "firefly":
         return _firefly_ztoken, ZFACC, FIREFLY_CS_FROM
-    return _ztoken, ZACC, ZOHO_CS_FROM
+    if profile == "powkong":
+        return _ztoken, ZACC, ZOHO_CS_FROM
+    raise ValueError(f"unsupported Zoho profile: {profile}")
 
 
 async def _zoho_send_reply(to_addr: str, subject: str, html: str,
@@ -1252,6 +1311,11 @@ def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = N
         fields["沟通历史摘要"] = (f"首封问题: {summary[:260]}\n"
                             f"路由依据: {route_basis or '待客户补充'}\n"
                             f"仍缺字段: {' / '.join(info_gaps)}")[:5000]
+    if msg.get("mail_thread_id"):
+        history = _field_text(fields.get("沟通历史摘要"))
+        fields["沟通历史摘要"] = (
+            history + ("\n" if history else "") + f"MAIL_THREAD_ID:{msg['mail_thread_id']}"
+        )[:5000]
     if not (msg.get("attachments") or []):
         fields.update(_attachment_base_fields([]))
     if status == STATUS_WAIT_INFO:
@@ -1459,19 +1523,37 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
     src_err = {}
     source_health = {}
     msgs = []
+    existing = await _existing_thread_ids()
 
     def add_source(name: str, rows: list) -> None:
         msgs.extend(rows)
+        prefix_by_source = {"powkong": "CSP", "firefly": "CSZ"}
+        processed_latest = max((int(x.get("received_ms") or 0) for x in rows), default=0)
+        latest = (processed_latest if message_id else
+                  int(_SOURCE_HEADS.get(prefix_by_source.get(name, ""), processed_latest) or 0))
+        previous = int(_SOURCE_WATERMARKS.get(name) or 0)
+        status = "ok"
+        if not message_id and latest and previous and latest < previous:
+            status = "anomaly"
+            src_err[name] = (
+                f"mailbox watermark regressed: previous={previous}, current={latest}"
+            )
+        elif not message_id and latest >= previous:
+            _SOURCE_WATERMARKS[name] = latest
         source_health[name] = {
-            "status": "ok",
+            "status": status,
             "fetched": len(rows),
-            "latest_received_ms": max((int(x.get("received_ms") or 0) for x in rows), default=0),
+            "latest_received_ms": latest,
+            "latest_processed_ms": processed_latest,
+            "watermark_received_ms": max(previous, latest),
         }
 
     def fail_source(name: str, exc: Exception) -> None:
         src_err[name] = str(exc)[:200]
         source_health[name] = {"status": "error", "fetched": 0,
-                               "latest_received_ms": 0, "error": str(exc)[:200]}
+                               "latest_received_ms": 0,
+                               "watermark_received_ms": int(_SOURCE_WATERMARKS.get(name) or 0),
+                               "error": str(exc)[:200]}
 
     if source in ("all", "powkong"):
         try:
@@ -1483,7 +1565,7 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                     )
                 add_source("powkong", [one])
             else:
-                add_source("powkong", await _fetch_powkong(limit))
+                add_source("powkong", await _fetch_powkong(limit, known_keys=existing))
         except Exception as e:
             fail_source("powkong", e)
     if source in ("all", "funlab"):
@@ -1510,7 +1592,7 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                     )
                 add_source("firefly", [one])
             else:
-                add_source("firefly", await _fetch_firefly(limit))
+                add_source("firefly", await _fetch_firefly(limit, known_keys=existing))
         except Exception as e:
             fail_source("firefly", e)
     if source in ("all", "discord"):
@@ -1519,16 +1601,33 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
         except Exception as e:
             fail_source("discord", e)
 
+    fetched_count = len(msgs)
+    latest_by_thread = {}
+    for msg in msgs:
+        prefix = (msg.get("id_prefix") or "").upper()
+        provider_thread = str(msg.get("mail_thread_id") or "").strip()
+        key = (f"{prefix}:thread:{provider_thread}" if provider_thread
+               else f"{prefix}:msg:{msg.get('id') or ''}")
+        old = latest_by_thread.get(key)
+        if not old or int(msg.get("received_ms") or 0) >= int(old.get("received_ms") or 0):
+            latest_by_thread[key] = msg
+    msgs = list(latest_by_thread.values())
+
     try:
         resources = await cs_resources.active_resources()
     except Exception:
         resources = cs_resources.builtin_resources()
-    existing = await _existing_thread_ids()
     waiting = await _waiting_info_tickets()
     new_cnt, skip_cnt, err_cnt = 0, 0, 0
     samples = []
     for m in msgs:
-        if not m.get("id") or m["id"] in existing:
+        prefix = (m.get("id_prefix") or "").upper()
+        msg_id = str(m.get("id") or "").strip()
+        mail_thread_id = str(m.get("mail_thread_id") or "").strip()
+        dedup_keys = {f"{prefix}:msg:{msg_id}", f"{prefix}-{msg_id}"}
+        if mail_thread_id:
+            dedup_keys.add(f"{prefix}:thread:{mail_thread_id}")
+        if not msg_id or (dedup_keys & existing) or msg_id in existing:
             skip_cnt += 1
             continue
         waiting_match = _match_waiting_info_ticket(m, waiting)
@@ -1594,8 +1693,10 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                 continue
             if rid and (m.get("attachments") or []):
                 await _save_attachments_to_ticket(rid, m.get("attachments") or [], dry_run=False)
+            existing.update(dedup_keys)
         new_cnt += 1
 
-    return {"sources": source, "fetched": len(msgs), "new": new_cnt, "skipped": skip_cnt,
+    return {"sources": source, "fetched": fetched_count, "threads_considered": len(msgs),
+            "new": new_cnt, "skipped": skip_cnt,
             "errors": err_cnt, "source_errors": src_err, "dry_run": dry_run,
             "source_health": source_health, "replay_mode": bool(message_id), "samples": samples}

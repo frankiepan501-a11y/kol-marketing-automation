@@ -7,6 +7,42 @@ from app import cs_ingest
 
 
 class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_firefly_paginates_past_kol_mail_before_applying_limit(self):
+        kol_page = [{"messageId": f"k{i}", "toAddress": "partner@fireflyfunlab.com",
+                     "fromAddress": "creator@example.com", "subject": "Collaboration"}
+                    for i in range(200)]
+        customer = {"messageId": "customer-1", "toAddress": "support@fireflyfunlab.com",
+                    "fromAddress": "buyer@example.com", "subject": "Order help",
+                    "receivedTime": "200"}
+        with patch.object(cs_ingest, "_zget", new=AsyncMock(side_effect=[
+                {"data": kol_page}, {"data": [customer]},
+             ])) as zget, \
+             patch.object(cs_ingest, "_zoho_message", new=AsyncMock(return_value={
+                 "id": "customer-1", "id_prefix": "CSZ", "received_ms": 200,
+             })):
+            rows = await cs_ingest._fetch_zoho(
+                1, tok="token", account_id="account", folder_id="inbox",
+                id_prefix="CSZ", brand="FUNLAB",
+                predicate=cs_ingest._firefly_customer_message, scan_limit=400,
+            )
+
+        self.assertEqual(["customer-1"], [x["id"] for x in rows])
+        self.assertEqual(2, zget.await_count)
+
+    def test_unknown_zoho_profile_fails_closed(self):
+        with self.assertRaises(ValueError):
+            cs_ingest._zoho_profile("firelfy")
+
+    def test_waiting_info_sender_fallback_does_not_cross_mailbox_brand(self):
+        msg = {"id": "firefly-message", "id_prefix": "CSZ", "brand_default": "FUNLAB",
+               "frm": "same-customer@example.com", "in_reply_to": "", "references": ""}
+        waiting = [{"record_id": "rec_powkong", "fields": {
+            "工单ID": "CSP-powkong-message", "品牌": "POWKONG",
+            "客户标识": "same-customer@example.com", "线程ID": "powkong-message",
+        }}]
+
+        self.assertIsNone(cs_ingest._match_waiting_info_ticket(msg, waiting))
+
     def test_firefly_filter_accepts_support_and_shopify_contact_but_rejects_partner_mail(self):
         self.assertTrue(cs_ingest._firefly_customer_message({
             "toAddress": "support@fireflyfunlab.com", "fromAddress": "buyer@example.com",
@@ -84,6 +120,30 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, result["fetched"])
         self.assertIn("firefly", result["source_errors"])
         self.assertIn("ZOHO_FUNLAB_CLIENT_ID", result["source_errors"]["firefly"])
+
+    async def test_mailbox_watermark_regression_is_reported_as_source_error(self):
+        first = {"id": "m1", "id_prefix": "CSP", "received_ms": 200,
+                 "mail_thread_id": "t1"}
+        second = {"id": "m2", "id_prefix": "CSP", "received_ms": 100,
+                  "mail_thread_id": "t2"}
+        cs_ingest._SOURCE_WATERMARKS.pop("powkong", None)
+        cs_ingest._SOURCE_HEADS.pop("CSP", None)
+        common = [
+            patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(
+                side_effect=[{"m1"}, {"m2"}])),
+            patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=[])),
+            patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])),
+            patch.object(cs_ingest, "_fetch_powkong", new=AsyncMock(
+                side_effect=[[first], [second]])),
+        ]
+        with common[0], common[1], common[2], common[3]:
+            ok = await cs_ingest.run(source="powkong", limit=1, dry_run=True)
+            regressed = await cs_ingest.run(source="powkong", limit=1, dry_run=True)
+
+        self.assertEqual("ok", ok["source_health"]["powkong"]["status"])
+        self.assertEqual("anomaly", regressed["source_health"]["powkong"]["status"])
+        self.assertIn("watermark regressed", regressed["source_errors"]["powkong"])
+        cs_ingest._SOURCE_WATERMARKS.pop("powkong", None)
 
     async def test_single_funlab_message_can_be_replayed_in_dry_run(self):
         message = {
