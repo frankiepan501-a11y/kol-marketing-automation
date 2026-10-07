@@ -156,7 +156,7 @@ _EMAIL_RE = re.compile(
     re.I,
 )
 _FORM_EMAIL_RE = re.compile(
-    r"(?:\b(?:alternate\s+)?e[\s-]?mail(?:\s+(?:address|adresse))?"
+    r"(?:\b(?:alternate\s+)?e[\s-]?mail(?:\s+(?:address|adresse))?|\bmail"
     r"|correo\s+electr[oó]nico|adresse\s+e-?mail|indirizzo\s+e-?mail"
     r"|e-?mailadres|e-?mailadresse|电子邮箱|电子邮件|邮箱|メールアドレス|メール)"
     r"\s*[:：]\s*(?:mailto:)?<?"
@@ -167,6 +167,7 @@ _PLATFORM_SYSTEM_EMAILS = {
     "mailer@shopify.com",
     "noreply@shopify.com",
     "no-reply@shopify.com",
+    "no-reply@mail.myshopline.com",
 }
 
 
@@ -177,7 +178,7 @@ def _is_platform_or_system_email(v: str) -> bool:
     if email in _PLATFORM_SYSTEM_EMAILS:
         return True
     local, _, domain = email.partition("@")
-    if domain in {"shopify.com", "shopifyemail.com"} and local in {
+    if domain in {"shopify.com", "shopifyemail.com", "mail.myshopline.com"} and local in {
             "mailer", "noreply", "no-reply", "donotreply", "do-not-reply"}:
         return True
     return email in {
@@ -219,7 +220,9 @@ def _message_customer_email(msg: dict) -> str:
         labeled = _labeled_customer_emails(msg.get("body") or "")
         if len(labeled) == 1:
             return labeled[0]
-        if len(labeled) > 1 or _is_platform_or_system_email(sender):
+        if len(labeled) > 1:
+            return ""
+        if _is_platform_or_system_email(sender):
             return ""
     return _valid_customer_email(sender)
 
@@ -1318,7 +1321,7 @@ CLASSIFY_PROMPT = """你是跨境电商(游戏配件 POWKONG/FUNLAB)客服分诊
    - 美客多订单 → platform=美客多;
    - 其余非平台客诉(独立站如PK+数字) → platform=独立站(兜底);
    - 无订单号且分不清是客户还是分销商 → 默认当客户; 有平台线索按平台, 否则 platform=独立站.
-2. 供应商/B2B/合作/分销 询盘 → is_cs=false, route=B2B群.
+2. 供应商/B2B/分销询盘 → is_cs=false, route=B2B群；明确的红人/内容创作者/influencer/affiliate/合作推广 → is_cs=false, route=KOL红人.
 3. 营销推广/SEO外链/平台系统通知/纯垃圾 → is_cs=false, route=忽略.
 4. 纯寒暄/致谢/确认收到/无实际问题或诉求的对话碎片(尤其 Discord 闲聊) → is_cs=false, route=忽略.
    Discord 降噪: 只有 "same issue" / "did anyone solve this" / "any update" / "thanks" 等跟帖碎片,
@@ -1341,7 +1344,7 @@ draft_reply 用英文自然体现以上, 给客户清晰下一步(如缺陷:"wit
 - AI直答 = 操作类咨询(物流查询/确认地址/固件使用指导);
 - AI起草人工审 = 质量补发/换货/未发货按树处理/质保内 且 金额≤$150 的常规客诉(运营审核草稿后自己发, 不升级)。
 字段:
-is_cs(bool), is_amazon(bool), route(B2B群/忽略/空),
+is_cs(bool), is_amazon(bool), route(B2B群/KOL红人/忽略/空),
 brand(FUNLAB或POWKONG, 据产品判断, 不确定用给定的默认品牌),
 platform(沃尔玛/美客多/独立站/未知 四选一; 亚马逊单填未知),
 complaint_type(物流/产品/退换货/售后/投诉升级, 非客服留空),
@@ -1356,6 +1359,82 @@ async def _classify(msg: dict) -> dict:
               + f"\n\n[此邮箱默认品牌:{msg['brand_default']}]\n发件人:{msg['frm']}\n"
               + f"主题:{msg['subj']}\n正文:{msg['body'][:1800]}")
     return await deepseek.chat_json(prompt, max_tokens=900, temperature=0.2)
+
+
+_KOL_PARTNER_OWNERSHIP_RE = re.compile(
+    r"\b(?:my|our)\s+affiliat\w*(?:\s+(?:link|code|account|commission|program|programme))?\b|"
+    r"\b(?:are\s+we|we\s+are)\s+still\s+(?:working|partnered|collaborating)\b|"
+    r"(?:我的|我们的).{0,12}(?:联盟链接|推广链接|联盟码|联盟账号|推广佣金)",
+    re.I | re.S,
+)
+_KOL_EXPLICIT_SELF_ROLE_RE = re.compile(
+    r"\b(?:i\s+am|i['’]m|we\s+are|we['’]re|sono|sou)\s+(?:an?\s+)?"
+    r"(?:content\s+creator|digital\s+creator|influencer|you\s*tuber|youtuber|tiktoker|"
+    r"streamer|reviewer|brand\s+ambassador|creatore\s+di\s+contenuti|"
+    r"criador(?:a|es)?\s+de\s+conte[uú]do)\b|"
+    r"(?:我是|我们是)\s*(?:一名|一个|一位)?\s*"
+    r"(?:内容创作者|视频创作者|红人|达人|博主|网红|品牌大使)",
+    re.I | re.S,
+)
+_KOL_CREATOR_IDENTITY_RE = re.compile(
+    r"\b(?:content\s+creator|digital\s+creator|influencer|you\s*tuber|youtuber|"
+    r"tiktoker|streamer|reviewer|creator|brand\s+ambassador|creatore\s+di\s+contenuti|"
+    r"criador(?:a|es)?\s+de\s+conte[uú]do)\b|(?:内容创作者|视频创作者|红人|达人|博主|网红)",
+    re.I,
+)
+_KOL_PARTNERSHIP_INTENT_RE = re.compile(
+    r"\b(?:collaborat\w*|partner\w*|promot\w*|sponsor\w*|affiliate|ambassador|"
+    r"gifted\s+(?:basis|collaboration)|work(?:ing)?\s+(?:with|together)|parceria|"
+    r"collaborazione)\b|(?:合作|推广|测评|带货|联盟|寄样)",
+    re.I,
+)
+_KOL_FIRST_PERSON_RE = re.compile(
+    r"\b(?:i\s+am|i['’]m|my\s+name\s+is|we\s+are|we['’]re|sono|sou|meu\s+nome\s+[ée])\b|"
+    r"(?:我是|我们是|我叫|我的名字是)",
+    re.I,
+)
+_KOL_NEGATED_IDENTITY_RE = re.compile(
+    r"\bnot\s+(?:an?\s+)?(?:influencer|creator|reviewer)\b",
+    re.I,
+)
+_KOL_CONSUMER_SIGNAL_RE = re.compile(
+    r"\b(?:order(?:ed)?|purchase[ds]?|bought|paid|deliver(?:y|ed)?|tracking|refund|"
+    r"defective|replacement|replace|not\s+arrived|ship(?:ment|ping|ped)?)\b|"
+    r"(?:订单|下单|购买|付款|物流|未收到|没收到|退款|故障|瑕疵|换货|补发|消费者)",
+    re.I,
+)
+
+
+def _is_kol_collaboration_message(msg: dict) -> bool:
+    text = "\n".join((str(msg.get("subj") or ""), str(msg.get("body") or "")))
+    if _KOL_NEGATED_IDENTITY_RE.search(text):
+        return False
+    ownership = bool(_KOL_PARTNER_OWNERSHIP_RE.search(text))
+    explicit_role = bool(_KOL_EXPLICIT_SELF_ROLE_RE.search(text))
+    if _KOL_CONSUMER_SIGNAL_RE.search(text) and not (ownership or explicit_role):
+        return False
+    if ownership:
+        return True
+    return bool(_KOL_FIRST_PERSON_RE.search(text)
+                and _KOL_CREATOR_IDENTITY_RE.search(text)
+                and _KOL_PARTNERSHIP_INTENT_RE.search(text))
+
+
+def _apply_kol_collaboration_gate(msg: dict, classification: dict) -> dict:
+    """Keep explicit creator partnerships out of the customer-service queue."""
+    result = dict(classification or {})
+    if not _is_kol_collaboration_message(msg):
+        return result
+    result.update({
+        "is_cs": False,
+        "route": "KOL红人",
+        "draft_reply": "",
+        "confidence": "必须人工",
+        "kol_handoff": True,
+    })
+    if not str(result.get("summary") or "").strip():
+        result["summary"] = "红人/内容创作者提出合作、推广或联盟相关事项。"
+    return result
 
 
 def _pick(v, opts, default=None):
@@ -1438,6 +1517,8 @@ def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = N
     ct = _pick(c.get("complaint_type"), TYPE_OPTS, None)
     if ct:
         fields["客诉类型"] = ct
+    if not is_cs:
+        return fields
     ctx = cs_resources.resolve_for_ticket(fields, resources=resources)
     resource_reply = cs_resources.build_resource_reply(fields, ctx)
     if resource_reply and status != STATUS_WAIT_INFO:
@@ -1858,6 +1939,17 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
     new_cnt, skip_cnt, err_cnt = 0, 0, 0
     samples = []
     created_records = []
+    handoff_retry = {"ok": True, "attempted": 0, "sent": 0, "skipped": dry_run}
+    if not dry_run:
+        try:
+            from . import cs_kol_handoff
+            handoff_retry = await cs_kol_handoff.retry_pending_handoffs(limit=max(10, limit))
+            if not handoff_retry.get("ok"):
+                err_cnt += 1
+        except Exception as exc:
+            err_cnt += 1
+            handoff_retry = {"ok": False, "attempted": 0, "sent": 0,
+                             "error": f"{type(exc).__name__}: {str(exc)[:180]}"}
     for m in msgs:
         prefix = (m.get("id_prefix") or "").upper()
         msg_id = str(m.get("id") or "").strip()
@@ -1899,6 +1991,7 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
         except Exception:
             err_cnt += 1
             continue
+        c = _apply_kol_collaboration_gate(m, c)
         # 亚马逊客诉 → 领星反查真实站点 → 对应运营(订单号格式判不出站点)
         amz_override = None
         if c.get("is_cs"):
@@ -1912,6 +2005,9 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                 if p:
                     amz_override = (p, op, "site_hint")
         fields = _to_fields(m, c, amz_override, resources=resources)
+        if c.get("kol_handoff"):
+            from . import cs_kol_handoff
+            fields = cs_kol_handoff.mark_pending_fields(fields)
         if fields.get("状态") == STATUS_WAIT_INFO and not dry_run:
             if allow_info_request:
                 mode, outbound = await _send_info_request(m, fields, fields.get("AI草稿", ""))
@@ -1936,13 +2032,37 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
             if rid and (m.get("attachments") or []):
                 await _save_attachments_to_ticket(rid, m.get("attachments") or [], dry_run=False)
             existing.update(message_keys)
-            created_records.append({"message_id": msg_id,
-                                    "ticket_id": fields.get("工单ID", ""),
-                                    "record_id": rid})
+            created_info = {"message_id": msg_id,
+                            "ticket_id": fields.get("工单ID", ""),
+                            "record_id": rid}
+            if c.get("kol_handoff"):
+                try:
+                    from . import cs_kol_handoff
+                    contact, contact_type = await cs_kol_handoff.lookup_contact(
+                        fields.get("客户标识", "")
+                    )
+                    handoff = await cs_kol_handoff.send_review_card(
+                        rid, fields, contact=contact, contact_type=contact_type or "",
+                    )
+                    created_info["kol_handoff"] = handoff
+                    if handoff.get("ok"):
+                        await cs_kol_handoff.record_handoff_marker(
+                            rid, fields, handoff, run_id="ingest",
+                        )
+                    else:
+                        err_cnt += 1
+                except Exception as exc:
+                    err_cnt += 1
+                    created_info["kol_handoff"] = {
+                        "ok": False,
+                        "error": f"{type(exc).__name__}: {str(exc)[:180]}",
+                    }
+            created_records.append(created_info)
         new_cnt += 1
 
     return {"sources": source, "fetched": fetched_count, "threads_considered": len(msgs),
             "new": new_cnt, "skipped": skip_cnt,
             "errors": err_cnt, "source_errors": src_err, "dry_run": dry_run,
             "source_health": source_health, "replay_mode": bool(message_id),
-            "created_records": created_records, "samples": samples}
+            "created_records": created_records, "samples": samples,
+            "kol_handoff_retry": handoff_retry}

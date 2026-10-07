@@ -272,6 +272,39 @@ async def _card_customer_readback(message_id: str, customer: str) -> dict:
     return last
 
 
+async def _closed_card_readback(message_id: str, expected_text: str) -> dict:
+    """Verify a patched card is visibly closed and has no actionable controls."""
+    if not message_id:
+        return {"ok": False, "error": "missing message_id"}
+    try:
+        tok = await _token()
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            response = await c.get(
+                f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}",
+                headers={"Authorization": f"Bearer {tok}"},
+            )
+        data = response.json()
+        items = (data.get("data") or {}).get("items") or []
+        content = (((items[0].get("body") or {}).get("content")) if items else "") or ""
+        try:
+            card = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            card = {}
+        actionable = any(
+            node.get("tag") in {"button", "action", "form"}
+            or node.get("action_type") == "form_submit"
+            for node in _walk_card(card)
+        )
+        rendered = json.dumps(card, ensure_ascii=False)
+        ok = data.get("code") == 0 and expected_text in rendered and not actionable
+        return {"ok": ok, "http_status": response.status_code,
+                "feishu_code": data.get("code"), "actionable": actionable,
+                "error": "" if ok else "closed card readback did not satisfy shape checks"}
+    except Exception as exc:
+        return {"ok": False, "http_status": 0, "feishu_code": None,
+                "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
+
+
 def _parse_card_message_ids(value) -> list[str]:
     """Read legacy single IDs and handover-era JSON arrays from the text field."""
     if isinstance(value, list):
@@ -1125,6 +1158,40 @@ async def refresh_ticket_card(rid: str) -> dict:
     return {"ok": updated == len(message_ids) and verified == len(message_ids),
             "record_id": rid, "cards_updated": updated, "cards_verified": verified,
             "message_ids": message_ids, "card_readback_errors": readback_errors}
+
+
+async def resolve_ticket_to_kol(rid: str) -> dict:
+    """Replace old actionable CS cards after a confirmed KOL-domain transfer."""
+    rec = await feishu.api("GET", f"/bitable/v1/apps/{CS_APP}/tables/{T_TICKET}/records/{rid}",
+                           which="notify")
+    f = ((rec.get("data", {}) or {}).get("record", {}) or {}).get("fields", {}) or {}
+    if not f:
+        return {"ok": False, "record_id": rid, "error": "record not found"}
+    message_ids = _parse_card_message_ids(_x(f, "卡片消息ID"))
+    if not message_ids:
+        return {"ok": True, "record_id": rid, "cards_updated": 0,
+                "cards_verified": 0, "message_ids": [], "skipped": "no_existing_card"}
+    card = _build_result_card(
+        rid, f, "grey", "已转KOL", "🟢 [CUS·P3] 已转KOL处理",
+        "这不是独立站客诉，已转交 KOL 媒体助手。",
+        "陈翔宇无需处理；旧客服按钮已移除，系统不会向联系人自动发信。",
+    )
+    results = await asyncio.gather(*(_update_card_result(mid, card) for mid in message_ids))
+    updated = sum(bool(item.get("ok")) for item in results)
+    verified_results = await asyncio.gather(*(
+        _closed_card_readback(mid, "已转KOL处理") if result.get("ok") else asyncio.sleep(
+            0, result=result)
+        for mid, result in zip(message_ids, results)
+    ))
+    verified = sum(bool(item.get("ok")) for item in verified_results)
+    errors = [
+        {"message_id": mid, "update": update_result, "readback": readback_result}
+        for mid, update_result, readback_result in zip(message_ids, results, verified_results)
+        if not update_result.get("ok") or not readback_result.get("ok")
+    ]
+    return {"ok": updated == len(message_ids) and verified == len(message_ids),
+            "record_id": rid, "cards_updated": updated, "cards_verified": verified,
+            "message_ids": message_ids, "errors": errors}
 
 
 # ===== 回客户真实渠道发送 (CSP=Powkong Zoho / CSF=Funlab 网易 SMTP / CSD·CSDT=Discord) =====

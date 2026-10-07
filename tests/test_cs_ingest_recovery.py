@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app import cs_ingest
+from app import cs_ingest, cs_kol_handoff
 
 
 class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -281,6 +281,179 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("独立站运营专员", fields["分配运营"])
         self.assertNotEqual("张佳烨", fields["分配运营"])
 
+    def test_kol_collaboration_gate_overrides_customer_classification(self):
+        message = {
+            "frm": "creator@example.com",
+            "subj": "Content creator collaboration",
+            "body": "I am a content creator and would like to collaborate to promote your products.",
+        }
+        mistaken = {
+            "is_cs": True,
+            "platform": "独立站",
+            "summary": "Creator asks about cooperation",
+            "draft_reply": "A customer-service reply that must not be used.",
+        }
+
+        corrected = cs_ingest._apply_kol_collaboration_gate(message, mistaken)
+
+        self.assertFalse(corrected["is_cs"])
+        self.assertEqual("KOL红人", corrected["route"])
+        self.assertEqual("", corrected["draft_reply"])
+
+    def test_kol_collaboration_gate_catches_affiliate_link_relationship(self):
+        message = {
+            "frm": "partner@example.com",
+            "subj": "Affiliate link stopped working",
+            "body": "My affiliate link no longer works. Are we still working together?",
+        }
+
+        corrected = cs_ingest._apply_kol_collaboration_gate(
+            message, {"is_cs": True, "summary": "Affiliate link issue"},
+        )
+
+        self.assertFalse(corrected["is_cs"])
+        self.assertEqual("KOL红人", corrected["route"])
+
+    def test_kol_gate_does_not_capture_real_customer_mentioning_influencer(self):
+        message = {
+            "frm": "buyer@example.com",
+            "subj": "Three month delivery delay",
+            "body": "I am not an influencer. I paid for my order and need delivery status now.",
+        }
+
+        corrected = cs_ingest._apply_kol_collaboration_gate(
+            message, {"is_cs": True, "summary": "Order not delivered"},
+        )
+
+        self.assertTrue(corrected["is_cs"])
+        self.assertNotEqual("KOL红人", corrected.get("route"))
+
+    def test_kol_gate_does_not_capture_customer_influenced_by_reviewer(self):
+        message = {
+            "frm": "buyer@example.com",
+            "subj": "Defective controller",
+            "body": ("I bought this controller after a reviewer promoted it, but it is defective "
+                     "and I need a replacement."),
+        }
+
+        corrected = cs_ingest._apply_kol_collaboration_gate(
+            message, {"is_cs": True, "summary": "Defective product"},
+        )
+
+        self.assertTrue(corrected["is_cs"])
+
+    def test_kol_gate_does_not_capture_customer_buying_through_affiliate_link(self):
+        message = {
+            "frm": "buyer@example.com",
+            "subj": "Order not delivered",
+            "body": ("I purchased through an affiliate link. Order PK123 has not arrived "
+                     "and I need a refund."),
+        }
+
+        corrected = cs_ingest._apply_kol_collaboration_gate(
+            message, {"is_cs": True, "summary": "Order not delivered"},
+        )
+
+        self.assertTrue(corrected["is_cs"])
+
+    def test_kol_gate_does_not_capture_chinese_customer_using_creator_link(self):
+        message = {
+            "frm": "buyer@example.com",
+            "subj": "订单未收到",
+            "body": "我是通过达人合作推广链接下单的消费者，订单一直没收到，请退款。",
+        }
+
+        corrected = cs_ingest._apply_kol_collaboration_gate(
+            message, {"is_cs": True, "summary": "订单未收到"},
+        )
+
+        self.assertTrue(corrected["is_cs"])
+
+    def test_kol_gate_accepts_first_person_brand_ambassador_relationship(self):
+        message = {
+            "frm": "partner@example.com",
+            "subj": "Brand ambassador partnership",
+            "body": "I am a brand ambassador and would like to continue our partnership.",
+        }
+
+        corrected = cs_ingest._apply_kol_collaboration_gate(
+            message, {"is_cs": True, "summary": "Partnership"},
+        )
+
+        self.assertFalse(corrected["is_cs"])
+        self.assertEqual("KOL红人", corrected["route"])
+
+    def test_platform_relay_does_not_use_unlabeled_third_party_email(self):
+        message = {
+            "frm": "no-reply@mail.myshopline.com",
+            "subj": "Message from client",
+            "body": "Please contact my installer at installer@example.com. My own email is missing.",
+        }
+
+        self.assertEqual("", cs_ingest._message_customer_email(message))
+
+    def test_shopline_relay_uses_labeled_contact_email(self):
+        message = {
+            "frm": "no-reply@mail.myshopline.com",
+            "subj": "New message from your online store",
+            "body": "E-mail: lary01tech@gmail.com\nComment: I am a creator seeking collaboration.",
+        }
+
+        self.assertTrue(cs_ingest._is_platform_or_system_email(message["frm"]))
+        self.assertEqual("lary01tech@gmail.com", cs_ingest._message_customer_email(message))
+
+    def test_non_customer_kol_ticket_never_gets_resource_reply(self):
+        message = {
+            "id": "m-kol", "id_prefix": "CSZ", "frm": "creator@example.com",
+            "subj": "Creator collaboration", "body": "I am a creator seeking collaboration.",
+            "channel": "邮箱", "brand_default": "FUNLAB", "received_ms": 1,
+            "attachments": [],
+        }
+        classification = {
+            "is_cs": False, "route": "KOL红人", "summary": "Creator collaboration",
+            "draft_reply": "", "confidence": "必须人工",
+        }
+
+        with patch.object(cs_ingest.cs_resources, "build_resource_reply",
+                          return_value="A support reply that must not be generated") as build:
+            fields = cs_ingest._to_fields(message, classification, resources=[])
+
+        self.assertEqual("", fields["AI草稿"])
+        build.assert_not_called()
+
+    async def test_kol_handoff_persists_pending_state_before_sending_card(self):
+        message = {
+            "id": "m-kol", "id_prefix": "CSP", "frm": "creator@example.com",
+            "subj": "Creator collaboration",
+            "body": "I am a content creator and would like to collaborate to promote products.",
+            "channel": "邮箱", "brand_default": "FUNLAB", "received_ms": 1,
+            "attachments": [],
+        }
+        api = AsyncMock(return_value={"data": {"record": {"record_id": "rec_kol_ticket"}}})
+        with patch.object(cs_ingest, "_fetch_powkong", new=AsyncMock(return_value=[message])), \
+             patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(return_value=set())), \
+             patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest, "_classify", new=AsyncMock(return_value={
+                 "is_cs": True, "platform": "独立站", "summary": "Creator collaboration",
+             })), \
+             patch.object(cs_kol_handoff, "retry_pending_handoffs",
+                          new=AsyncMock(return_value={"ok": True, "sent": 0})), \
+             patch.object(cs_kol_handoff, "lookup_contact",
+                          new=AsyncMock(return_value=(None, None))), \
+             patch.object(cs_kol_handoff, "send_review_card",
+                          new=AsyncMock(return_value={"ok": True, "message_ids": ["om_kol"]})), \
+             patch.object(cs_kol_handoff, "record_handoff_marker",
+                          new=AsyncMock(return_value={"marker": "done"})), \
+             patch.object(cs_ingest.feishu, "api", new=api):
+            result = await cs_ingest.run(source="powkong", limit=1, dry_run=False)
+
+        self.assertEqual(1, result["new"])
+        posted = api.await_args.args[2]["fields"]
+        self.assertTrue(posted["沟通历史摘要"].startswith(
+            cs_kol_handoff.PENDING_MARKER
+        ))
+
     async def test_funlab_missing_credentials_is_reported_as_source_error(self):
         with patch.object(cs_ingest, "NE_USER", ""), \
              patch.object(cs_ingest, "NE_CODE", ""), \
@@ -473,6 +646,8 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
              patch.object(cs_ingest, "_classify", new=AsyncMock(return_value={
                  "is_cs": True, "platform": "独立站", "summary": "Still not solved",
              })), \
+             patch.object(cs_kol_handoff, "retry_pending_handoffs",
+                          new=AsyncMock(return_value={"ok": True, "sent": 0})), \
              patch.object(cs_ingest.feishu, "api", new=api):
             first = await cs_ingest.run(source="powkong", limit=2, dry_run=False)
             second = await cs_ingest.run(source="powkong", limit=2, dry_run=False)

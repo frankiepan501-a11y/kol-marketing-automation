@@ -7,6 +7,70 @@ from app import cs_dispatch
 
 
 class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_closed_card_readback_rejects_remaining_action_controls(self):
+        card = {
+            "header": {"title": {"content": "已转KOL处理"}},
+            "elements": [{"tag": "action", "actions": [{"tag": "button"}]}],
+        }
+
+        class _Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"code": 0, "data": {"items": [
+                    {"body": {"content": json.dumps(card, ensure_ascii=False)}}
+                ]}}
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return _Response()
+
+        with patch.object(cs_dispatch, "_token", new=AsyncMock(return_value="token")), \
+             patch.object(cs_dispatch.httpx, "AsyncClient", return_value=_Client()):
+            result = await cs_dispatch._closed_card_readback("om_old", "已转KOL处理")
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["actionable"])
+
+    async def test_closed_card_readback_accepts_result_card_without_controls(self):
+        card = {
+            "header": {"title": {"content": "已转KOL处理"}},
+            "elements": [{"tag": "div", "text": {"content": "陈翔宇无需处理"}}],
+        }
+
+        class _Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"code": 0, "data": {"items": [
+                    {"body": {"content": json.dumps(card, ensure_ascii=False)}}
+                ]}}
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return _Response()
+
+        with patch.object(cs_dispatch, "_token", new=AsyncMock(return_value="token")), \
+             patch.object(cs_dispatch.httpx, "AsyncClient", return_value=_Client()):
+            result = await cs_dispatch._closed_card_readback("om_old", "已转KOL处理")
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["actionable"])
+
     def test_unknown_zoho_profile_fails_closed(self):
         with self.assertRaises(ValueError):
             cs_dispatch._zoho_profile("firelfy")
