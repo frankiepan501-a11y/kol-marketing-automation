@@ -2042,12 +2042,12 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                     contact, contact_type = await cs_kol_handoff.lookup_contact(
                         fields.get("客户标识", "")
                     )
-                    handoff = await cs_kol_handoff.send_review_card(
+                    handoff = await cs_kol_handoff.ensure_kol_workflow(
                         rid, fields, contact=contact, contact_type=contact_type or "",
                     )
                     created_info["kol_handoff"] = handoff
                     if handoff.get("ok"):
-                        await cs_kol_handoff.record_handoff_marker(
+                        await cs_kol_handoff.record_workflow_marker(
                             rid, fields, handoff, run_id="ingest",
                         )
                     else:

@@ -455,9 +455,13 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
                           new=AsyncMock(return_value={"ok": True, "sent": 0})), \
              patch.object(cs_kol_handoff, "lookup_contact",
                           new=AsyncMock(return_value=(None, None))), \
-             patch.object(cs_kol_handoff, "send_review_card",
-                          new=AsyncMock(return_value={"ok": True, "message_ids": ["om_kol"]})), \
-             patch.object(cs_kol_handoff, "record_handoff_marker",
+             patch.object(cs_kol_handoff, "ensure_kol_workflow",
+                          new=AsyncMock(return_value={
+                              "ok": True, "message_ids": ["om_kol"],
+                              "followup_record_id": "rec_fu",
+                              "draft_record_id": "",
+                          })), \
+             patch.object(cs_kol_handoff, "record_workflow_marker",
                           new=AsyncMock(return_value={"marker": "done"})), \
              patch.object(cs_ingest.feishu, "api", new=api):
             result = await cs_ingest.run(source="powkong", limit=1, dry_run=False)

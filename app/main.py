@@ -12,6 +12,7 @@ from . import config, reply_monitor, dashboard, followup, enrich, enrich_editor,
 from . import weekly_report  # P0 周报模块, 设计方案 https://u1wpma3xuhr.feishu.cn/wiki/QeQMw2peBiJcIdkKBI2c1tBbnLe
 from . import cs_ingest  # 客服助手 v0: Powkong 邮箱采集→分类→工单台 (memory cs-channel-apiization-2026-06-24)
 from . import cs_dispatch  # 客服助手 v0: 工单台待派 → 派单卡片(观察期全发 Frankie)
+from . import cs_kol_handoff  # 客服邮箱创作者来信 → KOL 主表/跟进/入站审核卡（不自动建可发送草稿）
 from . import cs_resources  # 客服官方资源真相源: 固件/手册/视频 URL 解析与发送闸
 from . import amz_assistant, amz_review_audit, amz_procurement_quote, amz_procurement_preview, amz_compliance_fit_card, amz_selection_confirmation, amz_validation50  # 亚马逊运营卡片: 差评审计 + 采购报价回填 + 采购阶段预览 + 合规/适配核查 + 选品结果确认 + 50件验证
 from . import b2b_mail_reminder  # B2B 外贸邮箱跟进提醒(日 10:00, 外贸助手回执卡)
@@ -1831,6 +1832,29 @@ async def run_cs_customer_email_backfill(
     except Exception as e:
         tr = _tb.format_exc()[-1000:]
         await _alert_endpoint_failure("/cs/customer-email/backfill", str(e), tr)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+
+@app.post("/cs/kol-workflow/correct")
+async def run_cs_kol_workflow_correct(
+        authorization: str = Header(default=""), record_id: str = "",
+        dry_run: bool = True, confirm: bool = False, run_id: str = ""):
+    """Move one explicitly approved CS ticket into the standard KOL workflow."""
+    _check_auth(authorization)
+    if not record_id.strip():
+        raise HTTPException(400, "record_id is required")
+    if not dry_run and (not confirm or not run_id.strip()):
+        raise HTTPException(400, "commit requires confirm=true and run_id")
+    try:
+        return await cs_kol_handoff.correct_confirmed_ticket(
+            record_id.strip(), dry_run=dry_run, confirm=confirm,
+            run_id=run_id.strip(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        tr = _tb.format_exc()[-1000:]
+        await _alert_endpoint_failure("/cs/kol-workflow/correct", str(e), tr)
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 
