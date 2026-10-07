@@ -30,3 +30,6 @@
 - KOL 卡结果：3/3 发送成功；1 条关联既有 KOL，2 条保持“未入库新创作者待审核”。
 - 安全结果：客户外发 0、KOL 主表自动新增 0、App 权限变更 0、非白名单工单修改 0。
 - 项目修复记录：`docs/handoff/cs-kol-routing-fix-2026-10-07.md`。
+- 最终规范复核发现 1 项 P2：点击超过 14 天的旧客服卡后，后台错误处理可能把新作废通知重建成带按钮的客服错误卡。已增加 `retired_non_cs` 专用结果标记，归档拒绝不再触碰任何相关卡片。
+- 新增回归测试验证“点击过期旧卡后作废通知保持只读”；最终全量 1388 passed、67 subtests passed。
+- 最终生产提交 `5a4788d2a64612de68367f1927131e92d2b814ee`，Zeabur deployment `6ac6510a344226a060ce2895` 已 `RUNNING`，`/health` 为 `status=ok`、KOL媒体助手回调 `ready=true`。
