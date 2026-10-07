@@ -991,6 +991,8 @@ async def _existing_thread_ids() -> set:
             if prefix:
                 for mail_thread in re.findall(r"MAIL_THREAD_ID:([^\s;]+)", history):
                     ids.add(f"{prefix}:thread:{mail_thread.strip()}")
+                for source_msg_id in re.findall(r"SOURCE_MESSAGE_ID:([^\s;]+)", history):
+                    ids.add(f"{prefix}:msg:{source_msg_id.strip()}")
         if data.get("has_more"):
             page = data.get("page_token", "")
         else:
@@ -1336,6 +1338,12 @@ def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = N
         fields["沟通历史摘要"] = (
             history + ("\n" if history else "") + f"MAIL_THREAD_ID:{msg['mail_thread_id']}"
         )[:5000]
+    merged_ids = [str(x).strip() for x in (msg.get("merged_message_ids") or [])
+                  if str(x).strip() and str(x).strip() != str(msg.get("id") or "").strip()]
+    if merged_ids:
+        history = _field_text(fields.get("沟通历史摘要"))
+        markers = "\n".join(f"SOURCE_MESSAGE_ID:{x}" for x in merged_ids)
+        fields["沟通历史摘要"] = (history + ("\n" if history else "") + markers)[:5000]
     if not (msg.get("attachments") or []):
         fields.update(_attachment_base_fields([]))
     if status == STATUS_WAIT_INFO:
@@ -1437,9 +1445,13 @@ async def _handle_waiting_info_reply(row: dict, msg: dict, resources: list | Non
     count = int(float(_field_text(f.get("补充信息次数")) or 0))
     order_no, platform, operator, basis = await _reroute_from_supplement(msg, f)
     gaps = _amazon_info_gaps(order_no, platform, basis)
+    merged_ids = [str(x).strip() for x in (msg.get("merged_message_ids") or [])
+                  if str(x).strip()]
+    id_markers = "\n".join(f"SOURCE_MESSAGE_ID:{x}" for x in merged_ids)
     common = {
         "最近客户补充": supplement[:5000],
-        "沟通历史摘要": (old_hist + f"\n客户补充({msg.get('id','')[:120]}): {supplement[:800]}").strip()[:5000],
+        "沟通历史摘要": (old_hist + f"\n客户补充({msg.get('id','')[:120]}): {supplement[:800]}"
+                         + (f"\n{id_markers}" if id_markers else "")).strip()[:5000],
     }
 
     if platform and operator:
@@ -1636,16 +1648,27 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
             fail_source("discord", e)
 
     fetched_count = len(msgs)
-    latest_by_thread = {}
+    messages_by_thread = {}
     for msg in msgs:
         prefix = (msg.get("id_prefix") or "").upper()
         provider_thread = str(msg.get("mail_thread_id") or "").strip()
         key = (f"{prefix}:thread:{provider_thread}" if provider_thread
                else f"{prefix}:msg:{msg.get('id') or ''}")
-        old = latest_by_thread.get(key)
-        if not old or int(msg.get("received_ms") or 0) >= int(old.get("received_ms") or 0):
-            latest_by_thread[key] = msg
-    msgs = list(latest_by_thread.values())
+        messages_by_thread.setdefault(key, []).append(msg)
+    merged_msgs = []
+    for parts in messages_by_thread.values():
+        ordered = sorted(parts, key=lambda x: int(x.get("received_ms") or 0))
+        merged = dict(ordered[-1])
+        merged["merged_message_ids"] = list(dict.fromkeys(
+            str(x.get("id") or "").strip() for x in ordered if str(x.get("id") or "").strip()
+        ))
+        if len(ordered) > 1:
+            merged["body"] = "\n\n--- same-thread message ---\n\n".join(
+                (x.get("body") or "").strip() for x in ordered if (x.get("body") or "").strip()
+            )[:12000]
+            merged["attachments"] = [a for x in ordered for a in (x.get("attachments") or [])]
+        merged_msgs.append(merged)
+    msgs = merged_msgs
 
     try:
         resources = await cs_resources.active_resources()
@@ -1658,8 +1681,15 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
     for m in msgs:
         prefix = (m.get("id_prefix") or "").upper()
         msg_id = str(m.get("id") or "").strip()
-        message_keys = {f"{prefix}:msg:{msg_id}", f"{prefix}-{msg_id}"}
-        if not msg_id or (message_keys & existing) or msg_id in existing:
+        message_ids = [str(x).strip() for x in (m.get("merged_message_ids") or [msg_id])
+                       if str(x).strip()]
+        message_keys = {key for mid in message_ids
+                        for key in (f"{prefix}:msg:{mid}", f"{prefix}-{mid}")}
+        all_known = bool(message_ids) and all(
+            f"{prefix}:msg:{mid}" in existing or f"{prefix}-{mid}" in existing or mid in existing
+            for mid in message_ids
+        )
+        if not msg_id or all_known:
             skip_cnt += 1
             continue
         waiting_match = _match_waiting_info_ticket(m, waiting)

@@ -294,6 +294,43 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, result["new"])
         self.assertEqual(0, result["skipped"])
 
+    async def test_same_thread_batch_records_all_message_ids_and_does_not_repeat(self):
+        old = {
+            "id": "old", "id_prefix": "CSP", "mail_thread_id": "t1",
+            "frm": "buyer@example.com", "subj": "Initial problem", "body": "first body",
+            "channel": "邮箱", "brand_default": "POWKONG", "received_ms": 100,
+            "attachments": [],
+        }
+        new = {
+            "id": "new", "id_prefix": "CSP", "mail_thread_id": "t1",
+            "frm": "buyer@example.com", "subj": "Still not solved", "body": "second body",
+            "channel": "邮箱", "brand_default": "POWKONG", "received_ms": 200,
+            "attachments": [],
+        }
+        api = AsyncMock(return_value={"data": {"record": {"record_id": "rec_merged"}}})
+        with patch.object(cs_ingest, "_fetch_powkong", new=AsyncMock(
+                 side_effect=[[new, old], [new, old]])), \
+             patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(side_effect=[
+                 set(), {"CSP:msg:new", "CSP:msg:old"},
+             ])), \
+             patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest, "_classify", new=AsyncMock(return_value={
+                 "is_cs": True, "platform": "独立站", "summary": "Still not solved",
+             })), \
+             patch.object(cs_ingest.feishu, "api", new=api):
+            first = await cs_ingest.run(source="powkong", limit=2, dry_run=False)
+            second = await cs_ingest.run(source="powkong", limit=2, dry_run=False)
+
+        self.assertEqual(1, first["new"])
+        self.assertEqual(0, second["new"])
+        self.assertEqual(1, second["skipped"])
+        self.assertEqual(1, api.await_count)
+        posted_fields = api.await_args.args[2]["fields"]
+        self.assertIn("first body", posted_fields["原文"])
+        self.assertIn("second body", posted_fields["原文"])
+        self.assertIn("SOURCE_MESSAGE_ID:old", posted_fields["沟通历史摘要"])
+
     async def test_single_funlab_message_can_be_replayed_in_dry_run(self):
         message = {
             "id": "<missing-message@example.com>",
