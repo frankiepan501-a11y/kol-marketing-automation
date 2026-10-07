@@ -1363,6 +1363,7 @@ async def _classify(msg: dict) -> dict:
 
 _KOL_PARTNER_OWNERSHIP_RE = re.compile(
     r"\b(?:my|our)\s+affiliat\w*(?:\s+(?:link|code|account|commission|program|programme))?\b|"
+    r"\b(?:i\s+am|i['’]m|we\s+are|we['’]re)\s+still\s+affiliat\w*\b|"
     r"\b(?:are\s+we|we\s+are)\s+still\s+(?:working|partnered|collaborating)\b|"
     r"(?:我的|我们的).{0,12}(?:联盟链接|推广链接|联盟码|联盟账号|推广佣金)",
     re.I | re.S,

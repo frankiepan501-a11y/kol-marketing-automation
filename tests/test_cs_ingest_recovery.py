@@ -314,6 +314,20 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(corrected["is_cs"])
         self.assertEqual("KOL红人", corrected["route"])
 
+    def test_kol_collaboration_gate_catches_still_affiliated_relationship(self):
+        message = {
+            "frm": "partner@example.com",
+            "subj": "Affiliate relationship",
+            "body": "I was wondering if I am still affiliated with you. My link does not work.",
+        }
+
+        corrected = cs_ingest._apply_kol_collaboration_gate(
+            message, {"is_cs": True, "summary": "Affiliate link issue"},
+        )
+
+        self.assertFalse(corrected["is_cs"])
+        self.assertEqual("KOL红人", corrected["route"])
+
     def test_kol_gate_does_not_capture_real_customer_mentioning_influencer(self):
         message = {
             "frm": "buyer@example.com",
