@@ -7,6 +7,26 @@ from app import cs_ingest, cs_kol_handoff
 
 
 class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_message_failure_reports_replay_id_without_mail_content(self):
+        message = {
+            "id": "failed-provider-id", "id_prefix": "CSP",
+            "frm": "buyer@example.com", "body": "private customer message",
+            "received_ms": 1,
+        }
+        with patch.object(cs_ingest, "_fetch_powkong", new=AsyncMock(return_value=[message])), \
+             patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(return_value=set())), \
+             patch.object(cs_ingest, "_waiting_info_tickets", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])), \
+             patch.object(cs_ingest, "_classify", new=AsyncMock(side_effect=ValueError("private customer message"))):
+            result = await cs_ingest.run(source="powkong", limit=1, dry_run=True)
+
+        self.assertEqual(1, result["errors"])
+        self.assertEqual([{
+            "source": "CSP", "message_id": "failed-provider-id",
+            "stage": "classify", "error_type": "ValueError",
+        }], result["message_failures"])
+        self.assertNotIn("private customer message", str(result))
+
     async def test_zoho_message_retains_reply_to_address(self):
         meta = {
             "messageId": "m1",

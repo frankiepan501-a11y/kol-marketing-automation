@@ -1938,6 +1938,16 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
         resources = cs_resources.builtin_resources()
     waiting = await _waiting_info_tickets()
     new_cnt, skip_cnt, err_cnt = 0, 0, 0
+    message_failures = []
+
+    def record_message_failure(m: dict, stage: str, exc: Exception | None = None) -> None:
+        if len(message_failures) < 10:
+            message_failures.append({
+                "source": (m.get("id_prefix") or "").upper(),
+                "message_id": str(m.get("id") or "")[:120],
+                "stage": stage,
+                "error_type": type(exc).__name__ if exc else "MissingResult",
+            })
     samples = []
     created_records = []
     handoff_retry = {"ok": True, "attempted": 0, "sent": 0, "skipped": dry_run}
@@ -1984,13 +1994,15 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                                     "动作": result.get("action"), "record": result.get("record_id", ""),
                                     "附件": len(m.get("attachments") or [])})
                 new_cnt += 1
-            except Exception:
+            except Exception as exc:
                 err_cnt += 1
+                record_message_failure(m, "waiting_info_reply", exc)
             continue
         try:
             c = await _classify(m)
-        except Exception:
+        except Exception as exc:
             err_cnt += 1
+            record_message_failure(m, "classify", exc)
             continue
         c = _apply_kol_collaboration_gate(m, c)
         # 亚马逊客诉 → 领星反查真实站点 → 对应运营(订单号格式判不出站点)
@@ -2029,6 +2041,7 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                    or ((created.get("data") or {}).get("record_id") or ""))
             if not rid:
                 err_cnt += 1
+                record_message_failure(m, "create_ticket")
                 continue
             if rid and (m.get("attachments") or []):
                 await _save_attachments_to_ticket(rid, m.get("attachments") or [], dry_run=False)
@@ -2052,8 +2065,10 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
                         )
                     else:
                         err_cnt += 1
+                        record_message_failure(m, "kol_handoff")
                 except Exception as exc:
                     err_cnt += 1
+                    record_message_failure(m, "kol_handoff", exc)
                     created_info["kol_handoff"] = {
                         "ok": False,
                         "error": f"{type(exc).__name__}: {str(exc)[:180]}",
@@ -2063,7 +2078,8 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
 
     return {"sources": source, "fetched": fetched_count, "threads_considered": len(msgs),
             "new": new_cnt, "skipped": skip_cnt,
-            "errors": err_cnt, "source_errors": src_err, "dry_run": dry_run,
+            "errors": err_cnt, "message_failures": message_failures,
+            "source_errors": src_err, "dry_run": dry_run,
             "source_health": source_health, "replay_mode": bool(message_id),
             "created_records": created_records, "samples": samples,
             "kol_handoff_retry": handoff_retry}
