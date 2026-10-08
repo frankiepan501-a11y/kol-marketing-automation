@@ -1942,11 +1942,18 @@ async def run(source: str = "all", limit: int = 20, dry_run: bool = False,
 
     def record_message_failure(m: dict, stage: str, exc: Exception | None = None) -> None:
         if len(message_failures) < 10:
+            tb = exc.__traceback__ if exc else None
+            while tb and tb.tb_next:
+                tb = tb.tb_next
             message_failures.append({
                 "source": (m.get("id_prefix") or "").upper(),
                 "message_id": str(m.get("id") or "")[:120],
                 "stage": stage,
                 "error_type": type(exc).__name__ if exc else "MissingResult",
+                "error_location": (
+                    f"{os.path.basename(tb.tb_frame.f_code.co_filename)}:{tb.tb_frame.f_code.co_name}:{tb.tb_lineno}"
+                    if tb else ""
+                ),
             })
     samples = []
     created_records = []

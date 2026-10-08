@@ -21,10 +21,13 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
             result = await cs_ingest.run(source="powkong", limit=1, dry_run=True)
 
         self.assertEqual(1, result["errors"])
-        self.assertEqual([{
+        self.assertEqual(1, len(result["message_failures"]))
+        failure = result["message_failures"][0]
+        self.assertEqual({
             "source": "CSP", "message_id": "failed-provider-id",
             "stage": "classify", "error_type": "ValueError",
-        }], result["message_failures"])
+        }, {key: failure[key] for key in ("source", "message_id", "stage", "error_type")})
+        self.assertRegex(failure["error_location"], r"^[\w.]+:[\w]+:\d+$")
         self.assertNotIn("private customer message", str(result))
 
     async def test_zoho_message_retains_reply_to_address(self):
