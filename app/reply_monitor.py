@@ -237,7 +237,18 @@ async def _get_sent_drafts():
     return items
 
 
-async def find_draft(contact_rid: str, contact_type: str, brand: str = None):
+def _thread_subject(subject: str) -> str:
+    """Strip reply/forward prefixes so a later reply stays on its original product thread."""
+    value = (subject or "").strip()
+    while True:
+        stripped = re.sub(r"^(?:re|fw|fwd)\s*:\s*", "", value, flags=re.I).strip()
+        if stripped == value:
+            return re.sub(r"\s+", " ", value).casefold()
+        value = stripped
+
+
+async def find_draft(contact_rid: str, contact_type: str, brand: str = None,
+                     subject: str = ""):
     """找到该 contact 关联的"待监听"草稿 + 该 contact 的所有已发送草稿(供 body 去重用).
     优先取「同品牌 + 未回复 + 发送时间最新」的草稿；都已回复时回 fallback 取最新一条。
 
@@ -273,6 +284,13 @@ async def find_draft(contact_rid: str, contact_type: str, brand: str = None):
                       if config.brand_from_text(ext(r["fields"].get("发送邮箱"))) == brand]
         if same_brand:
             pool_src = same_brand
+    # 同一达人同品牌可以有多款产品。旧线程来信不得继承另一产品的新草稿。
+    thread = _thread_subject(subject)
+    if thread:
+        same_thread = [r for r in pool_src
+                       if _thread_subject(ext(r["fields"].get("邮件主题"))) == thread]
+        if same_thread:
+            pool_src = same_thread
     # Plan A (2026-05-19): 不再按 邮件草稿来源 排除 reply 草稿。
     # 取最新一封"未回复"草稿 (任意来源, 含 reply); 都已回复时 fallback 取最新一封。
     # 1upBinge 类死循环由下游 V3-C dedup 拦 (同一 inbox email 的 [MID:] 已写进
@@ -632,7 +650,8 @@ async def run(only_brand: str = "", only_sender: str = ""):
                 continue
 
             # 2026-06-17: 传当前收件箱品牌 → find_draft 同品牌优先(防跨品牌错配产品, 见 find_draft docstring)
-            draft, all_matched = await find_draft(contact["record_id"], ctype, brand=brand)
+            draft, all_matched = await find_draft(contact["record_id"], ctype, brand=brand,
+                                                  subject=subject)
             if not draft: continue
             # Keep inbound mail pending in Zoho for this session. Do not mark it
             # processed, classify, mutate cooperation state, or generate a card.
@@ -811,6 +830,7 @@ async def run(only_brand: str = "", only_sender: str = ""):
             # 触发条件: intent in {感兴趣, 要报价} AND body 含 received 类关键词.
             # 副作用: 复活 sla_check L2(+7d 催稿) / L3(+30d) / L4(+60d) 寄样后闭环 dead code.
             ship_advanced_rid = None
+            sample_received = False
             if intent_type in ("感兴趣", "要报价"):
                 hit_received, received_frag = check_received(email_body)
                 # 2026-06-02: received 严 regex 命中但有"尚未收到/还在等"否定上下文 → 抑制 (防误推进)
@@ -820,6 +840,7 @@ async def run(only_brand: str = "", only_sender: str = ""):
                         print(f"[reply_monitor] received 命中但有否定上下文({neg_frag!r}), 跳过寄样推进 {from_addr}")
                         hit_received = False
                 if hit_received:
+                    sample_received = True
                     link_field = "关联媒体人" if ctype == "editor" else "关联KOL"
                     try:
                         # 查该 contact 所有寄样草稿(待发货/已发货/已签收) — 既用于推进, 也用于判定"是否手动寄样(全无草稿)"
@@ -930,6 +951,7 @@ async def run(only_brand: str = "", only_sender: str = ""):
                     manual_alias_review=manual_alias_review,  # 2026-06-01: marketing@/frankie@ 回复→强制人审
                     stale_reply_days=_stale_days,  # 2026-06-02 Fix B: 旧回复唤醒守卫
                     inbound_intent=intent,  # 2026-06-03 卡片合并: 入站回复内容渲染进审核卡(替代独立知会卡)
+                    sample_received=sample_received,
                 )
                 if reply_rid:
                     print(f"[reply_monitor] reply draft generated rid={reply_rid}")
