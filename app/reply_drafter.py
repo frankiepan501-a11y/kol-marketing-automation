@@ -94,6 +94,33 @@ TEMPLATE_NEED_ADDRESS = (
     "Best,\n{signature}"
 )
 
+TEMPLATE_SAMPLE_RECEIVED_EDITING = (
+    "Hi {first_name},\n\n"
+    "Thanks for confirming the sample arrived. Great to hear you've recorded "
+    "the unboxing and are working on the edit. When a preview is ready, "
+    "feel free to share it with us before posting "
+    "so we can check product details and the shopping links together.\n\n"
+    "Best,\n{signature}"
+)
+
+TEMPLATE_SAMPLE_RECEIVED = (
+    "Hi {first_name},\n\n"
+    "Thanks for confirming the sample arrived. When you start preparing the "
+    "content, we can share a concise product brief and the correct shopping "
+    "links. Feel free to send a preview before posting so we can check the "
+    "product details together.\n\n"
+    "Best,\n{signature}"
+)
+
+
+def _received_stage_sub(original_body: str, sample_received: bool) -> str:
+    if not sample_received:
+        return ""
+    if re.search(r"\b(edit(?:ing|ed)?|record(?:ed|ing)?|film(?:ed|ing)?|video|upload|post(?:ing)?)\b",
+                 (original_body or "")[:800], re.I):
+        return "sample_received_editing"
+    return "sample_received"
+
 # P5.11 要报价场景: KOL 主动来询价 → 不直接进商务谈判, 先邀请联盟模式
 # 策略: 80% KOL 看到联盟邀请会接受 (按效果分成,风险低); 拒绝才转人审给 Frankie 拍板
 # 不提佣金比例 (Frankie 决策: 不引导 KOL 期待数字),不留"如果你坚持付费"退路
@@ -614,6 +641,7 @@ async def draft_reply(
     manual_alias_review: bool = False,  # 2026-06-01: 回复发往 marketing@/frankie@(非partner@主别名)=手动高触达关系→强制人审
     stale_reply_days: int = 0,          # 2026-06-02 Fix B: 该回复 receivedTime 距今天数(0=新/未知); ≥config.STALE_REPLY_DAYS=久未互动旧回复唤醒
     inbound_intent: dict = None,        # 2026-06-03 卡片合并: reply_monitor 的入站分类 dict(type/summary/key_quote/suggested_action) → 透传给 route_draft 渲染进审核卡(替代原独立知会卡)
+    sample_received: bool = False,      # 物理收到样品；禁止再生成索取地址/寄样承诺
 ) -> Optional[str]:
     """
     生成 reply 草稿 → 写入「KOL·媒体人邮件草稿」 → 调 router 走自审
@@ -694,7 +722,9 @@ async def draft_reply(
         body = TEMPLATE_DECLINE.format(first_name=first, signature=sig_full)
     elif intent_type == "感兴趣":
         # 子分类细分
-        sub_info = await _classify_interest(original_body)
+        received_sub = _received_stage_sub(original_body, sample_received)
+        sub_info = ({"sub": received_sub, "extracted_address": "", "country_code": ""}
+                    if received_sub else await _classify_interest(original_body))
         sub = sub_info["sub"]
         extracted_address = sub_info["extracted_address"]
         country_code = sub_info["country_code"]
@@ -746,6 +776,10 @@ async def draft_reply(
                 first_name=first, signature=sig_full,
                 product_name=product_name,
             )
+        elif sub == "sample_received_editing":
+            body = TEMPLATE_SAMPLE_RECEIVED_EDITING.format(first_name=first, signature=sig_full)
+        elif sub == "sample_received":
+            body = TEMPLATE_SAMPLE_RECEIVED.format(first_name=first, signature=sig_full)
         elif sub == "schedule_call":
             body = TEMPLATE_SCHEDULE_CALL.format(
                 first_name=first, signature=sig_full,
@@ -917,6 +951,8 @@ async def draft_reply(
         force_label = None
         if sub == "affiliate_upsell":
             force_label = "affiliate_upsell"
+        elif sub in ("sample_received", "sample_received_editing"):
+            force_label = "sample_received"
         elif intent_type in ("不明意图", "质疑/澄清", "要报价"):
             force_label = intent_type
         # 2026-05-25 stage-blind 修复: late-stage KOL 的「感兴趣」早期话术强制人审 (不自动发)
@@ -932,6 +968,8 @@ async def draft_reply(
                     })
                 except Exception:
                     pass
+        if sub in ("sample_received", "sample_received_editing"):
+            force_reason = "sample-received:已收样，禁止再次索取地址或声称即将寄样；按制作/预览阶段人审"
         # 2026-06-01: marketing@/frankie@ 回复(手动高触达关系)→强制人审, 不自动发. 保留已有 force_reason.
         if manual_alias_review and not force_reason:
             force_reason = "manual-alias:回复发往 marketing@/frankie@(人工高触达关系)→强制人审"

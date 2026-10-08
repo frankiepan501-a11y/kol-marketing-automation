@@ -249,7 +249,8 @@ async def route_draft(record_id: str, ship_confirm_meta: dict = None,
     # 5. 触发后续动作 (异步, 不阻塞主路由)
     if action == "notify_human" and not skip_notify:
         await _notify_human_review(record_id, rec, score, committed, summary, reasons_text, path,
-                                    ship_confirm_meta=ship_confirm_meta, inbound_reply=inbound_reply)
+                                    ship_confirm_meta=ship_confirm_meta, inbound_reply=inbound_reply,
+                                    force_review_reason=force_review_reason)
     elif action == "retry":
         # 重生在调用方处理 (因为重生需要原始任务上下文)
         # router 只标状态,由 cron 或 generator 自身扫描重生标记触发重生
@@ -301,7 +302,8 @@ async def _notify_auto_reply(rec: dict, score: int, inbound_reply: dict):
 
 async def _notify_human_review(record_id: str, rec: dict, score: int,
                                committed: bool, summary: str, reasons_text: str, path: str,
-                               ship_confirm_meta: dict = None, inbound_reply: dict = None):
+                               ship_confirm_meta: dict = None, inbound_reply: dict = None,
+                               force_review_reason: str = ""):
     """飞书 IM 通知运营审核
     ship_confirm_meta 存在 → 渲染寄样高优先级卡片 (含仓库发货建议 + SLA)
     """
@@ -376,6 +378,9 @@ async def _notify_human_review(record_id: str, rec: dict, score: int,
         except Exception as _e:
             print(f"[draft_router] 联系人信息解析失败: {_e}")
         _ci2 = contact_info or {}
+        if (force_review_reason or "").startswith("sample-received:"):
+            # 主表「上稿日期」跨产品共用；本封已收样/剪辑中的回复不能显示成已上稿。
+            _ci2["stage"] = "📦 已签收／内容制作中"
         who2 = "媒体人" if contact_type == "媒体人" else "KOL"
         card = {
             "header": {

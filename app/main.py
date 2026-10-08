@@ -707,6 +707,7 @@ async def health():
         "status": "ok" if kol_ai_configured and kol_feishu_ready else "degraded",
         "cs_card_fix_version": "2026-09-09-p0-v2",
         "cs_customer_email_fix_version": "2026-10-07-shopify-v1",
+        "kol_sample_received_reply_fix_version": "2026-10-08-switchplay-v1",
         "kol_ai_configured": kol_ai_configured,
         "kol_feishu_migration": {
             "route_mode": "target_only",
@@ -4648,6 +4649,11 @@ async def backfill_reply_for_existing(
             original_body=original_body,
             sender_alias=sender_alias,
             related_draft_id=record_id,
+            sample_received=(
+                intent_type in ("感兴趣", "要报价")
+                and reply_monitor.check_received(original_body)[0]
+                and not reply_monitor.check_received_negation(original_body)[0]
+            ),
         )
         return {"ok": True, "new_draft_rid": new_rid, "intent_type": intent_type,
                 "contact_type": contact_type, "brand": brand}
