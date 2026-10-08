@@ -90,6 +90,13 @@ LANG_OPTS = ["EN", "中文", "德", "法", "西", "葡", "日", "其他"]
 CONF_OPTS = ["AI直答", "AI起草人工审", "必须人工"]
 AMZ_ORDER_RE = re.compile(r"\d{3}-\d{7}-\d{7}")
 STATUS_WAIT_INFO = "待客户补充"
+CS_CODEX_OLD_TICKET_IDS = frozenset({
+    "reczz28KPvDswaoS", "reczz28KPxDyUQlc", "reczz28KQ5Qn7Pdb",
+    "reczz28KQGlPgTmK", "reczz28KQcRfcRUA", "reczz28KQmuxJltA",
+    "reczz28KR7Tv6KAY", "reczz28KSe5c9nvN", "reczz28KSfAJWKQ0",
+    "reczz28KTAS5XcHx", "reczz28KTK8iLcS7", "reczz28KTfewe5bq",
+    "reczz28KTqPVcR2T", "reczz28KUsOsSJ1A",
+})
 _SOURCE_WATERMARKS: dict[str, int] = {}
 _SOURCE_HEADS: dict[str, int] = {}
 _SOURCE_FILTERED_HEADS: dict[str, int] = {}
@@ -1089,13 +1096,28 @@ async def _existing_thread_ids() -> set:
 
 
 async def _waiting_info_tickets() -> list:
-    """Rows waiting for customer order/site supplement."""
+    """Wait-info rows plus the 14 Codex-owned historical threads."""
     body = {"filter": {"conjunction": "and", "conditions": [
         {"field_name": "状态", "operator": "is", "value": [STATUS_WAIT_INFO]}]},
         "page_size": 200}
     d = await feishu.api("POST", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/search",
                          body, which="notify")
-    return d.get("data", {}).get("items", []) or []
+    waiting = d.get("data", {}).get("items", []) or []
+    # These exact historical tickets were taken back from the former operator.
+    # Some already have 'replied/resolved' status, but a later email in the
+    # original thread must still be attached to that ticket, not newly routed.
+    owned_body = {"filter": {"conjunction": "and", "conditions": [
+        {"field_name": "分配运营", "operator": "is", "value": ["Codex代处理"]},
+    ]}, "page_size": 200}
+    owned_data = await feishu.api(
+        "POST", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/search",
+        owned_body, which="notify")
+    seen = {row.get("record_id") for row in waiting}
+    for row in owned_data.get("data", {}).get("items", []) or []:
+        if (row.get("record_id") in CS_CODEX_OLD_TICKET_IDS
+                and row.get("record_id") not in seen):
+            waiting.append(row)
+    return waiting
 
 
 def _message_tokens(msg: dict) -> set:
@@ -1137,7 +1159,10 @@ def _match_waiting_info_ticket(msg: dict, waiting: list) -> dict | None:
             return row
         if msg_tokens and (msg_tokens & _ticket_tokens(f)):
             return row
-        if sender and sender == _customer_email(_field_text(f.get("客户标识"))):
+        # Sender-only fallback is safe for pending supplement requests, but
+        # would merge unrelated new requests into previously resolved cases.
+        if (_field_text(f.get("状态")) in ("", STATUS_WAIT_INFO) and sender
+                and sender == _customer_email(_field_text(f.get("客户标识")))):
             same_sender.append(row)
     # If one customer has exactly one pending supplement ticket, treat the new
     # email as the continuation even if the provider did not expose headers.
@@ -1629,7 +1654,7 @@ async def _handle_waiting_info_reply(row: dict, msg: dict, resources: list | Non
 
     # Frankie transferred these old tickets to Codex. Keep new customer mail in
     # the original ticket without routing it back to the former human operator.
-    if _field_text(f.get("分配运营")) == "Codex代处理":
+    if rid in CS_CODEX_OLD_TICKET_IDS and _field_text(f.get("分配运营")) == "Codex代处理":
         update = {**common, "分配运营": "Codex代处理", "状态": STATUS_WAIT_INFO}
         update["沟通历史摘要"] = (update["沟通历史摘要"]
                                 + "\nCodex代处理：客户新来信待复核").strip()[:5000]

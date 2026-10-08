@@ -7,8 +7,61 @@ from app import cs_ingest, cs_kol_handoff
 
 
 class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_codex_owned_replied_ticket_is_found_but_other_owner_is_not(self):
+        old = {"record_id": "reczz28KPvDswaoS", "fields": {
+            "状态": "已回复", "分配运营": "Codex代处理",
+            "工单ID": "CSP-old", "品牌": "POWKONG",
+            "客户标识": "buyer@example.com", "沟通历史摘要": "MAIL_THREAD_ID:thread-old",
+        }}
+        other = {"record_id": "rec_other", "fields": {
+            "状态": "已回复", "分配运营": "Codex代处理",
+        }}
+        api = AsyncMock(side_effect=[
+            {"data": {"items": []}}, {"data": {"items": [old, other]}},
+        ])
+        with patch.object(cs_ingest.feishu, "api", new=api):
+            candidates = await cs_ingest._waiting_info_tickets()
+        self.assertEqual([old], candidates)
+        self.assertEqual("分配运营", api.await_args_list[1].args[2]["filter"]["conditions"][0]["field_name"])
+
+        reply = {"id": "new", "id_prefix": "CSP", "brand_default": "POWKONG",
+                 "mail_thread_id": "thread-old", "frm": "buyer@example.com"}
+        self.assertEqual(old, cs_ingest._match_waiting_info_ticket(reply, candidates))
+        unrelated = {**reply, "mail_thread_id": "", "in_reply_to": "", "references": ""}
+        self.assertIsNone(cs_ingest._match_waiting_info_ticket(unrelated, candidates))
+
+    async def test_reply_to_codex_owned_resolved_ticket_stays_in_original_record(self):
+        old = {"record_id": "reczz28KPvDswaoS", "fields": {
+            "状态": "已解决", "分配运营": "Codex代处理",
+            "工单ID": "CSP-old", "品牌": "POWKONG",
+            "客户标识": "buyer@example.com", "沟通历史摘要": "MAIL_THREAD_ID:thread-old",
+            "补充信息次数": 0,
+        }}
+        reply = {"id": "new", "id_prefix": "CSP", "brand_default": "POWKONG",
+                 "mail_thread_id": "thread-old", "frm": "buyer@example.com",
+                 "body": "I still need help", "received_ms": 200, "attachments": []}
+        api = AsyncMock(side_effect=[
+            {"data": {"items": []}}, {"data": {"items": [old]}},
+            {},
+        ])
+        with patch.object(cs_ingest, "_fetch_powkong", new=AsyncMock(return_value=[reply])), \
+             patch.object(cs_ingest, "_existing_thread_ids", new=AsyncMock(return_value={"CSP:thread:thread-old"})), \
+             patch.object(cs_ingest.cs_resources, "active_resources", new=AsyncMock(return_value=[])), \
+             patch.object(cs_kol_handoff, "retry_pending_handoffs", new=AsyncMock(return_value={"ok": True, "sent": 0})), \
+             patch.object(cs_ingest.feishu, "api", new=api), \
+             patch.object(cs_ingest, "_classify", new=AsyncMock()) as classify:
+            result = await cs_ingest.run(source="powkong", limit=1, dry_run=False)
+
+        self.assertEqual(1, result["new"])
+        self.assertEqual(0, result["errors"])
+        self.assertEqual("wait_reply_agent_owned", result["samples"][0]["动作"])
+        classify.assert_not_awaited()
+        update = api.await_args_list[-1].args[2]["fields"]
+        self.assertEqual("Codex代处理", update["分配运营"])
+        self.assertIn("I still need help", update["最近客户补充"])
+
     async def test_codex_owned_old_ticket_keeps_customer_supplement_without_reassigning(self):
-        row = {"record_id": "rec_old", "fields": {
+        row = {"record_id": "reczz28KPvDswaoS", "fields": {
             "分配运营": "Codex代处理", "状态": "待客户补充",
             "客户标识": "buyer@example.com", "沟通历史摘要": "MAIL_THREAD_ID:t1",
             "补充信息次数": 1,
