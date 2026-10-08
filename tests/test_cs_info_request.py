@@ -28,6 +28,23 @@ class CsInfoRequestTests(unittest.TestCase):
     def tearDown(self):
         cs_dispatch.OBSERVE = self._old_observe
 
+    def test_info_request_time_requires_real_customer_send(self):
+        fields = {"沟通历史摘要": "首封问题", "补充信息次数": 0}
+        for mode in ("disabled", "dry_run", "replay_blocked", "blocked_invalid_customer"):
+            with self.subTest(mode=mode):
+                update = cs_ingest._info_send_update(fields, mode, "<test-only@example.com>")
+                self.assertNotIn("补充信息请求时间", update)
+                self.assertNotIn("最近出站Message-ID", update)
+                self.assertEqual(0, update["补充信息次数"])
+        sent = cs_ingest._info_send_update(fields, "live", "<sent@example.com>")
+        self.assertGreater(sent["补充信息请求时间"], 0)
+        self.assertEqual("<sent@example.com>", sent["最近出站Message-ID"])
+        self.assertEqual(1, sent["补充信息次数"])
+        unverified = cs_ingest._info_send_update(fields, "live", "")
+        self.assertNotIn("补充信息请求时间", unverified)
+        self.assertNotIn("最近出站Message-ID", unverified)
+        self.assertEqual(0, unverified["补充信息次数"])
+
     def test_amazon_without_order_or_site_waits_for_customer_info(self):
         msg = base_msg(
             "I bought this on Amazon and the XR and XL buttons activate by themselves. "

@@ -1531,11 +1531,14 @@ def _to_fields(msg: dict, c: dict, amz_override=None, resources: list | None = N
 
 
 def _info_send_update(fields: dict, mode: str, outbound_msg_id: str = "") -> dict:
-    now = int(time.time() * 1000)
     old_hist = _field_text(fields.get("沟通历史摘要"))
-    if mode == "live":
+    sent_to_customer = mode == "live" and bool(outbound_msg_id)
+    if sent_to_customer:
         note = "系统补询: 已同线程发送给客户。"
         count = int(float(_field_text(fields.get("补充信息次数")) or 0)) + 1
+    elif mode == "live":
+        note = "系统补询: 发送接口未返回 Message-ID，客户是否收到待核对。"
+        count = int(float(_field_text(fields.get("补充信息次数")) or 0))
     elif mode == "dry_run":
         note = f"系统补询: DRY-RUN 已发测试邮箱 {CS_INFO_REQUEST_DRY_RUN_TO}，真客户未收到。"
         count = int(float(_field_text(fields.get("补充信息次数")) or 0))
@@ -1552,11 +1555,11 @@ def _info_send_update(fields: dict, mode: str, outbound_msg_id: str = "") -> dic
         note = f"系统补询: 未发送，mode={mode}。"
         count = int(float(_field_text(fields.get("补充信息次数")) or 0))
     update = {
-        "补充信息请求时间": now,
         "补充信息次数": count,
         "沟通历史摘要": (old_hist + "\n" + note).strip()[:5000],
     }
-    if mode == "live" and outbound_msg_id:
+    if sent_to_customer:
+        update["补充信息请求时间"] = int(time.time() * 1000)
         update["最近出站Message-ID"] = outbound_msg_id[:1000]
     return update
 
