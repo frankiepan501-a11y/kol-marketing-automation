@@ -148,7 +148,8 @@ def _field_text(v) -> str:
 
 
 def _customer_email(v: str) -> str:
-    return (parseaddr(v or "")[1] or v or "").strip().lower()
+    address = _field_text(v)
+    return (parseaddr(address)[1] or address).strip().lower()
 
 
 _EMAIL_RE = re.compile(

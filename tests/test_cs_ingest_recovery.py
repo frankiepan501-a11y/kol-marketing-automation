@@ -7,6 +7,19 @@ from app import cs_ingest, cs_kol_handoff
 
 
 class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_waiting_info_customer_field_accepts_bitable_rich_text(self):
+        customer = [{"text": "buyer@example.com"}]
+        self.assertEqual("buyer@example.com", cs_ingest._valid_customer_email(customer))
+        with patch.object(cs_ingest, "CS_INFO_REQUEST_DRY_RUN_TO", ""), \
+             patch.object(cs_ingest, "CS_INFO_REQUEST_LIVE", False), \
+             patch.object(cs_ingest, "_zoho_send_reply", new=AsyncMock()) as send:
+            mode, message_id = await cs_ingest._send_info_request(
+                {"id_prefix": "CSP", "subj": "Order question"},
+                {"客户标识": customer}, "Please share the order number.",
+            )
+        self.assertEqual(("disabled", ""), (mode, message_id))
+        send.assert_not_called()
+
     async def test_message_failure_reports_replay_id_without_mail_content(self):
         message = {
             "id": "failed-provider-id", "id_prefix": "CSP",
