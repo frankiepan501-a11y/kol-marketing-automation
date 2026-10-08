@@ -1618,8 +1618,6 @@ async def _handle_waiting_info_reply(row: dict, msg: dict, resources: list | Non
     supplement = (msg.get("body") or "")[:3000]
     old_hist = _field_text(f.get("沟通历史摘要"))
     count = int(float(_field_text(f.get("补充信息次数")) or 0))
-    order_no, platform, operator, basis = await _reroute_from_supplement(msg, f)
-    gaps = _amazon_info_gaps(order_no, platform, basis)
     merged_ids = [str(x).strip() for x in (msg.get("merged_message_ids") or [])
                   if str(x).strip()]
     id_markers = "\n".join(f"SOURCE_MESSAGE_ID:{x}" for x in merged_ids)
@@ -1628,6 +1626,20 @@ async def _handle_waiting_info_reply(row: dict, msg: dict, resources: list | Non
         "沟通历史摘要": (old_hist + f"\n客户补充({msg.get('id','')[:120]}): {supplement[:800]}"
                          + (f"\n{id_markers}" if id_markers else "")).strip()[:5000],
     }
+
+    # Frankie transferred these old tickets to Codex. Keep new customer mail in
+    # the original ticket without routing it back to the former human operator.
+    if _field_text(f.get("分配运营")) == "Codex代处理":
+        update = {**common, "分配运营": "Codex代处理", "状态": STATUS_WAIT_INFO}
+        update["沟通历史摘要"] = (update["沟通历史摘要"]
+                                + "\nCodex代处理：客户新来信待复核").strip()[:5000]
+        if not dry_run:
+            await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{rid}",
+                             {"fields": update}, which="notify")
+        return {"action": "wait_reply_agent_owned", "record_id": rid, "dry_run": dry_run}
+
+    order_no, platform, operator, basis = await _reroute_from_supplement(msg, f)
+    gaps = _amazon_info_gaps(order_no, platform, basis)
 
     if platform and operator:
         summary, draft = await _operator_draft_after_supplement(msg, f, order_no, platform, resources)

@@ -7,6 +7,30 @@ from app import cs_ingest, cs_kol_handoff
 
 
 class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_codex_owned_old_ticket_keeps_customer_supplement_without_reassigning(self):
+        row = {"record_id": "rec_old", "fields": {
+            "分配运营": "Codex代处理", "状态": "待客户补充",
+            "客户标识": "buyer@example.com", "沟通历史摘要": "MAIL_THREAD_ID:t1",
+            "补充信息次数": 1,
+        }}
+        msg = {"id": "new-mail", "id_prefix": "CSP", "body": "Amazon order 111-1234567-1234567",
+               "received_ms": 1}
+        with patch.object(cs_ingest, "_reroute_from_supplement", new=AsyncMock(return_value=(
+                 "111-1234567-1234567", "亚马逊-US", "陈翔宇", "order_lookup"))), \
+             patch.object(cs_ingest, "_operator_draft_after_supplement", new=AsyncMock()) as draft, \
+             patch.object(cs_ingest, "_send_info_request", new=AsyncMock()) as send, \
+             patch.object(cs_ingest.feishu, "api", new=AsyncMock()) as update:
+            result = await cs_ingest._handle_waiting_info_reply(row, msg, resources=[])
+
+        self.assertEqual("wait_reply_agent_owned", result["action"])
+        draft.assert_not_awaited()
+        send.assert_not_awaited()
+        fields = update.await_args.args[2]["fields"]
+        self.assertEqual("Codex代处理", fields["分配运营"])
+        self.assertEqual("待客户补充", fields["状态"])
+        self.assertIn("new-mail", fields["沟通历史摘要"])
+        self.assertIn("111-1234567-1234567", fields["最近客户补充"])
+
     async def test_waiting_info_customer_field_accepts_bitable_rich_text(self):
         customer = [{"text": "buyer@example.com"}]
         self.assertEqual("buyer@example.com", cs_ingest._valid_customer_email(customer))
