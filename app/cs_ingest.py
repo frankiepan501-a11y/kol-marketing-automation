@@ -1691,7 +1691,13 @@ async def _handle_waiting_info_reply(row: dict, msg: dict, resources: list | Non
         marker = f"CS_CHEN_FOLLOWUP_MESSAGE_ID:{msg.get('id', '')}"
         update = {**common, "分配运营": "陈翔宇", "状态": "待派",
                   "卡片消息ID": "", "AI草稿": ""}
-        update["沟通历史摘要"] = (common["沟通历史摘要"] + "\n" + marker)[-5000:]
+        history = common["沟通历史摘要"] + "\n" + marker
+        if len(history) > 5000:
+            # Keep the original Zoho thread identity even after many replies.
+            thread_id = _field_text(f.get("线程ID"))
+            prefix = f"MAIL_THREAD_ID:{thread_id}\n" if thread_id else ""
+            history = prefix + history[-(5000 - len(prefix)):]
+        update["沟通历史摘要"] = history
         if not dry_run:
             await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{rid}",
                              {"fields": update}, which="notify")

@@ -125,6 +125,19 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(cs_ingest._match_waiting_info_ticket(
             {**reply, "mail_thread_id": ""}, candidates))
 
+    async def test_chen_followup_keeps_original_thread_id_when_history_is_full(self):
+        row = {"record_id": "reczz28KPvDswaoS", "fields": {
+            "分配运营": "陈翔宇", "状态": "已回复", "线程ID": "zoho-original",
+            "沟通历史摘要": "MAIL_THREAD_ID:zoho-original\n" + "x" * 4950,
+        }}
+        with patch.object(cs_ingest.feishu, "api", new=AsyncMock()) as api:
+            await cs_ingest._handle_waiting_info_reply(
+                row, {"id": "new-mail-2", "body": "I still need help"}, resources=[])
+        history = api.await_args.args[2]["fields"]["沟通历史摘要"]
+        self.assertLessEqual(len(history), 5000)
+        self.assertIn("MAIL_THREAD_ID:zoho-original", history)
+        self.assertIn("CS_CHEN_FOLLOWUP_MESSAGE_ID:new-mail-2", history)
+
     async def test_waiting_info_customer_field_accepts_bitable_rich_text(self):
         customer = [{"text": "buyer@example.com"}]
         self.assertEqual("buyer@example.com", cs_ingest._valid_customer_email(customer))
