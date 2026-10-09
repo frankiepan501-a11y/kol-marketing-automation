@@ -570,7 +570,100 @@ def _chen_old_thread_followup_id(rid: str, f: dict) -> str:
     return matches[-1] if matches else ""
 
 
+def _latest_customer_text(f: dict) -> str:
+    """Keep the customer's new words, not the quoted email history below them."""
+    body = re.sub(r"\s+", " ", _x(f, "最近客户补充")).strip()
+    quote_markers = (
+        r"\s+On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.{0,220}?\bwrote:",
+        r"\s*-{2,}\s*On\s+.{0,220}?\bwrote\s*-{2,}",
+        r"\s*-{2,}\s*same-thread message\s*-{2,}",
+        r"\s*-{2,}\s*Original Message\s*-{2,}",
+    )
+    for marker in quote_markers:
+        match = re.search(marker, body, flags=re.IGNORECASE)
+        if match:
+            body = body[:match.start()].strip()
+    return _short(body.replace("`", "'"), 360) or "本次来信正文未能从引用邮件中分离；请打开原线程核对。"
+
+
+def _build_old_thread_followup_card(rid: str, f: dict, resources: list | None = None) -> dict:
+    """Compact handoff for the exact 14 old tickets; preserve existing callbacks."""
+    resource_context = cs_resources.resolve_for_ticket(f, resources=resources)
+    resource_keys = [r.get("resource_key") for r in resource_context.get("matches") or [] if r.get("resource_key")]
+    brand = _x(f, "品牌") or "-"
+    customer = _x(f, "客户标识") or "-"
+    order = _x(f, "订单号") or "待核对"
+    attachment_status = _x(f, "客户附件状态") or "待核对"
+    attachment_count = _x(f, "客户附件数量")
+    attachment = attachment_status + (f" · {attachment_count}件" if attachment_count else "")
+    gaps = _short(_x(f, "信息缺口"), 300) or "请查看原工单和原邮件核实待办。"
+    thread = _x(f, "线程ID") or "请在原工单查看"
+    fields = [
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**客户**\n{_short(customer, 42)}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**品牌 / 渠道**\n{brand} · {_x(f, '渠道') or '邮箱'}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**产品**\n{_short(_x(f, '产品') or '待核对', 42)}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**订单号**\n{order}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**客户附件**\n{attachment}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**原邮件线程**\n{_short(thread, 42)}"}},
+    ]
+    elements = [
+        {"tag": "note", "elements": [{"tag": "plain_text", "content":
+            "陈翔宇接手原邮件线程的新回信；旧草稿已停用，只有核对后点击发送才会回客户。"}]},
+        {"tag": "div", "fields": fields},
+        {"tag": "action", "actions": [{"tag": "button", "type": "default",
+            "text": {"tag": "plain_text", "content": "📂 打开原工单与附件"}, "url": _record_url(rid)}]},
+        {"tag": "hr"},
+        {"tag": "div", "text": {"tag": "lark_md", "content":
+            "**💬 客户本次来信（原文；引用链已收起）**\n" + _latest_customer_text(f)}},
+        {"tag": "div", "text": {"tag": "lark_md", "content":
+            f"**✅ 已知情况 / 当前待办**\n{gaps}\n"
+            "先核原邮件、订单、附件及已发回复。退款或补寄须有实际履约凭证；"
+            "若本封只是确认收到，请等可执行方案明确后再回，不要重复追发。"}},
+        {"tag": "note", "elements": [{"tag": "plain_text", "content":
+            "核对原线程后须填写完整回复，不能发送旧草稿。"}]},
+    ]
+    can_send = bool(CS_REPLY_LIVE or CS_REPLY_DRY_RUN_TO)
+    if can_send:
+        elements.extend([
+            {"tag": "hr"},
+            {"tag": "form", "name": f"r_{rid}", "elements": [
+                {"tag": "input", "name": "custom_reply", "width": "fill", "label_position": "top",
+                 "label": {"tag": "plain_text", "content": "✍️ 给客户的完整回复（必填，第一段）"},
+                 "placeholder": {"tag": "plain_text", "content": "先核对原线程和证据；此处填写要发出的英文回复"},
+                 "max_length": CS_CARD_INPUT_MAX_CHARS},
+                {"tag": "input", "name": "custom_reply_extra", "width": "fill", "label_position": "top",
+                 "label": {"tag": "plain_text", "content": "续写回复（可选）"},
+                 "placeholder": {"tag": "plain_text", "content": "第一段不够时继续填写"},
+                 "max_length": max(0, CS_CUSTOM_REPLY_MAX_CHARS - CS_CARD_INPUT_MAX_CHARS)},
+                {"tag": "button", "action_type": "form_submit", "name": "send", "type": "primary",
+                 "text": {"tag": "plain_text", "content": "✅ 核对后发送给客户"},
+                 "value": {"act": "send_reply", "action": "cs_send_reply", "rid": rid,
+                           "resource_status": resource_context.get("status"),
+                           "resource_keys": resource_keys[:20]}},
+            ]},
+        ])
+    else:
+        elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content":
+            "当前为手动回复模式：请在原邮箱处理并回填工单；系统不会自动标为已回复。"}]})
+    elements.extend([
+        {"tag": "action", "actions": [
+            {"tag": "button", "text": {"tag": "plain_text", "content": "🔁 需要改派"},
+             "value": {"act": "reassign", "action": "cs_reassign", "rid": rid}},
+            {"tag": "button", "text": {"tag": "plain_text", "content": "⬆️ 升级给Frankie"},
+             "value": {"act": "escalate", "action": "cs_escalate", "rid": rid}},
+        ]},
+        {"tag": "note", "elements": [{"tag": "plain_text", "content":
+            "改派/升级仅处理内部交接，不会回复客户。"}]},
+    ])
+    return {"config": {"wide_screen_mode": True},
+            "header": {"template": "orange", "title": {"tag": "plain_text",
+                "content": f"🟠 [客服·旧单新回信] {brand} · {_short(customer, 26)}"}},
+            "elements": elements}
+
+
 def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
+    if _chen_old_thread_followup_id(rid, f):
+        return _build_old_thread_followup_card(rid, f, resources=resources)
     brand = _x(f, "品牌"); product = _x(f, "产品") or "未识别"; platform = _x(f, "销售平台")
     channel = _x(f, "渠道"); customer = _x(f, "客户标识"); order = _x(f, "订单号")
     summary = _x(f, "客诉摘要"); operator = _x(f, "分配运营") or "未定"

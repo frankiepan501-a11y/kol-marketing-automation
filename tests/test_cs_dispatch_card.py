@@ -117,6 +117,48 @@ class CsDispatchCardTests(unittest.TestCase):
         self.assertIn("Hello," + "x" * 1994, rendered)
         self.assertNotIn("Hello," + "x" * 1995, rendered)
 
+    def test_chen_old_thread_card_shows_new_words_and_preserves_existing_actions(self):
+        cs_dispatch.CS_REPLY_LIVE = True
+        rid = "reczz28KTfewe5bq"
+        fields = {
+            "工单ID": "CSP-1758191671979124600",
+            "客户标识": "ramaratunga@gmail.com",
+            "品牌": "POWKONG",
+            "渠道": "邮箱",
+            "分配运营": "陈翔宇",
+            "订单号": "702-9895287-1933010",
+            "客户附件状态": "已保存",
+            "客户附件数量": 4,
+            "信息缺口": "加拿大原型号暂无可发库存；待确认退款或可替代方案。",
+            "最近客户补充": (
+                "Thank you kindly! I look forward to hearing from you soon. Ruwan "
+                "On Oct 8, 2026, at 9:09 PM, support@powkong.com wrote: "
+                + "Previous email and quoted history. " * 100
+            ),
+            "沟通历史摘要": "MAIL_THREAD_ID:old\nCS_CHEN_FOLLOWUP_MESSAGE_ID:new-mail",
+            "线程ID": "1758191671979124600",
+            "AI草稿": "Old promise to send a replacement.",
+        }
+        card = cs_dispatch._build_card(rid, fields, resources=[])
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertIn("旧单新回信", card["header"]["title"]["content"])
+        self.assertIn("Thank you kindly! I look forward to hearing from you soon. Ruwan", rendered)
+        self.assertIn("702-9895287-1933010", rendered)
+        self.assertIn("已保存 · 4件", rendered)
+        self.assertIn("加拿大原型号暂无可发库存", rendered)
+        self.assertIn("1758191671979124600", rendered)
+        self.assertNotIn("Previous email", rendered)
+        self.assertNotIn("MAIL_THREAD_ID", rendered)
+        self.assertNotIn("Old promise", rendered)
+        self.assertLess(len(rendered), 6000)
+        actions = [node for node in cs_dispatch._walk_card(card) if node.get("tag") == "button"]
+        self.assertEqual({"cs_send_reply", "cs_reassign", "cs_escalate"},
+                         {node.get("value", {}).get("action") for node in actions if node.get("value")})
+        self.assertTrue(any(node.get("url") == cs_dispatch._record_url(rid) for node in actions))
+        form = next(node for node in card["elements"] if node.get("tag") == "form")
+        self.assertEqual("custom_reply", form["elements"][0]["name"])
+        self.assertEqual("custom_reply_extra", form["elements"][1]["name"])
+
     def test_reassign_result_card_keeps_undo_action(self):
         fields = {
             "工单ID": "CSP",
