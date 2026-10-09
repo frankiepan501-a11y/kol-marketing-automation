@@ -851,6 +851,54 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, result["eligible"])
         self.assertEqual(1, result["sent"])
 
+    async def test_chen_old_thread_new_reply_gets_card_once_per_customer_email(self):
+        rid = "reczz28KPvDswaoS"
+        fields = {"状态": "待派", "卡片消息ID": "", "入站时间": 1600000000000,
+                  "分配运营": "陈翔宇", "渠道": "邮箱", "品牌": "POWKONG",
+                  "客户标识": "buyer@example.com", "AI草稿": "Old promise",
+                  "最近客户补充": "Is it available?",
+                  "沟通历史摘要": "MAIL_THREAD_ID:old\nCS_CHEN_FOLLOWUP_MESSAGE_ID:mail-new-1"}
+        items = {"data": {"items": [{"record_id": rid, "fields": fields}], "has_more": False}}
+        with patch.object(cs_dispatch, "CS_ASSIST_SECRET", "configured"), \
+             patch.object(cs_dispatch, "OBSERVE_CONFIGURED", True), \
+             patch.object(cs_dispatch, "OBSERVE_UNION_CONFIGURED", True), \
+             patch.object(cs_dispatch, "DISPATCH_NOT_BEFORE_RAW", "1700000000000"), \
+             patch.object(cs_dispatch, "DISPATCH_NOT_BEFORE_MS", 1700000000000), \
+             patch.object(cs_dispatch, "OBSERVE", False), \
+             patch.object(cs_dispatch, "_resolve_targets", new=AsyncMock(return_value=([("陈翔宇", "on_chen")], ""))), \
+             patch.object(cs_dispatch.feishu, "api", new=AsyncMock(side_effect=[items, {}])), \
+             patch.object(cs_dispatch.cs_resources, "active_resources", new=AsyncMock(return_value=[])), \
+             patch.object(cs_dispatch, "_send_card_result", new=AsyncMock(return_value={
+                 "ok": True, "message_id": "om_new", "http_status": 200, "feishu_code": 0,
+             })) as send_card:
+            result = await cs_dispatch.run(limit=1)
+
+        self.assertEqual(1, result["sent"])
+        self.assertEqual("cs_dispatch:reczz28KPvDswaoS:mail-new-1",
+                         send_card.await_args.kwargs["idempotency_key"])
+        card = send_card.await_args.args[1]
+        content = json.dumps(card, ensure_ascii=False)
+        self.assertIn("须填写完整回复", content)
+        self.assertNotIn("Old promise", content)
+
+    async def test_chen_old_thread_stale_card_and_old_draft_cannot_send(self):
+        rid = "reczz28KPvDswaoS"
+        fields = {"状态": "待回", "卡片消息ID": "om_current", "分配运营": "陈翔宇",
+                  "渠道": "邮箱", "品牌": "POWKONG", "客户标识": "buyer@example.com",
+                  "AI草稿": "Old promise to replace the dock.",
+                  "沟通历史摘要": "CS_CHEN_FOLLOWUP_MESSAGE_ID:mail-new-2"}
+        rec = {"data": {"record": {"fields": fields}}}
+        base = {"action": {"value": {"act": "send_reply", "rid": rid},
+                            "form_value": {"custom_reply": ""}}}
+        with patch.object(cs_dispatch, "CS_REPLY_LIVE", True), \
+             patch.object(cs_dispatch.feishu, "api", new=AsyncMock(return_value=rec)), \
+             patch.object(cs_dispatch, "_dispatch_reply", new=AsyncMock()) as send:
+            stale = await cs_dispatch.handle_callback({**base, "open_message_id": "om_old"})
+            blank = await cs_dispatch.handle_callback({**base, "open_message_id": "om_current"})
+        send.assert_not_awaited()
+        self.assertIn("过期", stale["toast"]["content"])
+        self.assertIn("不能发送旧草稿", blank["toast"]["content"])
+
     async def test_cron_dispatch_paginates_past_more_than_200_historical_tickets(self):
         old_items = [
             {"record_id": f"rec_old_{i}", "fields": {"状态": "待派", "卡片消息ID": "",

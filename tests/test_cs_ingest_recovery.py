@@ -18,6 +18,7 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         }}
         api = AsyncMock(side_effect=[
             {"data": {"items": []}}, {"data": {"items": [old, other]}},
+            {"data": {"items": [], "has_more": False}},
         ])
         with patch.object(cs_ingest.feishu, "api", new=api):
             candidates = await cs_ingest._waiting_info_tickets()
@@ -42,6 +43,7 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
                  "body": "I still need help", "received_ms": 200, "attachments": []}
         api = AsyncMock(side_effect=[
             {"data": {"items": []}}, {"data": {"items": [old]}},
+            {"data": {"items": [], "has_more": False}},
             {},
         ])
         with patch.object(cs_ingest, "_fetch_powkong", new=AsyncMock(return_value=[reply])), \
@@ -83,6 +85,45 @@ class CustomerServiceIngestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("待客户补充", fields["状态"])
         self.assertIn("new-mail", fields["沟通历史摘要"])
         self.assertIn("111-1234567-1234567", fields["最近客户补充"])
+
+    async def test_chen_owned_resolved_thread_reopens_without_reusing_old_draft(self):
+        row = {"record_id": "reczz28KPvDswaoS", "fields": {
+            "分配运营": "陈翔宇", "状态": "已解决", "卡片消息ID": "om_old",
+            "AI草稿": "An outdated replacement promise.",
+            "沟通历史摘要": "MAIL_THREAD_ID:original-thread", "补充信息次数": 1,
+        }}
+        msg = {"id": "zoho-new-123", "body": "Is a replacement available now?"}
+        with patch.object(cs_ingest, "_reroute_from_supplement", new=AsyncMock()) as reroute, \
+             patch.object(cs_ingest.feishu, "api", new=AsyncMock()) as api:
+            result = await cs_ingest._handle_waiting_info_reply(row, msg, resources=[])
+
+        reroute.assert_not_awaited()
+        self.assertEqual("wait_reply_chen_handoff", result["action"])
+        update = api.await_args.args[2]["fields"]
+        self.assertEqual("陈翔宇", update["分配运营"])
+        self.assertEqual("待派", update["状态"])
+        self.assertEqual("", update["卡片消息ID"])
+        self.assertEqual("", update["AI草稿"])
+        self.assertIn("CS_CHEN_FOLLOWUP_MESSAGE_ID:zoho-new-123", update["沟通历史摘要"])
+
+    async def test_closed_chen_old_thread_is_loaded_and_matched_by_thread_only(self):
+        old = {"record_id": "reczz28KPvDswaoS", "fields": {
+            "状态": "已回复", "分配运营": "陈翔宇", "品牌": "POWKONG",
+            "工单ID": "CSP-old", "客户标识": "buyer@example.com",
+            "沟通历史摘要": "MAIL_THREAD_ID:thread-old",
+        }}
+        api = AsyncMock(side_effect=[
+            {"data": {"items": []}}, {"data": {"items": []}},
+            {"data": {"items": [old], "has_more": False}},
+        ])
+        with patch.object(cs_ingest.feishu, "api", new=api):
+            candidates = await cs_ingest._waiting_info_tickets()
+        self.assertEqual([old], candidates)
+        reply = {"id": "new-id", "id_prefix": "CSP", "brand_default": "POWKONG",
+                 "mail_thread_id": "thread-old", "frm": "buyer@example.com"}
+        self.assertEqual(old, cs_ingest._match_waiting_info_ticket(reply, candidates))
+        self.assertIsNone(cs_ingest._match_waiting_info_ticket(
+            {**reply, "mail_thread_id": ""}, candidates))
 
     async def test_waiting_info_customer_field_accepts_bitable_rich_text(self):
         customer = [{"text": "buyer@example.com"}]

@@ -561,11 +561,21 @@ def _build_reassign_notice_card(rid: str, f: dict, op: str, tag: str,
                          {"tag": "action", "actions": _undo_reassign_actions(rid, target_mid, owner)}]}
 
 
+def _chen_old_thread_followup_id(rid: str, f: dict) -> str:
+    if (rid not in _csi.CS_CODEX_OLD_TICKET_IDS
+            or _x(f, "分配运营") != "陈翔宇"):
+        return ""
+    matches = re.findall(r"CS_CHEN_FOLLOWUP_MESSAGE_ID:([^\s]+)",
+                         _x(f, "沟通历史摘要"))
+    return matches[-1] if matches else ""
+
+
 def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
     brand = _x(f, "品牌"); product = _x(f, "产品") or "未识别"; platform = _x(f, "销售平台")
     channel = _x(f, "渠道"); customer = _x(f, "客户标识"); order = _x(f, "订单号")
     summary = _x(f, "客诉摘要"); operator = _x(f, "分配运营") or "未定"
     conf = _x(f, "AI置信度"); ctype = _x(f, "客诉类型")
+    old_thread_followup = _chen_old_thread_followup_id(rid, f)
     draft = (_x(f, "AI草稿") or "(无 AI 草稿)")[:CS_CUSTOM_REPLY_MAX_CHARS]
     ticket = _ticket_label(f, rid)
     resource_context = cs_resources.resolve_for_ticket(f, resources=resources)
@@ -595,16 +605,25 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
             {"tag": "div", "text": {"tag": "lark_md", "content": evidence_md}},
             {"tag": "hr"},
         ])
-    elements.extend([
-        {"tag": "div", "text": {"tag": "lark_md",
-                                "content": "**🤖 AI 建议回复全文**（可复制；满意直接发）：\n" + draft}},
-        {"tag": "hr"},
-    ])
+    if old_thread_followup:
+        elements.extend([
+            {"tag": "div", "text": {"tag": "lark_md", "content":
+                "**原邮件线程有客户新回信。**请先打开原邮件和工单，核对附件、订单、退款或补寄凭证；"
+                "本卡没有可直接发送的旧草稿，须填写完整回复。"}},
+            {"tag": "hr"},
+        ])
+    else:
+        elements.extend([
+            {"tag": "div", "text": {"tag": "lark_md",
+                                    "content": "**🤖 AI 建议回复全文**（可复制；满意直接发）：\n" + draft}},
+            {"tag": "hr"},
+        ])
     can_send = bool(CS_REPLY_LIVE or CS_REPLY_DRY_RUN_TO)
     if can_send:
         elements.append({"tag": "form", "name": f"r_{rid}", "elements": [
             {"tag": "input", "name": "custom_reply", "width": "fill", "label_position": "top",
-             "label": {"tag": "plain_text", "content": f"✍️ 如需修改：最终回复第1段（≤{CS_CARD_INPUT_MAX_CHARS}字；留空=用上方草稿）"},
+             "label": {"tag": "plain_text", "content": (f"✍️ 最终回复第1段（必填，≤{CS_CARD_INPUT_MAX_CHARS}字）" if old_thread_followup
+                                                       else f"✍️ 如需修改：最终回复第1段（≤{CS_CARD_INPUT_MAX_CHARS}字；留空=用上方草稿）")},
              "placeholder": {"tag": "plain_text", "content": "1000字以内直接填这里；超过1000字请接着填下面第2段"},
              "max_length": CS_CARD_INPUT_MAX_CHARS},
             {"tag": "input", "name": "custom_reply_extra", "width": "fill", "label_position": "top",
@@ -1030,7 +1049,8 @@ async def run(limit: int = 10, rids: str = "") -> dict:
             received_ms = int(float(_x(f, "入站时间") or 0))
         except (TypeError, ValueError):
             received_ms = 0
-        if not rids and received_ms < DISPATCH_NOT_BEFORE_MS:
+        old_thread_followup = _chen_old_thread_followup_id(rid, f)
+        if not rids and received_ms < DISPATCH_NOT_BEFORE_MS and not old_thread_followup:
             historical_skipped += 1
             continue
         eligible += 1
@@ -1060,6 +1080,8 @@ async def run(limit: int = 10, rids: str = "") -> dict:
         successful_mids = []
         for target_name, union in targets:
             idempotency_key = f"cs_dispatch:{rid}"
+            if old_thread_followup:
+                idempotency_key += f":{old_thread_followup}"
             if len(targets) > 1:
                 recipient_key = hashlib.sha256(union.encode("utf-8")).hexdigest()[:12]
                 idempotency_key += f":{recipient_key}"
@@ -2264,12 +2286,18 @@ async def handle_callback(event: dict) -> dict:
         return _toast("已通知负责人改派 ✓")
 
     if act == "send_reply":
+        if _chen_old_thread_followup_id(rid, f):
+            current_cards = _parse_card_message_ids(_x(f, "卡片消息ID"))
+            if _card_message_id(event, {}) not in current_cards:
+                return _toast("这张卡已过期，请用客户最新回信的跟进卡", "error")
         form = _card_form_values(action)
         custom_parts = [
             (form.get("custom_reply") or "").strip(),
             (form.get("custom_reply_extra") or "").strip(),
         ]
         custom_reply = "\n".join([p for p in custom_parts if p]).strip()
+        if _chen_old_thread_followup_id(rid, f) and not custom_reply:
+            return _toast("请核对原邮件后填写完整回复，不能发送旧草稿", "error")
         reply = (custom_reply or _x(f, "AI草稿") or "").strip()
         if len(reply) < 10:
             return _toast("回复内容过短，请填写后再发", "error")

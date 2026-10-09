@@ -21,7 +21,7 @@ import time
 import httpx
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid, parseaddr
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from . import deepseek, feishu, cs_resources
 
 # ---- 资源 (非 secret, 可 env 覆盖) ----
@@ -1096,7 +1096,7 @@ async def _existing_thread_ids() -> set:
 
 
 async def _waiting_info_tickets() -> list:
-    """Wait-info rows plus the 14 Codex-owned historical threads."""
+    """Wait-info rows plus the 14 historical original email threads."""
     body = {"filter": {"conjunction": "and", "conditions": [
         {"field_name": "状态", "operator": "is", "value": [STATUS_WAIT_INFO]}]},
         "page_size": 200}
@@ -1117,6 +1117,28 @@ async def _waiting_info_tickets() -> list:
         if (row.get("record_id") in CS_CODEX_OLD_TICKET_IDS
                 and row.get("record_id") not in seen):
             waiting.append(row)
+            seen.add(row.get("record_id"))
+    # The same 14 threads now belong to Chen. Page through his rows before
+    # filtering by the exact record IDs; the first 200 may contain other work.
+    page_token = ""
+    while True:
+        params = {"page_size": 200, "filter": 'CurrentValue.[分配运营]="陈翔宇"'}
+        if page_token:
+            params["page_token"] = page_token
+        path = (f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records?"
+                f"{urlencode(params)}")
+        data = (await feishu.api("GET", path, which="notify")).get("data", {}) or {}
+        for row in data.get("items", []) or []:
+            rid = row.get("record_id")
+            if rid in CS_CODEX_OLD_TICKET_IDS and rid not in seen:
+                waiting.append(row)
+                seen.add(rid)
+        if not data.get("has_more"):
+            break
+        next_token = str(data.get("page_token") or "")
+        if not next_token or next_token == page_token:
+            raise RuntimeError("historical ticket pagination returned invalid page_token")
+        page_token = next_token
     return waiting
 
 
@@ -1662,6 +1684,18 @@ async def _handle_waiting_info_reply(row: dict, msg: dict, resources: list | Non
             await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{rid}",
                              {"fields": update}, which="notify")
         return {"action": "wait_reply_agent_owned", "record_id": rid, "dry_run": dry_run}
+
+    if rid in CS_CODEX_OLD_TICKET_IDS and _field_text(f.get("分配运营")) == "陈翔宇":
+        # A later customer email reopens the original ticket for one new card.
+        # Never carry the old AI draft into a live send button.
+        marker = f"CS_CHEN_FOLLOWUP_MESSAGE_ID:{msg.get('id', '')}"
+        update = {**common, "分配运营": "陈翔宇", "状态": "待派",
+                  "卡片消息ID": "", "AI草稿": ""}
+        update["沟通历史摘要"] = (common["沟通历史摘要"] + "\n" + marker)[-5000:]
+        if not dry_run:
+            await feishu.api("PUT", f"/bitable/v1/apps/{CS_APP_TOKEN}/tables/{T_TICKET}/records/{rid}",
+                             {"fields": update}, which="notify")
+        return {"action": "wait_reply_chen_handoff", "record_id": rid, "dry_run": dry_run}
 
     order_no, platform, operator, basis = await _reroute_from_supplement(msg, f)
     gaps = _amazon_info_gaps(order_no, platform, basis)
