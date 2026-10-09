@@ -609,7 +609,9 @@ def _build_card(rid: str, f: dict, resources: list | None = None) -> dict:
         elements.extend([
             {"tag": "div", "text": {"tag": "lark_md", "content":
                 "**原邮件线程有客户新回信。**请先打开原邮件和工单，核对附件、订单、退款或补寄凭证；"
-                "本卡没有可直接发送的旧草稿，须填写完整回复。"}},
+                "本卡没有可直接发送的旧草稿，须填写完整回复。"
+                f"\n**原邮件线程ID:** `{_x(f, '线程ID') or '-'}`"
+                f"  ·  [打开原工单]({_record_url(rid)})"}},
             {"tag": "hr"},
         ])
     else:

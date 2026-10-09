@@ -856,6 +856,7 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
         fields = {"状态": "待派", "卡片消息ID": "", "入站时间": 1600000000000,
                   "分配运营": "陈翔宇", "渠道": "邮箱", "品牌": "POWKONG",
                   "客户标识": "buyer@example.com", "AI草稿": "Old promise",
+                  "线程ID": "zoho-thread-old",
                   "最近客户补充": "Is it available?",
                   "沟通历史摘要": "MAIL_THREAD_ID:old\nCS_CHEN_FOLLOWUP_MESSAGE_ID:mail-new-1"}
         items = {"data": {"items": [{"record_id": rid, "fields": fields}], "has_more": False}}
@@ -879,6 +880,8 @@ class CustomerServiceDispatchRecoveryTests(unittest.IsolatedAsyncioTestCase):
         card = send_card.await_args.args[1]
         content = json.dumps(card, ensure_ascii=False)
         self.assertIn("须填写完整回复", content)
+        self.assertIn("zoho-thread-old", content)
+        self.assertIn("打开原工单", content)
         self.assertNotIn("Old promise", content)
 
     async def test_chen_old_thread_stale_card_and_old_draft_cannot_send(self):
