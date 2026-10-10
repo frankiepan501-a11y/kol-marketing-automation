@@ -708,6 +708,7 @@ async def health():
         "cs_card_fix_version": "2026-09-09-p0-v2",
         "cs_customer_email_fix_version": "2026-10-07-shopify-v1",
         "kol_sample_received_reply_fix_version": "2026-10-08-switchplay-v1",
+        "kol_sla_p1_dedup_version": "2026-10-10-frankie-v1",
         "kol_ai_configured": kol_ai_configured,
         "kol_feishu_migration": {
             "route_mode": "target_only",
