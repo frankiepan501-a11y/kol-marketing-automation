@@ -320,6 +320,7 @@ def _is_p2_digest_hour(now_ms: int) -> bool:
 async def _send_digest(targets: list, card: dict, *, level: str) -> dict:
     sent = 0
     failed = 0
+    definite_failed = 0
     errors = []
     message_ids = []
     for name, oid in targets:
@@ -332,9 +333,16 @@ async def _send_digest(targets: list, card: dict, *, level: str) -> dict:
                 message_ids.append(message_id)
         except Exception as e:
             failed += 1
+            # A missing recipient mapping or a rejected 4xx request cannot have
+            # delivered a card; timeouts/5xx remain uncertain and must not retry.
+            if (isinstance(e, RuntimeError) and "union_id 映射" in str(e)) or (
+                isinstance(e, feishu.FeishuAPIError) and 400 <= e.status_code < 500
+            ):
+                definite_failed += 1
             errors.append(f"{name}: {str(e)[:120]}")
             print(f"[sla_check digest] notify {name} fail: {e}")
-    return {"sent": sent, "failed": failed, "errors": errors, "message_ids": message_ids}
+    return {"sent": sent, "failed": failed, "definite_failed": definite_failed,
+            "errors": errors, "message_ids": message_ids}
 
 
 async def collect_sla_overdue_drafts(now_ms: int) -> dict:
@@ -479,6 +487,7 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
     p2_delivery = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
 
     p1_claimed_items = []
+    p1_previous_sent_at = {}
     if p1_items and config.KOL_SLA_CARD_FRANKIE_ONLY and not frankie_targets:
         reviewer_delivery["failed"] = 1
         reviewer_delivery["errors"].append("P1 Frankie recipient missing; no reminder claimed")
@@ -489,6 +498,7 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
                 continue
             if not _claim_p1_frankie_daily_record(now_ms, rid):
                 continue
+            p1_previous_sent_at[rid] = (rec.get("fields") or {}).get("卡片发送时间") or None
             try:
                 # Persist before sending: a restart or uncertain send must not double-notify.
                 await feishu.update_record(config.T_DRAFT, rid, {"卡片发送时间": now_ms})
@@ -504,6 +514,20 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
                 build_sla_digest_card(p1_claimed_items, now_ms, audience="reviewer", level="P1"),
                 level="P1",
             )
+            if (delivery["sent"] == 0 and delivery["failed"] > 0
+                    and delivery["failed"] == delivery["definite_failed"]):
+                # Explicit rejection is safe to retry after the recipient/permission
+                # issue is fixed. Restore the old timestamp before releasing claims.
+                for rec in p1_claimed_items:
+                    rid = rec["record_id"]
+                    previous = p1_previous_sent_at[rid]
+                    try:
+                        await feishu.update_record(config.T_DRAFT, rid, {"卡片发送时间": previous})
+                    except Exception as exc:
+                        delivery["failed"] += 1
+                        delivery["errors"].append(f"P1 rollback {rid}: {type(exc).__name__}")
+                    else:
+                        _release_p1_frankie_daily_record(now_ms, rid)
             for key in ("sent", "failed"):
                 reviewer_delivery[key] += delivery[key]
             reviewer_delivery["errors"].extend(delivery["errors"])

@@ -297,6 +297,49 @@ class SlaDigestTests(unittest.TestCase):
         self.assertEqual(updated, [])
         self.assertEqual(result["layer_1"]["delivery_failures"], 1)
 
+    def test_frankie_only_p1_explicit_rejection_can_retry(self):
+        sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = True
+        now_ms = at_local(2026, 10, 10, 12)
+        rows = [draft("rec_quote", "affiliate_quote", 59, now_ms)]
+        sent, updated = self._install_fakes(rows)
+
+        async def rejected(*args, **kwargs):
+            raise feishu.FeishuAPIError(method="POST", path="/im/v1/messages",
+                                         status_code=403, feishu_code=230013)
+
+        feishu.send_card_message = rejected
+        first = asyncio.run(sla_check.run(now_ms=now_ms))
+        self.assertEqual(first["layer_1"]["delivery_failures"], 1)
+        self.assertIsNone(rows[0]["fields"]["卡片发送时间"])
+        self.assertIn(("rec_quote", {"卡片发送时间": None}), updated)
+
+        async def delivered(*args, **kwargs):
+            sent.append({"card": args[2]})
+            return "om_recovered"
+
+        feishu.send_card_message = delivered
+        second = asyncio.run(sla_check.run(now_ms=now_ms + 6 * 3600 * 1000))
+        self.assertEqual(second["layer_1"]["reviewer_digest_sent"], 1)
+        self.assertEqual(len(sent), 1)
+
+    def test_frankie_only_p1_uncertain_failure_does_not_auto_retry(self):
+        sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = True
+        now_ms = at_local(2026, 10, 10, 12)
+        rows = [draft("rec_quote", "affiliate_quote", 59, now_ms)]
+        sent, updated = self._install_fakes(rows)
+
+        async def uncertain(*args, **kwargs):
+            raise TimeoutError("send result unknown")
+
+        feishu.send_card_message = uncertain
+        first = asyncio.run(sla_check.run(now_ms=now_ms))
+        self.assertEqual(first["layer_1"]["delivery_failures"], 1)
+        self.assertEqual(rows[0]["fields"]["卡片发送时间"], now_ms)
+        self.assertNotIn(("rec_quote", {"卡片发送时间": None}), updated)
+
+        second = asyncio.run(sla_check.run(now_ms=now_ms + 6 * 3600 * 1000))
+        self.assertEqual(second["layer_1"]["reviewer_digest_sent"], 0)
+
     def test_card_uses_plain_operational_language_and_one_clear_action(self):
         now_ms = at_local(2026, 8, 23, 18)
         rows = [
