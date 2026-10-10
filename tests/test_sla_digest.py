@@ -119,6 +119,9 @@ class SlaDigestTests(unittest.TestCase):
 
         async def fake_update(table_id, record_id, fields):
             updated.append((record_id, fields))
+            for rec in list(waiting_review) + list(waiting_tracking):
+                if rec.get("record_id") == record_id:
+                    rec["fields"].update(fields)
 
         async def noop(now_ms):
             return {"layer": "noop", "checked": 0}
@@ -248,6 +251,51 @@ class SlaDigestTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0]["receive_id"], "ou_frankie")
         self.assertEqual(result["layer_1"]["reviewer_digest_sent"], 1)
+
+    def test_frankie_only_p1_has_one_daily_card_even_after_48h(self):
+        sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = True
+        noon_ms = at_local(2026, 10, 10, 12)
+        rows = [draft("rec_quote", "affiliate_quote", 59, noon_ms)]
+        sent, updated = self._install_fakes(rows)
+
+        first = asyncio.run(sla_check.run(now_ms=noon_ms))
+        second = asyncio.run(sla_check.run(now_ms=noon_ms + 6 * 3600 * 1000))
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["receive_id"], "ou_frankie")
+        self.assertEqual(first["layer_1"]["reviewer_digest_sent"], 1)
+        self.assertEqual(first["layer_1"]["frankie_digest_sent"], 0)
+        self.assertEqual(second["layer_1"]["reviewer_digest_sent"], 0)
+        self.assertEqual(second["layer_1"]["frankie_digest_sent"], 0)
+        self.assertIn(("rec_quote", {"卡片发送时间": noon_ms}), updated)
+
+        rows.append(draft("rec_new", "reply", 25, noon_ms + 6 * 3600 * 1000))
+        asyncio.run(sla_check.run(now_ms=noon_ms + 6 * 3600 * 1000))
+        self.assertEqual(len(sent), 2)
+        self.assertIn("record=rec_new", str(sent[1]["card"]))
+        self.assertNotIn("record=rec_quote", str(sent[1]["card"]))
+
+        asyncio.run(sla_check.run(now_ms=at_local(2026, 10, 11, 0)))
+        self.assertEqual(len(sent), 2)  # Next calendar day is still within 24 hours.
+        asyncio.run(sla_check.run(now_ms=at_local(2026, 10, 11, 12)))
+        self.assertEqual(len(sent), 3)
+        self.assertIn("record=rec_quote", str(sent[2]["card"]))
+        self.assertNotIn("record=rec_new", str(sent[2]["card"]))
+
+    def test_frankie_only_p1_does_not_claim_when_recipient_missing(self):
+        sla_check.config.KOL_SLA_CARD_FRANKIE_ONLY = True
+        now_ms = at_local(2026, 10, 10, 12)
+        sent, updated = self._install_fakes([draft("rec_quote", "affiliate_quote", 59, now_ms)])
+
+        async def no_target(role):
+            return []
+
+        feishu.resolve_notify_targets = no_target
+        result = asyncio.run(sla_check.run(now_ms=now_ms))
+
+        self.assertEqual(sent, [])
+        self.assertEqual(updated, [])
+        self.assertEqual(result["layer_1"]["delivery_failures"], 1)
 
     def test_card_uses_plain_operational_language_and_one_clear_action(self):
         now_ms = at_local(2026, 8, 23, 18)

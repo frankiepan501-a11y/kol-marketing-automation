@@ -22,6 +22,7 @@ V1 寄样链路 SLA (扫"寄样订单号 != 空"的草稿):
   → 草稿表"低ROI60d标记"=True + 主表「维护标签」加"低ROI候选" + 飞书卡片提示
 """
 import datetime as dt
+import hashlib
 import os
 import re, time
 from collections import Counter
@@ -118,6 +119,39 @@ def _p2_already_notified_today(rec: dict, now_ms: int) -> bool:
     except (TypeError, ValueError):
         return False
     return bool(sent_at and _local_date(sent_at) == _local_date(now_ms))
+
+
+def _p1_notified_within_24h(rec: dict, now_ms: int) -> bool:
+    try:
+        sent_at = int((rec.get("fields") or {}).get("卡片发送时间") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(sent_at and 0 <= now_ms - sent_at < 24 * 3600 * 1000)
+
+
+def _claim_p1_frankie_daily_record(now_ms: int, record_id: str) -> bool:
+    """Prevent concurrent runs from sending the same Frankie-only P1 record twice."""
+    os.makedirs(config.KOL_SLA_STATE_DIR, exist_ok=True)
+    digest = hashlib.sha256(record_id.encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(config.KOL_SLA_STATE_DIR,
+                        f"p1-frankie-{_local_date(now_ms).isoformat()}-{digest}.claimed")
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(str(now_ms))
+    return True
+
+
+def _release_p1_frankie_daily_record(now_ms: int, record_id: str) -> None:
+    digest = hashlib.sha256(record_id.encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(config.KOL_SLA_STATE_DIR,
+                        f"p1-frankie-{_local_date(now_ms).isoformat()}-{digest}.claimed")
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
 
 
 def _claim_p2_daily_run(now_ms: int, group: str = "") -> bool:
@@ -422,7 +456,7 @@ async def _send_p2_handoff(items, now_ms):
 
 
 async def _layer1_review_overdue(now_ms: int) -> dict:
-    """Send at most one reviewer P1 digest, one Frankie 48h digest, and one daily reviewer P2 digest."""
+    """Send overdue digests; temporary Frankie ownership gets one P1 per record/day."""
     collected = await collect_sla_overdue_drafts(now_ms)
     all_items = collected["all"]
     overdue = collected["overdue"]
@@ -444,9 +478,39 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
     frankie_delivery = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
     p2_delivery = {"sent": 0, "failed": 0, "errors": [], "message_ids": []}
 
-    if p1_items:
+    p1_claimed_items = []
+    if p1_items and config.KOL_SLA_CARD_FRANKIE_ONLY and not frankie_targets:
+        reviewer_delivery["failed"] = 1
+        reviewer_delivery["errors"].append("P1 Frankie recipient missing; no reminder claimed")
+    elif p1_items and config.KOL_SLA_CARD_FRANKIE_ONLY:
+        for rec in p1_items:
+            rid = rec.get("record_id") or ""
+            if not rid or _p1_notified_within_24h(rec, now_ms):
+                continue
+            if not _claim_p1_frankie_daily_record(now_ms, rid):
+                continue
+            try:
+                # Persist before sending: a restart or uncertain send must not double-notify.
+                await feishu.update_record(config.T_DRAFT, rid, {"卡片发送时间": now_ms})
+            except Exception as exc:
+                _release_p1_frankie_daily_record(now_ms, rid)
+                reviewer_delivery["failed"] += 1
+                reviewer_delivery["errors"].append(f"P1 claim {rid}: {type(exc).__name__}")
+            else:
+                p1_claimed_items.append(rec)
+        if p1_claimed_items:
+            delivery = await _send_digest(
+                frankie_targets,
+                build_sla_digest_card(p1_claimed_items, now_ms, audience="reviewer", level="P1"),
+                level="P1",
+            )
+            for key in ("sent", "failed"):
+                reviewer_delivery[key] += delivery[key]
+            reviewer_delivery["errors"].extend(delivery["errors"])
+            reviewer_delivery["message_ids"].extend(delivery["message_ids"])
+    elif p1_items:
         reviewer_delivery = await _send_routed_review_digest(p1_items, now_ms, reviewer_targets, "P1")
-    if p1_over_48h:
+    if p1_over_48h and not config.KOL_SLA_CARD_FRANKIE_ONLY:
         frankie_delivery = await _send_digest(
             frankie_targets,
             build_sla_digest_card(p1_over_48h, now_ms, audience="frankie", level="P1"),
@@ -479,7 +543,8 @@ async def _layer1_review_overdue(now_ms: int) -> dict:
                 p2_claim_persisted = True
                 p2_delivery = await _send_routed_review_digest(p2_due_today, now_ms, reviewer_targets, "P2")
 
-    reminder_timestamps_written = int(p2_claim_persisted) + len(p2_delivery.get("claim_record_ids", []))
+    reminder_timestamps_written = (len(p1_claimed_items) + int(p2_claim_persisted)
+                                   + len(p2_delivery.get("claim_record_ids", [])))
     delivered_items = []
     if p2_delivery["sent"]:
         delivered_ids = p2_delivery.get("delivered_record_ids")
