@@ -2300,7 +2300,7 @@ async def handle_callback(event: dict) -> dict:
         result = _toast("此客服卡已作废并转交 KOL，未执行任何客服操作", "error")
         result["retired_non_cs"] = True
         return result
-    if TEMP_SITE_OPERATOR and _x(f, "销售平台") == "独立站":
+    if _x(f, "销售平台") == "独立站":
         op = event.get("operator") or {}
         uid = op.get("union_id") or ""
         try:
