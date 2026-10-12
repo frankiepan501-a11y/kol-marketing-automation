@@ -42,6 +42,17 @@ class HandoffAuthorizationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(api.await_count,1)
             spawn.assert_not_called()
 
+    async def test_cs_old_site_card_denied_after_role_routing_resumes(self):
+        e={'operator':{'union_id':'on_chen'},'action':{'value':{'act':'escalate','rid':'test'}}}
+        with patch.object(cs_dispatch,'TEMP_SITE_OPERATOR',''),patch.object(
+            feishu,'api',new=AsyncMock(return_value={'data':{'record':{'fields':{'销售平台':'独立站','状态':'待回'}}}})) as api,patch.object(
+            cs_dispatch,'_resolve_targets',new=AsyncMock(return_value=([('王仕培','on_wang')],''))),patch.object(
+            cs_dispatch,'_spawn') as spawn:
+            result=await cs_dispatch.handle_callback(e)
+            self.assertTrue(result['handoff_denied'])
+            self.assertEqual(api.await_count,1)
+            spawn.assert_not_called()
+
     async def test_cs_valid_owner_duplicate_has_no_business_write(self):
         e={'operator':{'union_id':'on_chen'},'action':{'value':{'act':'escalate','rid':'test'}}}
         def close_task(coro): coro.close()
