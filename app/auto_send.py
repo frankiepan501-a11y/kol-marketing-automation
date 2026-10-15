@@ -706,6 +706,21 @@ async def send_one(rec: dict, *, activity_release=None) -> dict:
     sender_alias = ext(f.get("发送邮箱"))
     brand = _brand_from_alias(sender_alias)
 
+    # 2026-10-15 SandboxxMode: 曾在 POWKONG 合作线程收到 FUNLAB 自动回复。
+    # 在来源归属完全厘清前，该收件人新的自动通过 reply 只转人审；人工已审通过不受影响。
+    # 设在唯一发送入口，旧的在途自动草稿也不能绕过。
+    if (ext(f.get("邮件草稿来源")) == "reply"
+            and ext(f.get("邮件草稿状态")) == "自动通过"
+            and raw_to.strip().lower() == "sandboxxmode.collab@gmail.com"):
+        await feishu.update_record(config.T_DRAFT, rid, {
+            "邮件草稿状态": "待审",
+            "审批意见": ("[跨品牌误回止血] SandboxxMode 的 POWKONG Plantdock 2 线程曾收到 "
+                     "FUNLAB 自动回复。请先逐项核对品牌、产品、原线程及收件箱，"
+                     "人工审核后再发送。"),
+        })
+        return {"rid": rid, "ok": False, "skipped": True,
+                "error": "SandboxxMode reply requires human review"}
+
     # 严格邮箱清洗 (2026-05-16): 历史 multi-email 换行 (SwitchUp/techbymidas) 含 @
     # 通过旧 "@" not in 校验 → Zoho 500; "dm"/"待补" 也不带 @
     to_email, clean_reason = feishu.clean_email(raw_to)

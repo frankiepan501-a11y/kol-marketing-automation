@@ -250,13 +250,14 @@ def _thread_subject(subject: str) -> str:
 async def find_draft(contact_rid: str, contact_type: str, brand: str = None,
                      subject: str = ""):
     """找到该 contact 关联的"待监听"草稿 + 该 contact 的所有已发送草稿(供 body 去重用).
-    优先取「同品牌 + 未回复 + 发送时间最新」的草稿；都已回复时回 fallback 取最新一条。
+    只在收件箱品牌的草稿内选择；都已回复时取该品牌最新一条。
 
     2026-06-17 (MikelTube 跨品牌错配修): 多品牌触达的 KOL(MikelTube 被 POWKONG 食人花 +
     FUNLAB PlayStation Portal 两条线 cold) 回信匹配原草稿时**必须按收件箱品牌优先**, 否则
     find_draft 跨品牌取"最新未回复"会错配 —— FUNLAB 收件箱的回信关联到 POWKONG 食人花草稿,
     生成"品牌 FUNLAB + 产品食人花"自相矛盾的草稿。best_draft 在同品牌草稿里选; 无同品牌草稿
-    才降级全部(不破坏单品牌 KOL)。all_matched(第2返回值) 仍返回全部, 供 V3-C dedup 全量比对。
+    不得降级到另一品牌；否则会把另一品牌产品带入自动回复。all_matched(第2返回值)
+    仍返回全部, 供 V3-C dedup 全量比对。
 
     2026-05-19 Plan A (Metalfear4 多轮丢回信根因修, 取代 V3-B 排除法):
         V3-B 曾排除 邮件草稿来源=reply 的草稿以修 1upBinge 死循环, 但副作用 =
@@ -277,13 +278,14 @@ async def find_draft(contact_rid: str, contact_type: str, brand: str = None,
     if not matched:
         return None, []
     # 2026-06-17: 按收件箱品牌优先选 best_draft (防跨品牌错配, 见 docstring)。
-    # 草稿品牌 = 其「发送邮箱」别名所属品牌; 同品牌有草稿就只在同品牌里选, 否则降级全部。
+    # 草稿品牌 = 其「发送邮箱」别名所属品牌；无同品牌草稿则停止自动回复。
     pool_src = matched
     if brand:
         same_brand = [r for r in matched
                       if config.brand_from_text(ext(r["fields"].get("发送邮箱"))) == brand]
-        if same_brand:
-            pool_src = same_brand
+        if not same_brand:
+            return None, matched
+        pool_src = same_brand
     # 同一达人同品牌可以有多款产品。旧线程来信不得继承另一产品的新草稿。
     thread = _thread_subject(subject)
     if thread:
@@ -299,6 +301,13 @@ async def find_draft(contact_rid: str, contact_type: str, brand: str = None,
     pool = unreplied if unreplied else pool_src
     pool.sort(key=lambda r: r["fields"].get("发送时间") or 0, reverse=True)
     return pool[0], matched
+
+
+def _has_cross_brand_history(drafts: list) -> bool:
+    """同一达人有多个品牌往来时，新回复不走自动通过，交由人核对原线程。"""
+    brands = {config.brand_from_text(ext(r["fields"].get("发送邮箱")))
+              for r in drafts}
+    return len(brands - {""}) > 1
 
 
 async def _manual_ship_recon(contact: dict, ctype: str, draft: dict, brand: str,
@@ -651,8 +660,10 @@ async def run(only_brand: str = "", only_sender: str = ""):
 
             # 2026-06-17: 传当前收件箱品牌 → find_draft 同品牌优先(防跨品牌错配产品, 见 find_draft docstring)
             draft, all_matched = await find_draft(contact["record_id"], ctype, brand=brand,
-                                                  subject=subject)
+                                                   subject=subject)
             if not draft: continue
+            if _has_cross_brand_history(all_matched):
+                manual_alias_review = True
             # Keep inbound mail pending in Zoho for this session. Do not mark it
             # processed, classify, mutate cooperation state, or generate a card.
             from . import nyxi_trial
