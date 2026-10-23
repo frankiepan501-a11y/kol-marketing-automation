@@ -1,0 +1,45 @@
+name: Tencent Coolify Read-only Watchdog
+on:
+  schedule:
+    - cron: '4,14,24,34,44,54 * * * *'
+  workflow_dispatch:
+    inputs:
+      test_notification:
+        description: 'One simulated fault message to Frankie only; no service changes'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: coolify-readonly-watchdog
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: .coolify-watchdog-state/state.json
+          key: coolify-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: coolify-watchdog-
+      - name: Read-only entry and certificate checks
+        env:
+          FEISHU_NOTIFY_APP_ID: ${{ secrets.FEISHU_NOTIFY_APP_ID }}
+          FEISHU_NOTIFY_APP_SECRET: ${{ secrets.FEISHU_NOTIFY_APP_SECRET }}
+          FEISHU_NOTIFY_OPEN_ID: ${{ secrets.FEISHU_NOTIFY_OPEN_ID }}
+          WATCHDOG_TEST: ${{ inputs.test_notification && 'true' || 'false' }}
+          WATCHDOG_DRY_RUN: 'false'
+        run: python scripts/coolify_watchdog.py
+      - uses: actions/cache/save@v4
+        if: always() && !inputs.test_notification
+        with:
+          path: .coolify-watchdog-state/state.json
+          key: coolify-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coolify-readonly-summary
+          path: .coolify-watchdog-state/summary.json
+          retention-days: 14
