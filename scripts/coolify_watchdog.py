@@ -89,12 +89,12 @@ def api(path, payload=None, token=None):
 
 
 def notification_token():
-    if os.environ.get('FEISHU_NOTIFY_APP_ID') != APP:
+    if os.environ.get('FEISHU_NOTIFY_APP_ID', '').strip() != APP:
         raise RuntimeError('Unexpected notification app; no message sent')
     recipient = os.environ.get('FEISHU_NOTIFY_OPEN_ID', '').strip()
     if hashlib.sha256(recipient.encode()).hexdigest() != RECIPIENT_SHA256:
         raise RuntimeError('Unexpected recipient; no message sent')
-    secret = os.environ.get('FEISHU_NOTIFY_APP_SECRET', '')
+    secret = os.environ.get('FEISHU_NOTIFY_APP_SECRET', '').strip()
     if not secret:
         raise RuntimeError('Notification secret missing')
     return api('auth/v3/tenant_access_token/internal', {'app_id': APP, 'app_secret': secret})['tenant_access_token']
