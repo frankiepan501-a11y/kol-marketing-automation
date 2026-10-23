@@ -11,6 +11,44 @@ import coolify_watchdog as w
 
 
 class WatchdogTests(unittest.TestCase):
+    def test_internal_fresh_stale_future_and_issue(self):
+        data = {'checked_at': '2026-10-23T14:00:00+00:00', 'ok': True, 'issues': []}
+        now = w.datetime.datetime.fromisoformat(data['checked_at']).timestamp()
+        self.assertIsNone(w.validate_status(data, now + 120))
+        self.assertEqual(w.validate_status(data, now + 601), 'STATUS_STALE')
+        self.assertEqual(w.validate_status(data, now - 61), 'STATUS_FUTURE')
+        data.update(ok=False, issues=['disk_usage'])
+        self.assertEqual(w.validate_status(data, now), 'INTERNAL:disk_usage')
+
+    def test_internal_rejects_extra_fields_and_bad_types(self):
+        good = {'checked_at': '2026-10-23T14:00:00Z', 'ok': True, 'issues': []}
+        for bad in [dict(good, containers={}), dict(good, ok='true'),
+                    dict(good, ok=False), dict(good, issues=['secret']),
+                    dict(good, checked_at='2026-10-23T14:00:00'),
+                    dict(good, ok=False, issues=['disk_usage', 'disk_usage'])]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                w.validate_status(bad, 0)
+
+    def test_internal_two_failures_dedup_and_recovery(self):
+        bad = [{'host': w.STATUS_URL, 'failure': 'INTERNAL:disk_usage'}]
+        state, due = w.transition({}, bad, 10000)
+        self.assertFalse(due)
+        state, due = w.transition(state, bad, 10600)
+        self.assertEqual(len(due), 1)
+        state[w.STATUS_URL].update(sent_at=10600, sent_fingerprint=due[0][1])
+        state, due = w.transition(state, bad, 11200)
+        self.assertFalse(due)
+        state, due = w.transition(state, [{'host': w.STATUS_URL}], 11800)
+        self.assertNotIn('sent_fingerprint', state[w.STATUS_URL])
+
+    def test_stale_status_alerts_immediately_and_deduplicates(self):
+        bad = [{'host': w.STATUS_URL, 'failure': 'STATUS_STALE'}]
+        state, due = w.transition({}, bad, 10000)
+        self.assertEqual(len(due), 1)
+        state[w.STATUS_URL].update(sent_at=10000, sent_fingerprint=due[0][1])
+        _, due = w.transition(state, bad, 10600)
+        self.assertFalse(due)
+
     def setUp(self):
         guard = patch.object(w, "RECIPIENT_SHA256", hashlib.sha256(b"test-recipient").hexdigest())
         guard.start()
@@ -89,7 +127,7 @@ class WatchdogTests(unittest.TestCase):
                     on_sent('saved-mid', 'digest')
                     raise RuntimeError('readback unavailable')
                 probe = {'host': w.HOSTS[0], 'certificate': 'warning'}
-                with patch.dict(w.os.environ, {'WATCHDOG_DRY_RUN': 'false', 'WATCHDOG_TEST': 'false'}), patch.object(w, 'probe', return_value=probe), patch.object(w, 'notify', side_effect=simulated_send):
+                with patch.dict(w.os.environ, {'WATCHDOG_DRY_RUN': 'false', 'WATCHDOG_TEST': 'false'}), patch.object(w, 'probe', return_value=probe), patch.object(w, 'probe_internal', return_value={'host': w.STATUS_URL}), patch.object(w, 'notify', side_effect=simulated_send):
                     with self.assertRaises(RuntimeError):
                         w.main()
                 saved = json.loads(Path('.coolify-watchdog-state/state.json').read_text())
