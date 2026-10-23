@@ -97,7 +97,7 @@ def transition(previous, probes, now):
         fresh = 0 <= now - prior.get('checked', 0) <= 3600
         count = (prior.get('count', 0) if fresh else 0) + 1 if result.get('failure') else 0
         reasons = []
-        if count >= 2:
+        if count >= 2 or (host == STATUS_URL and result.get('failure') == 'STATUS_STALE'):
             reasons.append(('主机巡检异常:' if host == STATUS_URL else '入口连接失败:') + result['failure'])
         if result.get('certificate'):
             reasons.append('证书:' + result['certificate'])
@@ -184,7 +184,7 @@ def main():
     sent = []
     if test:
         # Synthetic failed observations exercise the same decision and send path.
-        simulated = [{'host': HOSTS[0], 'failure': 'SIMULATED_TEST'}]
+        simulated = [{'host': STATUS_URL, 'failure': 'INTERNAL:disk_usage'}]
         first, _ = transition({}, simulated, now-60)
         _, due = transition(first, simulated, now)
     for host, fingerprint, result in due:

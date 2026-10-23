@@ -30,7 +30,7 @@ class WatchdogTests(unittest.TestCase):
                 w.validate_status(bad, 0)
 
     def test_internal_two_failures_dedup_and_recovery(self):
-        bad = [{'host': w.STATUS_URL, 'failure': 'STATUS_STALE'}]
+        bad = [{'host': w.STATUS_URL, 'failure': 'INTERNAL:disk_usage'}]
         state, due = w.transition({}, bad, 10000)
         self.assertFalse(due)
         state, due = w.transition(state, bad, 10600)
@@ -40,6 +40,14 @@ class WatchdogTests(unittest.TestCase):
         self.assertFalse(due)
         state, due = w.transition(state, [{'host': w.STATUS_URL}], 11800)
         self.assertNotIn('sent_fingerprint', state[w.STATUS_URL])
+
+    def test_stale_status_alerts_immediately_and_deduplicates(self):
+        bad = [{'host': w.STATUS_URL, 'failure': 'STATUS_STALE'}]
+        state, due = w.transition({}, bad, 10000)
+        self.assertEqual(len(due), 1)
+        state[w.STATUS_URL].update(sent_at=10000, sent_fingerprint=due[0][1])
+        _, due = w.transition(state, bad, 10600)
+        self.assertFalse(due)
 
     def setUp(self):
         guard = patch.object(w, "RECIPIENT_SHA256", hashlib.sha256(b"test-recipient").hexdigest())
