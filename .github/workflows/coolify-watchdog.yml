@@ -28,6 +28,7 @@ jobs:
         env:
           FEISHU_NOTIFY_APP_ID: ${{ secrets.FEISHU_NOTIFY_APP_ID }}
           FEISHU_NOTIFY_APP_SECRET: ${{ secrets.FEISHU_NOTIFY_APP_SECRET }}
+          FEISHU_NOTIFY_OPEN_ID: ${{ secrets.FEISHU_NOTIFY_OPEN_ID }}
           WATCHDOG_TEST: ${{ inputs.test_notification && 'true' || 'false' }}
           WATCHDOG_DRY_RUN: 'false'
         run: python scripts/coolify_watchdog.py

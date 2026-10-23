@@ -15,7 +15,7 @@ from feishu_title_audit import format_title
 HOSTS = ('coolify.ops.funlab.net', 'n8n.ops.funlab.net',
          'alexa-insight-cloud-center.ops.funlab.net')
 APP = 'cli_a9f6ae86fce8dbd8'
-RECIPIENT = 'ou_629ce01f4bc31de078e10fcb038dbf78'
+RECIPIENT_SHA256 = 'f89363e19dc94cbf0efca22819046503fff16809b75b8d4e185ad1b3f5d12be4'
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -88,26 +88,42 @@ def api(path, payload=None, token=None):
     return result
 
 
-def notify(body, incident, test=False):
+def notification_token():
     if os.environ.get('FEISHU_NOTIFY_APP_ID') != APP:
         raise RuntimeError('Unexpected notification app; no message sent')
+    recipient = os.environ.get('FEISHU_NOTIFY_OPEN_ID', '').strip()
+    if hashlib.sha256(recipient.encode()).hexdigest() != RECIPIENT_SHA256:
+        raise RuntimeError('Unexpected recipient; no message sent')
     secret = os.environ.get('FEISHU_NOTIFY_APP_SECRET', '')
     if not secret:
         raise RuntimeError('Notification secret missing')
-    token = api('auth/v3/tenant_access_token/internal', {'app_id': APP, 'app_secret': secret})['tenant_access_token']
+    return api('auth/v3/tenant_access_token/internal', {'app_id': APP, 'app_secret': secret})['tenant_access_token']
+
+
+def verify_message(mid, digest, token):
+    readback = api('im/v1/messages/' + mid, token=token)
+    items = readback['data']['items']
+    text = json.loads(items[0]['body']['content']).get('text', '') if items else ''
+    if hashlib.sha256(text.encode()).hexdigest() != digest:
+        raise RuntimeError('Notification readback did not match')
+
+
+def notify(body, incident, test=False, on_sent=None):
+    token = notification_token()
+    recipient = os.environ['FEISHU_NOTIFY_OPEN_ID'].strip()
     title = format_title('AUDIT', 'P3' if test else 'P1',
                          '腾讯云维护告警测试' if test else '腾讯云入口或证书异常', '迁移验收')
     text = title + '\n' + body
     sent = api('im/v1/messages?receive_id_type=open_id', {
-        'receive_id': RECIPIENT, 'msg_type': 'text',
+        'receive_id': recipient, 'msg_type': 'text',
         'content': json.dumps({'text': text}, ensure_ascii=False),
         'uuid': str(uuid.uuid5(uuid.NAMESPACE_URL, incident)),
     }, token)
     mid = sent['data']['message_id']
-    readback = api('im/v1/messages/' + mid, token=token)
-    items = readback['data']['items']
-    if not items or json.loads(items[0]['body']['content']).get('text') != text:
-        raise RuntimeError('Notification readback did not match')
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    if on_sent:
+        on_sent(mid, digest)
+    verify_message(mid, digest, token)
     return mid
 
 
@@ -119,6 +135,13 @@ def main():
     dry = os.environ.get('WATCHDOG_DRY_RUN', 'true') == 'true'
     now = time.time()
     previous = json.loads(path.read_text()) if path.exists() else {}
+    if not dry and not test:
+        for item in previous.values():
+            if item.get('pending_readback'):
+                pending = item['pending_readback']
+                verify_message(pending['message_id'], pending['digest'], notification_token())
+                item.pop('pending_readback')
+                path.write_text(json.dumps(previous), encoding='utf-8')
     probes = [probe(host) for host in HOSTS]
     state, due = transition(previous, probes, now)
     sent = []
@@ -134,10 +157,17 @@ def main():
         body += '\n下一步：核腾讯控制台主机状态、Coolify代理和DNS；不要重复启用业务调度。'
         incident = str(os.environ.get('GITHUB_RUN_ID', int(now))) + host + fingerprint
         if not dry:
-            mid = notify(body, incident, test)
+            def record_sent(mid, digest):
+                if not test:
+                    state[host].update(sent_at=now, sent_fingerprint=fingerprint,
+                                       pending_readback={'message_id': mid, 'digest': digest})
+                    path.write_text(json.dumps(state), encoding='utf-8')
+            mid = notify(body, incident, test, record_sent)
             sent.append({'host': host, 'message_id': mid, 'readback_verified': True})
             if not test:
                 state[host].update(sent_at=now, sent_fingerprint=fingerprint)
+                state[host].pop('pending_readback', None)
+                path.write_text(json.dumps(state), encoding='utf-8')
     if not dry and not test:
         path.write_text(json.dumps(state), encoding='utf-8')
     summary = {'time': now, 'probes': probes, 'test': test, 'dry_run': dry,
