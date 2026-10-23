@@ -42,4 +42,5 @@ jobs:
         with:
           name: coolify-readonly-summary
           path: .coolify-watchdog-state/summary.json
+          include-hidden-files: true
           retention-days: 14

@@ -64,6 +64,15 @@ class WatchdogTests(unittest.TestCase):
             self.assertEqual(w.notify('simulation', 'incident', True), 'test-mid')
         self.assertEqual(len(calls), 3)
 
+    def test_env_whitespace_preserves_identity_guard(self):
+        with patch.dict(w.os.environ, {'FEISHU_NOTIFY_APP_ID': ' ' + w.APP + '\n', 'FEISHU_NOTIFY_APP_SECRET': ' test-only\n'}), patch.object(w, 'api', return_value={'tenant_access_token': 'test-token'}) as api:
+            self.assertEqual(w.notification_token(), 'test-token')
+            self.assertEqual(api.call_args.args[1], {'app_id': w.APP, 'app_secret': 'test-only'})
+        with patch.dict(w.os.environ, {'FEISHU_NOTIFY_APP_ID': ' wrong\n'}), patch.object(w, 'api') as api:
+            with self.assertRaises(RuntimeError):
+                w.notification_token()
+            api.assert_not_called()
+
     def test_wrong_readback_fails(self):
         replies = [{'tenant_access_token': 'test-only'}, {'data': {'message_id': 'test-mid'}},
                    {'data': {'items': [{'body': {'content': json.dumps({'text': 'wrong'})}}]}}]
