@@ -5,6 +5,7 @@ import asyncio
 import hmac
 import json
 import os
+import time
 from html import escape
 from urllib.parse import urlencode
 
@@ -17,6 +18,7 @@ from fastapi.responses import HTMLResponse
 from . import discord_direct_campaign_config as direct_campaign
 from . import discord_direct_campaign as direct_campaign_publisher
 from . import discord_final10_campaign as final10_campaign_publisher
+from . import discord_the40th_crew
 from . import discord_tester_program
 
 
@@ -212,6 +214,55 @@ async def _send_direct_interest_dm(
     return direct_campaign.DirectMessageStatus.SENT
 
 
+async def _send_the40th_privacy_dm(
+    discord_user_id: str, message: dict
+) -> direct_campaign.DirectMessageStatus:
+    """Send and read back the campaign privacy notice before opening the form."""
+    dm = await _discord_request("POST", "/users/@me/channels", body={"recipient_id": discord_user_id})
+    channel_id = str(dm.get("id") or "")
+    if not channel_id:
+        raise HTTPException(502, "Discord did not return a DM channel")
+
+    bot_user_id = os.environ.get("DISCORD_FUN_BOT_USER_ID", direct_campaign.BOT_USER_ID)
+    recent = await _discord_request("GET", f"/channels/{channel_id}/messages?limit=100")
+    current_ms = int(time.time() * 1000)
+    for existing in recent if isinstance(recent, list) else []:
+        if str(((existing.get("author") or {}).get("id")) or "") != bot_user_id:
+            continue
+        if discord_the40th_crew.THE40TH_PRIVACY_MARKER not in str(existing.get("content") or ""):
+            continue
+        for value in direct_campaign.component_custom_ids(existing):
+            parts = value.split(".")
+            if len(parts) == 4 and parts[0] == "the40th_form_start":
+                try:
+                    if int(parts[2]) > current_ms:
+                        return direct_campaign.DirectMessageStatus.ALREADY_SENT
+                except ValueError:
+                    continue
+
+    outbound = dict(message)
+    request_ids = sorted(
+        value for value in direct_campaign.component_custom_ids(outbound)
+        if value.startswith("the40th_form_start.")
+    )
+    request_key = request_ids[0] if request_ids else str(current_ms)
+    outbound["nonce"] = discord_the40th_crew.privacy_dm_nonce(discord_user_id, request_key)
+    outbound["enforce_nonce"] = True
+    created = await _discord_request("POST", f"/channels/{channel_id}/messages", body=outbound)
+    message_id = str(created.get("id") or "")
+    if not message_id:
+        raise HTTPException(502, "Discord did not confirm the private application notice")
+    stored = await _discord_request("GET", f"/channels/{channel_id}/messages/{message_id}")
+    if (
+        str(stored.get("id") or "") != message_id
+        or str(((stored.get("author") or {}).get("id")) or "") != bot_user_id
+        or discord_the40th_crew.THE40TH_PRIVACY_MARKER not in str(stored.get("content") or "")
+        or not any(value.startswith("the40th_form_start.") for value in direct_campaign.component_custom_ids(stored))
+    ):
+        raise HTTPException(502, "Discord private application notice verification failed")
+    return direct_campaign.DirectMessageStatus.SENT
+
+
 @router.post("/admin/setup")
 async def setup_discord_prelaunch(request: Request, authorization: str = Header(default=""), commit: bool = False):
     _check_internal_auth(authorization)
@@ -385,6 +436,22 @@ async def run_final10_campaign(request: Request, authorization: str = Header(def
             channel_name=channel_name,
             commit=commit,
         )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/admin/the40th/allocation")
+async def run_the40th_allocation(request: Request, authorization: str = Header(default="")):
+    """Preview by default; production writes require an explicit environment gate."""
+    _check_internal_auth(authorization)
+    body = await request.json()
+    commit = body.get("commit", False)
+    if not isinstance(commit, bool):
+        raise HTTPException(400, "commit must be a boolean")
+    if commit and os.environ.get("DISCORD_THE40TH_ALLOCATION_WRITES_ENABLED", "0") != "1":
+        raise HTTPException(409, "THE 40TH CREW allocation writes are not enabled")
+    try:
+        return await discord_the40th_crew.The40thCrewLedger().apply_allocation(commit=commit)
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -683,12 +750,21 @@ async def discord_interactions(request: Request, background_tasks: BackgroundTas
     async def notify_completion(message: str) -> None:
         await _edit_original_interaction(application_id, interaction_token, message)
 
-    outcome = await discord_tester_program.build_interaction_outcome(
-        payload,
-        signing_secret=signing_secret,
-        completion_notifier=notify_completion,
-        direct_message_sender=_send_direct_interest_dm,
-    )
+    custom_id = str((payload.get("data") or {}).get("custom_id") or "")
+    if custom_id.startswith("the40th_"):
+        outcome = await discord_the40th_crew.build_interaction_outcome(
+            payload,
+            signing_secret=signing_secret,
+            completion_notifier=notify_completion,
+            direct_message_sender=_send_the40th_privacy_dm,
+        )
+    else:
+        outcome = await discord_tester_program.build_interaction_outcome(
+            payload,
+            signing_secret=signing_secret,
+            completion_notifier=notify_completion,
+            direct_message_sender=_send_direct_interest_dm,
+        )
     if outcome.work:
         background_tasks.add_task(outcome.work)
     return outcome.response
