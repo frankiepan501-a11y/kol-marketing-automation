@@ -101,6 +101,7 @@ def audit_discord_state(
     roles: Sequence[Mapping[str, Any]],
     channels: Sequence[Mapping[str, Any]],
     bot_member: Mapping[str, Any],
+    allow_administrator: bool = False,
 ) -> dict[str, Any]:
     """Audit a guild snapshot without changing Discord.
 
@@ -151,14 +152,14 @@ def audit_discord_state(
                     break
 
     bot_has_administrator = bool(bot_permissions & ADMINISTRATOR)
-    bot_can_manage_roles = bool(bot_permissions & MANAGE_ROLES)
-    bot_can_manage_channels = bool(bot_permissions & MANAGE_CHANNELS)
+    bot_can_manage_roles = bot_has_administrator or bool(bot_permissions & MANAGE_ROLES)
+    bot_can_manage_channels = bot_has_administrator or bool(bot_permissions & MANAGE_CHANNELS)
     selected_has_dangerous_permissions = bool(
         selected_permissions & _TESTER_SELECTED_DANGEROUS
     )
     safe_to_commit = all(
         (
-            not bot_has_administrator,
+            allow_administrator or not bot_has_administrator,
             bot_can_manage_roles,
             bot_can_manage_channels,
             bot_above_activity_roles,
@@ -169,6 +170,7 @@ def audit_discord_state(
 
     return {
         "bot_has_administrator": bot_has_administrator,
+        "administrator_retention_approved": bool(allow_administrator),
         "bot_can_manage_roles": bot_can_manage_roles,
         "bot_can_manage_channels": bot_can_manage_channels,
         "bot_top_role_position": bot_top_position,

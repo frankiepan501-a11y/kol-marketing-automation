@@ -56,6 +56,24 @@ class The40thDiscordSetupTests(unittest.TestCase):
         self.assertEqual(["legacy-private"], audit["tester_selected_view_channels"])
         self.assertFalse(audit["safe_to_commit"])
 
+    def test_audit_allows_explicitly_approved_admin_retention(self):
+        roles = [
+            {"id": "guild", "name": "@everyone", "position": 0, "permissions": "0"},
+            {"id": "bot-role", "name": "FUN Bot", "position": 10,
+             "permissions": str(setup.ADMINISTRATOR)},
+            {"id": "applicant", "name": "Applicant", "position": 1, "permissions": "0"},
+            {"id": "first", "name": "The First 20", "position": 2, "permissions": "0"},
+            {"id": "selected", "name": "Tester Selected", "position": 3, "permissions": "0"},
+            {"id": "forty", "name": "The 40", "position": 4, "permissions": "0"},
+        ]
+        audit = setup.audit_discord_state(
+            guild_id="guild", roles=roles, channels=[],
+            bot_member={"roles": ["bot-role"]}, allow_administrator=True,
+        )
+        self.assertTrue(audit["bot_has_administrator"])
+        self.assertTrue(audit["administrator_retention_approved"])
+        self.assertTrue(audit["safe_to_commit"])
+
     def test_audit_requires_bot_above_all_activity_roles_and_minimum_permissions(self):
         roles = [
             {"id": "guild", "name": "@everyone", "position": 0, "permissions": "0"},
