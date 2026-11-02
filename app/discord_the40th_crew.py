@@ -42,6 +42,8 @@ RETRY_DELAYS_SECONDS = (60, 300, 1800, 7200, 21600)
 _DRAFT_TTL_MS = 30 * 60 * 1000
 _drafts: dict[str, dict] = {}
 _CLAIM_LEASE_MS = 15 * 60 * 1000
+_ACTION_CREATE_VISIBILITY_MS = 60 * 1000
+_ACTION_CREATE_INTENT_PREFIX = "create-intent:"
 THE40TH_PRIVACY_MARKER = "[THE40TH-PRIVACY-V1]"
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,62 @@ class ExternalAction:
     evidence: str
     created_at: int
     updated_at: int
+    record_id: str = ""
+
+
+@dataclass(frozen=True)
+class ConfirmationPlan:
+    updates: dict[str, dict]
+    actions: list[ExternalAction]
+
+
+class ExternalActionError(RuntimeError):
+    def __init__(self, failure_class: str, *, retry_after_seconds: int | None = None):
+        super().__init__(failure_class)
+        self.failure_class = str(failure_class)
+        self.retry_after_seconds = retry_after_seconds
+
+
+_ACTION_FIELDS = {
+    "idempotency_key": "幂等键",
+    "campaign_id": "活动批次",
+    "discord_user_id": "Discord用户ID",
+    "action_type": "动作类型",
+    "action_version": "动作版本",
+    "status": "状态",
+    "retry_count": "重试次数",
+    "next_retry_at": "下次重试时间",
+    "failure_class": "失败分类",
+    "manual_action_required": "需人工处理",
+    "evidence": "执行证据",
+    "created_at": "创建时间",
+    "updated_at": "更新时间",
+}
+
+
+def action_to_bitable_fields(action: ExternalAction) -> dict:
+    return {external: getattr(action, internal) for internal, external in _ACTION_FIELDS.items()}
+
+
+def action_from_bitable_fields(fields: Mapping[str, object], *, record_id: str = "") -> ExternalAction:
+    reverse = {external: internal for internal, external in _ACTION_FIELDS.items()}
+    values = {reverse[key]: value for key, value in fields.items() if key in reverse}
+    return ExternalAction(
+        idempotency_key=str(values.get("idempotency_key") or ""),
+        campaign_id=str(values.get("campaign_id") or ""),
+        discord_user_id=str(values.get("discord_user_id") or ""),
+        action_type=str(values.get("action_type") or ""),
+        action_version=str(values.get("action_version") or ""),
+        status=str(values.get("status") or ""),
+        retry_count=int(values.get("retry_count") or 0),
+        next_retry_at=int(values.get("next_retry_at") or 0),
+        failure_class=str(values.get("failure_class") or ""),
+        manual_action_required=_truth(values.get("manual_action_required")),
+        evidence=str(values.get("evidence") or ""),
+        created_at=int(values.get("created_at") or 0),
+        updated_at=int(values.get("updated_at") or 0),
+        record_id=str(record_id),
+    )
 
 
 class SubmissionLedger(Protocol):
@@ -146,6 +204,17 @@ class ApplicationClaimStore:
                 campaign_id TEXT PRIMARY KEY,
                 snapshot_json TEXT NOT NULL,
                 status TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS action_create_intents (
+                idempotency_key TEXT PRIMARY KEY,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at INTEGER NOT NULL DEFAULT 0,
+                manual_action_required INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                evidence TEXT NOT NULL DEFAULT '',
                 updated_at INTEGER NOT NULL
             )"""
         )
@@ -203,6 +272,83 @@ class ApplicationClaimStore:
         finally:
             connection.close()
 
+    def get_action_create_intent(self, idempotency_key: str) -> dict | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """SELECT attempt_count, next_retry_at, manual_action_required,
+                          last_error, evidence, updated_at
+                   FROM action_create_intents WHERE idempotency_key=?""",
+                (str(idempotency_key),),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "idempotency_key": str(idempotency_key),
+                "attempt_count": int(row[0]),
+                "next_retry_at": int(row[1]),
+                "manual_action_required": bool(row[2]),
+                "last_error": str(row[3]),
+                "evidence": str(row[4]),
+                "updated_at": int(row[5]),
+            }
+        finally:
+            connection.close()
+
+    def save_action_create_intent(
+        self, idempotency_key: str, *, attempt_count: int, next_retry_at: int,
+        manual_action_required: bool, last_error: str = "", evidence: str = "",
+        now_ms: int | None = None,
+    ) -> None:
+        clock_ms = self._clock_ms(now_ms)
+        connection = self._connect()
+        try:
+            connection.execute(
+                """INSERT INTO action_create_intents(
+                       idempotency_key, attempt_count, next_retry_at,
+                       manual_action_required, last_error, evidence, updated_at
+                   ) VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(idempotency_key) DO UPDATE SET
+                       attempt_count=excluded.attempt_count,
+                       next_retry_at=excluded.next_retry_at,
+                       manual_action_required=excluded.manual_action_required,
+                       last_error=excluded.last_error,
+                       evidence=excluded.evidence,
+                       updated_at=excluded.updated_at""",
+                (
+                    str(idempotency_key), int(attempt_count), int(next_retry_at),
+                    1 if manual_action_required else 0, str(last_error),
+                    str(evidence), clock_ms,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def list_manual_action_create_intents(self) -> list[dict]:
+        connection = self._connect()
+        try:
+            keys = [
+                str(row[0]) for row in connection.execute(
+                    """SELECT idempotency_key FROM action_create_intents
+                       WHERE manual_action_required=1 ORDER BY updated_at, idempotency_key"""
+                ).fetchall()
+            ]
+        finally:
+            connection.close()
+        return [intent for key in keys if (intent := self.get_action_create_intent(key))]
+
+    def clear_action_create_intent(self, idempotency_key: str) -> None:
+        connection = self._connect()
+        try:
+            connection.execute(
+                "DELETE FROM action_create_intents WHERE idempotency_key=?",
+                (str(idempotency_key),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     @staticmethod
     def _clock_ms(now_ms: int | None = None) -> int:
         return int(time.time() * 1000) if now_ms is None else int(now_ms)
@@ -232,7 +378,7 @@ class ApplicationClaimStore:
                     (owner_token, clock_ms + _CLAIM_LEASE_MS, clock_ms, application_id_value),
                 )
                 connection.commit()
-                return True, ""
+                return True, record_id
             connection.commit()
             return False, record_id
         finally:
@@ -505,8 +651,20 @@ _BITABLE_FIELDS = {
     "invalid_reason": "invalid_reason",
     "controller_status": "controller_status",
     "controller_reserve_rank": "controller_reserve_rank",
+    "controller_selected_at": "controller_selected_at",
+    "controller_confirmation_due_at": "controller_confirmation_due_at",
+    "controller_confirmed_at": "controller_confirmed_at",
+    "controller_correction_requested_at": "controller_correction_requested_at",
+    "controller_correction_due_at": "controller_correction_due_at",
+    "controller_event_log": "controller_event_log",
     "cardcase_status": "cardcase_status",
     "cardcase_reserve_rank": "cardcase_reserve_rank",
+    "cardcase_selected_at": "cardcase_selected_at",
+    "cardcase_confirmation_due_at": "cardcase_confirmation_due_at",
+    "cardcase_confirmed_at": "cardcase_confirmed_at",
+    "cardcase_correction_requested_at": "cardcase_correction_requested_at",
+    "cardcase_correction_due_at": "cardcase_correction_due_at",
+    "cardcase_event_log": "cardcase_event_log",
     "application_id": "application_id",
     "withdrawn_at": "withdrawn_at",
 }
@@ -663,13 +821,14 @@ class The40thCrewLedger:
             "THE 40TH CREW allocation update",
         )
 
-    async def apply_allocation(self, *, commit: bool = False) -> dict:
+    async def apply_allocation(self, *, commit: bool = False, now_ms: int | None = None) -> dict:
         rows = validate_unique_applications(await self.list_campaign_applications())
+        allocation_time = int(time.time() * 1000) if now_ms is None else int(now_ms)
         state = self.claim_store.allocation_state(CAMPAIGN_ID)
         if state is None and _is_allocation_rerun(rows):
             raise RuntimeError("allocation state is missing for existing allocated records; manual review required")
         if state is None:
-            updates = allocation_updates(rows, rerun=False)
+            updates = allocation_updates(rows, rerun=False, selected_at_ms=allocation_time)
             if commit:
                 state = self.claim_store.begin_allocation(CAMPAIGN_ID, updates)
                 updates = dict(state["updates"])
@@ -705,6 +864,18 @@ class The40thCrewLedger:
                         # move an application backwards from later operational work.
                         current[status_field] = current_status
                         current[rank_field] = row.get(rank_field)
+                    track = status_field.removesuffix("_status")
+                    for lifecycle_field in (
+                        f"{track}_selected_at",
+                        f"{track}_confirmation_due_at",
+                        f"{track}_confirmed_at",
+                        f"{track}_correction_requested_at",
+                        f"{track}_correction_due_at",
+                        f"{track}_event_log",
+                    ):
+                        value = row.get(lifecycle_field)
+                        if value not in (None, ""):
+                            current[lifecycle_field] = value
                 updates[user_id] = current
         else:
             updates = allocation_updates(rows, rerun=True)
@@ -743,6 +914,217 @@ class The40thCrewLedger:
             ),
             "updates": updates,
         }
+
+
+class The40thCrewActionLedger:
+    """Feishu-backed external action journal with a local single-writer claim."""
+
+    def __init__(
+        self, *, base_token: str | None = None, table_id: str | None = None,
+        claim_store: ApplicationClaimStore | None = None,
+    ):
+        self.base_token = base_token or os.environ.get("DISCORD_TESTER_BASE_TOKEN", "KINabIENjak8fRsB6AHcIDALntc")
+        self.table_id = table_id or os.environ.get("DISCORD_THE40TH_ACTION_TABLE_ID", "")
+        self.claim_store = claim_store or ApplicationClaimStore()
+        if not self.table_id:
+            raise RuntimeError("DISCORD_THE40TH_ACTION_TABLE_ID is not configured")
+
+    async def list_actions(self) -> list[ExternalAction]:
+        from . import feishu
+
+        path = f"/bitable/v1/apps/{self.base_token}/tables/{self.table_id}/records"
+        rows: list[ExternalAction] = []
+        page_token = ""
+        while True:
+            query = "?page_size=500" + (f"&page_token={page_token}" if page_token else "")
+            result = _require_feishu_ok(
+                await feishu.api("GET", path + query, which="bitable"),
+                "THE 40TH CREW action list",
+            )
+            data = result.get("data") or {}
+            for item in data.get("items") or []:
+                action = action_from_bitable_fields(
+                    item.get("fields") or {}, record_id=str(item.get("record_id") or ""),
+                )
+                if action.campaign_id == CAMPAIGN_ID:
+                    rows.append(action)
+            if not data.get("has_more") or not data.get("page_token"):
+                return rows
+            page_token = str(data["page_token"])
+
+    async def get(self, idempotency_key: str) -> ExternalAction | None:
+        matches = [
+            action for action in await self.list_actions()
+            if action.idempotency_key == str(idempotency_key)
+        ]
+        if len(matches) > 1:
+            raise RuntimeError("duplicate THE 40TH CREW action records require manual review")
+        return matches[0] if matches else None
+
+    def list_manual_create_intents(self) -> list[dict]:
+        return self.claim_store.list_manual_action_create_intents()
+
+    def requeue_create_intent(self, idempotency_key: str, *, now_ms: int | None = None) -> None:
+        intent = self.claim_store.get_action_create_intent(idempotency_key)
+        if intent is None or not intent["manual_action_required"]:
+            raise ValueError("only a manual action create intent can be requeued")
+        claim_key = f"action:{idempotency_key}"
+        owner_token = secrets.token_hex(16)
+        claimed, _record_id = self.claim_store.acquire(
+            claim_key, owner_token=owner_token, now_ms=now_ms,
+        )
+        if not claimed:
+            raise RuntimeError("external action create intent is currently owned")
+        try:
+            self.claim_store.bind(
+                claim_key, owner_token=owner_token, record_id="", now_ms=now_ms,
+            )
+            self.claim_store.clear_action_create_intent(idempotency_key)
+        finally:
+            self.claim_store.release(claim_key, owner_token=owner_token, now_ms=now_ms)
+
+    async def ensure_pending(
+        self, action: ExternalAction, *, now_ms: int | None = None,
+    ) -> ExternalAction:
+        from . import feishu
+
+        if action.campaign_id != CAMPAIGN_ID:
+            raise ValueError("action belongs to a different campaign")
+        owner_token = secrets.token_hex(16)
+        clock_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        claimed, known_record_id = self.claim_store.acquire(
+            f"action:{action.idempotency_key}", owner_token=owner_token,
+        )
+        if not claimed:
+            if known_record_id:
+                existing = await self.get(action.idempotency_key)
+                if existing is not None:
+                    return existing
+            raise RuntimeError("external action creation is already in progress")
+        try:
+            existing = await self.get(action.idempotency_key)
+            if existing is not None:
+                self.claim_store.clear_action_create_intent(action.idempotency_key)
+                self.claim_store.bind(
+                    f"action:{action.idempotency_key}", owner_token=owner_token,
+                    record_id=existing.record_id,
+                )
+                return existing
+            intent = self.claim_store.get_action_create_intent(action.idempotency_key)
+            if intent is not None:
+                if intent["manual_action_required"]:
+                    raise RuntimeError("Feishu action create requires manual review and explicit requeue")
+                retry_at = int(intent["next_retry_at"])
+                if clock_ms < retry_at:
+                    raise RuntimeError(
+                        f"claimed Feishu action record is not currently readable; retry after {retry_at}"
+                    )
+                next_attempt = int(intent["attempt_count"]) + 1
+                if next_attempt > len(RETRY_DELAYS_SECONDS):
+                    self.claim_store.save_action_create_intent(
+                        action.idempotency_key,
+                        attempt_count=next_attempt,
+                        next_retry_at=0,
+                        manual_action_required=True,
+                        last_error=str(intent["last_error"]),
+                        evidence="automatic reconciliation exhausted without a readable Feishu record",
+                        now_ms=clock_ms,
+                    )
+                    raise RuntimeError("Feishu action create retries exhausted; manual review required")
+                next_retry_at = clock_ms + RETRY_DELAYS_SECONDS[next_attempt - 1] * 1000
+                self.claim_store.save_action_create_intent(
+                    action.idempotency_key,
+                    attempt_count=next_attempt,
+                    next_retry_at=next_retry_at,
+                    manual_action_required=False,
+                    last_error=str(intent["last_error"]),
+                    evidence="Feishu record is still not visible; reconciliation only, no duplicate POST",
+                    now_ms=clock_ms,
+                )
+                raise RuntimeError(
+                    f"claimed Feishu action record is not currently readable; retry after {next_retry_at}"
+                )
+            if known_record_id:
+                if not known_record_id.startswith(_ACTION_CREATE_INTENT_PREFIX):
+                    raise RuntimeError(
+                        "claimed Feishu action record is not currently readable; retry later"
+                    )
+                raise RuntimeError("legacy Feishu action create intent requires manual review")
+            if action.status != "pending":
+                raise ValueError("a missing action can only be created in pending state")
+            path = f"/bitable/v1/apps/{self.base_token}/tables/{self.table_id}/records"
+            first_retry_at = clock_ms + max(
+                _ACTION_CREATE_VISIBILITY_MS, RETRY_DELAYS_SECONDS[0] * 1000,
+            )
+            self.claim_store.save_action_create_intent(
+                action.idempotency_key,
+                attempt_count=1,
+                next_retry_at=first_retry_at,
+                manual_action_required=False,
+                evidence="create request prepared; later retries reconcile only",
+                now_ms=clock_ms,
+            )
+            self.claim_store.bind(
+                f"action:{action.idempotency_key}", owner_token=owner_token,
+                record_id=f"{_ACTION_CREATE_INTENT_PREFIX}{clock_ms}:1",
+            )
+            try:
+                created = _require_feishu_ok(
+                    await feishu.api(
+                        "POST", path, {"fields": action_to_bitable_fields(action)}, which="bitable",
+                    ),
+                    "THE 40TH CREW action create",
+                )
+            except Exception as exc:
+                self.claim_store.save_action_create_intent(
+                    action.idempotency_key,
+                    attempt_count=1,
+                    next_retry_at=first_retry_at,
+                    manual_action_required=False,
+                    last_error=f"{type(exc).__name__}: {exc}",
+                    evidence="create response was not confirmed; automatic processing will only reconcile",
+                    now_ms=clock_ms,
+                )
+                raise
+            data = created.get("data") or {}
+            record_id = str(((data.get("record") or {}).get("record_id")) or data.get("record_id") or "")
+            if not record_id:
+                raise RuntimeError("Feishu action create returned no record_id")
+            self.claim_store.bind(
+                f"action:{action.idempotency_key}", owner_token=owner_token, record_id=record_id,
+            )
+            self.claim_store.clear_action_create_intent(action.idempotency_key)
+            return replace(action, record_id=record_id)
+        finally:
+            self.claim_store.release(f"action:{action.idempotency_key}", owner_token=owner_token)
+
+    async def acquire_execution(self, action: ExternalAction, owner_token: str) -> bool:
+        claimed, _record_id = self.claim_store.acquire(
+            f"execute:{action.idempotency_key}", owner_token=owner_token,
+        )
+        return claimed
+
+    async def release_execution(self, action: ExternalAction, owner_token: str) -> None:
+        self.claim_store.release(
+            f"execute:{action.idempotency_key}", owner_token=owner_token,
+        )
+
+    async def save(self, action: ExternalAction) -> ExternalAction:
+        from . import feishu
+
+        if not action.record_id:
+            raise ValueError("persisted action record_id is required")
+        path = (
+            f"/bitable/v1/apps/{self.base_token}/tables/{self.table_id}/records/"
+            f"{action.record_id}"
+        )
+        _require_feishu_ok(
+            await feishu.api(
+                "PUT", path, {"fields": action_to_bitable_fields(action)}, which="bitable",
+            ),
+            "THE 40TH CREW action update",
+        )
+        return action
 
 
 def merge_submission(
@@ -1032,6 +1414,7 @@ def allocate(
 
 def allocation_updates(
     records: Iterable[Mapping[str, object]], *, rerun: bool = False,
+    selected_at_ms: int | None = None,
 ) -> dict[str, dict]:
     """Return reproducible per-user status/rank writes for a result preview."""
     rows = validate_unique_applications(records)
@@ -1084,17 +1467,274 @@ def allocation_updates(
             cardcase_rank = row.get("cardcase_reserve_rank") if cardcase_status == "reserve" else None
         elif user_id in cardcase_selected and previous_cardcase_status in _SELECTED_TRACK_STATUSES:
             cardcase_status = previous_cardcase_status
+        controller_selected_at = row.get("controller_selected_at")
+        controller_due_at = row.get("controller_confirmation_due_at")
+        if controller_status in _SELECTED_TRACK_STATUSES:
+            if not controller_selected_at and selected_at_ms is not None:
+                controller_selected_at = int(selected_at_ms)
+            if controller_selected_at and not controller_due_at:
+                controller_due_at = confirmation_due_at(int(controller_selected_at))
+        cardcase_selected_at = row.get("cardcase_selected_at")
+        cardcase_due_at = row.get("cardcase_confirmation_due_at")
+        if cardcase_status in (_SELECTED_TRACK_STATUSES - {"promoted_to_first20"}):
+            if not cardcase_selected_at and selected_at_ms is not None:
+                cardcase_selected_at = int(selected_at_ms)
+            if cardcase_selected_at and not cardcase_due_at:
+                cardcase_due_at = confirmation_due_at(int(cardcase_selected_at))
         updates[user_id] = {
             "controller_status": controller_status,
             "controller_reserve_rank": controller_rank,
+            "controller_selected_at": controller_selected_at,
+            "controller_confirmation_due_at": controller_due_at,
             "cardcase_status": cardcase_status,
             "cardcase_reserve_rank": cardcase_rank,
+            "cardcase_selected_at": cardcase_selected_at,
+            "cardcase_confirmation_due_at": cardcase_due_at,
         }
+        if selected_at_ms is not None and controller_status != previous_controller_status:
+            updates[user_id]["controller_event_log"] = _track_event(
+                row, track="controller", now_ms=selected_at_ms,
+                previous_status=previous_controller_status or "unallocated",
+                new_status=controller_status, reason="initial_allocation",
+            )
+        if selected_at_ms is not None and cardcase_status != previous_cardcase_status:
+            updates[user_id]["cardcase_event_log"] = _track_event(
+                row, track="cardcase", now_ms=selected_at_ms,
+                previous_status=previous_cardcase_status or "unallocated",
+                new_status=cardcase_status, reason="initial_allocation",
+            )
     return updates
 
 
 def confirmation_due_at(selected_at_ms: int) -> int:
     return int(selected_at_ms) + 72 * 60 * 60 * 1000
+
+
+def _track_fields(track: str) -> tuple[str, str, str, str, str]:
+    if track not in {"controller", "cardcase"}:
+        raise ValueError("track must be controller or cardcase")
+    return (
+        f"{track}_status",
+        f"{track}_selected_at",
+        f"{track}_confirmation_due_at",
+        f"{track}_confirmed_at",
+        f"{track}_correction_due_at",
+    )
+
+
+def _track_event(
+    application: Mapping[str, object], *, track: str, now_ms: int,
+    previous_status: str, new_status: str, reason: str,
+) -> str:
+    previous_log = str(application.get(f"{track}_event_log") or "").strip()
+    event = f"{int(now_ms)}|{previous_status}->{new_status}|{reason}"
+    return "\n".join(filter(None, (previous_log, event)))
+
+
+def confirm_track(
+    application: Mapping[str, object], *, track: str, now_ms: int,
+    shipping_complete: bool,
+) -> dict:
+    status_field, _selected_field, due_field, confirmed_field, correction_field = _track_fields(track)
+    if str(application.get(status_field) or "") != "selected":
+        raise ValueError(f"{track} selection is not awaiting confirmation")
+    due_at = int(application.get(correction_field) or application.get(due_field) or 0)
+    if not due_at or int(now_ms) >= due_at:
+        raise ValueError(f"{track} confirmation deadline has passed")
+    if not shipping_complete:
+        correction_due = application.get(correction_field) or (int(now_ms) + 24 * 60 * 60 * 1000)
+        updates = {
+            status_field: "selected",
+            correction_field: int(correction_due),
+            f"{track}_correction_requested_at": int(
+                application.get(f"{track}_correction_requested_at") or now_ms
+            ),
+        }
+        if not application.get(correction_field):
+            updates[f"{track}_event_log"] = _track_event(
+                application, track=track, now_ms=now_ms,
+                previous_status="selected", new_status="selected",
+                reason="shipping_correction_requested",
+            )
+        return updates
+    return {
+        status_field: "confirmed",
+        confirmed_field: int(now_ms),
+        correction_field: None,
+        f"{track}_event_log": _track_event(
+            application, track=track, now_ms=now_ms,
+            previous_status="selected", new_status="confirmed", reason="shipping_confirmed",
+        ),
+    }
+
+
+def withdraw_track(
+    application: Mapping[str, object], *, track: str, now_ms: int, reason: str,
+) -> dict:
+    status_field, _selected_field, _due_field, _confirmed_field, _correction_field = _track_fields(track)
+    if not str(reason or "").strip():
+        raise ValueError("withdrawal reason is required")
+    current_status = str(application.get(status_field) or "")
+    if current_status == "deliverables_complete":
+        raise ValueError("completed participation cannot be withdrawn through allocation workflow")
+    previous_log = str(application.get(f"{track}_event_log") or "").strip()
+    event = f"{int(now_ms)}|{current_status}->withdrawn_or_expired|{str(reason).strip()}"
+    return {
+        status_field: "withdrawn_or_expired",
+        f"{track}_reserve_rank": None,
+        f"{track}_event_log": "\n".join(filter(None, (previous_log, event))),
+    }
+
+
+def _action_lookup(actions: Iterable[ExternalAction]) -> dict[str, ExternalAction]:
+    return {action.idempotency_key: action for action in actions}
+
+
+def plan_confirmation_cycle(
+    records: Iterable[Mapping[str, object]], existing_actions: Iterable[ExternalAction], *,
+    now_ms: int,
+) -> ConfirmationPlan:
+    actions_by_key = _action_lookup(existing_actions)
+    updates: dict[str, dict] = {}
+    actions: list[ExternalAction] = []
+    for row in validate_unique_applications(records):
+        user_id = str(row.get("discord_user_id") or "")
+        if not user_id:
+            continue
+        for track in ("controller", "cardcase"):
+            status_field, selected_field, due_field, confirmed_field, correction_field = _track_fields(track)
+            if str(row.get(status_field) or "") != "selected" or row.get(confirmed_field):
+                continue
+            selected_at = int(row.get(selected_field) or 0)
+            due_at = int(row.get(correction_field) or row.get(due_field) or 0)
+            if not selected_at or not due_at:
+                raise RuntimeError(f"selected {track} record is missing its confirmation deadline")
+            version = f"v1-{selected_at}"
+            if int(now_ms) >= due_at:
+                updates.setdefault(user_id, {}).update(
+                    withdraw_track(row, track=track, now_ms=now_ms, reason="confirmation_expired")
+                )
+                expiry = new_action(user_id, f"{track}_confirmation_expired", version, now_ms=now_ms)
+                if expiry.idempotency_key not in actions_by_key:
+                    actions.append(expiry)
+                continue
+            if row.get(correction_field):
+                correction = new_action(user_id, f"{track}_correction_reminder", version, now_ms=now_ms)
+                if correction.idempotency_key not in actions_by_key:
+                    actions.append(correction)
+                continue
+            invite = new_action(user_id, f"{track}_selection_invite", version, now_ms=selected_at)
+            prior_invite = actions_by_key.get(invite.idempotency_key)
+            if prior_invite is None:
+                actions.append(invite)
+                continue
+            if prior_invite.status != "applied":
+                continue
+            remaining = due_at - int(now_ms)
+            if remaining <= 24 * 60 * 60 * 1000:
+                action_type = f"{track}_confirmation_reminder_24h"
+            elif remaining <= 48 * 60 * 60 * 1000:
+                action_type = f"{track}_confirmation_reminder_48h"
+            else:
+                continue
+            reminder = new_action(user_id, action_type, version, now_ms=now_ms)
+            if reminder.idempotency_key not in actions_by_key:
+                actions.append(reminder)
+    return ConfirmationPlan(updates, actions)
+
+
+def _next_reserve(rows: list[Mapping[str, object]], track: str) -> Mapping[str, object] | None:
+    rank_field = f"{track}_reserve_rank"
+    candidates = [
+        row for row in rows
+        if not row.get("withdrawn_at") and str(row.get(f"{track}_status") or "") == "reserve"
+        and not (
+            track == "cardcase"
+            and str(row.get("controller_status") or "") in _SELECTED_TRACK_STATUSES
+        )
+    ]
+    return min(
+        candidates,
+        key=lambda row: (int(row.get(rank_field) or 10**9), str(row.get("record_id") or "")),
+        default=None,
+    )
+
+
+def promotion_updates(
+    records: Iterable[Mapping[str, object]], *, track: str, invited_at_ms: int,
+) -> dict[str, dict]:
+    if int(invited_at_ms) >= PROMOTION_INVITE_CUTOFF_MS:
+        raise ValueError("promotion invitation cutoff has passed")
+    if track not in {"controller", "cardcase"}:
+        raise ValueError("track must be controller or cardcase")
+    rows = validate_unique_applications(records)
+    selected_limit = CONTROLLER_SELECTED_LIMIT if track == "controller" else CARDCASE_SELECTED_LIMIT
+    active = [
+        row for row in rows
+        if not row.get("withdrawn_at")
+        and str(row.get(f"{track}_status") or "") in _SELECTED_TRACK_STATUSES
+        and not (track == "cardcase" and str(row.get(f"{track}_status") or "") == "promoted_to_first20")
+    ]
+    if len(active) >= selected_limit:
+        raise ValueError(f"{track} has no selected vacancy")
+    candidate = _next_reserve(rows, track)
+    if candidate is None:
+        raise ValueError(f"{track} has no reserve available")
+    user_id = str(candidate.get("discord_user_id") or "")
+    if track == "controller" and str(candidate.get("cardcase_status") or "") in {
+        "testing", "deliverables_complete"
+    }:
+        raise RuntimeError("cardcase participation already advanced; manual promotion review required")
+    updates = {
+        user_id: {
+            f"{track}_status": "selected",
+            f"{track}_reserve_rank": None,
+            f"{track}_selected_at": int(invited_at_ms),
+            f"{track}_confirmation_due_at": confirmation_due_at(invited_at_ms),
+            f"{track}_event_log": _track_event(
+                candidate, track=track, now_ms=invited_at_ms,
+                previous_status=str(candidate.get(f"{track}_status") or ""),
+                new_status="selected", reason=f"{track}_promotion",
+            ),
+        }
+    }
+    if track == "controller" and str(candidate.get("cardcase_status") or "") in {
+        "selected", "confirmed"
+    }:
+        updates[user_id].update({
+            "cardcase_status": "promoted_to_first20",
+            "cardcase_reserve_rank": None,
+            "cardcase_event_log": _track_event(
+                candidate, track="cardcase", now_ms=invited_at_ms,
+                previous_status=str(candidate.get("cardcase_status") or ""),
+                new_status="promoted_to_first20", reason="controller_promotion",
+            ),
+        })
+        backfill = _next_reserve(rows, "cardcase")
+        if backfill is not None:
+            backfill_id = str(backfill.get("discord_user_id") or "")
+            updates[backfill_id] = {
+                "cardcase_status": "selected",
+                "cardcase_reserve_rank": None,
+                "cardcase_selected_at": int(invited_at_ms),
+                "cardcase_confirmation_due_at": confirmation_due_at(invited_at_ms),
+                "cardcase_event_log": _track_event(
+                    backfill, track="cardcase", now_ms=invited_at_ms,
+                    previous_status=str(backfill.get("cardcase_status") or ""),
+                    new_status="selected", reason="cardcase_backfill",
+                ),
+            }
+    elif track == "controller" and str(candidate.get("cardcase_status") or "") == "reserve":
+        updates[user_id].update({
+            "cardcase_status": "withdrawn_or_expired",
+            "cardcase_reserve_rank": None,
+            "cardcase_event_log": _track_event(
+                candidate, track="cardcase", now_ms=invited_at_ms,
+                previous_status="reserve", new_status="withdrawn_or_expired",
+                reason="controller_promotion_removed_from_cardcase_reserve",
+            ),
+        })
+    return updates
 
 
 def promote_controller(
@@ -1119,7 +1759,10 @@ def promote_controller(
     ]
     controller_reserve = [user_id for user_id in allocation.controller_reserve if user_id != discord_user_id]
     cardcase_selected = [user_id for user_id in allocation.cardcase_selected if user_id != discord_user_id]
-    cardcase_reserve = list(allocation.cardcase_reserve)
+    cardcase_reserve = [
+        user_id for user_id in allocation.cardcase_reserve
+        if user_id != discord_user_id
+    ]
     if len(cardcase_selected) < CARDCASE_SELECTED_LIMIT and cardcase_reserve:
         cardcase_selected.append(cardcase_reserve.pop(0))
     return Allocation(controller_selected, controller_reserve, cardcase_selected, cardcase_reserve)
@@ -1162,7 +1805,9 @@ def mark_action_applied(action: ExternalAction, *, now_ms: int, evidence: str) -
 
 
 def retry_decision(failure_class: str, *, attempt_count: int, retry_after_seconds: int | None = None) -> RetryDecision:
-    retryable_classes = {"discord_429", "discord_5xx", "network_timeout", "feishu_5xx"}
+    retryable_classes = {
+        "discord_429", "discord_5xx", "network_timeout", "feishu_5xx", "readback_mismatch",
+    }
     if failure_class not in retryable_classes or attempt_count > len(RETRY_DELAYS_SECONDS):
         return RetryDecision(False, 0, True, failure_class)
     delay = RETRY_DELAYS_SECONDS[max(0, attempt_count - 1)]
@@ -1206,6 +1851,56 @@ def requeue_action(action: ExternalAction, *, now_ms: int) -> ExternalAction:
         manual_action_required=False,
         updated_at=int(now_ms),
     )
+
+
+async def _await_result(value):
+    return await value if inspect.isawaitable(value) else value
+
+
+async def execute_external_action(
+    action: ExternalAction, *, ledger, executor: Callable[[ExternalAction], object],
+    readback: Callable[[ExternalAction], object], now_ms: int,
+) -> ExternalAction:
+    """Execute or replay exactly one action, reconciling readback before retrying."""
+    execution_owner = secrets.token_hex(16)
+    acquire_execution = getattr(ledger, "acquire_execution", None)
+    release_execution = getattr(ledger, "release_execution", None)
+    if acquire_execution is not None:
+        acquired = bool(await _await_result(acquire_execution(action, execution_owner)))
+        if not acquired:
+            return await ledger.ensure_pending(action)
+    try:
+        persisted = await ledger.ensure_pending(action)
+        if persisted.status == "applied" or persisted.manual_action_required:
+            return persisted
+        if persisted.status == "failed" and persisted.next_retry_at > int(now_ms):
+            return persisted
+        try:
+            evidence = str(await _await_result(readback(persisted)) or "")
+            if not evidence:
+                await _await_result(executor(persisted))
+                evidence = str(await _await_result(readback(persisted)) or "")
+            if not evidence:
+                raise ExternalActionError("readback_mismatch")
+            applied = mark_action_applied(persisted, now_ms=now_ms, evidence=evidence)
+            return await ledger.save(applied)
+        except ExternalActionError as exc:
+            failed = mark_action_failed(
+                persisted,
+                exc.failure_class,
+                now_ms=now_ms,
+                retry_after_seconds=exc.retry_after_seconds,
+            )
+            return await ledger.save(failed)
+        except TimeoutError:
+            failed = mark_action_failed(persisted, "network_timeout", now_ms=now_ms)
+            return await ledger.save(failed)
+        except Exception:
+            failed = mark_action_failed(persisted, "unexpected_error", now_ms=now_ms)
+            return await ledger.save(failed)
+    finally:
+        if release_execution is not None:
+            await _await_result(release_execution(action, execution_owner))
 
 
 def _extract_values(data: Mapping[str, object]) -> dict[str, str]:

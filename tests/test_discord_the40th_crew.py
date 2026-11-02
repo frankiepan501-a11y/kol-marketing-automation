@@ -1,5 +1,7 @@
+import asyncio
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -252,6 +254,22 @@ class AllocationTests(unittest.TestCase):
         self.assertIn("61", promoted.cardcase_selected)
         self.assertNotIn("61", promoted.cardcase_reserve)
 
+    def test_legacy_promotion_removes_promoted_user_from_cardcase_reserve(self):
+        allocation = crew.Allocation(
+            controller_selected=["1"],
+            controller_reserve=["21"],
+            cardcase_selected=[],
+            cardcase_reserve=["21", "61"],
+        )
+        promoted = crew.promote_controller(
+            allocation,
+            discord_user_id="21",
+            invited_at_ms=crew.PROMOTION_INVITE_CUTOFF_MS - 1,
+            replacing_user_id="1",
+        )
+        self.assertNotIn("21", promoted.cardcase_reserve)
+        self.assertEqual(["61"], promoted.cardcase_selected)
+
     def test_promotion_invitation_cutoff_is_exclusive(self):
         allocation = crew.allocate([record(i, controller_at=i, cardcase_at=i) for i in range(1, 72)])
         with self.assertRaisesRegex(ValueError, "cutoff"):
@@ -376,6 +394,400 @@ class ActionRetryTests(unittest.TestCase):
         self.assertEqual("pending", requeued.status)
         self.assertFalse(requeued.manual_action_required)
         self.assertEqual(0, requeued.next_retry_at)
+
+
+class FakeActionLedger:
+    def __init__(self):
+        self.actions = {}
+        self.saved = []
+
+    async def ensure_pending(self, action):
+        current = self.actions.setdefault(action.idempotency_key, action)
+        self.saved.append(current)
+        return current
+
+    async def save(self, action):
+        self.actions[action.idempotency_key] = action
+        self.saved.append(action)
+        return action
+
+
+class ActionPersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_action_is_persisted_pending_before_discord_and_applied_only_after_readback(self):
+        ledger = FakeActionLedger()
+        action = crew.new_action("42", "add_the_first_20", "v1", now_ms=1000)
+
+        async def execute(persisted):
+            self.assertEqual("pending", ledger.actions[persisted.idempotency_key].status)
+
+        result = await crew.execute_external_action(
+            action,
+            ledger=ledger,
+            executor=execute,
+            readback=AsyncMock(side_effect=["", "role-readback:present"]),
+            now_ms=2000,
+        )
+        self.assertEqual("applied", result.status)
+        self.assertEqual("role-readback:present", result.evidence)
+
+    async def test_response_loss_is_reconciled_before_any_duplicate_external_call(self):
+        ledger = FakeActionLedger()
+        action = crew.new_action("42", "send_result_dm", "v1", now_ms=1000)
+        executor = AsyncMock()
+        result = await crew.execute_external_action(
+            action,
+            ledger=ledger,
+            executor=executor,
+            readback=AsyncMock(return_value="message-readback:present"),
+            now_ms=2000,
+        )
+        executor.assert_not_awaited()
+        self.assertEqual("applied", result.status)
+
+    async def test_retry_gate_and_manual_failure_are_persisted_for_single_action_replay(self):
+        ledger = FakeActionLedger()
+        action = crew.new_action("42", "send_result_dm", "v1", now_ms=1000)
+        executor = AsyncMock(side_effect=crew.ExternalActionError("discord_429", retry_after_seconds=90))
+        failed = await crew.execute_external_action(
+            action, ledger=ledger, executor=executor, readback=AsyncMock(return_value=""), now_ms=2000,
+        )
+        self.assertEqual("failed", failed.status)
+        self.assertEqual(92000, failed.next_retry_at)
+        before_due = await crew.execute_external_action(
+            failed, ledger=ledger, executor=AsyncMock(), readback=AsyncMock(return_value=""), now_ms=91000,
+        )
+        self.assertEqual(failed, before_due)
+
+    async def test_feishu_action_ledger_uses_idempotency_key_and_updates_same_record(self):
+        api = AsyncMock(side_effect=[
+            {"code": 0, "data": {"items": []}},
+            {"code": 0, "data": {"record": {"record_id": "rec-action"}}},
+            {"code": 0, "data": {}},
+        ])
+        with tempfile.TemporaryDirectory() as tempdir:
+            ledger = crew.The40thCrewActionLedger(
+                base_token="base",
+                table_id="actions",
+                claim_store=crew.ApplicationClaimStore(Path(tempdir) / "claims.sqlite3"),
+            )
+            action = crew.new_action("42", "send_result_dm", "v1", now_ms=1000)
+            with patch("app.feishu.api", api):
+                persisted = await ledger.ensure_pending(action)
+                applied = crew.mark_action_applied(persisted, now_ms=2000, evidence="message:123")
+                await ledger.save(applied)
+        self.assertEqual("rec-action", persisted.record_id)
+        self.assertEqual("POST", api.await_args_list[1].args[0])
+        self.assertEqual("PUT", api.await_args_list[2].args[0])
+        self.assertEqual("applied", api.await_args_list[2].args[2]["fields"]["状态"])
+
+    async def test_bound_action_claim_fails_closed_while_feishu_list_is_stale(self):
+        api = AsyncMock(return_value={"code": 0, "data": {"items": []}})
+        with tempfile.TemporaryDirectory() as tempdir:
+            claim_store = crew.ApplicationClaimStore(Path(tempdir) / "claims.sqlite3")
+            action = crew.new_action("42", "send_result_dm", "test-key", now_ms=2000)
+            key = f"action:{action.idempotency_key}"
+            claimed, _ = claim_store.acquire(key, owner_token="first", now_ms=1000)
+            self.assertTrue(claimed)
+            claim_store.bind(key, owner_token="first", record_id="rec-action", now_ms=1001)
+            claim_store.release(key, owner_token="first", now_ms=1002)
+            ledger = crew.The40thCrewActionLedger(
+                base_token="base", table_id="actions", claim_store=claim_store,
+            )
+            with patch("app.feishu.api", api):
+                with self.assertRaisesRegex(RuntimeError, "not currently readable"):
+                    await ledger.ensure_pending(action)
+        self.assertEqual(1, api.await_count)
+
+    async def test_create_response_loss_is_not_retried_while_feishu_list_is_stale(self):
+        action = crew.new_action("42", "send_result_dm", "response-loss", now_ms=1000)
+        with tempfile.TemporaryDirectory() as tempdir:
+            ledger = crew.The40thCrewActionLedger(
+                base_token="base",
+                table_id="actions",
+                claim_store=crew.ApplicationClaimStore(Path(tempdir) / "claims.sqlite3"),
+            )
+            first_api = AsyncMock(side_effect=[
+                {"code": 0, "data": {"items": []}},
+                TimeoutError("response lost"),
+            ])
+            with patch("app.feishu.api", first_api):
+                with self.assertRaises(TimeoutError):
+                    await ledger.ensure_pending(action, now_ms=1000)
+            second_api = AsyncMock(return_value={"code": 0, "data": {"items": []}})
+            with patch("app.feishu.api", second_api):
+                with self.assertRaisesRegex(RuntimeError, "not currently readable"):
+                    await ledger.ensure_pending(action, now_ms=1001)
+        self.assertEqual(2, first_api.await_count)
+        self.assertEqual(1, second_api.await_count)
+
+    async def test_create_intent_only_reconciles_after_visibility_window(self):
+        action = crew.new_action("42", "send_result_dm", "safe-retry", now_ms=1000)
+        with tempfile.TemporaryDirectory() as tempdir:
+            ledger = crew.The40thCrewActionLedger(
+                base_token="base",
+                table_id="actions",
+                claim_store=crew.ApplicationClaimStore(Path(tempdir) / "claims.sqlite3"),
+            )
+            first_api = AsyncMock(side_effect=[
+                {"code": 0, "data": {"items": []}},
+                TimeoutError("request did not complete"),
+            ])
+            with patch("app.feishu.api", first_api):
+                with self.assertRaises(TimeoutError):
+                    await ledger.ensure_pending(action, now_ms=1000)
+            visible = replace(action, record_id="rec-recovered")
+            retry_api = AsyncMock(return_value={
+                "code": 0,
+                "data": {"items": [{
+                    "record_id": visible.record_id,
+                    "fields": crew.action_to_bitable_fields(visible),
+                }]},
+            })
+            with patch("app.feishu.api", retry_api):
+                recovered = await ledger.ensure_pending(
+                    action, now_ms=1000 + crew._ACTION_CREATE_VISIBILITY_MS + 1,
+                )
+        self.assertEqual("rec-recovered", recovered.record_id)
+        self.assertEqual(1, retry_api.await_count)
+        self.assertEqual("GET", retry_api.await_args.args[0])
+
+    async def test_create_intent_exhausts_to_persistent_manual_task_and_requeues_explicitly(self):
+        action = crew.new_action("42", "send_result_dm", "manual-requeue", now_ms=1000)
+        with tempfile.TemporaryDirectory() as tempdir:
+            claim_store = crew.ApplicationClaimStore(Path(tempdir) / "claims.sqlite3")
+            ledger = crew.The40thCrewActionLedger(
+                base_token="base", table_id="actions", claim_store=claim_store,
+            )
+            first_api = AsyncMock(side_effect=[
+                {"code": 0, "data": {"items": []}},
+                TimeoutError("response lost"),
+            ])
+            with patch("app.feishu.api", first_api):
+                with self.assertRaises(TimeoutError):
+                    await ledger.ensure_pending(action, now_ms=1000)
+
+            clock = 1000
+            empty_list = AsyncMock(return_value={"code": 0, "data": {"items": []}})
+            for delay_seconds in crew.RETRY_DELAYS_SECONDS:
+                clock += delay_seconds * 1000 + 1
+                with patch("app.feishu.api", empty_list):
+                    with self.assertRaisesRegex(RuntimeError, "not currently readable|manual review"):
+                        await ledger.ensure_pending(action, now_ms=clock)
+
+            manual = ledger.list_manual_create_intents()
+            self.assertEqual(1, len(manual))
+            self.assertEqual(action.idempotency_key, manual[0]["idempotency_key"])
+            self.assertTrue(manual[0]["manual_action_required"])
+
+            after_manual = AsyncMock(return_value={"code": 0, "data": {"items": []}})
+            with patch("app.feishu.api", after_manual):
+                with self.assertRaisesRegex(RuntimeError, "manual review"):
+                    await ledger.ensure_pending(action, now_ms=clock + 999999999)
+            self.assertEqual(1, after_manual.await_count)
+
+            ledger.requeue_create_intent(action.idempotency_key, now_ms=clock + 1000000000)
+            recovered_api = AsyncMock(side_effect=[
+                {"code": 0, "data": {"items": []}},
+                {"code": 0, "data": {"record": {"record_id": "rec-requeued"}}},
+            ])
+            with patch("app.feishu.api", recovered_api):
+                recovered = await ledger.ensure_pending(action, now_ms=clock + 1000000001)
+            self.assertEqual("rec-requeued", recovered.record_id)
+            self.assertEqual(2, recovered_api.await_count)
+
+    async def test_execution_lease_prevents_two_concurrent_external_calls(self):
+        class LeaseLedger(FakeActionLedger):
+            def __init__(self):
+                super().__init__()
+                self.locked = False
+
+            async def acquire_execution(self, _action, _owner_token):
+                if self.locked:
+                    return False
+                self.locked = True
+                return True
+
+            async def release_execution(self, _action, _owner_token):
+                self.locked = False
+
+        ledger = LeaseLedger()
+        action = crew.new_action("42", "send_result_dm", "concurrent", now_ms=1000)
+        entered = asyncio.Event()
+        proceed = asyncio.Event()
+        calls = 0
+
+        async def executor(_action):
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await proceed.wait()
+
+        async def readback(_action):
+            return "message:present" if proceed.is_set() else ""
+
+        first = asyncio.create_task(crew.execute_external_action(
+            action, ledger=ledger, executor=executor, readback=readback, now_ms=2000,
+        ))
+        await entered.wait()
+        second = await crew.execute_external_action(
+            action, ledger=ledger, executor=executor, readback=readback, now_ms=2000,
+        )
+        proceed.set()
+        completed = await first
+        self.assertEqual(1, calls)
+        self.assertEqual("pending", second.status)
+        self.assertEqual("applied", completed.status)
+
+    async def test_readback_delay_retries_safely_without_second_external_call(self):
+        ledger = FakeActionLedger()
+        action = crew.new_action("42", "send_result_dm", "eventual-readback", now_ms=1000)
+        first = await crew.execute_external_action(
+            action,
+            ledger=ledger,
+            executor=AsyncMock(),
+            readback=AsyncMock(return_value=""),
+            now_ms=2000,
+        )
+        self.assertEqual("failed", first.status)
+        self.assertFalse(first.manual_action_required)
+        executor = AsyncMock()
+        recovered = await crew.execute_external_action(
+            first,
+            ledger=ledger,
+            executor=executor,
+            readback=AsyncMock(return_value="message:present"),
+            now_ms=first.next_retry_at,
+        )
+        executor.assert_not_awaited()
+        self.assertEqual("applied", recovered.status)
+
+
+class SelectionLifecycleTests(unittest.TestCase):
+    def test_initial_selection_records_track_specific_72_hour_deadlines(self):
+        rows = [record(i, controller_at=i, cardcase_at=i) for i in range(1, 76)]
+        updates = crew.allocation_updates(rows, selected_at_ms=1000)
+        self.assertEqual(1000, updates["1"]["controller_selected_at"])
+        self.assertEqual(1000 + 72 * 60 * 60 * 1000, updates["1"]["controller_confirmation_due_at"])
+        self.assertIn("unallocated->selected|initial_allocation", updates["1"]["controller_event_log"])
+        self.assertIsNone(updates["1"]["cardcase_selected_at"])
+        self.assertEqual(1000, updates["21"]["cardcase_selected_at"])
+
+    def test_confirmation_requires_shipping_and_grants_24_hour_correction_window(self):
+        row = {
+            "controller_status": "selected",
+            "controller_selected_at": 1000,
+            "controller_confirmation_due_at": crew.confirmation_due_at(1000),
+        }
+        correction = crew.confirm_track(row, track="controller", now_ms=2000, shipping_complete=False)
+        self.assertEqual("selected", correction["controller_status"])
+        self.assertEqual(2000 + 24 * 60 * 60 * 1000, correction["controller_correction_due_at"])
+        confirmed = crew.confirm_track(
+            {**row, **correction}, track="controller", now_ms=3000, shipping_complete=True,
+        )
+        self.assertEqual("confirmed", confirmed["controller_status"])
+        self.assertEqual(3000, confirmed["controller_confirmed_at"])
+        self.assertIn("selected->confirmed|shipping_confirmed", confirmed["controller_event_log"])
+
+    def test_repeated_incomplete_confirmation_does_not_extend_correction_window(self):
+        row = {
+            "controller_status": "selected",
+            "controller_selected_at": 1000,
+            "controller_confirmation_due_at": crew.confirmation_due_at(1000),
+        }
+        first = crew.confirm_track(row, track="controller", now_ms=2000, shipping_complete=False)
+        second = crew.confirm_track(
+            {**row, **first}, track="controller", now_ms=3000, shipping_complete=False,
+        )
+        self.assertEqual(first["controller_correction_due_at"], second["controller_correction_due_at"])
+        self.assertEqual(first["controller_correction_requested_at"], second["controller_correction_requested_at"])
+
+    def test_reminders_fire_once_at_48_and_24_hours_and_stop_after_confirmation(self):
+        due = crew.confirmation_due_at(1000)
+        row = {
+            "discord_user_id": "42",
+            "controller_status": "selected",
+            "controller_selected_at": 1000,
+            "controller_confirmation_due_at": due,
+        }
+        invite = crew.new_action("42", "controller_selection_invite", "v1-1000", now_ms=1000)
+        invite = crew.mark_action_applied(invite, now_ms=1100, evidence="dm-readback:present")
+        first = crew.plan_confirmation_cycle([row], [invite], now_ms=due - 48 * 60 * 60 * 1000)
+        self.assertEqual(["controller_confirmation_reminder_48h"], [a.action_type for a in first.actions])
+        reminder = crew.mark_action_applied(first.actions[0], now_ms=first.actions[0].created_at, evidence="dm")
+        second = crew.plan_confirmation_cycle(
+            [row], [invite, reminder], now_ms=due - 24 * 60 * 60 * 1000,
+        )
+        self.assertEqual(["controller_confirmation_reminder_24h"], [a.action_type for a in second.actions])
+        confirmed = dict(row, controller_status="confirmed", controller_confirmed_at=due - 1)
+        self.assertEqual([], crew.plan_confirmation_cycle([confirmed], [], now_ms=due).actions)
+
+    def test_expiry_and_track_withdrawal_do_not_change_the_other_track(self):
+        due = crew.confirmation_due_at(1000)
+        row = {
+            "discord_user_id": "42",
+            "controller_status": "selected",
+            "controller_selected_at": 1000,
+            "controller_confirmation_due_at": due,
+            "cardcase_status": "confirmed",
+            "cardcase_confirmed_at": 500,
+        }
+        plan = crew.plan_confirmation_cycle([row], [], now_ms=due)
+        self.assertEqual("withdrawn_or_expired", plan.updates["42"]["controller_status"])
+        self.assertNotIn("cardcase_status", plan.updates["42"])
+        withdrawn = crew.withdraw_track(row, track="controller", now_ms=2000, reason="declined")
+        self.assertEqual("withdrawn_or_expired", withdrawn["controller_status"])
+        self.assertNotIn("cardcase_status", withdrawn)
+
+    def test_controller_promotion_preserves_order_and_backfills_released_cardcase(self):
+        rows = [record(i, controller_at=i, cardcase_at=i) for i in range(1, 76)]
+        initial = crew.allocation_updates(rows, selected_at_ms=1000)
+        for row in rows:
+            row.update(initial[row["discord_user_id"]])
+        rows[0]["controller_status"] = "withdrawn_or_expired"
+        updates = crew.promotion_updates(rows, track="controller", invited_at_ms=2000)
+        self.assertEqual("selected", updates["21"]["controller_status"])
+        self.assertEqual(2000, updates["21"]["controller_selected_at"])
+        self.assertEqual("promoted_to_first20", updates["21"]["cardcase_status"])
+        self.assertEqual("selected", updates["61"]["cardcase_status"])
+        self.assertEqual(2000, updates["61"]["cardcase_selected_at"])
+        self.assertIn("reserve->selected|cardcase_backfill", updates["61"]["cardcase_event_log"])
+        self.assertIn("selected->promoted_to_first20", updates["21"]["cardcase_event_log"])
+
+    def test_controller_promotion_stops_when_cardcase_delivery_has_already_advanced(self):
+        rows = [record(i, controller_at=i, cardcase_at=i) for i in range(1, 76)]
+        initial = crew.allocation_updates(rows, selected_at_ms=1000)
+        for row in rows:
+            row.update(initial[row["discord_user_id"]])
+        rows[0]["controller_status"] = "withdrawn_or_expired"
+        rows[20]["cardcase_status"] = "testing"
+        with self.assertRaisesRegex(RuntimeError, "cardcase participation already advanced"):
+            crew.promotion_updates(rows, track="controller", invited_at_ms=2000)
+
+    def test_controller_promotion_removes_cardcase_reserve_and_future_backfill_skips_user(self):
+        rows = [record(i, controller_at=i, cardcase_at=i) for i in range(1, 76)]
+        initial = crew.allocation_updates(rows, selected_at_ms=1000)
+        for row in rows:
+            row.update(initial[row["discord_user_id"]])
+        rows[0]["controller_status"] = "withdrawn_or_expired"
+        rows[20]["cardcase_status"] = "reserve"
+        rows[20]["cardcase_reserve_rank"] = 1
+        promoted = crew.promotion_updates(rows, track="controller", invited_at_ms=2000)
+        self.assertEqual("withdrawn_or_expired", promoted["21"]["cardcase_status"])
+        self.assertIsNone(promoted["21"]["cardcase_reserve_rank"])
+        rows[20].update(promoted["21"])
+        cardcase = crew.promotion_updates(rows, track="cardcase", invited_at_ms=3000)
+        self.assertNotIn("21", cardcase)
+
+    def test_promotion_cutoff_is_exclusive(self):
+        rows = [record(i, controller_at=i, cardcase_at=i) for i in range(1, 76)]
+        initial = crew.allocation_updates(rows, selected_at_ms=1000)
+        for row in rows:
+            row.update(initial[row["discord_user_id"]])
+        rows[0]["controller_status"] = "withdrawn_or_expired"
+        with self.assertRaisesRegex(ValueError, "cutoff"):
+            crew.promotion_updates(
+                rows, track="controller", invited_at_ms=crew.PROMOTION_INVITE_CUTOFF_MS,
+            )
 
 
 class InteractionTests(unittest.IsolatedAsyncioTestCase):
@@ -644,6 +1056,25 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(status, first_write.args[1]["controller_status"])
                 self.assertEqual(status, first_write.args[1]["cardcase_status"])
+
+    async def test_pending_replay_preserves_later_track_timestamps_and_event_logs(self):
+        ledger = crew.The40thCrewLedger(claim_store=self.claim_store)
+        rows = [record(i, controller_at=i, cardcase_at=i) for i in range(1, 76)]
+        snapshot = crew.allocation_updates(rows, selected_at_ms=1000)
+        self.claim_store.begin_allocation(crew.CAMPAIGN_ID, snapshot)
+        rows[0].update(snapshot["1"])
+        rows[0].update({
+            "controller_status": "confirmed",
+            "controller_confirmed_at": 3000,
+            "controller_event_log": "1000|unallocated->selected|initial_allocation\n3000|selected->confirmed|shipping_confirmed",
+        })
+        writes = AsyncMock()
+        with patch.object(ledger, "list_campaign_applications", AsyncMock(return_value=rows)), \
+             patch.object(ledger, "update_application", writes):
+            await ledger.apply_allocation(commit=True)
+        first_write = next(call for call in writes.await_args_list if call.args[0] == rows[0]["record_id"])
+        self.assertEqual(3000, first_write.args[1]["controller_confirmed_at"])
+        self.assertIn("selected->confirmed|shipping_confirmed", first_write.args[1]["controller_event_log"])
 
     async def test_pending_replay_fails_closed_before_writes_for_duplicate_or_missing_users(self):
         for scenario in ("duplicate", "missing"):
